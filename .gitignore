@@ -8,10 +8,10 @@ __pycache__/
 *.env
 collector.env
 api.env
+droplet.env
 
 .coverage
 htmlcov/
 dist/
 build/
 *.egg-info/
-
