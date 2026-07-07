@@ -1,0 +1,2 @@
+"""BTCUSDT price collector package."""
+

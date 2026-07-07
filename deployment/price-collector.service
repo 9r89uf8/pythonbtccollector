@@ -1,0 +1,27 @@
+[Unit]
+Description=BTCUSDT price collector
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pricecollector
+Group=pricecollector
+WorkingDirectory=/opt/price-collector
+EnvironmentFile=/etc/price-collector/collector.env
+ExecStart=/opt/price-collector/.venv/bin/python -m price_collector.collector
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/price-collector
+
+[Install]
+WantedBy=multi-user.target
+

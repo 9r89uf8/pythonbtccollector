@@ -1,0 +1,26 @@
+[Unit]
+Description=Local read-only price API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pricecollector
+Group=pricecollector
+WorkingDirectory=/opt/price-collector
+EnvironmentFile=/etc/price-collector/api.env
+ExecStart=/opt/price-collector/.venv/bin/uvicorn price_collector.api:app --host 127.0.0.1 --port 9000 --workers 1
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+

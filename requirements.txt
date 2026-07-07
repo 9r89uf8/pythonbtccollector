@@ -1,0 +1,7 @@
+asyncpg
+fastapi
+pydantic-settings
+uvicorn[standard]
+websockets
+pytest
+httpx
