@@ -1,15 +1,17 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
+import json
 from typing import Any, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
 from price_collector.db import (
     create_read_pool,
+    fetch_market_download_payload,
     fetch_latest_market_id,
     fetch_latest_price,
     fetch_market_summaries_for_btc_sources,
@@ -211,6 +213,73 @@ async def markets_sources_by_id(
     )
 
 
+@app.get("/markets/current/data")
+async def markets_current_data(
+    request: Request,
+    include_probabilities: bool = Query(False),
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    sample_second_ms = (now_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+
+    payload = await fetch_market_download_payload(
+        get_pool(request),
+        market_id=window.market_id,
+        include_probabilities=include_probabilities,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail="no current market data found")
+    return payload
+
+
+@app.get("/markets/{market_id}/data")
+async def markets_data_by_id(
+    request: Request,
+    market_id: int,
+    include_probabilities: bool = Query(False),
+) -> dict[str, Any]:
+    payload = await fetch_market_download_payload(
+        get_pool(request),
+        market_id=market_id,
+        include_probabilities=include_probabilities,
+    )
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no market data found for market_id={market_id}",
+        )
+    return payload
+
+
+@app.get("/markets/current/download")
+async def markets_current_download(
+    request: Request,
+    include_probabilities: bool = Query(False),
+) -> Response:
+    now_ms = current_utc_epoch_ms()
+    sample_second_ms = (now_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+
+    return await market_download_response(
+        request,
+        market_id=window.market_id,
+        include_probabilities=include_probabilities,
+    )
+
+
+@app.get("/markets/{market_id}/download")
+async def markets_download_by_id(
+    request: Request,
+    market_id: int,
+    include_probabilities: bool = Query(False),
+) -> Response:
+    return await market_download_response(
+        request,
+        market_id=market_id,
+        include_probabilities=include_probabilities,
+    )
+
+
 @app.get("/markets/{market_id}")
 async def markets_by_id(
     request: Request,
@@ -260,3 +329,30 @@ async def market_sources_response(
         )
 
     return serialize_market_sources_summary(summary, now_ms=now_ms)
+
+
+async def market_download_response(
+    request: Request,
+    *,
+    market_id: int,
+    include_probabilities: bool,
+) -> Response:
+    payload = await fetch_market_download_payload(
+        get_pool(request),
+        market_id=market_id,
+        include_probabilities=include_probabilities,
+    )
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no market data found for market_id={market_id}",
+        )
+
+    suffix = "with_probabilities" if include_probabilities else "prices"
+    filename = f"btc_5m_market_{market_id}_{suffix}.json"
+
+    return Response(
+        content=json.dumps(payload, default=str, separators=(",", ":")),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

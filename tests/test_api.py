@@ -320,3 +320,106 @@ def test_markets_current_sources_uses_current_five_minute_market(client, monkeyp
 
     assert response.status_code == 200
     assert response.json()["market_id"] == 5_944_864
+
+
+def market_data_payload(include_probabilities=False):
+    row = {
+        "t": 0,
+        "timestamp_ms": 1_783_459_200_000,
+        "timestamp_at": "2026-07-07T21:00:00Z",
+        "prices": {
+            "binance": "123000.00",
+            "chainlink": "122998.12",
+        },
+    }
+    if include_probabilities:
+        row["probabilities"] = {
+            "up": {
+                "bid": "0.47",
+                "ask": "0.49",
+                "mid": "0.48",
+                "normalized": "0.48241206",
+            },
+            "down": {
+                "bid": "0.50",
+                "ask": "0.53",
+                "mid": "0.515",
+                "normalized": "0.51758794",
+            },
+        }
+
+    return {
+        "schema_version": 1,
+        "market": {
+            "market_id": 5_944_864,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+            "market_start_at": "2026-07-07T21:00:00Z",
+            "market_end_at": "2026-07-07T21:05:00Z",
+            "seconds_expected": 300,
+        },
+        "series": [row],
+    }
+
+
+def test_markets_current_data_uses_current_five_minute_market(client, monkeypatch):
+    async def fake_fetch_market_download_payload(pool, market_id, include_probabilities):
+        assert market_id == 5_944_864
+        assert include_probabilities is False
+        return market_data_payload()
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get("/markets/current/data")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market"]["market_id"] == 5_944_864
+    assert "probabilities" not in body["series"][0]
+
+
+def test_markets_data_by_id_can_include_probabilities(client, monkeypatch):
+    async def fake_fetch_market_download_payload(pool, market_id, include_probabilities):
+        assert market_id == 5_944_864
+        assert include_probabilities is True
+        return market_data_payload(include_probabilities=True)
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get("/markets/5944864/data?include_probabilities=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["series"][0]["probabilities"]["up"]["mid"] == "0.48"
+
+
+def test_markets_download_returns_attachment_filename(client, monkeypatch):
+    async def fake_fetch_market_download_payload(pool, market_id, include_probabilities):
+        assert market_id == 5_944_864
+        assert include_probabilities is True
+        return market_data_payload(include_probabilities=True)
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get("/markets/5944864/download?include_probabilities=true")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="btc_5m_market_5944864_with_probabilities.json"'
+    )
+    assert response.json()["series"][0]["probabilities"]["down"]["normalized"] == "0.51758794"

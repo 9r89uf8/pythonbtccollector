@@ -28,6 +28,45 @@ CREATE TABLE IF NOT EXISTS market_windows (
     CHECK (market_id = market_start_ms / 300000)
 );
 
+CREATE TABLE IF NOT EXISTS polymarket_btc_5m_markets (
+    market_id BIGINT PRIMARY KEY REFERENCES market_windows(market_id),
+
+    slug TEXT NOT NULL UNIQUE,
+    gamma_event_id TEXT,
+    gamma_market_id TEXT,
+    condition_id TEXT,
+
+    question TEXT,
+    start_ms BIGINT,
+    end_ms BIGINT,
+    start_at TIMESTAMPTZ,
+    end_at TIMESTAMPTZ,
+
+    up_token_id TEXT NOT NULL,
+    down_token_id TEXT NOT NULL,
+    up_outcome TEXT NOT NULL DEFAULT 'Up',
+    down_outcome TEXT NOT NULL DEFAULT 'Down',
+
+    active BOOLEAN,
+    closed BOOLEAN,
+    archived BOOLEAN,
+
+    raw_gamma JSONB,
+    first_seen_ms BIGINT NOT NULL,
+    last_seen_ms BIGINT NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (market_id >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_markets_slug_idx
+    ON polymarket_btc_5m_markets (slug);
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_markets_tokens_idx
+    ON polymarket_btc_5m_markets (up_token_id, down_token_id);
+
 CREATE TABLE IF NOT EXISTS price_samples (
     instrument_id BIGINT NOT NULL REFERENCES instruments(instrument_id),
     sample_second_ms BIGINT NOT NULL,
@@ -63,6 +102,57 @@ CREATE INDEX IF NOT EXISTS price_samples_market_idx
 
 CREATE INDEX IF NOT EXISTS price_samples_instrument_latest_idx
     ON price_samples (instrument_id, sample_second_ms DESC);
+
+CREATE TABLE IF NOT EXISTS polymarket_probability_samples (
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    source TEXT NOT NULL DEFAULT 'polymarket_clob',
+
+    sample_second_ms BIGINT NOT NULL,
+    sample_second_at TIMESTAMPTZ NOT NULL,
+
+    up_token_id TEXT NOT NULL,
+    down_token_id TEXT NOT NULL,
+
+    up_bid NUMERIC(18, 8),
+    up_ask NUMERIC(18, 8),
+    up_mid NUMERIC(18, 8),
+
+    down_bid NUMERIC(18, 8),
+    down_ask NUMERIC(18, 8),
+    down_mid NUMERIC(18, 8),
+
+    up_prob_norm NUMERIC(18, 8),
+    down_prob_norm NUMERIC(18, 8),
+
+    provider_event_ms BIGINT,
+    received_ms BIGINT NOT NULL,
+
+    raw JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (market_id, source, sample_second_ms),
+
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms >= market_id * 300000),
+    CHECK (sample_second_ms < (market_id + 1) * 300000),
+
+    CHECK (up_bid IS NULL OR (up_bid >= 0 AND up_bid <= 1)),
+    CHECK (up_ask IS NULL OR (up_ask >= 0 AND up_ask <= 1)),
+    CHECK (up_mid IS NULL OR (up_mid >= 0 AND up_mid <= 1)),
+
+    CHECK (down_bid IS NULL OR (down_bid >= 0 AND down_bid <= 1)),
+    CHECK (down_ask IS NULL OR (down_ask >= 0 AND down_ask <= 1)),
+    CHECK (down_mid IS NULL OR (down_mid >= 0 AND down_mid <= 1)),
+
+    CHECK (up_prob_norm IS NULL OR (up_prob_norm >= 0 AND up_prob_norm <= 1)),
+    CHECK (down_prob_norm IS NULL OR (down_prob_norm >= 0 AND down_prob_norm <= 1))
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_probability_samples_market_idx
+    ON polymarket_probability_samples (market_id, sample_second_ms);
+
+CREATE INDEX IF NOT EXISTS polymarket_probability_samples_latest_idx
+    ON polymarket_probability_samples (sample_second_ms DESC);
 
 INSERT INTO providers (provider_code, display_name)
 VALUES ('binance_spot', 'Binance Spot')

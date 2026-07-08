@@ -37,6 +37,19 @@ def test_polymarket_chainlink_collector_service_execs_new_module():
     assert "-m price_collector.collector" not in service
 
 
+def test_polymarket_probability_collector_service_execs_probability_module():
+    service = (
+        ROOT / "deployment" / "price-collector-polymarket-probabilities.service"
+    ).read_text()
+
+    assert "EnvironmentFile=/etc/price-collector/collector.env" in service
+    assert (
+        "ExecStart=/opt/price-collector/.venv/bin/python "
+        "-m price_collector.polymarket_probability_collector"
+    ) in service
+    assert "--host 0.0.0.0" not in service
+
+
 def test_no_runtime_code_uses_direct_chainlink_websocket():
     scanned_files = []
     for folder in ("price_collector", "deployment"):

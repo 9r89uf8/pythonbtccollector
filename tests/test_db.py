@@ -72,6 +72,20 @@ def test_upsert_price_sample_updates_duplicate_instrument_second_rows():
     assert "DO UPDATE SET" in source
 
 
+def test_upsert_polymarket_probability_sample_updates_duplicate_source_second_rows():
+    source = inspect.getsource(db.upsert_polymarket_probability_sample)
+
+    assert "ON CONFLICT (market_id, source, sample_second_ms)" in source
+    assert "DO UPDATE SET" in source
+
+
+def test_upsert_polymarket_market_ensures_market_window_before_metadata_insert():
+    source = inspect.getsource(db.upsert_polymarket_btc_5m_market)
+
+    assert "await _ensure_market_window(connection, window)" in source
+    assert "ON CONFLICT (market_id)" in source
+
+
 def test_schema_seeds_polymarket_chainlink_provider_and_instrument():
     schema = (ROOT / "schema.sql").read_text()
 
@@ -79,6 +93,17 @@ def test_schema_seeds_polymarket_chainlink_provider_and_instrument():
     assert "Polymarket RTDS Chainlink BTC/USD" in schema
     assert "'BTCUSD'" in schema
     assert "'crypto_prices_chainlink:btc/usd'" in schema
+
+
+def test_schema_includes_polymarket_probability_tables():
+    schema = (ROOT / "schema.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS polymarket_btc_5m_markets" in schema
+    assert "CREATE TABLE IF NOT EXISTS polymarket_probability_samples" in schema
+    assert "PRIMARY KEY (market_id, source, sample_second_ms)" in schema
+    assert "up_bid NUMERIC(18, 8)" in schema
+    assert "down_prob_norm NUMERIC(18, 8)" in schema
+    assert "CHECK (sample_second_ms < (market_id + 1) * 300000)" in schema
 
 
 def test_build_market_sources_summary_returns_both_btc_sources():
@@ -159,3 +184,86 @@ def test_build_market_sources_summary_returns_both_btc_sources():
     assert summary["sources"][1]["sample_count"] == 2
     assert summary["sources"][1]["latest_sample_second_ms"] == 1_783_459_202_000
     assert summary["sources"][1]["latest_provider_event_ms"] == 1_783_459_202_999
+
+
+def market_download_rows():
+    market_start_ms = 1_783_459_200_000
+    market_end_ms = 1_783_459_500_000
+    market_start_at = datetime(2026, 7, 7, 21, 0, 0, tzinfo=timezone.utc)
+    market_end_at = datetime(2026, 7, 7, 21, 5, 0, tzinfo=timezone.utc)
+    rows = []
+
+    for t in range(300):
+        rows.append(
+            {
+                "market_id": 5_944_864,
+                "market_start_ms": market_start_ms,
+                "market_end_ms": market_end_ms,
+                "market_start_at": market_start_at,
+                "market_end_at": market_end_at,
+                "sample_second_ms": market_start_ms + (t * 1000),
+                "binance_price": Decimal("123000.00") if t == 0 else None,
+                "chainlink_price": Decimal("122998.12") if t == 0 else None,
+                "up_bid": Decimal("0.47") if t == 1 else None,
+                "up_ask": Decimal("0.49") if t == 1 else None,
+                "up_mid": Decimal("0.48") if t == 1 else None,
+                "down_bid": Decimal("0.50") if t == 1 else None,
+                "down_ask": Decimal("0.53") if t == 1 else None,
+                "down_mid": Decimal("0.515") if t == 1 else None,
+                "up_prob_norm": Decimal("0.48241206") if t == 1 else None,
+                "down_prob_norm": Decimal("0.51758794") if t == 1 else None,
+            }
+        )
+
+    return rows
+
+
+def test_build_market_download_payload_returns_300_price_rows_without_probabilities():
+    payload = db.build_market_download_payload(
+        market_download_rows(),
+        include_probabilities=False,
+    )
+
+    assert payload is not None
+    assert payload["schema_version"] == 1
+    assert payload["market"] == {
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "market_start_at": "2026-07-07T21:00:00Z",
+        "market_end_at": "2026-07-07T21:05:00Z",
+        "seconds_expected": 300,
+    }
+    assert len(payload["series"]) == 300
+    assert [row["t"] for row in payload["series"]] == list(range(300))
+    assert payload["series"][0]["prices"] == {
+        "binance": "123000.00",
+        "chainlink": "122998.12",
+    }
+    assert payload["series"][1]["prices"] == {"binance": None, "chainlink": None}
+    assert "probabilities" not in payload["series"][1]
+
+
+def test_build_market_download_payload_adds_probabilities_only_when_requested():
+    payload = db.build_market_download_payload(
+        market_download_rows(),
+        include_probabilities=True,
+    )
+
+    assert payload is not None
+    probability_row = payload["series"][1]
+    assert probability_row["probabilities"] == {
+        "up": {
+            "bid": "0.47",
+            "ask": "0.49",
+            "mid": "0.48",
+            "normalized": "0.48241206",
+        },
+        "down": {
+            "bid": "0.50",
+            "ask": "0.53",
+            "mid": "0.515",
+            "normalized": "0.51758794",
+        },
+    }
+    assert payload["series"][2]["probabilities"]["up"]["bid"] is None

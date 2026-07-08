@@ -20,5 +20,12 @@ class Settings(BaseSettings):
     POLYMARKET_CHAINLINK_RTD_SYMBOL: str = "btc/usd"
     POLYMARKET_CHAINLINK_TOPIC: str = "crypto_prices_chainlink"
 
+    POLYMARKET_GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
+    POLYMARKET_CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    POLYMARKET_BTC_5M_SLUG_PREFIX: str = "btc-updown-5m"
+    POLYMARKET_PROBABILITY_SOURCE: str = "polymarket_clob"
+    POLYMARKET_PROBABILITY_STALE_MS: int = 15_000
+    POLYMARKET_CLOB_PING_SECONDS: int = 10
+
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None
