@@ -8,6 +8,7 @@ On the droplet:
 
 ```bash
 systemctl status price-collector --no-pager
+systemctl status price-collector-polymarket-chainlink --no-pager
 systemctl status price-api --no-pager
 ```
 
@@ -15,6 +16,7 @@ Follow logs:
 
 ```bash
 journalctl -u price-collector -f
+journalctl -u price-collector-polymarket-chainlink -f
 journalctl -u price-api -f
 ```
 
@@ -23,7 +25,9 @@ Check the local API from inside the droplet:
 ```bash
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/prices/latest
+curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
 curl http://127.0.0.1:9000/markets/latest
+curl http://127.0.0.1:9000/markets/current/sources
 ```
 
 ## Connect From Your Local Machine
@@ -55,6 +59,7 @@ Then, from your local machine:
 
 ```bash
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/latest"
+curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/sources"
 ```
 
 Keep the SSH tunnel terminal open while using the API locally.
@@ -67,13 +72,14 @@ After pushing changes to GitHub, update the droplet:
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-systemctl restart price-collector price-api
+systemctl restart price-collector price-collector-polymarket-chainlink price-api
 ```
 
 Verify after restart:
 
 ```bash
 systemctl status price-collector --no-pager
+systemctl status price-collector-polymarket-chainlink --no-pager
 systemctl status price-api --no-pager
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/markets/latest

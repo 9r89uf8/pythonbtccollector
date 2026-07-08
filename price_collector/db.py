@@ -92,6 +92,8 @@ async def upsert_price_sample(
     provider_event_ms: Optional[int],
     received_ms: int,
     source_price_field: str = "c",
+    provider_message_ms: Optional[int] = None,
+    source_topic: Optional[str] = None,
 ) -> None:
     if not isinstance(price, Decimal):
         raise TypeError("price must be Decimal")
@@ -109,15 +111,19 @@ async def upsert_price_sample(
                     price,
                     provider_event_ms,
                     received_ms,
-                    source_price_field
+                    source_price_field,
+                    provider_message_ms,
+                    source_topic
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (instrument_id, sample_second_ms)
                 DO UPDATE SET
                     price = EXCLUDED.price,
                     provider_event_ms = EXCLUDED.provider_event_ms,
                     received_ms = EXCLUDED.received_ms,
-                    source_price_field = EXCLUDED.source_price_field
+                    source_price_field = EXCLUDED.source_price_field,
+                    provider_message_ms = EXCLUDED.provider_message_ms,
+                    source_topic = EXCLUDED.source_topic
                 """,
                 instrument_id,
                 sample_second_ms,
@@ -127,6 +133,8 @@ async def upsert_price_sample(
                 provider_event_ms,
                 received_ms,
                 source_price_field,
+                provider_message_ms,
+                source_topic,
             )
 
 
@@ -255,3 +263,91 @@ async def fetch_market_summary(
         "close": prices[-1],
         "samples": samples,
     }
+
+
+def build_market_sources_summary(
+    rows: list[Mapping[str, Any]],
+) -> Optional[dict[str, Any]]:
+    if not rows:
+        return None
+
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        key = (row["provider"], row["symbol"])
+        grouped.setdefault(key, []).append(row)
+
+    first = rows[0]
+    sources = []
+    for source_rows in grouped.values():
+        prices = [row["price"] for row in source_rows]
+        source_first = source_rows[0]
+        source_latest = source_rows[-1]
+        sources.append(
+            {
+                "provider": source_first["provider"],
+                "symbol": source_first["symbol"],
+                "quote_asset": source_first["quote_asset"],
+                "sample_count": len(source_rows),
+                "open": prices[0],
+                "high": max(prices),
+                "low": min(prices),
+                "close": prices[-1],
+                "latest_sample_second_ms": source_latest["sample_second_ms"],
+                "latest_provider_event_ms": source_latest["provider_event_ms"],
+                "latest_received_ms": source_latest["received_ms"],
+            }
+        )
+
+    return {
+        "market_id": first["market_id"],
+        "market_start_ms": first["market_start_ms"],
+        "market_end_ms": first["market_end_ms"],
+        "market_start_at": first["market_start_at"],
+        "market_end_at": first["market_end_at"],
+        "sources": sources,
+    }
+
+
+async def fetch_market_summaries_for_btc_sources(
+    pool: asyncpg.Pool,
+    market_id: int,
+) -> Optional[dict[str, Any]]:
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                p.provider_code AS provider,
+                i.symbol AS symbol,
+                i.quote_asset AS quote_asset,
+                mw.market_id AS market_id,
+                mw.market_start_ms AS market_start_ms,
+                mw.market_end_ms AS market_end_ms,
+                mw.market_start_at AS market_start_at,
+                mw.market_end_at AS market_end_at,
+                ps.sample_second_ms AS sample_second_ms,
+                ps.price AS price,
+                ps.provider_event_ms AS provider_event_ms,
+                ps.received_ms AS received_ms
+            FROM price_samples ps
+            JOIN instruments i ON i.instrument_id = ps.instrument_id
+            JOIN providers p ON p.provider_id = i.provider_id
+            JOIN market_windows mw ON mw.market_id = ps.market_id
+            WHERE ps.market_id = $1
+              AND (
+                (p.provider_code = 'binance_spot' AND i.symbol = 'BTCUSDT')
+                OR
+                (p.provider_code = 'polymarket_chainlink_rtds' AND i.symbol = 'BTCUSD')
+              )
+            ORDER BY
+                CASE p.provider_code
+                    WHEN 'binance_spot' THEN 0
+                    WHEN 'polymarket_chainlink_rtds' THEN 1
+                    ELSE 2
+                END,
+                i.symbol ASC,
+                ps.sample_second_ms ASC
+            """,
+            market_id,
+        )
+
+    return build_market_sources_summary([dict(row) for row in rows])

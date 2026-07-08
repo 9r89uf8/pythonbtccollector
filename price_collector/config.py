@@ -14,5 +14,11 @@ class Settings(BaseSettings):
     SYMBOL: str = "BTCUSDT"
     STALE_PRICE_MS: int = 10_000
 
+    POLYMARKET_RTDS_WS_URL: str = "wss://ws-live-data.polymarket.com"
+    POLYMARKET_CHAINLINK_PROVIDER_CODE: str = "polymarket_chainlink_rtds"
+    POLYMARKET_CHAINLINK_SYMBOL: str = "BTCUSD"
+    POLYMARKET_CHAINLINK_RTD_SYMBOL: str = "btc/usd"
+    POLYMARKET_CHAINLINK_TOPIC: str = "crypto_prices_chainlink"
+
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None

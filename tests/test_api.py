@@ -97,6 +97,37 @@ def test_prices_latest_returns_decimal_price_as_string_and_z_datetime(client, mo
     assert body["sample_second_at"] == "2026-07-07T21:00:00Z"
 
 
+def test_prices_latest_can_query_polymarket_chainlink_btcusd(client, monkeypatch):
+    async def fake_fetch_latest_price(pool, provider_code, symbol):
+        assert provider_code == "polymarket_chainlink_rtds"
+        assert symbol == "BTCUSD"
+        return {
+            "provider": "polymarket_chainlink_rtds",
+            "symbol": "BTCUSD",
+            "price": Decimal("123455.900000000000000000"),
+            "sample_second_ms": 1_783_459_200_000,
+            "sample_second_at": utc_dt(2026, 7, 7, 21, 0, 0),
+            "provider_event_ms": 1_783_459_200_123,
+            "received_ms": 1_783_459_200_250,
+            "market_id": 5_944_864,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+        }
+
+    monkeypatch.setattr(api, "fetch_latest_price", fake_fetch_latest_price)
+
+    response = client.get(
+        "/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "polymarket_chainlink_rtds"
+    assert body["symbol"] == "BTCUSD"
+    assert body["price"] == "123455.900000000000000000"
+    assert body["provider_event_ms"] == 1_783_459_200_123
+
+
 def test_prices_latest_returns_404_when_no_sample_exists(client, monkeypatch):
     async def fake_fetch_latest_price(pool, provider_code, symbol):
         return None
@@ -185,3 +216,107 @@ def test_markets_by_id_returns_404_when_no_samples_exist(client, monkeypatch):
     response = client.get("/markets/5944864")
 
     assert response.status_code == 404
+
+
+def test_markets_sources_by_id_returns_both_sources(client, monkeypatch):
+    async def fake_fetch_market_summaries_for_btc_sources(pool, market_id):
+        assert market_id == 5_944_864
+        return {
+            "market_id": 5_944_864,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+            "market_start_at": utc_dt(2026, 7, 7, 21, 0, 0),
+            "market_end_at": utc_dt(2026, 7, 7, 21, 5, 0),
+            "sources": [
+                {
+                    "provider": "binance_spot",
+                    "symbol": "BTCUSDT",
+                    "quote_asset": "USDT",
+                    "sample_count": 300,
+                    "open": Decimal("123000.000000000000000000"),
+                    "high": Decimal("123500.000000000000000000"),
+                    "low": Decimal("122900.000000000000000000"),
+                    "close": Decimal("123456.780000000000000000"),
+                    "latest_sample_second_ms": 1_783_459_499_000,
+                    "latest_provider_event_ms": 1_783_459_498_950,
+                    "latest_received_ms": 1_783_459_499_010,
+                },
+                {
+                    "provider": "polymarket_chainlink_rtds",
+                    "symbol": "BTCUSD",
+                    "quote_asset": "USD",
+                    "sample_count": 298,
+                    "open": Decimal("122998.120000000000000000"),
+                    "high": Decimal("123501.990000000000000000"),
+                    "low": Decimal("122901.030000000000000000"),
+                    "close": Decimal("123455.900000000000000000"),
+                    "latest_sample_second_ms": 1_783_459_499_000,
+                    "latest_provider_event_ms": 1_783_459_499_123,
+                    "latest_received_ms": 1_783_459_499_320,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_summaries_for_btc_sources",
+        fake_fetch_market_summaries_for_btc_sources,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_300_000)
+
+    response = client.get("/markets/5944864/sources")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market_id"] == 5_944_864
+    assert body["is_complete"] is False
+    assert [source["provider"] for source in body["sources"]] == [
+        "binance_spot",
+        "polymarket_chainlink_rtds",
+    ]
+    assert body["sources"][0]["symbol"] == "BTCUSDT"
+    assert body["sources"][0]["quote_asset"] == "USDT"
+    assert body["sources"][0]["sample_count"] == 300
+    assert body["sources"][1]["symbol"] == "BTCUSD"
+    assert body["sources"][1]["quote_asset"] == "USD"
+    assert body["sources"][1]["sample_count"] == 298
+    assert body["sources"][1]["close"] == "123455.900000000000000000"
+
+
+def test_markets_current_sources_uses_current_five_minute_market(client, monkeypatch):
+    async def fake_fetch_market_summaries_for_btc_sources(pool, market_id):
+        assert market_id == 5_944_864
+        return {
+            "market_id": market_id,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+            "market_start_at": utc_dt(2026, 7, 7, 21, 0, 0),
+            "market_end_at": utc_dt(2026, 7, 7, 21, 5, 0),
+            "sources": [
+                {
+                    "provider": "binance_spot",
+                    "symbol": "BTCUSDT",
+                    "quote_asset": "USDT",
+                    "sample_count": 1,
+                    "open": Decimal("123000.00"),
+                    "high": Decimal("123000.00"),
+                    "low": Decimal("123000.00"),
+                    "close": Decimal("123000.00"),
+                    "latest_sample_second_ms": 1_783_459_200_000,
+                    "latest_provider_event_ms": 1_783_459_199_950,
+                    "latest_received_ms": 1_783_459_200_010,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_summaries_for_btc_sources",
+        fake_fetch_market_summaries_for_btc_sources,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get("/markets/current/sources")
+
+    assert response.status_code == 200
+    assert response.json()["market_id"] == 5_944_864

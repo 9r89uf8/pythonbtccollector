@@ -12,9 +12,11 @@ from price_collector.db import (
     create_read_pool,
     fetch_latest_market_id,
     fetch_latest_price,
+    fetch_market_summaries_for_btc_sources,
     fetch_market_summary,
     health_check,
 )
+from price_collector.market import market_for_sample_second
 
 
 DEFAULT_PROVIDER = "binance_spot"
@@ -69,6 +71,37 @@ def serialize_market_summary(summary: Mapping[str, Any], *, now_ms: int) -> dict
                 "price": decimal_to_string(sample["price"]),
             }
             for sample in summary["samples"]
+        ],
+    }
+
+
+def serialize_market_sources_summary(
+    summary: Mapping[str, Any],
+    *,
+    now_ms: int,
+) -> dict[str, Any]:
+    return {
+        "market_id": summary["market_id"],
+        "market_start_ms": summary["market_start_ms"],
+        "market_end_ms": summary["market_end_ms"],
+        "market_start_at": utc_datetime_to_z(summary["market_start_at"]),
+        "market_end_at": utc_datetime_to_z(summary["market_end_at"]),
+        "is_complete": now_ms >= summary["market_end_ms"],
+        "sources": [
+            {
+                "provider": source["provider"],
+                "symbol": source["symbol"],
+                "quote_asset": source["quote_asset"],
+                "sample_count": source["sample_count"],
+                "open": decimal_to_string(source["open"]),
+                "high": decimal_to_string(source["high"]),
+                "low": decimal_to_string(source["low"]),
+                "close": decimal_to_string(source["close"]),
+                "latest_sample_second_ms": source["latest_sample_second_ms"],
+                "latest_provider_event_ms": source["latest_provider_event_ms"],
+                "latest_received_ms": source["latest_received_ms"],
+            }
+            for source in summary["sources"]
         ],
     }
 
@@ -153,6 +186,31 @@ async def markets_latest(
     )
 
 
+@app.get("/markets/current/sources")
+async def markets_current_sources(request: Request) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    sample_second_ms = (now_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+
+    return await market_sources_response(
+        request,
+        market_id=window.market_id,
+        now_ms=now_ms,
+    )
+
+
+@app.get("/markets/{market_id}/sources")
+async def markets_sources_by_id(
+    request: Request,
+    market_id: int,
+) -> dict[str, Any]:
+    return await market_sources_response(
+        request,
+        market_id=market_id,
+        now_ms=current_utc_epoch_ms(),
+    )
+
+
 @app.get("/markets/{market_id}")
 async def markets_by_id(
     request: Request,
@@ -187,3 +245,18 @@ async def market_by_id_response(
 
     return serialize_market_summary(summary, now_ms=current_utc_epoch_ms())
 
+
+async def market_sources_response(
+    request: Request,
+    *,
+    market_id: int,
+    now_ms: int,
+) -> dict[str, Any]:
+    summary = await fetch_market_summaries_for_btc_sources(get_pool(request), market_id)
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no BTC source samples found for market_id={market_id!r}",
+        )
+
+    return serialize_market_sources_summary(summary, now_ms=now_ms)

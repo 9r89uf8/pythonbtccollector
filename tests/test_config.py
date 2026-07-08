@@ -16,3 +16,18 @@ def test_settings_allows_api_reader_url_without_writer_url(monkeypatch):
         == "postgresql://price_reader:secret@127.0.0.1:5432/price_collector"
     )
 
+
+def test_settings_include_polymarket_chainlink_defaults(monkeypatch):
+    monkeypatch.delenv("POLYMARKET_RTDS_WS_URL", raising=False)
+    monkeypatch.delenv("POLYMARKET_CHAINLINK_PROVIDER_CODE", raising=False)
+    monkeypatch.delenv("POLYMARKET_CHAINLINK_SYMBOL", raising=False)
+    monkeypatch.delenv("POLYMARKET_CHAINLINK_RTD_SYMBOL", raising=False)
+    monkeypatch.delenv("POLYMARKET_CHAINLINK_TOPIC", raising=False)
+
+    settings = Settings()
+
+    assert settings.POLYMARKET_RTDS_WS_URL == "wss://ws-live-data.polymarket.com"
+    assert settings.POLYMARKET_CHAINLINK_PROVIDER_CODE == "polymarket_chainlink_rtds"
+    assert settings.POLYMARKET_CHAINLINK_SYMBOL == "BTCUSD"
+    assert settings.POLYMARKET_CHAINLINK_RTD_SYMBOL == "btc/usd"
+    assert settings.POLYMARKET_CHAINLINK_TOPIC == "crypto_prices_chainlink"

@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS price_samples (
     received_ms BIGINT NOT NULL,
 
     source_price_field TEXT NOT NULL DEFAULT 'c',
+    provider_message_ms BIGINT,
+    source_topic TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     PRIMARY KEY (instrument_id, sample_second_ms),
@@ -49,6 +51,12 @@ CREATE TABLE IF NOT EXISTS price_samples (
     CHECK (sample_second_ms >= market_id * 300000),
     CHECK (sample_second_ms < (market_id + 1) * 300000)
 );
+
+ALTER TABLE price_samples
+ADD COLUMN IF NOT EXISTS provider_message_ms BIGINT;
+
+ALTER TABLE price_samples
+ADD COLUMN IF NOT EXISTS source_topic TEXT;
 
 CREATE INDEX IF NOT EXISTS price_samples_market_idx
     ON price_samples (market_id, instrument_id, sample_second_ms);
@@ -77,3 +85,23 @@ FROM providers
 WHERE provider_code = 'binance_spot'
 ON CONFLICT (provider_id, symbol) DO NOTHING;
 
+INSERT INTO providers (provider_code, display_name)
+VALUES ('polymarket_chainlink_rtds', 'Polymarket RTDS Chainlink BTC/USD')
+ON CONFLICT (provider_code) DO NOTHING;
+
+INSERT INTO instruments (
+    provider_id,
+    symbol,
+    base_asset,
+    quote_asset,
+    stream_name
+)
+SELECT
+    provider_id,
+    'BTCUSD',
+    'BTC',
+    'USD',
+    'crypto_prices_chainlink:btc/usd'
+FROM providers
+WHERE provider_code = 'polymarket_chainlink_rtds'
+ON CONFLICT (provider_id, symbol) DO NOTHING;

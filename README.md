@@ -1,16 +1,17 @@
 Price Collector
-Production-oriented BTCUSDT price collection for a single-user Ubuntu 24.04 DigitalOcean droplet.
+Production-oriented BTC price collection for a single-user Ubuntu 24.04 DigitalOcean droplet.
 Architecture
 ```text
 DigitalOcean droplet
 ├── systemd
 │   ├── price-collector.service
+│   ├── price-collector-polymarket-chainlink.service
 │   └── price-api.service
 ├── Python app cloned from GitHub into /opt/price-collector
 ├── env files in /etc/price-collector
 └── local PostgreSQL database price_collector
 ```
-The collector connects to Binance Spot WebSocket stream `btcusdt@ticker`, keeps the latest price in memory, and writes at most one sample per UTC second. The API is read-only and must bind only to `127.0.0.1:9000`.
+The Binance collector connects to Binance Spot WebSocket stream `btcusdt@ticker`, keeps the latest price in memory, and writes at most one sample per UTC second. The Polymarket collector connects to Polymarket RTDS topic `crypto_prices_chainlink` with filter `{"symbol":"btc/usd"}` and writes Chainlink BTC/USD samples by the source payload timestamp. The API is read-only and must bind only to `127.0.0.1:9000`.
 Do not run Docker. Do not run a dashboard on the droplet. Do not expose PostgreSQL or the API publicly.
 Droplet Assumptions
 Ubuntu 24.04 LTS
@@ -176,6 +177,14 @@ sudo nano /etc/price-collector/api.env
 ```text
 DATABASE_URL=postgresql://price_writer:REPLACE_ME@127.0.0.1:5432/price_collector
 ```
+It can also override the Polymarket Chainlink RTDS defaults:
+```text
+POLYMARKET_RTDS_WS_URL=wss://ws-live-data.polymarket.com
+POLYMARKET_CHAINLINK_PROVIDER_CODE=polymarket_chainlink_rtds
+POLYMARKET_CHAINLINK_SYMBOL=BTCUSD
+POLYMARKET_CHAINLINK_RTD_SYMBOL=btc/usd
+POLYMARKET_CHAINLINK_TOPIC=crypto_prices_chainlink
+```
 `api.env` contains reader credentials only:
 ```text
 READ_DATABASE_URL=postgresql://price_reader:REPLACE_ME@127.0.0.1:5432/price_collector
@@ -185,11 +194,14 @@ systemd
 Install service files from the cloned repository:
 ```bash
 sudo cp /opt/price-collector/deployment/price-collector.service /etc/systemd/system/price-collector.service
+sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.service /etc/systemd/system/price-collector-polymarket-chainlink.service
 sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
 sudo systemctl daemon-reload
 sudo systemctl enable price-collector
+sudo systemctl enable price-collector-polymarket-chainlink
 sudo systemctl enable price-api
 sudo systemctl start price-collector
+sudo systemctl start price-collector-polymarket-chainlink
 sudo systemctl start price-api
 ```
 The API service is intentionally local-only:
@@ -199,18 +211,22 @@ ExecStart=/opt/price-collector/.venv/bin/uvicorn price_collector.api:app --host 
 Service Verification
 ```bash
 sudo systemctl status price-collector
+sudo systemctl status price-collector-polymarket-chainlink
 sudo systemctl status price-api
 ```
 Logs:
 ```bash
 sudo journalctl -u price-collector -f
+sudo journalctl -u price-collector-polymarket-chainlink -f
 sudo journalctl -u price-api -f
 ```
 API checks from inside the droplet:
 ```bash
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/prices/latest
+curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
 curl http://127.0.0.1:9000/markets/latest
+curl http://127.0.0.1:9000/markets/current/sources
 ```
 DB Verification
 ```bash
@@ -279,11 +295,13 @@ If `schema.sql` changed, review it before applying it. For this version, the sch
 Restart services:
 ```bash
 sudo systemctl restart price-collector
+sudo systemctl restart price-collector-polymarket-chainlink
 sudo systemctl restart price-api
 ```
 Verify after update:
 ```bash
 sudo systemctl status price-collector
+sudo systemctl status price-collector-polymarket-chainlink
 sudo systemctl status price-api
 curl http://127.0.0.1:9000/healthz
 ```
