@@ -697,5 +697,5 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
         "chainlink": "122998.12",
         "futures": "62075.12",
     }
-    assert body["series"][0]["futures"]["last"] == "62075.12"
+    assert "futures" not in body["series"][0]
     assert "freshness" not in body["series"][0]

@@ -123,6 +123,7 @@ def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(futures, Mapping):
         prices["futures"] = futures.get("last")
     exported["prices"] = prices
+    exported.pop("futures", None)
 
     return exported
 

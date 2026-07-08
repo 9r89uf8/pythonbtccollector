@@ -111,7 +111,8 @@ Download responses are intentionally cleaner than `/data` responses:
 
 - Per-row `freshness` is omitted.
 - When futures are requested, `row.prices.futures` contains the futures last price.
-- The separate `row.futures` object may still contain futures metadata such as mark, index, and premium.
+- The separate `row.futures` object is omitted from downloads.
+- Futures mark, index, and premium are dashboard/data-grid fields, not download fields.
 
 For dashboard chart display with futures/open interest, request:
 
