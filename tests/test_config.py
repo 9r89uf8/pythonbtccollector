@@ -60,3 +60,23 @@ def test_settings_include_polymarket_probability_defaults(monkeypatch):
     assert settings.POLYMARKET_NEXT_MARKET_PRELOAD_SECONDS == 45
     assert settings.POLYMARKET_NEXT_MARKET_RETRY_MS == 500
     assert settings.POLYMARKET_REST_PRIME_SECONDS == 15
+
+
+def test_settings_include_binance_futures_defaults(monkeypatch):
+    monkeypatch.delenv("BINANCE_FUTURES_BASE_URL", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_SYMBOL", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_PROVIDER_CODE", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_POLL_SECONDS", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_REST_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_HIST_OI_ENABLED", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_HIST_OI_POLL_SECONDS", raising=False)
+
+    settings = Settings()
+
+    assert settings.BINANCE_FUTURES_BASE_URL == "https://fapi.binance.com"
+    assert settings.BINANCE_FUTURES_SYMBOL == "BTCUSDT"
+    assert settings.BINANCE_FUTURES_PROVIDER_CODE == "binance_usdm_perp"
+    assert settings.BINANCE_FUTURES_POLL_SECONDS == 1
+    assert settings.BINANCE_FUTURES_REST_TIMEOUT_SECONDS == 5
+    assert settings.BINANCE_FUTURES_HIST_OI_ENABLED is True
+    assert settings.BINANCE_FUTURES_HIST_OI_POLL_SECONDS == 30

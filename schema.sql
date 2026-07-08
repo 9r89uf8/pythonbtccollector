@@ -154,6 +154,72 @@ CREATE INDEX IF NOT EXISTS polymarket_probability_samples_market_idx
 CREATE INDEX IF NOT EXISTS polymarket_probability_samples_latest_idx
     ON polymarket_probability_samples (sample_second_ms DESC);
 
+CREATE TABLE IF NOT EXISTS binance_futures_snapshots (
+    symbol TEXT NOT NULL,
+
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    sample_second_ms BIGINT NOT NULL,
+    sample_second_at TIMESTAMPTZ NOT NULL,
+
+    futures_last_price NUMERIC(38, 18),
+    futures_last_price_time_ms BIGINT,
+
+    mark_price NUMERIC(38, 18),
+    index_price NUMERIC(38, 18),
+    last_funding_rate NUMERIC(38, 18),
+    next_funding_time_ms BIGINT,
+    premium_index_time_ms BIGINT,
+
+    open_interest NUMERIC(38, 18),
+    open_interest_time_ms BIGINT,
+
+    oi_notional_usdt NUMERIC(38, 18),
+    premium_bps NUMERIC(20, 8),
+
+    received_ms BIGINT NOT NULL,
+    raw JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (symbol, sample_second_ms),
+
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms >= market_id * 300000),
+    CHECK (sample_second_ms < (market_id + 1) * 300000),
+    CHECK (open_interest IS NULL OR open_interest >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS binance_futures_snapshots_market_idx
+    ON binance_futures_snapshots (market_id, sample_second_ms);
+
+CREATE INDEX IF NOT EXISTS binance_futures_snapshots_latest_idx
+    ON binance_futures_snapshots (symbol, sample_second_ms DESC);
+
+CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
+    symbol TEXT NOT NULL,
+
+    source_window_start_ms BIGINT NOT NULL,
+    source_window_end_ms BIGINT NOT NULL,
+
+    effective_market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+
+    binance_timestamp_ms BIGINT NOT NULL,
+
+    sum_open_interest NUMERIC(38, 18),
+    sum_open_interest_value NUMERIC(38, 18),
+
+    received_ms BIGINT NOT NULL,
+    raw JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (symbol, source_window_start_ms, source_window_end_ms),
+
+    CHECK (source_window_end_ms = source_window_start_ms + 300000),
+    CHECK (source_window_start_ms % 300000 = 0)
+);
+
+CREATE INDEX IF NOT EXISTS binance_futures_oi_5m_effective_market_idx
+    ON binance_futures_oi_5m_summaries (effective_market_id);
+
 INSERT INTO providers (provider_code, display_name)
 VALUES ('binance_spot', 'Binance Spot')
 ON CONFLICT (provider_code) DO NOTHING;
@@ -194,4 +260,25 @@ SELECT
     'crypto_prices_chainlink:btc/usd'
 FROM providers
 WHERE provider_code = 'polymarket_chainlink_rtds'
+ON CONFLICT (provider_id, symbol) DO NOTHING;
+
+INSERT INTO providers (provider_code, display_name)
+VALUES ('binance_usdm_perp', 'Binance USD-M Perpetual Futures')
+ON CONFLICT (provider_code) DO NOTHING;
+
+INSERT INTO instruments (
+    provider_id,
+    symbol,
+    base_asset,
+    quote_asset,
+    stream_name
+)
+SELECT
+    provider_id,
+    'BTCUSDT',
+    'BTC',
+    'USDT',
+    'binance_usdm_perp:BTCUSDT'
+FROM providers
+WHERE provider_code = 'binance_usdm_perp'
 ON CONFLICT (provider_id, symbol) DO NOTHING;

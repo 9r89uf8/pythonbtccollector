@@ -345,6 +345,148 @@ async def upsert_polymarket_probability_sample(
             )
 
 
+async def upsert_binance_futures_snapshot(
+    pool: asyncpg.Pool,
+    *,
+    symbol: str,
+    window: MarketWindow,
+    sample_second_ms: int,
+    futures_last_price: Optional[Decimal],
+    futures_last_price_time_ms: Optional[int],
+    mark_price: Optional[Decimal],
+    index_price: Optional[Decimal],
+    last_funding_rate: Optional[Decimal],
+    next_funding_time_ms: Optional[int],
+    premium_index_time_ms: Optional[int],
+    open_interest: Optional[Decimal],
+    open_interest_time_ms: Optional[int],
+    oi_notional_usdt: Optional[Decimal],
+    premium_bps: Optional[Decimal],
+    received_ms: int,
+    raw: Mapping[str, Any],
+) -> None:
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _ensure_market_window(connection, window)
+            await connection.execute(
+                """
+                INSERT INTO binance_futures_snapshots (
+                    symbol,
+                    market_id,
+                    sample_second_ms,
+                    sample_second_at,
+                    futures_last_price,
+                    futures_last_price_time_ms,
+                    mark_price,
+                    index_price,
+                    last_funding_rate,
+                    next_funding_time_ms,
+                    premium_index_time_ms,
+                    open_interest,
+                    open_interest_time_ms,
+                    oi_notional_usdt,
+                    premium_bps,
+                    received_ms,
+                    raw
+                )
+                VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6,
+                    $7, $8, $9, $10, $11,
+                    $12, $13,
+                    $14, $15,
+                    $16,
+                    $17::jsonb
+                )
+                ON CONFLICT (symbol, sample_second_ms)
+                DO UPDATE SET
+                    market_id = EXCLUDED.market_id,
+                    sample_second_at = EXCLUDED.sample_second_at,
+                    futures_last_price = EXCLUDED.futures_last_price,
+                    futures_last_price_time_ms = EXCLUDED.futures_last_price_time_ms,
+                    mark_price = EXCLUDED.mark_price,
+                    index_price = EXCLUDED.index_price,
+                    last_funding_rate = EXCLUDED.last_funding_rate,
+                    next_funding_time_ms = EXCLUDED.next_funding_time_ms,
+                    premium_index_time_ms = EXCLUDED.premium_index_time_ms,
+                    open_interest = EXCLUDED.open_interest,
+                    open_interest_time_ms = EXCLUDED.open_interest_time_ms,
+                    oi_notional_usdt = EXCLUDED.oi_notional_usdt,
+                    premium_bps = EXCLUDED.premium_bps,
+                    received_ms = EXCLUDED.received_ms,
+                    raw = EXCLUDED.raw
+                """,
+                symbol,
+                window.market_id,
+                sample_second_ms,
+                epoch_ms_to_utc_datetime(sample_second_ms),
+                futures_last_price,
+                futures_last_price_time_ms,
+                mark_price,
+                index_price,
+                last_funding_rate,
+                next_funding_time_ms,
+                premium_index_time_ms,
+                open_interest,
+                open_interest_time_ms,
+                oi_notional_usdt,
+                premium_bps,
+                received_ms,
+                json.dumps(raw, default=str),
+            )
+
+
+async def upsert_binance_futures_oi_5m_summary(
+    pool: asyncpg.Pool,
+    *,
+    symbol: str,
+    source_window_start_ms: int,
+    source_window_end_ms: int,
+    effective_window: MarketWindow,
+    binance_timestamp_ms: int,
+    sum_open_interest: Optional[Decimal],
+    sum_open_interest_value: Optional[Decimal],
+    received_ms: int,
+    raw: Mapping[str, Any],
+) -> None:
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _ensure_market_window(connection, effective_window)
+            await connection.execute(
+                """
+                INSERT INTO binance_futures_oi_5m_summaries (
+                    symbol,
+                    source_window_start_ms,
+                    source_window_end_ms,
+                    effective_market_id,
+                    binance_timestamp_ms,
+                    sum_open_interest,
+                    sum_open_interest_value,
+                    received_ms,
+                    raw
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                ON CONFLICT (symbol, source_window_start_ms, source_window_end_ms)
+                DO UPDATE SET
+                    effective_market_id = EXCLUDED.effective_market_id,
+                    binance_timestamp_ms = EXCLUDED.binance_timestamp_ms,
+                    sum_open_interest = EXCLUDED.sum_open_interest,
+                    sum_open_interest_value = EXCLUDED.sum_open_interest_value,
+                    received_ms = EXCLUDED.received_ms,
+                    raw = EXCLUDED.raw
+                """,
+                symbol,
+                source_window_start_ms,
+                source_window_end_ms,
+                effective_window.market_id,
+                binance_timestamp_ms,
+                sum_open_interest,
+                sum_open_interest_value,
+                received_ms,
+                json.dumps(raw, default=str),
+            )
+
+
 async def health_check(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as connection:
         await connection.fetchval("SELECT 1")

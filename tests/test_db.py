@@ -79,6 +79,22 @@ def test_upsert_polymarket_probability_sample_updates_duplicate_source_second_ro
     assert "DO UPDATE SET" in source
 
 
+def test_upsert_binance_futures_snapshot_updates_duplicate_symbol_second_rows():
+    source = inspect.getsource(db.upsert_binance_futures_snapshot)
+
+    assert "await _ensure_market_window(connection, window)" in source
+    assert "ON CONFLICT (symbol, sample_second_ms)" in source
+    assert "DO UPDATE SET" in source
+
+
+def test_upsert_binance_futures_oi_5m_summary_updates_duplicate_source_window_rows():
+    source = inspect.getsource(db.upsert_binance_futures_oi_5m_summary)
+
+    assert "await _ensure_market_window(connection, effective_window)" in source
+    assert "ON CONFLICT (symbol, source_window_start_ms, source_window_end_ms)" in source
+    assert "DO UPDATE SET" in source
+
+
 def test_upsert_polymarket_market_ensures_market_window_before_metadata_insert():
     source = inspect.getsource(db.upsert_polymarket_btc_5m_market)
 
@@ -112,6 +128,20 @@ def test_schema_includes_polymarket_probability_tables():
     assert "up_bid NUMERIC(18, 8)" in schema
     assert "down_prob_norm NUMERIC(18, 8)" in schema
     assert "CHECK (sample_second_ms < (market_id + 1) * 300000)" in schema
+
+
+def test_schema_includes_binance_futures_tables_and_seed():
+    schema = (ROOT / "schema.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS binance_futures_snapshots" in schema
+    assert "CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries" in schema
+    assert "PRIMARY KEY (symbol, sample_second_ms)" in schema
+    assert "PRIMARY KEY (symbol, source_window_start_ms, source_window_end_ms)" in schema
+    assert "open_interest NUMERIC(38, 18)" in schema
+    assert "premium_bps NUMERIC(20, 8)" in schema
+    assert "sum_open_interest_value NUMERIC(38, 18)" in schema
+    assert "'binance_usdm_perp'" in schema
+    assert "'binance_usdm_perp:BTCUSDT'" in schema
 
 
 def test_build_market_sources_summary_returns_both_btc_sources():

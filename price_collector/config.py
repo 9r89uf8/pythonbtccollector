@@ -31,5 +31,13 @@ class Settings(BaseSettings):
     POLYMARKET_NEXT_MARKET_RETRY_MS: int = 500
     POLYMARKET_REST_PRIME_SECONDS: int = 15
 
+    BINANCE_FUTURES_BASE_URL: str = "https://fapi.binance.com"
+    BINANCE_FUTURES_SYMBOL: str = "BTCUSDT"
+    BINANCE_FUTURES_PROVIDER_CODE: str = "binance_usdm_perp"
+    BINANCE_FUTURES_POLL_SECONDS: int = 1
+    BINANCE_FUTURES_REST_TIMEOUT_SECONDS: int = 5
+    BINANCE_FUTURES_HIST_OI_ENABLED: bool = True
+    BINANCE_FUTURES_HIST_OI_POLL_SECONDS: int = 30
+
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None
