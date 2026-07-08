@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import price_collector.db as db
+from price_collector.market import MarketWindow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +115,21 @@ def test_oi_3dp_rounds_contract_values():
     assert db.oi_3dp(Decimal("74321.1234")) == "74321.123"
     assert db.oi_3dp(Decimal("74321.1235")) == "74321.124"
     assert db.oi_3dp(None) is None
+
+
+def test_freshness_meta_uses_source_received_and_transport_timestamps():
+    assert db.age_ms(10_000, 9_250) == 750
+    assert db.age_ms(10_000, 10_250) == 0
+    assert db.age_ms(10_000, None) is None
+    assert db.freshness_meta(
+        server_time_ms=10_000,
+        source_time_ms=9_250,
+        received_ms=9_500,
+    ) == {
+        "source_age_ms": 750,
+        "received_age_ms": 500,
+        "transport_lag_ms": 250,
+    }
 
 
 def test_schema_seeds_polymarket_chainlink_provider_and_instrument():
@@ -246,7 +262,25 @@ def market_download_rows():
                 "market_start_at": market_start_at,
                 "market_end_at": market_end_at,
                 "sample_second_ms": market_start_ms + (t * 1000),
+                "binance_provider_event_ms": (
+                    market_start_ms - 100 if t == 0 else None
+                ),
+                "binance_received_ms": (
+                    market_start_ms - 50 if t == 0 else None
+                ),
                 "binance_price": Decimal("123000.004") if t == 0 else None,
+                "chainlink_sample_second_ms": (
+                    market_start_ms if t == 0 else None
+                ),
+                "chainlink_provider_event_ms": (
+                    market_start_ms - 1_000 if t == 0 else None
+                ),
+                "chainlink_provider_message_ms": (
+                    market_start_ms - 900 if t == 0 else None
+                ),
+                "chainlink_received_ms": (
+                    market_start_ms - 800 if t == 0 else None
+                ),
                 "chainlink_price": Decimal("122998.125") if t == 0 else None,
                 "up_bid": Decimal("0.47") if t == 1 else None,
                 "up_ask": Decimal("0.485") if t == 1 else None,
@@ -256,6 +290,11 @@ def market_download_rows():
                 "down_mid": Decimal("0.515") if t == 1 else None,
                 "up_prob_norm": Decimal("0.48241206") if t == 1 else None,
                 "down_prob_norm": Decimal("0.51758794") if t == 1 else None,
+                "futures_last_price_time_ms": None,
+                "premium_index_time_ms": None,
+                "open_interest_time_ms": None,
+                "futures_received_ms": None,
+                "prev_oi_source_window_start_ms": None,
             }
         )
 
@@ -265,6 +304,7 @@ def market_download_rows():
 def test_build_market_download_payload_returns_300_price_rows_without_probabilities():
     payload = db.build_market_download_payload(
         market_download_rows(),
+        server_time_ms=1_783_459_200_250,
         include_probabilities=False,
         include_futures=False,
         include_oi=False,
@@ -272,6 +312,7 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
 
     assert payload is not None
     assert payload["schema_version"] == 1
+    assert payload["server_time_ms"] == 1_783_459_200_250
     assert payload["market"] == {
         "market_id": 5_944_864,
         "market_start_ms": 1_783_459_200_000,
@@ -286,6 +327,22 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
         "binance": "123000.00",
         "chainlink": "122998.13",
     }
+    assert payload["series"][0]["freshness"]["binance"] == {
+        "source_ms": 1_783_459_199_900,
+        "received_ms": 1_783_459_199_950,
+        "source_age_ms": 350,
+        "received_age_ms": 300,
+        "transport_lag_ms": 50,
+    }
+    assert payload["series"][0]["freshness"]["chainlink"] == {
+        "source_ms": 1_783_459_199_000,
+        "message_ms": 1_783_459_199_100,
+        "received_ms": 1_783_459_199_200,
+        "is_carried_forward": False,
+        "source_age_ms": 1_250,
+        "received_age_ms": 1_050,
+        "transport_lag_ms": 200,
+    }
     assert payload["series"][1]["prices"] == {"binance": None, "chainlink": None}
     assert "probabilities" not in payload["series"][1]
     assert "futures" not in payload["series"][1]
@@ -296,6 +353,7 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
 def test_build_market_download_payload_adds_probabilities_only_when_requested():
     payload = db.build_market_download_payload(
         market_download_rows(),
+        server_time_ms=1_783_459_200_250,
         include_probabilities=True,
         include_futures=False,
         include_oi=False,
@@ -317,6 +375,7 @@ def test_build_market_download_payload_adds_probabilities_only_when_requested():
 def test_download_payload_probability_shape_ask_only():
     payload = db.build_market_download_payload(
         market_download_rows(),
+        server_time_ms=1_783_459_200_250,
         include_probabilities=True,
         include_futures=False,
         include_oi=False,
@@ -341,9 +400,13 @@ def test_build_market_download_payload_adds_optional_futures_and_oi():
             "index_price": Decimal("62070.185"),
             "last_funding_rate": Decimal("0.00010000"),
             "next_funding_time_ms": 1_783_468_800_000,
+            "futures_last_price_time_ms": 1_783_459_212_050,
+            "premium_index_time_ms": 1_783_459_212_000,
             "open_interest": Decimal("74321.1234"),
+            "open_interest_time_ms": 1_783_459_210_000,
             "oi_notional_usdt": Decimal("4616789012.345"),
             "premium_bps": Decimal("0.755"),
+            "futures_received_ms": 1_783_459_212_100,
             "oi_delta_30s": Decimal("12.1234"),
             "oi_delta_60s": Decimal("-3.9876"),
             "oi_delta_300s": None,
@@ -365,16 +428,14 @@ def test_build_market_download_payload_adds_optional_futures_and_oi():
         other_row.setdefault("oi_delta_30s", None)
         other_row.setdefault("oi_delta_60s", None)
         other_row.setdefault("oi_delta_300s", None)
-        other_row.setdefault("prev_oi_source_window_start_ms", 1_783_458_900_000)
-        other_row.setdefault("prev_oi_source_window_end_ms", 1_783_459_200_000)
-        other_row.setdefault("prev_oi_sum_open_interest", Decimal("74000.1234"))
-        other_row.setdefault(
-            "prev_oi_sum_open_interest_value",
-            Decimal("4590000000.125"),
-        )
+        other_row["prev_oi_source_window_start_ms"] = 1_783_458_900_000
+        other_row["prev_oi_source_window_end_ms"] = 1_783_459_200_000
+        other_row["prev_oi_sum_open_interest"] = Decimal("74000.1234")
+        other_row["prev_oi_sum_open_interest_value"] = Decimal("4590000000.125")
 
     payload = db.build_market_download_payload(
         rows,
+        server_time_ms=1_783_459_212_250,
         include_probabilities=False,
         include_futures=True,
         include_oi=True,
@@ -395,6 +456,18 @@ def test_build_market_download_payload_adds_optional_futures_and_oi():
         "delta_60s": "-3.988",
         "delta_300s": None,
     }
+    assert item["freshness"]["futures_last"] == {
+        "source_ms": 1_783_459_212_050,
+        "received_ms": 1_783_459_212_100,
+        "source_age_ms": 200,
+        "received_age_ms": 150,
+    }
+    assert item["freshness"]["open_interest"] == {
+        "source_ms": 1_783_459_210_000,
+        "received_ms": 1_783_459_212_100,
+        "source_age_ms": 2_250,
+        "received_age_ms": 150,
+    }
     assert payload["previous_5m_oi_summary"] == {
         "source_window_start_ms": 1_783_458_900_000,
         "source_window_end_ms": 1_783_459_200_000,
@@ -404,9 +477,120 @@ def test_build_market_download_payload_adds_optional_futures_and_oi():
     }
 
 
+def test_build_market_download_payload_marks_chainlink_display_carry_forward():
+    rows = market_download_rows()
+    rows[1]["chainlink_sample_second_ms"] = rows[0]["sample_second_ms"]
+    rows[1]["chainlink_price"] = rows[0]["chainlink_price"]
+    rows[1]["chainlink_provider_event_ms"] = rows[0]["chainlink_provider_event_ms"]
+    rows[1]["chainlink_provider_message_ms"] = rows[0]["chainlink_provider_message_ms"]
+    rows[1]["chainlink_received_ms"] = rows[0]["chainlink_received_ms"]
+
+    payload = db.build_market_download_payload(
+        rows,
+        server_time_ms=1_783_459_201_250,
+        include_probabilities=False,
+        include_futures=False,
+        include_oi=False,
+    )
+
+    assert payload is not None
+    assert payload["series"][1]["prices"]["chainlink"] == "122998.13"
+    assert payload["series"][1]["freshness"]["chainlink"]["is_carried_forward"] is True
+    assert payload["series"][1]["freshness"]["chainlink"]["source_age_ms"] == 2_250
+
+
+def test_fetch_current_live_payload_returns_latest_values_with_freshness():
+    class FakeAcquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeConnection:
+        def __init__(self):
+            self.calls = []
+
+        async def fetchrow(self, query, *args):
+            self.calls.append((query, args))
+            return {
+                "binance_sample_second_ms": 1_783_459_250_000,
+                "binance_price": Decimal("62095.491"),
+                "binance_provider_event_ms": 1_783_459_249_900,
+                "binance_received_ms": 1_783_459_249_950,
+                "chainlink_sample_second_ms": 1_783_459_247_000,
+                "chainlink_price": Decimal("62037.054"),
+                "chainlink_provider_event_ms": 1_783_459_247_000,
+                "chainlink_provider_message_ms": 1_783_459_247_050,
+                "chainlink_received_ms": 1_783_459_247_100,
+                "futures_last_price": Decimal("62099.105"),
+                "futures_last_price_time_ms": 1_783_459_250_000,
+                "mark_price": Decimal("62098.804"),
+                "index_price": Decimal("62098.195"),
+                "premium_index_time_ms": 1_783_459_249_000,
+                "futures_received_ms": 1_783_459_250_050,
+                "open_interest": Decimal("74321.1234"),
+                "open_interest_time_ms": 1_783_459_240_000,
+                "oi_received_ms": 1_783_459_250_060,
+            }
+
+    class FakePool:
+        def __init__(self):
+            self.connection = FakeConnection()
+
+        def acquire(self):
+            return FakeAcquire(self.connection)
+
+    pool = FakePool()
+    window = MarketWindow(
+        market_id=5_944_864,
+        market_start_ms=1_783_459_200_000,
+        market_end_ms=1_783_459_500_000,
+    )
+
+    payload = asyncio.run(
+        db.fetch_current_live_payload(
+            pool,
+            window=window,
+            current_sample_second_ms=1_783_459_250_000,
+            server_time_ms=1_783_459_250_123,
+            max_chainlink_carry_forward_ms=10_000,
+        )
+    )
+
+    assert pool.connection.calls[0][1] == (
+        5_944_864,
+        1_783_459_250_000,
+        10_000,
+    )
+    assert payload["server_time_ms"] == 1_783_459_250_123
+    assert payload["prices"]["binance_spot"]["value"] == "62095.49"
+    assert payload["prices"]["binance_spot"]["source_age_ms"] == 223
+    assert payload["prices"]["binance_spot"]["transport_lag_ms"] == 50
+    assert payload["prices"]["chainlink"]["value"] == "62037.05"
+    assert payload["prices"]["chainlink"]["provider_message_ms"] == 1_783_459_247_050
+    assert payload["prices"]["chainlink"]["is_carried_forward_for_display"] is True
+    assert payload["prices"]["chainlink"]["source_age_ms"] == 3_123
+    assert payload["futures"]["last"]["value"] == "62099.11"
+    assert payload["futures"]["last"]["source_age_ms"] == 123
+    assert payload["futures"]["mark"]["time_ms"] == 1_783_459_249_000
+    assert payload["open_interest"]["contracts"] == "74321.123"
+    assert payload["open_interest"]["source_age_ms"] == 10_123
+
+
 def test_fetch_market_download_payload_query_includes_futures_and_oi_joins():
     source = inspect.getsource(db.fetch_market_download_payload)
 
+    assert "server_time_ms: int" in source
+    assert "fill_display: bool = False" in source
+    assert "provider_event_ms AS binance_provider_event_ms" in source
+    assert "provider_message_ms AS chainlink_provider_message_ms" in source
+    assert "futures_last_price_time_ms" in source
+    assert "open_interest_time_ms" in source
+    assert "LEFT JOIN LATERAL" in source
     assert "include_futures: bool" in source
     assert "include_oi: bool" in source
     assert "FROM binance_futures_snapshots" in source

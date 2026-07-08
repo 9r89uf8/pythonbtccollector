@@ -47,6 +47,41 @@ def oi_3dp(value: Optional[Decimal]) -> Optional[str]:
     return decimal_fixed_or_none(value, "0.001")
 
 
+def age_ms(server_time_ms: int, timestamp_ms: Optional[int]) -> Optional[int]:
+    if timestamp_ms is None:
+        return None
+    return max(0, server_time_ms - int(timestamp_ms))
+
+
+def freshness_meta(
+    *,
+    server_time_ms: int,
+    source_time_ms: Optional[int],
+    received_ms: Optional[int],
+) -> dict[str, Optional[int]]:
+    return {
+        "source_age_ms": age_ms(server_time_ms, source_time_ms),
+        "received_age_ms": age_ms(server_time_ms, received_ms),
+        "transport_lag_ms": (
+            None
+            if source_time_ms is None or received_ms is None
+            else max(0, int(received_ms) - int(source_time_ms))
+        ),
+    }
+
+
+def freshness_age_only_meta(
+    *,
+    server_time_ms: int,
+    source_time_ms: Optional[int],
+    received_ms: Optional[int],
+) -> dict[str, Optional[int]]:
+    return {
+        "source_age_ms": age_ms(server_time_ms, source_time_ms),
+        "received_age_ms": age_ms(server_time_ms, received_ms),
+    }
+
+
 async def create_pool(database_url: str) -> asyncpg.Pool:
     return await asyncpg.create_pool(
         database_url,
@@ -720,6 +755,7 @@ async def fetch_market_summaries_for_btc_sources(
 def build_market_download_payload(
     rows: list[Mapping[str, Any]],
     *,
+    server_time_ms: int,
     include_probabilities: bool,
     include_futures: bool,
     include_oi: bool,
@@ -734,6 +770,16 @@ def build_market_download_payload(
     series = []
     for row in rows:
         sample_second_ms = int(row["sample_second_ms"])
+        binance_source_ms = row.get("binance_provider_event_ms")
+        binance_received_ms = row.get("binance_received_ms")
+        chainlink_source_ms = row.get("chainlink_provider_event_ms")
+        chainlink_message_ms = row.get("chainlink_provider_message_ms")
+        chainlink_received_ms = row.get("chainlink_received_ms")
+        chainlink_sample_second_ms = row.get("chainlink_sample_second_ms")
+        futures_last_price_time_ms = row.get("futures_last_price_time_ms")
+        premium_index_time_ms = row.get("premium_index_time_ms")
+        open_interest_time_ms = row.get("open_interest_time_ms")
+        futures_received_ms = row.get("futures_received_ms")
         item = {
             "t": (sample_second_ms - market_start_ms) // 1000,
             "timestamp_ms": sample_second_ms,
@@ -741,6 +787,49 @@ def build_market_download_payload(
             "prices": {
                 "binance": decimal_2dp_or_none(row["binance_price"]),
                 "chainlink": decimal_2dp_or_none(row["chainlink_price"]),
+            },
+            "freshness": {
+                "binance": {
+                    "source_ms": binance_source_ms,
+                    "received_ms": binance_received_ms,
+                    **freshness_meta(
+                        server_time_ms=server_time_ms,
+                        source_time_ms=binance_source_ms,
+                        received_ms=binance_received_ms,
+                    ),
+                },
+                "chainlink": {
+                    "source_ms": chainlink_source_ms,
+                    "message_ms": chainlink_message_ms,
+                    "received_ms": chainlink_received_ms,
+                    "is_carried_forward": (
+                        chainlink_sample_second_ms is not None
+                        and int(chainlink_sample_second_ms) != sample_second_ms
+                    ),
+                    **freshness_meta(
+                        server_time_ms=server_time_ms,
+                        source_time_ms=chainlink_source_ms,
+                        received_ms=chainlink_received_ms,
+                    ),
+                },
+                "futures_last": {
+                    "source_ms": futures_last_price_time_ms,
+                    "received_ms": futures_received_ms,
+                    **freshness_age_only_meta(
+                        server_time_ms=server_time_ms,
+                        source_time_ms=futures_last_price_time_ms,
+                        received_ms=futures_received_ms,
+                    ),
+                },
+                "open_interest": {
+                    "source_ms": open_interest_time_ms,
+                    "received_ms": futures_received_ms,
+                    **freshness_age_only_meta(
+                        server_time_ms=server_time_ms,
+                        source_time_ms=open_interest_time_ms,
+                        received_ms=futures_received_ms,
+                    ),
+                },
             },
         }
 
@@ -775,6 +864,7 @@ def build_market_download_payload(
 
     payload = {
         "schema_version": 1,
+        "server_time_ms": server_time_ms,
         "market": {
             "market_id": int(first["market_id"]),
             "market_start_ms": market_start_ms,
@@ -786,7 +876,7 @@ def build_market_download_payload(
         "series": series,
     }
 
-    if include_oi and first["prev_oi_source_window_start_ms"] is not None:
+    if include_oi and first.get("prev_oi_source_window_start_ms") is not None:
         payload["previous_5m_oi_summary"] = {
             "source_window_start_ms": first["prev_oi_source_window_start_ms"],
             "source_window_end_ms": first["prev_oi_source_window_end_ms"],
@@ -804,9 +894,12 @@ async def fetch_market_download_payload(
     pool: asyncpg.Pool,
     *,
     market_id: int,
+    server_time_ms: int,
     include_probabilities: bool,
     include_futures: bool,
     include_oi: bool,
+    fill_display: bool = False,
+    max_carry_forward_ms: int = 10_000,
 ) -> Optional[dict[str, Any]]:
     async with pool.acquire() as connection:
         rows = await connection.fetch(
@@ -824,7 +917,11 @@ async def fetch_market_download_payload(
                 )::BIGINT AS sample_second_ms
             ),
             binance AS (
-                SELECT ps.sample_second_ms, ps.price
+                SELECT
+                    ps.sample_second_ms,
+                    ps.price,
+                    ps.provider_event_ms AS binance_provider_event_ms,
+                    ps.received_ms AS binance_received_ms
                 FROM price_samples ps
                 JOIN instruments i ON i.instrument_id = ps.instrument_id
                 JOIN providers p ON p.provider_id = i.provider_id
@@ -833,7 +930,12 @@ async def fetch_market_download_payload(
                   AND i.symbol = 'BTCUSDT'
             ),
             chainlink AS (
-                SELECT ps.sample_second_ms, ps.price
+                SELECT
+                    ps.sample_second_ms,
+                    ps.price,
+                    ps.provider_event_ms AS chainlink_provider_event_ms,
+                    ps.provider_message_ms AS chainlink_provider_message_ms,
+                    ps.received_ms AS chainlink_received_ms
                 FROM price_samples ps
                 JOIN instruments i ON i.instrument_id = ps.instrument_id
                 JOIN providers p ON p.provider_id = i.provider_id
@@ -909,7 +1011,14 @@ async def fetch_market_download_payload(
                 s.sample_second_ms,
 
                 b.price AS binance_price,
+                b.binance_provider_event_ms,
+                b.binance_received_ms,
+
+                c.sample_second_ms AS chainlink_sample_second_ms,
                 c.price AS chainlink_price,
+                c.chainlink_provider_event_ms,
+                c.chainlink_provider_message_ms,
+                c.chainlink_received_ms,
 
                 probs.up_bid,
                 probs.up_ask,
@@ -925,9 +1034,13 @@ async def fetch_market_download_payload(
                 f.index_price,
                 f.last_funding_rate,
                 f.next_funding_time_ms,
+                f.futures_last_price_time_ms,
+                f.premium_index_time_ms,
                 f.open_interest,
+                f.open_interest_time_ms,
                 f.oi_notional_usdt,
                 f.premium_bps,
+                f.received_ms AS futures_received_ms,
 
                 (f.open_interest - oi_30.open_interest_30s_ago) AS oi_delta_30s,
                 (f.open_interest - oi_60.open_interest_60s_ago) AS oi_delta_60s,
@@ -941,7 +1054,21 @@ async def fetch_market_download_payload(
             CROSS JOIN mw
             LEFT JOIN pm ON pm.market_id = mw.market_id
             LEFT JOIN binance b ON b.sample_second_ms = s.sample_second_ms
-            LEFT JOIN chainlink c ON c.sample_second_ms = s.sample_second_ms
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM chainlink cl
+                WHERE (
+                    $2::BOOLEAN
+                    AND cl.sample_second_ms <= s.sample_second_ms
+                    AND cl.sample_second_ms >= s.sample_second_ms - $3::BIGINT
+                )
+                OR (
+                    NOT $2::BOOLEAN
+                    AND cl.sample_second_ms = s.sample_second_ms
+                )
+                ORDER BY cl.sample_second_ms DESC
+                LIMIT 1
+            ) c ON TRUE
             LEFT JOIN probs ON probs.sample_second_ms = s.sample_second_ms
             LEFT JOIN futures f ON f.sample_second_ms = s.sample_second_ms
             LEFT JOIN oi_30 ON oi_30.sample_second_ms = s.sample_second_ms
@@ -951,11 +1078,221 @@ async def fetch_market_download_payload(
             ORDER BY s.sample_second_ms ASC
             """,
             market_id,
+            fill_display,
+            max(0, max_carry_forward_ms),
         )
 
     return build_market_download_payload(
         [dict(row) for row in rows],
+        server_time_ms=server_time_ms,
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
     )
+
+
+async def fetch_current_live_payload(
+    pool: asyncpg.Pool,
+    *,
+    window: MarketWindow,
+    current_sample_second_ms: int,
+    server_time_ms: int,
+    max_chainlink_carry_forward_ms: int = 10_000,
+) -> dict[str, Any]:
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            WITH binance AS (
+                SELECT
+                    ps.sample_second_ms AS binance_sample_second_ms,
+                    ps.price AS binance_price,
+                    ps.provider_event_ms AS binance_provider_event_ms,
+                    ps.received_ms AS binance_received_ms
+                FROM price_samples ps
+                JOIN instruments i ON i.instrument_id = ps.instrument_id
+                JOIN providers p ON p.provider_id = i.provider_id
+                WHERE ps.market_id = $1
+                  AND p.provider_code = 'binance_spot'
+                  AND i.symbol = 'BTCUSDT'
+                ORDER BY ps.sample_second_ms DESC
+                LIMIT 1
+            ),
+            chainlink AS (
+                SELECT
+                    ps.sample_second_ms AS chainlink_sample_second_ms,
+                    ps.price AS chainlink_price,
+                    ps.provider_event_ms AS chainlink_provider_event_ms,
+                    ps.provider_message_ms AS chainlink_provider_message_ms,
+                    ps.received_ms AS chainlink_received_ms
+                FROM price_samples ps
+                JOIN instruments i ON i.instrument_id = ps.instrument_id
+                JOIN providers p ON p.provider_id = i.provider_id
+                WHERE ps.market_id = $1
+                  AND p.provider_code = 'polymarket_chainlink_rtds'
+                  AND i.symbol = 'BTCUSD'
+                  AND ps.sample_second_ms <= $2
+                  AND ps.sample_second_ms >= $2 - $3::BIGINT
+                ORDER BY ps.sample_second_ms DESC
+                LIMIT 1
+            ),
+            futures_price AS (
+                SELECT
+                    sample_second_ms AS futures_sample_second_ms,
+                    futures_last_price,
+                    futures_last_price_time_ms,
+                    mark_price,
+                    index_price,
+                    premium_index_time_ms,
+                    received_ms AS futures_received_ms
+                FROM binance_futures_snapshots
+                WHERE market_id = $1
+                  AND symbol = 'BTCUSDT'
+                  AND (
+                    futures_last_price IS NOT NULL
+                    OR mark_price IS NOT NULL
+                    OR index_price IS NOT NULL
+                  )
+                ORDER BY COALESCE(
+                    futures_last_price_time_ms,
+                    premium_index_time_ms,
+                    sample_second_ms
+                ) DESC
+                LIMIT 1
+            ),
+            oi AS (
+                SELECT
+                    sample_second_ms AS oi_sample_second_ms,
+                    open_interest,
+                    open_interest_time_ms,
+                    received_ms AS oi_received_ms
+                FROM binance_futures_snapshots
+                WHERE market_id = $1
+                  AND symbol = 'BTCUSDT'
+                  AND open_interest IS NOT NULL
+                ORDER BY COALESCE(open_interest_time_ms, sample_second_ms) DESC
+                LIMIT 1
+            )
+            SELECT
+                binance.binance_sample_second_ms,
+                binance.binance_price,
+                binance.binance_provider_event_ms,
+                binance.binance_received_ms,
+
+                chainlink.chainlink_sample_second_ms,
+                chainlink.chainlink_price,
+                chainlink.chainlink_provider_event_ms,
+                chainlink.chainlink_provider_message_ms,
+                chainlink.chainlink_received_ms,
+
+                futures_price.futures_sample_second_ms,
+                futures_price.futures_last_price,
+                futures_price.futures_last_price_time_ms,
+                futures_price.mark_price,
+                futures_price.index_price,
+                futures_price.premium_index_time_ms,
+                futures_price.futures_received_ms,
+
+                oi.oi_sample_second_ms,
+                oi.open_interest,
+                oi.open_interest_time_ms,
+                oi.oi_received_ms
+            FROM (SELECT 1) seed
+            LEFT JOIN binance ON TRUE
+            LEFT JOIN chainlink ON TRUE
+            LEFT JOIN futures_price ON TRUE
+            LEFT JOIN oi ON TRUE
+            """,
+            window.market_id,
+            current_sample_second_ms,
+            max(0, max_chainlink_carry_forward_ms),
+        )
+
+    data = dict(row) if row is not None else {}
+
+    binance_source_ms = data.get("binance_provider_event_ms")
+    binance_received_ms = data.get("binance_received_ms")
+    chainlink_source_ms = data.get("chainlink_provider_event_ms")
+    chainlink_received_ms = data.get("chainlink_received_ms")
+    futures_last_time_ms = data.get("futures_last_price_time_ms")
+    premium_index_time_ms = data.get("premium_index_time_ms")
+    futures_received_ms = data.get("futures_received_ms")
+    open_interest_time_ms = data.get("open_interest_time_ms")
+    oi_received_ms = data.get("oi_received_ms")
+
+    return {
+        "server_time_ms": server_time_ms,
+        "market_id": window.market_id,
+        "market_start_ms": window.market_start_ms,
+        "market_end_ms": window.market_end_ms,
+        "prices": {
+            "binance_spot": {
+                "value": decimal_2dp_or_none(data.get("binance_price")),
+                "sample_second_ms": data.get("binance_sample_second_ms"),
+                "provider_event_ms": binance_source_ms,
+                "received_ms": binance_received_ms,
+                **freshness_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=binance_source_ms,
+                    received_ms=binance_received_ms,
+                ),
+            },
+            "chainlink": {
+                "value": decimal_2dp_or_none(data.get("chainlink_price")),
+                "sample_second_ms": data.get("chainlink_sample_second_ms"),
+                "provider_event_ms": chainlink_source_ms,
+                "provider_message_ms": data.get("chainlink_provider_message_ms"),
+                "received_ms": chainlink_received_ms,
+                "is_carried_forward_for_display": (
+                    data.get("chainlink_sample_second_ms") is not None
+                    and int(data["chainlink_sample_second_ms"]) < current_sample_second_ms
+                ),
+                **freshness_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=chainlink_source_ms,
+                    received_ms=chainlink_received_ms,
+                ),
+            },
+        },
+        "futures": {
+            "last": {
+                "value": money_2dp(data.get("futures_last_price")),
+                "time_ms": futures_last_time_ms,
+                "received_ms": futures_received_ms,
+                **freshness_age_only_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=futures_last_time_ms,
+                    received_ms=futures_received_ms,
+                ),
+            },
+            "mark": {
+                "value": money_2dp(data.get("mark_price")),
+                "time_ms": premium_index_time_ms,
+                "received_ms": futures_received_ms,
+                **freshness_age_only_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=premium_index_time_ms,
+                    received_ms=futures_received_ms,
+                ),
+            },
+            "index": {
+                "value": money_2dp(data.get("index_price")),
+                "time_ms": premium_index_time_ms,
+                "received_ms": futures_received_ms,
+                **freshness_age_only_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=premium_index_time_ms,
+                    received_ms=futures_received_ms,
+                ),
+            },
+        },
+        "open_interest": {
+            "contracts": oi_3dp(data.get("open_interest")),
+            "time_ms": open_interest_time_ms,
+            "received_ms": oi_received_ms,
+            **freshness_age_only_meta(
+                server_time_ms=server_time_ms,
+                source_time_ms=open_interest_time_ms,
+                received_ms=oi_received_ms,
+            ),
+        },
+    }

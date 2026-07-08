@@ -11,6 +11,7 @@ from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
 from price_collector.db import (
     create_read_pool,
+    fetch_current_live_payload,
     fetch_market_download_payload,
     fetch_latest_market_id,
     fetch_latest_price,
@@ -219,6 +220,8 @@ async def markets_current_data(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    fill_display: bool = Query(False),
+    max_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
     now_ms = current_utc_epoch_ms()
     sample_second_ms = (now_ms // 1000) * 1000
@@ -227,9 +230,12 @@ async def markets_current_data(
     payload = await fetch_market_download_payload(
         get_pool(request),
         market_id=window.market_id,
+        server_time_ms=now_ms,
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        fill_display=fill_display,
+        max_carry_forward_ms=max_carry_forward_ms,
     )
     if payload is None:
         raise HTTPException(status_code=404, detail="no current market data found")
@@ -243,13 +249,19 @@ async def markets_data_by_id(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    fill_display: bool = Query(False),
+    max_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
     payload = await fetch_market_download_payload(
         get_pool(request),
         market_id=market_id,
+        server_time_ms=now_ms,
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        fill_display=fill_display,
+        max_carry_forward_ms=max_carry_forward_ms,
     )
     if payload is None:
         raise HTTPException(
@@ -265,6 +277,8 @@ async def markets_current_download(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    fill_display: bool = Query(False),
+    max_carry_forward_ms: int = Query(10_000),
 ) -> Response:
     now_ms = current_utc_epoch_ms()
     sample_second_ms = (now_ms // 1000) * 1000
@@ -273,9 +287,12 @@ async def markets_current_download(
     return await market_download_response(
         request,
         market_id=window.market_id,
+        server_time_ms=now_ms,
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        fill_display=fill_display,
+        max_carry_forward_ms=max_carry_forward_ms,
     )
 
 
@@ -286,13 +303,37 @@ async def markets_download_by_id(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    fill_display: bool = Query(False),
+    max_carry_forward_ms: int = Query(10_000),
 ) -> Response:
+    now_ms = current_utc_epoch_ms()
     return await market_download_response(
         request,
         market_id=market_id,
+        server_time_ms=now_ms,
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        fill_display=fill_display,
+        max_carry_forward_ms=max_carry_forward_ms,
+    )
+
+
+@app.get("/markets/current/live")
+async def markets_current_live(
+    request: Request,
+    max_chainlink_carry_forward_ms: int = Query(10_000),
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    sample_second_ms = (now_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+
+    return await fetch_current_live_payload(
+        get_pool(request),
+        window=window,
+        current_sample_second_ms=sample_second_ms,
+        server_time_ms=now_ms,
+        max_chainlink_carry_forward_ms=max_chainlink_carry_forward_ms,
     )
 
 
@@ -351,16 +392,22 @@ async def market_download_response(
     request: Request,
     *,
     market_id: int,
+    server_time_ms: int,
     include_probabilities: bool,
     include_futures: bool,
     include_oi: bool,
+    fill_display: bool,
+    max_carry_forward_ms: int,
 ) -> Response:
     payload = await fetch_market_download_payload(
         get_pool(request),
         market_id=market_id,
+        server_time_ms=server_time_ms,
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        fill_display=fill_display,
+        max_carry_forward_ms=max_carry_forward_ms,
     )
     if payload is None:
         raise HTTPException(

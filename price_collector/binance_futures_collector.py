@@ -151,8 +151,13 @@ def build_binance_futures_snapshot(
     futures_last_price = decimal_or_none(ticker_payload.get("price"))
     futures_last_price_time_ms = int_or_none(ticker_payload.get("time"))
 
+    futures_row_time_ms = (
+        futures_last_price_time_ms
+        or premium_index_time_ms
+        or received_ms
+    )
     sample_second_ms = _sample_second_ms_for_source_time(
-        open_interest_time_ms,
+        futures_row_time_ms,
         received_ms,
     )
     window = market_for_sample_second(sample_second_ms)

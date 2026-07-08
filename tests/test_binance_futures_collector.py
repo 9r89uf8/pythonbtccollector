@@ -47,10 +47,10 @@ def futures_settings():
     )
 
 
-def test_build_snapshot_uses_open_interest_time_for_sample_market_and_decimal_math():
+def test_build_snapshot_uses_futures_price_time_for_sample_market_and_decimal_math():
     snapshot = collector.build_binance_futures_snapshot(
         symbol="BTCUSDT",
-        open_interest_payload=open_interest_payload(),
+        open_interest_payload=open_interest_payload(time=1_783_459_499_456),
         premium_index_payload=premium_index_payload(),
         ticker_payload=ticker_payload(),
         received_ms=1_783_459_500_700,
@@ -63,13 +63,14 @@ def test_build_snapshot_uses_open_interest_time_for_sample_market_and_decimal_ma
     assert snapshot.mark_price == Decimal("62074.88")
     assert snapshot.index_price == Decimal("62070.19")
     assert snapshot.open_interest == Decimal("74321.123")
+    assert snapshot.open_interest_time_ms == 1_783_459_499_456
     assert snapshot.oi_notional_usdt == Decimal("74321.123") * Decimal("62074.88")
     assert snapshot.premium_bps == (
         Decimal("62074.88") / Decimal("62070.19") - Decimal("1")
     ) * Decimal("10000")
 
 
-def test_build_snapshot_falls_back_to_received_ms_when_oi_time_is_missing():
+def test_build_snapshot_uses_futures_price_time_when_oi_time_is_missing():
     snapshot = collector.build_binance_futures_snapshot(
         symbol="BTCUSDT",
         open_interest_payload=open_interest_payload(time=None),
@@ -79,8 +80,29 @@ def test_build_snapshot_falls_back_to_received_ms_when_oi_time_is_missing():
     )
 
     assert snapshot.open_interest_time_ms is None
-    assert snapshot.sample_second_ms == 1_783_459_499_000
-    assert snapshot.window.market_start_ms == 1_783_459_200_000
+    assert snapshot.sample_second_ms == 1_783_459_500_000
+    assert snapshot.window.market_start_ms == 1_783_459_500_000
+
+
+def test_build_snapshot_falls_back_to_premium_index_then_received_ms_for_row_time():
+    premium_snapshot = collector.build_binance_futures_snapshot(
+        symbol="BTCUSDT",
+        open_interest_payload=open_interest_payload(time=1_783_459_499_456),
+        premium_index_payload=premium_index_payload(time=1_783_459_500_500),
+        ticker_payload=ticker_payload(time=None),
+        received_ms=1_783_459_501_700,
+    )
+
+    received_snapshot = collector.build_binance_futures_snapshot(
+        symbol="BTCUSDT",
+        open_interest_payload=open_interest_payload(time=1_783_459_499_456),
+        premium_index_payload=premium_index_payload(time=None),
+        ticker_payload=ticker_payload(time=None),
+        received_ms=1_783_459_501_700,
+    )
+
+    assert premium_snapshot.sample_second_ms == 1_783_459_500_000
+    assert received_snapshot.sample_second_ms == 1_783_459_501_000
 
 
 def test_build_snapshot_rejects_unexpected_symbol():

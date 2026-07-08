@@ -396,14 +396,20 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
     async def fake_fetch_market_download_payload(
         pool,
         market_id,
+        server_time_ms,
         include_probabilities,
         include_futures,
         include_oi,
+        fill_display,
+        max_carry_forward_ms,
     ):
         assert market_id == 5_944_864
+        assert server_time_ms == 1_783_459_250_123
         assert include_probabilities is False
         assert include_futures is False
         assert include_oi is False
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
         return market_data_payload()
 
     monkeypatch.setattr(
@@ -427,14 +433,20 @@ def test_markets_data_by_id_can_include_probabilities(client, monkeypatch):
     async def fake_fetch_market_download_payload(
         pool,
         market_id,
+        server_time_ms,
         include_probabilities,
         include_futures,
         include_oi,
+        fill_display,
+        max_carry_forward_ms,
     ):
         assert market_id == 5_944_864
+        assert isinstance(server_time_ms, int)
         assert include_probabilities is True
         assert include_futures is False
         assert include_oi is False
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
         return market_data_payload(include_probabilities=True)
 
     monkeypatch.setattr(
@@ -454,14 +466,20 @@ def test_markets_data_by_id_can_include_futures_and_oi(client, monkeypatch):
     async def fake_fetch_market_download_payload(
         pool,
         market_id,
+        server_time_ms,
         include_probabilities,
         include_futures,
         include_oi,
+        fill_display,
+        max_carry_forward_ms,
     ):
         assert market_id == 5_944_864
+        assert isinstance(server_time_ms, int)
         assert include_probabilities is False
         assert include_futures is True
         assert include_oi is True
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
         return market_data_payload(include_futures=True, include_oi=True)
 
     monkeypatch.setattr(
@@ -479,18 +497,120 @@ def test_markets_data_by_id_can_include_futures_and_oi(client, monkeypatch):
     assert body["previous_5m_oi_summary"]["sum_open_interest"] == "74000.123"
 
 
+def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        server_time_ms,
+        include_probabilities,
+        include_futures,
+        include_oi,
+        fill_display,
+        max_carry_forward_ms,
+    ):
+        assert market_id == 5_944_864
+        assert server_time_ms == 1_783_459_250_123
+        assert include_probabilities is False
+        assert include_futures is False
+        assert include_oi is False
+        assert fill_display is True
+        assert max_carry_forward_ms == 5_000
+        return market_data_payload()
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get("/markets/current/data?fill_display=true&max_carry_forward_ms=5000")
+
+    assert response.status_code == 200
+
+
+def test_markets_current_live_returns_latest_per_source_payload(client, monkeypatch):
+    async def fake_fetch_current_live_payload(
+        pool,
+        window,
+        current_sample_second_ms,
+        server_time_ms,
+        max_chainlink_carry_forward_ms,
+    ):
+        assert window.market_id == 5_944_864
+        assert current_sample_second_ms == 1_783_459_250_000
+        assert server_time_ms == 1_783_459_250_123
+        assert max_chainlink_carry_forward_ms == 7_000
+        return {
+            "server_time_ms": server_time_ms,
+            "market_id": window.market_id,
+            "market_start_ms": window.market_start_ms,
+            "market_end_ms": window.market_end_ms,
+            "prices": {
+                "chainlink": {
+                    "value": "62037.05",
+                    "provider_event_ms": 1_783_459_247_000,
+                    "provider_message_ms": 1_783_459_247_050,
+                    "received_ms": 1_783_459_247_100,
+                    "source_age_ms": 3_123,
+                    "received_age_ms": 3_023,
+                    "is_carried_forward_for_display": True,
+                }
+            },
+            "futures": {
+                "last": {
+                    "value": "62099.10",
+                    "time_ms": 1_783_459_250_000,
+                    "received_ms": 1_783_459_250_050,
+                    "source_age_ms": 123,
+                    "received_age_ms": 73,
+                }
+            },
+            "open_interest": {
+                "contracts": "74321.123",
+                "time_ms": 1_783_459_240_000,
+                "received_ms": 1_783_459_250_050,
+                "source_age_ms": 10_123,
+                "received_age_ms": 73,
+            },
+        }
+
+    monkeypatch.setattr(
+        api,
+        "fetch_current_live_payload",
+        fake_fetch_current_live_payload,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get("/markets/current/live?max_chainlink_carry_forward_ms=7000")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["server_time_ms"] == 1_783_459_250_123
+    assert body["prices"]["chainlink"]["provider_message_ms"] == 1_783_459_247_050
+    assert body["prices"]["chainlink"]["is_carried_forward_for_display"] is True
+    assert body["futures"]["last"]["source_age_ms"] == 123
+    assert body["open_interest"]["source_age_ms"] == 10_123
+
+
 def test_markets_download_returns_attachment_filename(client, monkeypatch):
     async def fake_fetch_market_download_payload(
         pool,
         market_id,
+        server_time_ms,
         include_probabilities,
         include_futures,
         include_oi,
+        fill_display,
+        max_carry_forward_ms,
     ):
         assert market_id == 5_944_864
+        assert isinstance(server_time_ms, int)
         assert include_probabilities is True
         assert include_futures is False
         assert include_oi is False
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
         return market_data_payload(include_probabilities=True)
 
     monkeypatch.setattr(
@@ -514,14 +634,20 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
     async def fake_fetch_market_download_payload(
         pool,
         market_id,
+        server_time_ms,
         include_probabilities,
         include_futures,
         include_oi,
+        fill_display,
+        max_carry_forward_ms,
     ):
         assert market_id == 5_944_864
+        assert isinstance(server_time_ms, int)
         assert include_probabilities is True
         assert include_futures is True
         assert include_oi is True
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
         return market_data_payload(
             include_probabilities=True,
             include_futures=True,
