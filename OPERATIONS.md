@@ -66,13 +66,32 @@ Keep the SSH tunnel terminal open while using the API locally.
 
 ## Deploy Code Updates
 
-After pushing changes to GitHub, update the droplet:
+After pushing code-only changes to GitHub, update the droplet:
 
 ```bash
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 systemctl restart price-collector price-collector-polymarket-chainlink price-api
+```
+
+If the update adds database columns, seed rows, indexes, or new systemd unit files, use this fuller sequence instead. Apply the schema before restarting services so new code does not start before PostgreSQL has the expected tables, columns, and seed data:
+
+```bash
+cd /opt/price-collector
+
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+
+sudo -u postgres psql -d price_collector -f /opt/price-collector/schema.sql
+
+sudo cp /opt/price-collector/deployment/price-collector.service /etc/systemd/system/price-collector.service
+sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.service /etc/systemd/system/price-collector-polymarket-chainlink.service
+sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable price-collector price-collector-polymarket-chainlink price-api
+
+sudo systemctl restart price-collector price-collector-polymarket-chainlink price-api
 ```
 
 Verify after restart:
@@ -83,6 +102,7 @@ systemctl status price-collector-polymarket-chainlink --no-pager
 systemctl status price-api --no-pager
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/markets/latest
+curl http://127.0.0.1:9000/markets/current/sources
 ```
 
 ## Database Spot Checks
