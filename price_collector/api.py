@@ -217,6 +217,8 @@ async def markets_sources_by_id(
 async def markets_current_data(
     request: Request,
     include_probabilities: bool = Query(False),
+    include_futures: bool = Query(False),
+    include_oi: bool = Query(False),
 ) -> dict[str, Any]:
     now_ms = current_utc_epoch_ms()
     sample_second_ms = (now_ms // 1000) * 1000
@@ -226,6 +228,8 @@ async def markets_current_data(
         get_pool(request),
         market_id=window.market_id,
         include_probabilities=include_probabilities,
+        include_futures=include_futures,
+        include_oi=include_oi,
     )
     if payload is None:
         raise HTTPException(status_code=404, detail="no current market data found")
@@ -237,11 +241,15 @@ async def markets_data_by_id(
     request: Request,
     market_id: int,
     include_probabilities: bool = Query(False),
+    include_futures: bool = Query(False),
+    include_oi: bool = Query(False),
 ) -> dict[str, Any]:
     payload = await fetch_market_download_payload(
         get_pool(request),
         market_id=market_id,
         include_probabilities=include_probabilities,
+        include_futures=include_futures,
+        include_oi=include_oi,
     )
     if payload is None:
         raise HTTPException(
@@ -255,6 +263,8 @@ async def markets_data_by_id(
 async def markets_current_download(
     request: Request,
     include_probabilities: bool = Query(False),
+    include_futures: bool = Query(False),
+    include_oi: bool = Query(False),
 ) -> Response:
     now_ms = current_utc_epoch_ms()
     sample_second_ms = (now_ms // 1000) * 1000
@@ -264,6 +274,8 @@ async def markets_current_download(
         request,
         market_id=window.market_id,
         include_probabilities=include_probabilities,
+        include_futures=include_futures,
+        include_oi=include_oi,
     )
 
 
@@ -272,11 +284,15 @@ async def markets_download_by_id(
     request: Request,
     market_id: int,
     include_probabilities: bool = Query(False),
+    include_futures: bool = Query(False),
+    include_oi: bool = Query(False),
 ) -> Response:
     return await market_download_response(
         request,
         market_id=market_id,
         include_probabilities=include_probabilities,
+        include_futures=include_futures,
+        include_oi=include_oi,
     )
 
 
@@ -336,11 +352,15 @@ async def market_download_response(
     *,
     market_id: int,
     include_probabilities: bool,
+    include_futures: bool,
+    include_oi: bool,
 ) -> Response:
     payload = await fetch_market_download_payload(
         get_pool(request),
         market_id=market_id,
         include_probabilities=include_probabilities,
+        include_futures=include_futures,
+        include_oi=include_oi,
     )
     if payload is None:
         raise HTTPException(
@@ -348,8 +368,14 @@ async def market_download_response(
             detail=f"no market data found for market_id={market_id}",
         )
 
-    suffix = "with_probabilities" if include_probabilities else "prices"
-    filename = f"btc_5m_market_{market_id}_{suffix}.json"
+    parts = ["btc_5m_market", str(market_id)]
+    if include_futures:
+        parts.append("futures")
+    if include_oi:
+        parts.append("oi")
+    if include_probabilities:
+        parts.append("probabilities")
+    filename = "_".join(parts) + ".json"
 
     return Response(
         content=json.dumps(payload, default=str, separators=(",", ":")),

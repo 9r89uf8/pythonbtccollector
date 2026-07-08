@@ -9,7 +9,6 @@ from price_collector.market import MarketWindow
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-TWO_DECIMALS = Decimal("0.01")
 
 
 def epoch_ms_to_utc_datetime(epoch_ms: int) -> datetime:
@@ -22,14 +21,30 @@ def utc_datetime_to_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def decimal_2dp_or_none(value: Optional[Decimal]) -> Optional[str]:
+def decimal_fixed_or_none(
+    value: Optional[Decimal],
+    places: str,
+) -> Optional[str]:
     if value is None:
         return None
 
     if not isinstance(value, Decimal):
         value = Decimal(str(value))
 
-    return format(value.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP), "f")
+    quantum = Decimal(places)
+    return format(value.quantize(quantum, rounding=ROUND_HALF_UP), "f")
+
+
+def decimal_2dp_or_none(value: Optional[Decimal]) -> Optional[str]:
+    return decimal_fixed_or_none(value, "0.01")
+
+
+def money_2dp(value: Optional[Decimal]) -> Optional[str]:
+    return decimal_fixed_or_none(value, "0.01")
+
+
+def oi_3dp(value: Optional[Decimal]) -> Optional[str]:
+    return decimal_fixed_or_none(value, "0.001")
 
 
 async def create_pool(database_url: str) -> asyncpg.Pool:
@@ -706,6 +721,8 @@ def build_market_download_payload(
     rows: list[Mapping[str, Any]],
     *,
     include_probabilities: bool,
+    include_futures: bool,
+    include_oi: bool,
 ) -> Optional[dict[str, Any]]:
     if not rows:
         return None
@@ -737,9 +754,26 @@ def build_market_download_payload(
                 },
             }
 
+        if include_futures:
+            item["futures"] = {
+                "last": money_2dp(row["futures_last_price"]),
+                "mark": money_2dp(row["mark_price"]),
+                "index": money_2dp(row["index_price"]),
+                "premium_bps": money_2dp(row["premium_bps"]),
+            }
+
+        if include_oi:
+            item["open_interest"] = {
+                "contracts": oi_3dp(row["open_interest"]),
+                "notional_usdt": money_2dp(row["oi_notional_usdt"]),
+                "delta_30s": oi_3dp(row["oi_delta_30s"]),
+                "delta_60s": oi_3dp(row["oi_delta_60s"]),
+                "delta_300s": oi_3dp(row["oi_delta_300s"]),
+            }
+
         series.append(item)
 
-    return {
+    payload = {
         "schema_version": 1,
         "market": {
             "market_id": int(first["market_id"]),
@@ -752,12 +786,27 @@ def build_market_download_payload(
         "series": series,
     }
 
+    if include_oi and first["prev_oi_source_window_start_ms"] is not None:
+        payload["previous_5m_oi_summary"] = {
+            "source_window_start_ms": first["prev_oi_source_window_start_ms"],
+            "source_window_end_ms": first["prev_oi_source_window_end_ms"],
+            "effective_market_id": int(first["market_id"]),
+            "sum_open_interest": oi_3dp(first["prev_oi_sum_open_interest"]),
+            "sum_open_interest_value": money_2dp(
+                first["prev_oi_sum_open_interest_value"]
+            ),
+        }
+
+    return payload
+
 
 async def fetch_market_download_payload(
     pool: asyncpg.Pool,
     *,
     market_id: int,
     include_probabilities: bool,
+    include_futures: bool,
+    include_oi: bool,
 ) -> Optional[dict[str, Any]]:
     async with pool.acquire() as connection:
         rows = await connection.fetch(
@@ -798,6 +847,47 @@ async def fetch_market_download_payload(
                 WHERE market_id = $1
                   AND source = 'polymarket_clob'
             ),
+            futures AS (
+                SELECT *
+                FROM binance_futures_snapshots
+                WHERE market_id = $1
+                  AND symbol = 'BTCUSDT'
+            ),
+            oi_prev AS (
+                SELECT *
+                FROM binance_futures_oi_5m_summaries
+                WHERE effective_market_id = $1
+                  AND symbol = 'BTCUSDT'
+                ORDER BY source_window_end_ms DESC
+                LIMIT 1
+            ),
+            oi_30 AS (
+                SELECT
+                    f.sample_second_ms,
+                    prev.open_interest AS open_interest_30s_ago
+                FROM futures f
+                LEFT JOIN binance_futures_snapshots prev
+                  ON prev.symbol = f.symbol
+                 AND prev.sample_second_ms = f.sample_second_ms - 30000
+            ),
+            oi_60 AS (
+                SELECT
+                    f.sample_second_ms,
+                    prev.open_interest AS open_interest_60s_ago
+                FROM futures f
+                LEFT JOIN binance_futures_snapshots prev
+                  ON prev.symbol = f.symbol
+                 AND prev.sample_second_ms = f.sample_second_ms - 60000
+            ),
+            oi_300 AS (
+                SELECT
+                    f.sample_second_ms,
+                    prev.open_interest AS open_interest_300s_ago
+                FROM futures f
+                LEFT JOIN binance_futures_snapshots prev
+                  ON prev.symbol = f.symbol
+                 AND prev.sample_second_ms = f.sample_second_ms - 300000
+            ),
             pm AS (
                 SELECT *
                 FROM polymarket_btc_5m_markets
@@ -828,13 +918,36 @@ async def fetch_market_download_payload(
                 probs.down_ask,
                 probs.down_mid,
                 probs.up_prob_norm,
-                probs.down_prob_norm
+                probs.down_prob_norm,
+
+                f.futures_last_price,
+                f.mark_price,
+                f.index_price,
+                f.last_funding_rate,
+                f.next_funding_time_ms,
+                f.open_interest,
+                f.oi_notional_usdt,
+                f.premium_bps,
+
+                (f.open_interest - oi_30.open_interest_30s_ago) AS oi_delta_30s,
+                (f.open_interest - oi_60.open_interest_60s_ago) AS oi_delta_60s,
+                (f.open_interest - oi_300.open_interest_300s_ago) AS oi_delta_300s,
+
+                oi_prev.source_window_start_ms AS prev_oi_source_window_start_ms,
+                oi_prev.source_window_end_ms AS prev_oi_source_window_end_ms,
+                oi_prev.sum_open_interest AS prev_oi_sum_open_interest,
+                oi_prev.sum_open_interest_value AS prev_oi_sum_open_interest_value
             FROM seconds s
             CROSS JOIN mw
             LEFT JOIN pm ON pm.market_id = mw.market_id
             LEFT JOIN binance b ON b.sample_second_ms = s.sample_second_ms
             LEFT JOIN chainlink c ON c.sample_second_ms = s.sample_second_ms
             LEFT JOIN probs ON probs.sample_second_ms = s.sample_second_ms
+            LEFT JOIN futures f ON f.sample_second_ms = s.sample_second_ms
+            LEFT JOIN oi_30 ON oi_30.sample_second_ms = s.sample_second_ms
+            LEFT JOIN oi_60 ON oi_60.sample_second_ms = s.sample_second_ms
+            LEFT JOIN oi_300 ON oi_300.sample_second_ms = s.sample_second_ms
+            LEFT JOIN oi_prev ON TRUE
             ORDER BY s.sample_second_ms ASC
             """,
             market_id,
@@ -843,4 +956,6 @@ async def fetch_market_download_payload(
     return build_market_download_payload(
         [dict(row) for row in rows],
         include_probabilities=include_probabilities,
+        include_futures=include_futures,
+        include_oi=include_oi,
     )

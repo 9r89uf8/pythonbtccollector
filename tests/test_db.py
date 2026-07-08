@@ -110,6 +110,12 @@ def test_decimal_2dp_or_none():
     assert db.decimal_2dp_or_none(None) is None
 
 
+def test_oi_3dp_rounds_contract_values():
+    assert db.oi_3dp(Decimal("74321.1234")) == "74321.123"
+    assert db.oi_3dp(Decimal("74321.1235")) == "74321.124"
+    assert db.oi_3dp(None) is None
+
+
 def test_schema_seeds_polymarket_chainlink_provider_and_instrument():
     schema = (ROOT / "schema.sql").read_text()
 
@@ -260,6 +266,8 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     payload = db.build_market_download_payload(
         market_download_rows(),
         include_probabilities=False,
+        include_futures=False,
+        include_oi=False,
     )
 
     assert payload is not None
@@ -280,12 +288,17 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     }
     assert payload["series"][1]["prices"] == {"binance": None, "chainlink": None}
     assert "probabilities" not in payload["series"][1]
+    assert "futures" not in payload["series"][1]
+    assert "open_interest" not in payload["series"][1]
+    assert "previous_5m_oi_summary" not in payload
 
 
 def test_build_market_download_payload_adds_probabilities_only_when_requested():
     payload = db.build_market_download_payload(
         market_download_rows(),
         include_probabilities=True,
+        include_futures=False,
+        include_oi=False,
     )
 
     assert payload is not None
@@ -305,6 +318,8 @@ def test_download_payload_probability_shape_ask_only():
     payload = db.build_market_download_payload(
         market_download_rows(),
         include_probabilities=True,
+        include_futures=False,
+        include_oi=False,
     )
 
     assert payload is not None
@@ -314,3 +329,88 @@ def test_download_payload_probability_shape_ask_only():
     assert set(first["probabilities"].keys()) == {"up", "down"}
     assert set(first["probabilities"]["up"].keys()) == {"ask"}
     assert set(first["probabilities"]["down"].keys()) == {"ask"}
+
+
+def test_build_market_download_payload_adds_optional_futures_and_oi():
+    rows = market_download_rows()
+    row = rows[12]
+    row.update(
+        {
+            "futures_last_price": Decimal("62075.125"),
+            "mark_price": Decimal("62074.884"),
+            "index_price": Decimal("62070.185"),
+            "last_funding_rate": Decimal("0.00010000"),
+            "next_funding_time_ms": 1_783_468_800_000,
+            "open_interest": Decimal("74321.1234"),
+            "oi_notional_usdt": Decimal("4616789012.345"),
+            "premium_bps": Decimal("0.755"),
+            "oi_delta_30s": Decimal("12.1234"),
+            "oi_delta_60s": Decimal("-3.9876"),
+            "oi_delta_300s": None,
+            "prev_oi_source_window_start_ms": 1_783_458_900_000,
+            "prev_oi_source_window_end_ms": 1_783_459_200_000,
+            "prev_oi_sum_open_interest": Decimal("74000.1234"),
+            "prev_oi_sum_open_interest_value": Decimal("4590000000.125"),
+        }
+    )
+    for other_row in rows:
+        other_row.setdefault("futures_last_price", None)
+        other_row.setdefault("mark_price", None)
+        other_row.setdefault("index_price", None)
+        other_row.setdefault("last_funding_rate", None)
+        other_row.setdefault("next_funding_time_ms", None)
+        other_row.setdefault("open_interest", None)
+        other_row.setdefault("oi_notional_usdt", None)
+        other_row.setdefault("premium_bps", None)
+        other_row.setdefault("oi_delta_30s", None)
+        other_row.setdefault("oi_delta_60s", None)
+        other_row.setdefault("oi_delta_300s", None)
+        other_row.setdefault("prev_oi_source_window_start_ms", 1_783_458_900_000)
+        other_row.setdefault("prev_oi_source_window_end_ms", 1_783_459_200_000)
+        other_row.setdefault("prev_oi_sum_open_interest", Decimal("74000.1234"))
+        other_row.setdefault(
+            "prev_oi_sum_open_interest_value",
+            Decimal("4590000000.125"),
+        )
+
+    payload = db.build_market_download_payload(
+        rows,
+        include_probabilities=False,
+        include_futures=True,
+        include_oi=True,
+    )
+
+    assert payload is not None
+    item = payload["series"][12]
+    assert item["futures"] == {
+        "last": "62075.13",
+        "mark": "62074.88",
+        "index": "62070.19",
+        "premium_bps": "0.76",
+    }
+    assert item["open_interest"] == {
+        "contracts": "74321.123",
+        "notional_usdt": "4616789012.35",
+        "delta_30s": "12.123",
+        "delta_60s": "-3.988",
+        "delta_300s": None,
+    }
+    assert payload["previous_5m_oi_summary"] == {
+        "source_window_start_ms": 1_783_458_900_000,
+        "source_window_end_ms": 1_783_459_200_000,
+        "effective_market_id": 5_944_864,
+        "sum_open_interest": "74000.123",
+        "sum_open_interest_value": "4590000000.13",
+    }
+
+
+def test_fetch_market_download_payload_query_includes_futures_and_oi_joins():
+    source = inspect.getsource(db.fetch_market_download_payload)
+
+    assert "include_futures: bool" in source
+    assert "include_oi: bool" in source
+    assert "FROM binance_futures_snapshots" in source
+    assert "FROM binance_futures_oi_5m_summaries" in source
+    assert "f.sample_second_ms - 30000" in source
+    assert "f.sample_second_ms - 60000" in source
+    assert "f.sample_second_ms - 300000" in source

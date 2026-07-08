@@ -322,7 +322,11 @@ def test_markets_current_sources_uses_current_five_minute_market(client, monkeyp
     assert response.json()["market_id"] == 5_944_864
 
 
-def market_data_payload(include_probabilities=False):
+def market_data_payload(
+    include_probabilities=False,
+    include_futures=False,
+    include_oi=False,
+):
     row = {
         "t": 0,
         "timestamp_ms": 1_783_459_200_000,
@@ -348,7 +352,15 @@ def market_data_payload(include_probabilities=False):
             },
         }
 
-    return {
+    if include_futures:
+        row["futures"] = {
+            "last": "62075.12",
+            "mark": "62074.88",
+            "index": "62070.19",
+            "premium_bps": "0.76",
+        }
+
+    payload = {
         "schema_version": 1,
         "market": {
             "market_id": 5_944_864,
@@ -361,11 +373,37 @@ def market_data_payload(include_probabilities=False):
         "series": [row],
     }
 
+    if include_oi:
+        row["open_interest"] = {
+            "contracts": "74321.123",
+            "notional_usdt": "4616789012.34",
+            "delta_30s": None,
+            "delta_60s": None,
+            "delta_300s": None,
+        }
+        payload["previous_5m_oi_summary"] = {
+            "source_window_start_ms": 1_783_458_900_000,
+            "source_window_end_ms": 1_783_459_200_000,
+            "effective_market_id": 5_944_864,
+            "sum_open_interest": "74000.123",
+            "sum_open_interest_value": "4590000000.13",
+        }
+
+    return payload
+
 
 def test_markets_current_data_uses_current_five_minute_market(client, monkeypatch):
-    async def fake_fetch_market_download_payload(pool, market_id, include_probabilities):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        include_probabilities,
+        include_futures,
+        include_oi,
+    ):
         assert market_id == 5_944_864
         assert include_probabilities is False
+        assert include_futures is False
+        assert include_oi is False
         return market_data_payload()
 
     monkeypatch.setattr(
@@ -381,12 +419,22 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
     body = response.json()
     assert body["market"]["market_id"] == 5_944_864
     assert "probabilities" not in body["series"][0]
+    assert "futures" not in body["series"][0]
+    assert "open_interest" not in body["series"][0]
 
 
 def test_markets_data_by_id_can_include_probabilities(client, monkeypatch):
-    async def fake_fetch_market_download_payload(pool, market_id, include_probabilities):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        include_probabilities,
+        include_futures,
+        include_oi,
+    ):
         assert market_id == 5_944_864
         assert include_probabilities is True
+        assert include_futures is False
+        assert include_oi is False
         return market_data_payload(include_probabilities=True)
 
     monkeypatch.setattr(
@@ -402,10 +450,47 @@ def test_markets_data_by_id_can_include_probabilities(client, monkeypatch):
     assert body["series"][0]["probabilities"]["up"]["mid"] == "0.48"
 
 
+def test_markets_data_by_id_can_include_futures_and_oi(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        include_probabilities,
+        include_futures,
+        include_oi,
+    ):
+        assert market_id == 5_944_864
+        assert include_probabilities is False
+        assert include_futures is True
+        assert include_oi is True
+        return market_data_payload(include_futures=True, include_oi=True)
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get("/markets/5944864/data?include_futures=true&include_oi=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["series"][0]["futures"]["mark"] == "62074.88"
+    assert body["series"][0]["open_interest"]["contracts"] == "74321.123"
+    assert body["previous_5m_oi_summary"]["sum_open_interest"] == "74000.123"
+
+
 def test_markets_download_returns_attachment_filename(client, monkeypatch):
-    async def fake_fetch_market_download_payload(pool, market_id, include_probabilities):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        include_probabilities,
+        include_futures,
+        include_oi,
+    ):
         assert market_id == 5_944_864
         assert include_probabilities is True
+        assert include_futures is False
+        assert include_oi is False
         return market_data_payload(include_probabilities=True)
 
     monkeypatch.setattr(
@@ -420,6 +505,46 @@ def test_markets_download_returns_attachment_filename(client, monkeypatch):
     assert response.headers["content-type"] == "application/json"
     assert (
         response.headers["content-disposition"]
-        == 'attachment; filename="btc_5m_market_5944864_with_probabilities.json"'
+        == 'attachment; filename="btc_5m_market_5944864_probabilities.json"'
     )
     assert response.json()["series"][0]["probabilities"]["down"]["normalized"] == "0.51758794"
+
+
+def test_markets_download_filename_includes_requested_optional_layers(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        include_probabilities,
+        include_futures,
+        include_oi,
+    ):
+        assert market_id == 5_944_864
+        assert include_probabilities is True
+        assert include_futures is True
+        assert include_oi is True
+        return market_data_payload(
+            include_probabilities=True,
+            include_futures=True,
+            include_oi=True,
+        )
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get(
+        "/markets/5944864/download?"
+        "include_probabilities=true&include_futures=true&include_oi=true"
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.headers["content-disposition"]
+        == (
+            'attachment; filename="'
+            'btc_5m_market_5944864_futures_oi_probabilities.json"'
+        )
+    )
+    assert response.json()["series"][0]["futures"]["last"] == "62075.12"
