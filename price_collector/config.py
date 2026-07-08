@@ -21,11 +21,15 @@ class Settings(BaseSettings):
     POLYMARKET_CHAINLINK_TOPIC: str = "crypto_prices_chainlink"
 
     POLYMARKET_GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
+    POLYMARKET_CLOB_BASE_URL: str = "https://clob.polymarket.com"
     POLYMARKET_CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     POLYMARKET_BTC_5M_SLUG_PREFIX: str = "btc-updown-5m"
     POLYMARKET_PROBABILITY_SOURCE: str = "polymarket_clob"
     POLYMARKET_PROBABILITY_STALE_MS: int = 15_000
     POLYMARKET_CLOB_PING_SECONDS: int = 10
+    POLYMARKET_NEXT_MARKET_PRELOAD_SECONDS: int = 45
+    POLYMARKET_NEXT_MARKET_RETRY_MS: int = 500
+    POLYMARKET_REST_PRIME_SECONDS: int = 15
 
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None

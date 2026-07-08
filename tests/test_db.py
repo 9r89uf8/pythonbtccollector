@@ -86,6 +86,14 @@ def test_upsert_polymarket_market_ensures_market_window_before_metadata_insert()
     assert "ON CONFLICT (market_id)" in source
 
 
+def test_decimal_2dp_or_none():
+    assert db.decimal_2dp_or_none(Decimal("62012.870302750816000000")) == "62012.87"
+    assert db.decimal_2dp_or_none(Decimal("62067.890000000000000000")) == "62067.89"
+    assert db.decimal_2dp_or_none(Decimal("0.55500000")) == "0.56"
+    assert db.decimal_2dp_or_none(Decimal("0.55400000")) == "0.55"
+    assert db.decimal_2dp_or_none(None) is None
+
+
 def test_schema_seeds_polymarket_chainlink_provider_and_instrument():
     schema = (ROOT / "schema.sql").read_text()
 
@@ -202,13 +210,13 @@ def market_download_rows():
                 "market_start_at": market_start_at,
                 "market_end_at": market_end_at,
                 "sample_second_ms": market_start_ms + (t * 1000),
-                "binance_price": Decimal("123000.00") if t == 0 else None,
-                "chainlink_price": Decimal("122998.12") if t == 0 else None,
+                "binance_price": Decimal("123000.004") if t == 0 else None,
+                "chainlink_price": Decimal("122998.125") if t == 0 else None,
                 "up_bid": Decimal("0.47") if t == 1 else None,
-                "up_ask": Decimal("0.49") if t == 1 else None,
+                "up_ask": Decimal("0.485") if t == 1 else None,
                 "up_mid": Decimal("0.48") if t == 1 else None,
                 "down_bid": Decimal("0.50") if t == 1 else None,
-                "down_ask": Decimal("0.53") if t == 1 else None,
+                "down_ask": Decimal("0.534") if t == 1 else None,
                 "down_mid": Decimal("0.515") if t == 1 else None,
                 "up_prob_norm": Decimal("0.48241206") if t == 1 else None,
                 "down_prob_norm": Decimal("0.51758794") if t == 1 else None,
@@ -238,7 +246,7 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     assert [row["t"] for row in payload["series"]] == list(range(300))
     assert payload["series"][0]["prices"] == {
         "binance": "123000.00",
-        "chainlink": "122998.12",
+        "chainlink": "122998.13",
     }
     assert payload["series"][1]["prices"] == {"binance": None, "chainlink": None}
     assert "probabilities" not in payload["series"][1]
@@ -254,16 +262,25 @@ def test_build_market_download_payload_adds_probabilities_only_when_requested():
     probability_row = payload["series"][1]
     assert probability_row["probabilities"] == {
         "up": {
-            "bid": "0.47",
             "ask": "0.49",
-            "mid": "0.48",
-            "normalized": "0.48241206",
         },
         "down": {
-            "bid": "0.50",
             "ask": "0.53",
-            "mid": "0.515",
-            "normalized": "0.51758794",
         },
     }
-    assert payload["series"][2]["probabilities"]["up"]["bid"] is None
+    assert payload["series"][2]["probabilities"]["up"]["ask"] is None
+
+
+def test_download_payload_probability_shape_ask_only():
+    payload = db.build_market_download_payload(
+        market_download_rows(),
+        include_probabilities=True,
+    )
+
+    assert payload is not None
+    first = payload["series"][0]
+
+    assert set(first["prices"].keys()) == {"binance", "chainlink"}
+    assert set(first["probabilities"].keys()) == {"up", "down"}
+    assert set(first["probabilities"]["up"].keys()) == {"ask"}
+    assert set(first["probabilities"]["down"].keys()) == {"ask"}

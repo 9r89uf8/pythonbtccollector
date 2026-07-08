@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Mapping, Optional
 
 import asyncpg
@@ -9,6 +9,7 @@ from price_collector.market import MarketWindow
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+TWO_DECIMALS = Decimal("0.01")
 
 
 def epoch_ms_to_utc_datetime(epoch_ms: int) -> datetime:
@@ -21,10 +22,14 @@ def utc_datetime_to_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def decimal_or_none(value: Optional[Decimal]) -> Optional[str]:
+def decimal_2dp_or_none(value: Optional[Decimal]) -> Optional[str]:
     if value is None:
         return None
-    return format(value, "f")
+
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+
+    return format(value.quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP), "f")
 
 
 async def create_pool(database_url: str) -> asyncpg.Pool:
@@ -575,24 +580,18 @@ def build_market_download_payload(
             "timestamp_ms": sample_second_ms,
             "timestamp_at": utc_datetime_to_z(epoch_ms_to_utc_datetime(sample_second_ms)),
             "prices": {
-                "binance": decimal_or_none(row["binance_price"]),
-                "chainlink": decimal_or_none(row["chainlink_price"]),
+                "binance": decimal_2dp_or_none(row["binance_price"]),
+                "chainlink": decimal_2dp_or_none(row["chainlink_price"]),
             },
         }
 
         if include_probabilities:
             item["probabilities"] = {
                 "up": {
-                    "bid": decimal_or_none(row["up_bid"]),
-                    "ask": decimal_or_none(row["up_ask"]),
-                    "mid": decimal_or_none(row["up_mid"]),
-                    "normalized": decimal_or_none(row["up_prob_norm"]),
+                    "ask": decimal_2dp_or_none(row["up_ask"]),
                 },
                 "down": {
-                    "bid": decimal_or_none(row["down_bid"]),
-                    "ask": decimal_or_none(row["down_ask"]),
-                    "mid": decimal_or_none(row["down_mid"]),
-                    "normalized": decimal_or_none(row["down_prob_norm"]),
+                    "ask": decimal_2dp_or_none(row["down_ask"]),
                 },
             }
 

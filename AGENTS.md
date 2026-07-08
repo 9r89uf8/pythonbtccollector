@@ -21,7 +21,6 @@ The deployed system is:
 ## Implementation Rules
 
 - Work in reviewable checkpoints. Do not implement the entire system in one session unless the user explicitly asks.
-- Follow `plan.md` as the primary blueprint.
 - Keep the project Python-only.
 - Use the requested package layout under `price_collector/`.
 - Use `Decimal` for prices. Never convert prices to `float`.

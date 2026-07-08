@@ -487,6 +487,152 @@ async def store_current_market(
     )
 
 
+async def fetch_best_asks_from_clob_prices(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    current_market: CurrentPolymarketMarket,
+) -> tuple[Optional[Decimal], Optional[Decimal]]:
+    base_url = settings.POLYMARKET_CLOB_BASE_URL.rstrip("/")
+    request_body = [
+        {
+            "token_id": current_market.up_token_id,
+            "side": "SELL",
+        },
+        {
+            "token_id": current_market.down_token_id,
+            "side": "SELL",
+        },
+    ]
+
+    response = await client.post(
+        f"{base_url}/prices",
+        json=request_body,
+    )
+    response.raise_for_status()
+
+    data = json.loads(response.text, parse_float=Decimal)
+    if not isinstance(data, Mapping):
+        return None, None
+
+    def parse_price(token_id: str) -> Optional[Decimal]:
+        token_data = data.get(token_id)
+        if not isinstance(token_data, Mapping):
+            return None
+
+        raw_price = token_data.get("SELL")
+        if raw_price is None:
+            return None
+
+        try:
+            price = raw_price if isinstance(raw_price, Decimal) else Decimal(str(raw_price))
+        except (InvalidOperation, ValueError):
+            return None
+
+        if not price.is_finite() or price < 0 or price > 1:
+            return None
+
+        return price
+
+    return (
+        parse_price(current_market.up_token_id),
+        parse_price(current_market.down_token_id),
+    )
+
+
+async def prime_probability_state_from_rest(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    current_market: CurrentPolymarketMarket,
+    state: ProbabilityState,
+) -> bool:
+    try:
+        up_ask, down_ask = await fetch_best_asks_from_clob_prices(
+            client,
+            settings,
+            current_market,
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "polymarket_probability_rest_prime_failed",
+            extra={
+                "event": "polymarket_probability_rest_prime_failed",
+                "market_id": current_market.window.market_id,
+                "error": repr(exc),
+            },
+        )
+        return False
+
+    received_ms = current_utc_epoch_ms()
+    updated = False
+
+    if up_ask is not None:
+        updated = (
+            state.update_token(
+                current_market.up_token_id,
+                bid=None,
+                ask=up_ask,
+                replace=False,
+                provider_event_ms=received_ms,
+                received_ms=received_ms,
+                event_type="rest_prime_prices",
+            )
+            or updated
+        )
+
+    if down_ask is not None:
+        updated = (
+            state.update_token(
+                current_market.down_token_id,
+                bid=None,
+                ask=down_ask,
+                replace=False,
+                provider_event_ms=received_ms,
+                received_ms=received_ms,
+                event_type="rest_prime_prices",
+            )
+            or updated
+        )
+
+    if updated:
+        LOGGER.info(
+            "polymarket_probability_rest_prime_updated",
+            extra={
+                "event": "polymarket_probability_rest_prime_updated",
+                "market_id": current_market.window.market_id,
+                "up_ask": str(up_ask) if up_ask is not None else None,
+                "down_ask": str(down_ask) if down_ask is not None else None,
+                "received_ms": received_ms,
+            },
+        )
+
+    return updated
+
+
+async def probability_rest_prime_loop(
+    *,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    current_market: CurrentPolymarketMarket,
+    state: ProbabilityState,
+) -> None:
+    while current_utc_epoch_ms() < current_market.window.market_start_ms:
+        await asyncio.sleep(0.05)
+
+    stop_ms = (
+        current_market.window.market_start_ms
+        + settings.POLYMARKET_REST_PRIME_SECONDS * 1000
+    )
+
+    while current_utc_epoch_ms() < stop_ms:
+        await prime_probability_state_from_rest(
+            client,
+            settings,
+            current_market,
+            state,
+        )
+        await asyncio.sleep(seconds_until_next_utc_second())
+
+
 def build_clob_subscription(current_market: CurrentPolymarketMarket) -> dict[str, Any]:
     return {
         "type": "market",
@@ -687,11 +833,11 @@ def build_probability_snapshot(
     if now_ms - state.latest_received_ms > stale_ms:
         return None
 
-    up_mid = midpoint(state.up_bid, state.up_ask)
-    down_mid = midpoint(state.down_bid, state.down_ask)
-    if up_mid is None or down_mid is None:
+    if state.up_ask is None or state.down_ask is None:
         return None
 
+    up_mid = midpoint(state.up_bid, state.up_ask)
+    down_mid = midpoint(state.down_bid, state.down_ask)
     up_prob_norm, down_prob_norm = normalized_probs(up_mid, down_mid)
 
     return ProbabilitySnapshot(
@@ -807,6 +953,7 @@ async def collect_current_market(
     *,
     settings: Settings,
     pool: Any,
+    client: httpx.AsyncClient,
     current_market: CurrentPolymarketMarket,
 ) -> None:
     state = ProbabilityState(
@@ -853,6 +1000,14 @@ async def collect_current_market(
                 state=state,
                 source=settings.POLYMARKET_PROBABILITY_SOURCE,
                 stale_ms=settings.POLYMARKET_PROBABILITY_STALE_MS,
+            )
+        )
+        rest_prime_task = asyncio.create_task(
+            probability_rest_prime_loop(
+                client=client,
+                settings=settings,
+                current_market=current_market,
+                state=state,
             )
         )
 
@@ -904,10 +1059,114 @@ async def collect_current_market(
         finally:
             ping_task.cancel()
             sampler_task.cancel()
+            rest_prime_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await ping_task
             with contextlib.suppress(asyncio.CancelledError):
                 await sampler_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await rest_prime_task
+
+
+async def sleep_until_ms(target_ms: int) -> None:
+    while True:
+        now_ms = current_utc_epoch_ms()
+        remaining_ms = target_ms - now_ms
+        if remaining_ms <= 0:
+            return
+        await asyncio.sleep(min(remaining_ms / 1000, 1.0))
+
+
+async def sleep_until_ms_or_task_done(target_ms: int, task: Any) -> None:
+    if task.done():
+        await task
+        raise RuntimeError("Polymarket collection task ended before preload time")
+
+    sleep_task = asyncio.create_task(sleep_until_ms(target_ms))
+    try:
+        done, _pending = await asyncio.wait(
+            {sleep_task, task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task in done:
+            await task
+            raise RuntimeError("Polymarket collection task ended before preload time")
+    finally:
+        if not sleep_task.done():
+            sleep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sleep_task
+
+
+async def cancel_and_drain_task(task: Any) -> None:
+    task.cancel()
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await task
+
+
+async def discover_market_with_retries(
+    *,
+    settings: Settings,
+    pool: Any,
+    client: httpx.AsyncClient,
+    window: MarketWindow,
+    deadline_ms: int,
+    retry_ms: int,
+) -> CurrentPolymarketMarket:
+    last_error: Optional[Exception] = None
+
+    while current_utc_epoch_ms() < deadline_ms:
+        try:
+            return await discover_current_polymarket_market(
+                settings,
+                pool,
+                client,
+                window,
+            )
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(retry_ms / 1000)
+
+    if last_error is not None:
+        raise last_error
+
+    raise GammaDiscoveryError(
+        f"could not discover Polymarket market for market_id={window.market_id}"
+    )
+
+
+async def start_market_collection(
+    *,
+    settings: Settings,
+    pool: Any,
+    client: httpx.AsyncClient,
+    window: MarketWindow,
+) -> tuple[CurrentPolymarketMarket, Any]:
+    current_market = await discover_current_polymarket_market(
+        settings,
+        pool,
+        client,
+        window,
+    )
+    LOGGER.info(
+        "polymarket_market_discovered",
+        extra={
+            "event": "polymarket_market_discovered",
+            "market_id": current_market.window.market_id,
+            "slug": current_market.slug,
+            "up_token_id": current_market.up_token_id,
+            "down_token_id": current_market.down_token_id,
+        },
+    )
+    task = asyncio.create_task(
+        collect_current_market(
+            settings=settings,
+            pool=pool,
+            client=client,
+            current_market=current_market,
+        )
+    )
+    return current_market, task
 
 
 async def run_collector(settings: Settings) -> None:
@@ -925,35 +1184,22 @@ async def run_collector(settings: Settings) -> None:
     )
 
     pool = await create_pool(require_collector_database_url(settings))
+    current_task: Optional[asyncio.Task] = None
+    next_task: Optional[asyncio.Task] = None
     try:
         attempt = 0
         async with httpx.AsyncClient(timeout=10.0) as client:
-            while True:
+            while current_task is None:
                 now_ms = current_utc_epoch_ms()
-                window = market_for_sample_second(sample_second_ms_for_now(now_ms))
+                current_window = market_for_sample_second(sample_second_ms_for_now(now_ms))
                 try:
-                    current_market = await discover_current_polymarket_market(
-                        settings,
-                        pool,
-                        client,
-                        window,
-                    )
-                    attempt = 0
-                    LOGGER.info(
-                        "polymarket_market_discovered",
-                        extra={
-                            "event": "polymarket_market_discovered",
-                            "market_id": current_market.window.market_id,
-                            "slug": current_market.slug,
-                            "up_token_id": current_market.up_token_id,
-                            "down_token_id": current_market.down_token_id,
-                        },
-                    )
-                    await collect_current_market(
+                    current_market, current_task = await start_market_collection(
                         settings=settings,
                         pool=pool,
-                        current_market=current_market,
+                        client=client,
+                        window=current_window,
                     )
+                    attempt = 0
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -969,7 +1215,89 @@ async def run_collector(settings: Settings) -> None:
                         },
                     )
                     await asyncio.sleep(delay)
+
+            while True:
+                try:
+                    next_window = market_for_sample_second(current_market.window.market_end_ms)
+                    preload_at_ms = (
+                        current_market.window.market_end_ms
+                        - settings.POLYMARKET_NEXT_MARKET_PRELOAD_SECONDS * 1000
+                    )
+
+                    await sleep_until_ms_or_task_done(preload_at_ms, current_task)
+                    next_market = await discover_market_with_retries(
+                        settings=settings,
+                        pool=pool,
+                        client=client,
+                        window=next_window,
+                        deadline_ms=current_market.window.market_end_ms - 500,
+                        retry_ms=settings.POLYMARKET_NEXT_MARKET_RETRY_MS,
+                    )
+                    LOGGER.info(
+                        "polymarket_next_market_preloaded",
+                        extra={
+                            "event": "polymarket_next_market_preloaded",
+                            "current_market_id": current_market.window.market_id,
+                            "next_market_id": next_market.window.market_id,
+                            "next_slug": next_market.slug,
+                        },
+                    )
+
+                    next_task = asyncio.create_task(
+                        collect_current_market(
+                            settings=settings,
+                            pool=pool,
+                            client=client,
+                            current_market=next_market,
+                        )
+                    )
+
+                    await current_task
+
+                    current_market = next_market
+                    current_task = next_task
+                    next_task = None
+                    attempt = 0
+
+                except asyncio.CancelledError:
+                    await cancel_and_drain_task(current_task)
+                    if next_task is not None:
+                        await cancel_and_drain_task(next_task)
+                    raise
+
+                except Exception as exc:
+                    attempt += 1
+                    delay = reconnect_delay_seconds(attempt)
+                    LOGGER.warning(
+                        "polymarket_probability_cycle_recovering",
+                        extra={
+                            "event": "polymarket_probability_cycle_recovering",
+                            "attempt": attempt,
+                            "delay_seconds": round(delay, 3),
+                            "error": repr(exc),
+                        },
+                    )
+
+                    await cancel_and_drain_task(current_task)
+                    if next_task is not None:
+                        await cancel_and_drain_task(next_task)
+                    next_task = None
+
+                    await asyncio.sleep(delay)
+
+                    now_ms = current_utc_epoch_ms()
+                    current_window = market_for_sample_second(sample_second_ms_for_now(now_ms))
+                    current_market, current_task = await start_market_collection(
+                        settings=settings,
+                        pool=pool,
+                        client=client,
+                        window=current_window,
+                    )
     finally:
+        if current_task is not None:
+            await cancel_and_drain_task(current_task)
+        if next_task is not None:
+            await cancel_and_drain_task(next_task)
         await pool.close()
 
 
