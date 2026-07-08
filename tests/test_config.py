@@ -80,3 +80,17 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
     assert settings.BINANCE_FUTURES_REST_TIMEOUT_SECONDS == 5
     assert settings.BINANCE_FUTURES_HIST_OI_ENABLED is True
     assert settings.BINANCE_FUTURES_HIST_OI_POLL_SECONDS == 30
+
+
+def test_settings_include_local_redis_defaults(monkeypatch):
+    monkeypatch.delenv("REDIS_HOST", raising=False)
+    monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.delenv("REDIS_DB", raising=False)
+    monkeypatch.delenv("REDIS_SOCKET_TIMEOUT_SECONDS", raising=False)
+
+    settings = Settings()
+
+    assert settings.REDIS_HOST == "127.0.0.1"
+    assert settings.REDIS_PORT == 6379
+    assert settings.REDIS_DB == 0
+    assert settings.REDIS_SOCKET_TIMEOUT_SECONDS == 0.25

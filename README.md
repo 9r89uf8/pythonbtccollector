@@ -6,12 +6,14 @@ DigitalOcean droplet
 ├── systemd
 │   ├── price-collector.service
 │   ├── price-collector-polymarket-chainlink.service
+│   ├── price-collector-binance-futures.service
 │   └── price-api.service
 ├── Python app cloned from GitHub into /opt/price-collector
 ├── env files in /etc/price-collector
+├── local Redis live cache bound to 127.0.0.1:6379
 └── local PostgreSQL database price_collector
 ```
-The Binance collector connects to Binance Spot WebSocket stream `btcusdt@ticker`, keeps the latest price in memory, and writes at most one sample per UTC second. The Polymarket collector connects to Polymarket RTDS topic `crypto_prices_chainlink` with filter `{"symbol":"btc/usd"}` and writes Chainlink BTC/USD samples by the source payload timestamp. The API is read-only and must bind only to `127.0.0.1:9000`.
+The Binance collector connects to Binance Spot WebSocket stream `btcusdt@ticker`, writes the latest event to Redis immediately, keeps the latest price in memory, and writes at most one PostgreSQL sample per UTC second. The Polymarket collector connects to Polymarket RTDS topic `crypto_prices_chainlink` with filter `{"symbol":"btc/usd"}` and writes Chainlink BTC/USD samples by the source payload timestamp. The Binance futures collector polls REST and writes its latest price to Redis before historical storage. The API is read-only, `/markets/current/live` reads Redis, and the API must bind only to `127.0.0.1:9000`.
 Do not run Docker. Do not run a dashboard on the droplet. Do not expose PostgreSQL or the API publicly.
 Droplet Assumptions
 Ubuntu 24.04 LTS
@@ -24,7 +26,7 @@ Install Packages
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y python3 python3-venv python3-pip postgresql postgresql-contrib git openssh-client ufw
+sudo apt install -y python3 python3-venv python3-pip postgresql postgresql-contrib redis-server git openssh-client ufw
 ```
 Firewall
 ```bash
@@ -36,6 +38,7 @@ Do not run:
 ```bash
 sudo ufw allow 9000
 sudo ufw allow 5432
+sudo ufw allow 6379
 ```
 Service User
 ```bash
@@ -137,6 +140,27 @@ Load the schema from the cloned repository:
 ```bash
 sudo -u postgres psql -d price_collector -f /opt/price-collector/schema.sql
 ```
+
+Redis Setup
+Keep Redis private to the droplet:
+```bash
+sudo sed -i 's/^bind .*/bind 127.0.0.1/' /etc/redis/redis.conf
+sudo sed -i 's/^protected-mode .*/protected-mode yes/' /etc/redis/redis.conf
+sudo systemctl enable --now redis-server
+sudo systemctl restart redis-server
+```
+Verify Redis is listening only on loopback:
+```bash
+sudo ss -ltnp | grep ':6379'
+```
+Acceptable:
+```text
+127.0.0.1:6379
+```
+Not acceptable:
+```text
+0.0.0.0:6379
+```
 Apply grants:
 ```bash
 sudo -u postgres psql -d price_collector
@@ -176,6 +200,8 @@ sudo nano /etc/price-collector/api.env
 `collector.env` contains writer credentials:
 ```text
 DATABASE_URL=postgresql://price_writer:REPLACE_ME@127.0.0.1:5432/price_collector
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
 ```
 It can also override the Polymarket Chainlink RTDS defaults:
 ```text
@@ -188,6 +214,8 @@ POLYMARKET_CHAINLINK_TOPIC=crypto_prices_chainlink
 `api.env` contains reader credentials only:
 ```text
 READ_DATABASE_URL=postgresql://price_reader:REPLACE_ME@127.0.0.1:5432/price_collector
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
 ```
 Do not commit real `.env`, `collector.env`, or `api.env` files to GitHub. Commit only the example env files.
 systemd
@@ -195,13 +223,16 @@ Install service files from the cloned repository:
 ```bash
 sudo cp /opt/price-collector/deployment/price-collector.service /etc/systemd/system/price-collector.service
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.service /etc/systemd/system/price-collector-polymarket-chainlink.service
+sudo cp /opt/price-collector/deployment/price-collector-binance-futures.service /etc/systemd/system/price-collector-binance-futures.service
 sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
 sudo systemctl daemon-reload
 sudo systemctl enable price-collector
 sudo systemctl enable price-collector-polymarket-chainlink
+sudo systemctl enable price-collector-binance-futures
 sudo systemctl enable price-api
 sudo systemctl start price-collector
 sudo systemctl start price-collector-polymarket-chainlink
+sudo systemctl start price-collector-binance-futures
 sudo systemctl start price-api
 ```
 The API service is intentionally local-only:
@@ -212,12 +243,14 @@ Service Verification
 ```bash
 sudo systemctl status price-collector
 sudo systemctl status price-collector-polymarket-chainlink
+sudo systemctl status price-collector-binance-futures
 sudo systemctl status price-api
 ```
 Logs:
 ```bash
 sudo journalctl -u price-collector -f
 sudo journalctl -u price-collector-polymarket-chainlink -f
+sudo journalctl -u price-collector-binance-futures -f
 sudo journalctl -u price-api -f
 ```
 API checks from inside the droplet:
@@ -227,6 +260,7 @@ curl http://127.0.0.1:9000/prices/latest
 curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
+curl http://127.0.0.1:9000/markets/current/live
 ```
 DB Verification
 ```bash
@@ -259,16 +293,19 @@ Confirm Local-Only Binding
 ```bash
 sudo ss -ltnp | grep ':9000'
 sudo ss -ltnp | grep ':5432'
+sudo ss -ltnp | grep ':6379'
 ```
 Acceptable:
 ```text
 127.0.0.1:9000
 127.0.0.1:5432
+127.0.0.1:6379
 ```
 Not acceptable:
 ```text
 0.0.0.0:9000
 0.0.0.0:5432
+0.0.0.0:6379
 ```
 SSH Tunnel
 From your local machine:
@@ -296,14 +333,17 @@ Restart services:
 ```bash
 sudo systemctl restart price-collector
 sudo systemctl restart price-collector-polymarket-chainlink
+sudo systemctl restart price-collector-binance-futures
 sudo systemctl restart price-api
 ```
 Verify after update:
 ```bash
 sudo systemctl status price-collector
 sudo systemctl status price-collector-polymarket-chainlink
+sudo systemctl status price-collector-binance-futures
 sudo systemctl status price-api
 curl http://127.0.0.1:9000/healthz
+curl http://127.0.0.1:9000/markets/current/live
 ```
 Maintenance Notes
 One provider at one sample per second is 86,400 rows/day.

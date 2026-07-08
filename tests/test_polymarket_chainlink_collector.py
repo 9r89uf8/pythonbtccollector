@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import price_collector.polymarket_chainlink_collector as collector
+from price_collector.live_cache import CHAINLINK_LIVE_KEY
 
 
 def polymarket_settings():
@@ -152,6 +153,62 @@ def test_duplicate_ticks_in_same_source_second_use_same_upsert_key(monkeypatch):
     assert calls[0]["source_price_field"] == "payload.value"
     assert calls[0]["source_topic"] == "crypto_prices_chainlink"
     assert calls[1]["price"] == Decimal("123457.01")
+
+
+def test_chainlink_tick_writes_redis_live_cache_before_postgres(monkeypatch):
+    events = []
+
+    class FakeLiveCache:
+        async def set_price(
+            self,
+            key,
+            *,
+            value,
+            source_timestamp_ms,
+            received_ms,
+        ):
+            events.append(
+                (
+                    "redis",
+                    {
+                        "key": key,
+                        "value": value,
+                        "source_timestamp_ms": source_timestamp_ms,
+                        "received_ms": received_ms,
+                    },
+                )
+            )
+
+    async def fake_upsert_price_sample(pool, **kwargs):
+        events.append(("postgres", kwargs))
+
+    monkeypatch.setattr(collector, "upsert_price_sample", fake_upsert_price_sample)
+
+    tick = collector.PolymarketChainlinkTick(
+        symbol="BTCUSD",
+        price=Decimal("62066.12"),
+        provider_event_ms=1_783_459_250_123,
+        provider_message_ms=1_783_459_250_140,
+    )
+
+    asyncio.run(
+        collector.handle_tick(
+            "pool",
+            42,
+            tick,
+            received_ms=1_783_459_250_180,
+            live_cache=FakeLiveCache(),
+        )
+    )
+
+    assert [event_name for event_name, _payload in events] == ["redis", "postgres"]
+    assert events[0][1] == {
+        "key": CHAINLINK_LIVE_KEY,
+        "value": Decimal("62066.12"),
+        "source_timestamp_ms": 1_783_459_250_123,
+        "received_ms": 1_783_459_250_180,
+    }
+    assert events[1][1]["sample_second_ms"] == 1_783_459_250_000
 
 
 def test_rtds_ping_loop_sends_text_ping_every_five_seconds(monkeypatch):

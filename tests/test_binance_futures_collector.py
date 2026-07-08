@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import price_collector.binance_futures_collector as collector
+from price_collector.live_cache import FUTURES_LIVE_KEY
 
 
 def open_interest_payload(**overrides):
@@ -225,6 +226,67 @@ def test_collect_once_fetches_three_endpoints_and_upserts_snapshot(monkeypatch):
     assert upserts[0]["sample_second_ms"] == 1_783_459_500_000
     assert upserts[0]["open_interest"] == Decimal("74321.123")
     assert upserts[0]["raw"]["openInterest"]["openInterest"] == "74321.123"
+
+
+def test_collect_once_writes_futures_live_cache_before_postgres(monkeypatch):
+    events = []
+
+    class FakeLiveCache:
+        async def set_price(
+            self,
+            key,
+            *,
+            value,
+            source_timestamp_ms,
+            received_ms,
+        ):
+            events.append(
+                (
+                    "redis",
+                    {
+                        "key": key,
+                        "value": value,
+                        "source_timestamp_ms": source_timestamp_ms,
+                        "received_ms": received_ms,
+                    },
+                )
+            )
+
+    async def fake_get_json(client, base_url, path, params):
+        return {
+            "/fapi/v1/openInterest": open_interest_payload(),
+            "/fapi/v1/premiumIndex": premium_index_payload(),
+            "/fapi/v2/ticker/price": ticker_payload(),
+        }[path]
+
+    async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
+        events.append(("postgres", kwargs))
+
+    monkeypatch.setattr(collector, "get_json", fake_get_json)
+    monkeypatch.setattr(
+        collector,
+        "upsert_binance_futures_snapshot",
+        fake_upsert_binance_futures_snapshot,
+    )
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+
+    asyncio.run(
+        collector.collect_once(
+            pool="pool",
+            client="client",
+            settings=futures_settings(),
+            live_cache=FakeLiveCache(),
+        )
+    )
+
+    assert [event_name for event_name, _payload in events] == ["redis", "postgres"]
+    assert events[0][1] == {
+        "key": FUTURES_LIVE_KEY,
+        "value": Decimal("62075.12"),
+        "source_timestamp_ms": 1_783_459_500_510,
+        "received_ms": 1_783_459_500_700,
+    }
+    assert events[1][1]["sample_second_ms"] == 1_783_459_500_000
 
 
 def test_collect_historical_oi_once_stores_only_completed_summaries(monkeypatch):

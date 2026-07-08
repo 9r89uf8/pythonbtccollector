@@ -19,6 +19,11 @@ from price_collector.db import (
     upsert_binance_futures_oi_5m_summary,
     upsert_binance_futures_snapshot,
 )
+from price_collector.live_cache import (
+    FUTURES_LIVE_KEY,
+    LIVE_CACHE_WRITE_ERRORS,
+    create_live_cache,
+)
 from price_collector.market import MARKET_MS, MarketWindow, market_for_sample_second
 
 
@@ -264,11 +269,41 @@ async def get_json(
     return json.loads(response.text, parse_float=Decimal)
 
 
+async def update_futures_live_cache(
+    live_cache: Any,
+    snapshot: BinanceFuturesSnapshot,
+) -> bool:
+    if live_cache is None or snapshot.futures_last_price is None:
+        return False
+
+    try:
+        await live_cache.set_price(
+            FUTURES_LIVE_KEY,
+            value=snapshot.futures_last_price,
+            source_timestamp_ms=snapshot.futures_last_price_time_ms,
+            received_ms=snapshot.received_ms,
+        )
+    except LIVE_CACHE_WRITE_ERRORS as exc:
+        LOGGER.warning(
+            "live_cache_write_failed",
+            extra={
+                "event": "live_cache_write_failed",
+                "source": "futures",
+                "key": FUTURES_LIVE_KEY,
+                "error": repr(exc),
+            },
+        )
+        return False
+
+    return True
+
+
 async def collect_once(
     *,
     pool: Any,
     client: httpx.AsyncClient,
     settings: Settings,
+    live_cache: Any = None,
 ) -> BinanceFuturesSnapshot:
     received_ms = current_utc_epoch_ms()
     symbol = settings.BINANCE_FUTURES_SYMBOL
@@ -302,6 +337,8 @@ async def collect_once(
         ticker_payload=_require_mapping(ticker_data, "ticker"),
         received_ms=received_ms,
     )
+
+    await update_futures_live_cache(live_cache, snapshot)
 
     await upsert_binance_futures_snapshot(
         pool,
@@ -420,6 +457,7 @@ async def snapshot_loop(
     pool: Any,
     client: httpx.AsyncClient,
     settings: Settings,
+    live_cache: Any = None,
 ) -> None:
     while True:
         if settings.BINANCE_FUTURES_POLL_SECONDS <= 1:
@@ -428,7 +466,12 @@ async def snapshot_loop(
             await asyncio.sleep(settings.BINANCE_FUTURES_POLL_SECONDS)
 
         try:
-            await collect_once(pool=pool, client=client, settings=settings)
+            await collect_once(
+                pool=pool,
+                client=client,
+                settings=settings,
+                live_cache=live_cache,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -472,12 +515,18 @@ async def run_collector(settings: Settings) -> None:
     )
 
     pool = await create_pool(require_collector_database_url(settings))
+    live_cache = create_live_cache(settings)
     try:
         timeout = httpx.Timeout(settings.BINANCE_FUTURES_REST_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout) as client:
             tasks = [
                 asyncio.create_task(
-                    snapshot_loop(pool=pool, client=client, settings=settings)
+                    snapshot_loop(
+                        pool=pool,
+                        client=client,
+                        settings=settings,
+                        live_cache=live_cache,
+                    )
                 )
             ]
             if settings.BINANCE_FUTURES_HIST_OI_ENABLED:
@@ -489,6 +538,7 @@ async def run_collector(settings: Settings) -> None:
 
             await asyncio.gather(*tasks)
     finally:
+        await live_cache.close()
         await pool.close()
 
 

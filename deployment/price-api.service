@@ -1,7 +1,7 @@
 [Unit]
 Description=Local read-only price API
-After=network-online.target postgresql.service
-Wants=network-online.target
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
@@ -23,4 +23,3 @@ ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
-

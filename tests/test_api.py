@@ -5,11 +5,37 @@ import pytest
 from fastapi.testclient import TestClient
 
 import price_collector.api as api
+from price_collector.live_cache import (
+    BINANCE_SPOT_LIVE_KEY,
+    CHAINLINK_LIVE_KEY,
+    FUTURES_LIVE_KEY,
+    LivePrice,
+)
 
 
 class FakePool:
     def __init__(self) -> None:
         self.closed = False
+        self.acquire_calls = 0
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def acquire(self):
+        self.acquire_calls += 1
+        raise AssertionError("test endpoint should not acquire PostgreSQL")
+
+
+class FakeLiveCache:
+    def __init__(self) -> None:
+        self.closed = False
+        self.prices = {}
+        self.requested_keys = []
+
+    async def get_prices(self, keys):
+        key_list = list(keys)
+        self.requested_keys.append(key_list)
+        return {key: self.prices.get(key) for key in key_list}
 
     async def close(self) -> None:
         self.closed = True
@@ -18,6 +44,7 @@ class FakePool:
 @pytest.fixture
 def client(monkeypatch):
     fake_pool = FakePool()
+    fake_live_cache = FakeLiveCache()
 
     async def fake_create_read_pool(settings):
         return fake_pool
@@ -30,10 +57,12 @@ def client(monkeypatch):
         "postgresql://price_reader:secret@127.0.0.1:5432/price_collector",
     )
     monkeypatch.setattr(api, "create_read_pool", fake_create_read_pool)
+    monkeypatch.setattr(api, "create_live_cache", lambda settings: fake_live_cache)
     monkeypatch.setattr(api, "health_check", fake_health_check)
 
     with TestClient(api.app) as test_client:
         test_client.fake_pool = fake_pool
+        test_client.fake_live_cache = fake_live_cache
         yield test_client
 
 
@@ -529,68 +558,45 @@ def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
     assert response.status_code == 200
 
 
-def test_markets_current_live_returns_latest_per_source_payload(client, monkeypatch):
-    async def fake_fetch_current_live_payload(
-        pool,
-        window,
-        current_sample_second_ms,
-        server_time_ms,
-        max_chainlink_carry_forward_ms,
-    ):
-        assert window.market_id == 5_944_864
-        assert current_sample_second_ms == 1_783_459_250_000
-        assert server_time_ms == 1_783_459_250_123
-        assert max_chainlink_carry_forward_ms == 7_000
-        return {
-            "server_time_ms": server_time_ms,
-            "market_id": window.market_id,
-            "market_start_ms": window.market_start_ms,
-            "market_end_ms": window.market_end_ms,
-            "prices": {
-                "chainlink": {
-                    "value": "62037.05",
-                    "provider_event_ms": 1_783_459_247_000,
-                    "provider_message_ms": 1_783_459_247_050,
-                    "received_ms": 1_783_459_247_100,
-                    "source_age_ms": 3_123,
-                    "received_age_ms": 3_023,
-                    "is_carried_forward_for_display": True,
-                }
-            },
-            "futures": {
-                "last": {
-                    "value": "62099.10",
-                    "time_ms": 1_783_459_250_000,
-                    "received_ms": 1_783_459_250_050,
-                    "source_age_ms": 123,
-                    "received_age_ms": 73,
-                }
-            },
-            "open_interest": {
-                "contracts": "74321.123",
-                "time_ms": 1_783_459_240_000,
-                "received_ms": 1_783_459_250_050,
-                "source_age_ms": 10_123,
-                "received_age_ms": 73,
-            },
-        }
-
-    monkeypatch.setattr(
-        api,
-        "fetch_current_live_payload",
-        fake_fetch_current_live_payload,
-    )
+def test_markets_current_live_reads_redis_without_postgres_queries(client, monkeypatch):
     monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+    client.fake_live_cache.prices = {
+        BINANCE_SPOT_LIVE_KEY: LivePrice(
+            value="62067.89",
+            source_timestamp_ms=1_783_459_249_900,
+            received_ms=1_783_459_249_950,
+        ),
+        CHAINLINK_LIVE_KEY: LivePrice(
+            value="62037.05",
+            source_timestamp_ms=1_783_459_247_000,
+            received_ms=1_783_459_247_100,
+        ),
+        FUTURES_LIVE_KEY: LivePrice(
+            value="62099.10",
+            source_timestamp_ms=1_783_459_250_000,
+            received_ms=1_783_459_250_050,
+        ),
+    }
 
     response = client.get("/markets/current/live?max_chainlink_carry_forward_ms=7000")
 
     assert response.status_code == 200
     body = response.json()
     assert body["server_time_ms"] == 1_783_459_250_123
-    assert body["prices"]["chainlink"]["provider_message_ms"] == 1_783_459_247_050
-    assert body["prices"]["chainlink"]["is_carried_forward_for_display"] is True
+    assert body["market_id"] == 5_944_864
+    assert body["prices"]["binance_spot"]["value"] == "62067.89"
+    assert body["prices"]["binance_spot"]["source_timestamp_ms"] == 1_783_459_249_900
+    assert body["prices"]["binance_spot"]["provider_event_ms"] == 1_783_459_249_900
+    assert body["prices"]["binance_spot"]["source_age_ms"] == 223
+    assert body["prices"]["binance_spot"]["received_age_ms"] == 173
+    assert body["prices"]["chainlink"]["source_age_ms"] == 3_123
     assert body["futures"]["last"]["source_age_ms"] == 123
-    assert body["open_interest"]["source_age_ms"] == 10_123
+    assert body["futures"]["last"]["received_age_ms"] == 73
+    assert body["futures"]["last"]["time_ms"] == 1_783_459_250_000
+    assert client.fake_live_cache.requested_keys == [
+        [BINANCE_SPOT_LIVE_KEY, CHAINLINK_LIVE_KEY, FUTURES_LIVE_KEY]
+    ]
+    assert client.fake_pool.acquire_calls == 0
 
 
 def test_markets_download_returns_attachment_filename(client, monkeypatch):

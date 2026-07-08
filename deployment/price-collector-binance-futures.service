@@ -1,7 +1,7 @@
 [Unit]
 Description=Binance USD-M BTCUSDT futures and open interest collector
-After=network-online.target postgresql.service
-Wants=network-online.target
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple

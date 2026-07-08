@@ -16,6 +16,11 @@ from price_collector.collector import (
 )
 from price_collector.config import Settings
 from price_collector.db import create_pool, get_instrument_id, upsert_price_sample
+from price_collector.live_cache import (
+    CHAINLINK_LIVE_KEY,
+    LIVE_CACHE_WRITE_ERRORS,
+    create_live_cache,
+)
 from price_collector.market import MarketWindow, market_for_sample_second
 
 
@@ -169,6 +174,35 @@ def build_polymarket_chainlink_sample(
     )
 
 
+async def update_chainlink_live_cache(
+    live_cache: Any,
+    sample: PolymarketChainlinkSample,
+) -> bool:
+    if live_cache is None:
+        return False
+
+    try:
+        await live_cache.set_price(
+            CHAINLINK_LIVE_KEY,
+            value=sample.price,
+            source_timestamp_ms=sample.provider_event_ms,
+            received_ms=sample.received_ms,
+        )
+    except LIVE_CACHE_WRITE_ERRORS as exc:
+        LOGGER.warning(
+            "live_cache_write_failed",
+            extra={
+                "event": "live_cache_write_failed",
+                "source": "chainlink",
+                "key": CHAINLINK_LIVE_KEY,
+                "error": repr(exc),
+            },
+        )
+        return False
+
+    return True
+
+
 async def handle_tick(
     pool: Any,
     instrument_id: int,
@@ -176,11 +210,14 @@ async def handle_tick(
     *,
     source_topic: str = "crypto_prices_chainlink",
     received_ms: Optional[int] = None,
+    live_cache: Any = None,
 ) -> None:
     sample = build_polymarket_chainlink_sample(
         tick,
         received_ms=current_utc_epoch_ms() if received_ms is None else received_ms,
     )
+
+    await update_chainlink_live_cache(live_cache, sample)
 
     await upsert_price_sample(
         pool,
@@ -220,6 +257,7 @@ async def polymarket_chainlink_reader_loop(
     settings: Settings,
     pool: Any,
     instrument_id: int,
+    live_cache: Any = None,
 ) -> None:
     attempt = 0
 
@@ -280,6 +318,7 @@ async def polymarket_chainlink_reader_loop(
                             instrument_id,
                             tick,
                             source_topic=settings.POLYMARKET_CHAINLINK_TOPIC,
+                            live_cache=live_cache,
                         )
                 finally:
                     ping_task.cancel()
@@ -317,14 +356,21 @@ async def run_collector(settings: Settings) -> None:
     )
 
     pool = await create_pool(require_collector_database_url(settings))
+    live_cache = create_live_cache(settings)
     try:
         instrument_id = await get_instrument_id(
             pool,
             provider_code=settings.POLYMARKET_CHAINLINK_PROVIDER_CODE,
             symbol=settings.POLYMARKET_CHAINLINK_SYMBOL,
         )
-        await polymarket_chainlink_reader_loop(settings, pool, instrument_id)
+        await polymarket_chainlink_reader_loop(
+            settings,
+            pool,
+            instrument_id,
+            live_cache=live_cache,
+        )
     finally:
+        await live_cache.close()
         await pool.close()
 
 

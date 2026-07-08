@@ -11,13 +11,18 @@ from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
 from price_collector.db import (
     create_read_pool,
-    fetch_current_live_payload,
     fetch_market_download_payload,
     fetch_latest_market_id,
     fetch_latest_price,
     fetch_market_summaries_for_btc_sources,
     fetch_market_summary,
     health_check,
+)
+from price_collector.live_cache import (
+    LIVE_CACHE_READ_ERRORS,
+    LiveCachePayloadError,
+    build_current_live_payload,
+    create_live_cache,
 )
 from price_collector.market import market_for_sample_second
 
@@ -113,15 +118,22 @@ def get_pool(request: Request) -> Any:
     return request.app.state.pool
 
 
+def get_live_cache(request: Request) -> Any:
+    return request.app.state.live_cache
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
     pool = await create_read_pool(settings)
+    live_cache = create_live_cache(settings)
     app.state.settings = settings
     app.state.pool = pool
+    app.state.live_cache = live_cache
     try:
         yield
     finally:
+        await live_cache.close()
         await pool.close()
 
 
@@ -324,17 +336,21 @@ async def markets_current_live(
     request: Request,
     max_chainlink_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
+    _ = max_chainlink_carry_forward_ms
     now_ms = current_utc_epoch_ms()
     sample_second_ms = (now_ms // 1000) * 1000
     window = market_for_sample_second(sample_second_ms)
 
-    return await fetch_current_live_payload(
-        get_pool(request),
-        window=window,
-        current_sample_second_ms=sample_second_ms,
-        server_time_ms=now_ms,
-        max_chainlink_carry_forward_ms=max_chainlink_carry_forward_ms,
-    )
+    try:
+        return await build_current_live_payload(
+            get_live_cache(request),
+            window=window,
+            server_time_ms=now_ms,
+        )
+    except LIVE_CACHE_READ_ERRORS as exc:
+        raise HTTPException(status_code=503, detail="live cache unavailable") from exc
+    except LiveCachePayloadError as exc:
+        raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
 
 
 @app.get("/markets/{market_id}")

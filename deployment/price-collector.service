@@ -1,7 +1,7 @@
 [Unit]
 Description=BTCUSDT price collector
-After=network-online.target postgresql.service
-Wants=network-online.target
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
@@ -24,4 +24,3 @@ ReadWritePaths=/var/lib/price-collector
 
 [Install]
 WantedBy=multi-user.target
-

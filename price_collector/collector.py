@@ -13,6 +13,11 @@ import websockets
 
 from price_collector.config import Settings
 from price_collector.db import create_pool, get_instrument_id, upsert_price_sample
+from price_collector.live_cache import (
+    BINANCE_SPOT_LIVE_KEY,
+    LIVE_CACHE_WRITE_ERRORS,
+    create_live_cache,
+)
 from price_collector.market import MarketWindow, market_for_sample_second
 
 
@@ -201,7 +206,37 @@ def require_collector_database_url(settings: Settings) -> str:
     return settings.DATABASE_URL
 
 
-async def websocket_reader_loop(settings: Settings, latest_store: LatestPriceStore) -> None:
+async def update_binance_live_cache(live_cache: Any, latest: LatestPrice) -> bool:
+    if live_cache is None:
+        return False
+
+    try:
+        await live_cache.set_price(
+            BINANCE_SPOT_LIVE_KEY,
+            value=latest.price,
+            source_timestamp_ms=latest.provider_event_ms,
+            received_ms=latest.received_ms,
+        )
+    except LIVE_CACHE_WRITE_ERRORS as exc:
+        LOGGER.warning(
+            "live_cache_write_failed",
+            extra={
+                "event": "live_cache_write_failed",
+                "source": "binance_spot",
+                "key": BINANCE_SPOT_LIVE_KEY,
+                "error": repr(exc),
+            },
+        )
+        return False
+
+    return True
+
+
+async def websocket_reader_loop(
+    settings: Settings,
+    latest_store: LatestPriceStore,
+    live_cache: Any = None,
+) -> None:
     attempt = 0
 
     while True:
@@ -265,14 +300,14 @@ async def websocket_reader_loop(settings: Settings, latest_store: LatestPriceSto
                         continue
 
                     received_ms = current_utc_epoch_ms()
-                    await latest_store.update(
-                        LatestPrice(
-                            symbol=ticker.symbol,
-                            price=ticker.price,
-                            provider_event_ms=ticker.provider_event_ms,
-                            received_ms=received_ms,
-                        )
+                    latest = LatestPrice(
+                        symbol=ticker.symbol,
+                        price=ticker.price,
+                        provider_event_ms=ticker.provider_event_ms,
+                        received_ms=received_ms,
                     )
+                    await update_binance_live_cache(live_cache, latest)
+                    await latest_store.update(latest)
 
                     LOGGER.debug(
                         "ticker_received",
@@ -398,6 +433,7 @@ async def run_collector(settings: Settings) -> None:
     )
 
     pool = await create_pool(require_collector_database_url(settings))
+    live_cache = create_live_cache(settings)
     try:
         instrument_id = await get_instrument_id(
             pool,
@@ -406,7 +442,7 @@ async def run_collector(settings: Settings) -> None:
         )
         latest_store = LatestPriceStore()
         await asyncio.gather(
-            websocket_reader_loop(settings, latest_store),
+            websocket_reader_loop(settings, latest_store, live_cache=live_cache),
             sampler_loop(
                 pool=pool,
                 latest_store=latest_store,
@@ -415,6 +451,7 @@ async def run_collector(settings: Settings) -> None:
             ),
         )
     finally:
+        await live_cache.close()
         await pool.close()
 
 

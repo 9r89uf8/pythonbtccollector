@@ -39,5 +39,10 @@ class Settings(BaseSettings):
     BINANCE_FUTURES_HIST_OI_ENABLED: bool = True
     BINANCE_FUTURES_HIST_OI_POLL_SECONDS: int = 30
 
+    REDIS_HOST: str = "127.0.0.1"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 0.25
+
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None

@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -11,7 +12,9 @@ from price_collector.collector import (
     parse_binance_ticker_payload,
     require_collector_database_url,
     sample_second_ms_for_now,
+    update_binance_live_cache,
 )
+from price_collector.live_cache import BINANCE_SPOT_LIVE_KEY
 
 
 def test_parse_binance_ticker_payload_uses_decimal_price_and_event_time():
@@ -125,6 +128,47 @@ def test_build_pending_sample_uses_market_helper_for_fresh_price():
     assert sample.sample_second_ms == 1_783_459_200_000
     assert sample.price == Decimal("12345.67000000")
     assert sample.window.market_start_ms == 1_783_459_200_000
+
+
+def test_binance_websocket_update_writes_redis_live_cache():
+    calls = []
+
+    class FakeLiveCache:
+        async def set_price(
+            self,
+            key,
+            *,
+            value,
+            source_timestamp_ms,
+            received_ms,
+        ):
+            calls.append(
+                {
+                    "key": key,
+                    "value": value,
+                    "source_timestamp_ms": source_timestamp_ms,
+                    "received_ms": received_ms,
+                }
+            )
+
+    latest = LatestPrice(
+        symbol="BTCUSDT",
+        price=Decimal("62067.89000000"),
+        provider_event_ms=1_783_459_250_123,
+        received_ms=1_783_459_250_150,
+    )
+
+    written = asyncio.run(update_binance_live_cache(FakeLiveCache(), latest))
+
+    assert written is True
+    assert calls == [
+        {
+            "key": BINANCE_SPOT_LIVE_KEY,
+            "value": Decimal("62067.89000000"),
+            "source_timestamp_ms": 1_783_459_250_123,
+            "received_ms": 1_783_459_250_150,
+        }
+    ]
 
 
 def test_collector_requires_database_url_before_startup_connects():

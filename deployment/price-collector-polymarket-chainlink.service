@@ -1,7 +1,7 @@
 [Unit]
 Description=Polymarket Chainlink BTC/USD RTDS price collector
-After=network-online.target postgresql.service
-Wants=network-online.target
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
