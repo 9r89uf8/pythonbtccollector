@@ -114,6 +114,33 @@ def serialize_market_sources_summary(
     }
 
 
+def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    exported = dict(item)
+    exported.pop("freshness", None)
+
+    prices = dict(exported.get("prices") or {})
+    futures = exported.get("futures")
+    if isinstance(futures, Mapping):
+        prices["futures"] = futures.get("last")
+    exported["prices"] = prices
+
+    return exported
+
+
+def serialize_download_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    exported = {}
+    for key, value in payload.items():
+        if key == "series":
+            exported[key] = [
+                serialize_download_series_item(item)
+                for item in value
+            ]
+        else:
+            exported[key] = value
+
+    return exported
+
+
 def get_pool(request: Request) -> Any:
     return request.app.state.pool
 
@@ -439,9 +466,10 @@ async def market_download_response(
     if include_probabilities:
         parts.append("probabilities")
     filename = "_".join(parts) + ".json"
+    download_payload = serialize_download_payload(payload)
 
     return Response(
-        content=json.dumps(payload, default=str, separators=(",", ":")),
+        content=json.dumps(download_payload, default=str, separators=(",", ":")),
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

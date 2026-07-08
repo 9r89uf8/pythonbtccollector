@@ -364,6 +364,16 @@ def market_data_payload(
             "binance": "123000.00",
             "chainlink": "122998.12",
         },
+        "freshness": {
+            "binance": {
+                "source_age_ms": 250,
+                "received_age_ms": 200,
+            },
+            "chainlink": {
+                "source_age_ms": 300,
+                "received_age_ms": 225,
+            },
+        },
     }
     if include_probabilities:
         row["probabilities"] = {
@@ -633,7 +643,9 @@ def test_markets_download_returns_attachment_filename(client, monkeypatch):
         response.headers["content-disposition"]
         == 'attachment; filename="btc_5m_market_5944864_probabilities.json"'
     )
-    assert response.json()["series"][0]["probabilities"]["down"]["normalized"] == "0.51758794"
+    body = response.json()
+    assert body["series"][0]["probabilities"]["down"]["normalized"] == "0.51758794"
+    assert "freshness" not in body["series"][0]
 
 
 def test_markets_download_filename_includes_requested_optional_layers(client, monkeypatch):
@@ -679,4 +691,11 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
             'btc_5m_market_5944864_futures_oi_probabilities.json"'
         )
     )
-    assert response.json()["series"][0]["futures"]["last"] == "62075.12"
+    body = response.json()
+    assert body["series"][0]["prices"] == {
+        "binance": "123000.00",
+        "chainlink": "122998.12",
+        "futures": "62075.12",
+    }
+    assert body["series"][0]["futures"]["last"] == "62075.12"
+    assert "freshness" not in body["series"][0]
