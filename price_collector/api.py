@@ -65,8 +65,20 @@ def serialize_download_flow(flow: Mapping[str, Any]) -> dict[str, Any]:
         key: flow.get(key)
         for key in DOWNLOAD_FLOW_FIELDS
     }
+    exported["taker_imbalance"] = _format_download_decimal_string(
+        exported["taker_imbalance"],
+        "0.0000",
+    )
     exported["cvd_10s"] = _format_download_decimal_string(exported["cvd_10s"], "0.01")
     exported["cvd_30s"] = _format_download_decimal_string(exported["cvd_30s"], "0.01")
+    exported["imbalance_10s"] = _format_download_decimal_string(
+        exported["imbalance_10s"],
+        "0.0000",
+    )
+    exported["imbalance_30s"] = _format_download_decimal_string(
+        exported["imbalance_30s"],
+        "0.0000",
+    )
     return exported
 
 
@@ -75,6 +87,10 @@ def serialize_download_book(book: Mapping[str, Any]) -> dict[str, Any]:
         key: book.get(key)
         for key in DOWNLOAD_BOOK_FIELDS
     }
+    exported["book_imbalance"] = _format_download_decimal_string(
+        exported["book_imbalance"],
+        "0.0000",
+    )
     exported["microprice"] = _format_download_decimal_string(
         exported["microprice"],
         "0.01",

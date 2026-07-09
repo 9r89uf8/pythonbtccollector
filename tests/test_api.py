@@ -851,14 +851,14 @@ def test_markets_download_trims_flow_and_book_to_export_fields(client, monkeypat
     )
     body = response.json()
     assert body["series"][0]["flow"] == {
-        "taker_imbalance": "0.60000000",
+        "taker_imbalance": "0.6000",
         "cvd_10s": "900.12",
         "cvd_30s": "1200.13",
-        "imbalance_10s": "0.12345678",
-        "imbalance_30s": "-0.23456789",
+        "imbalance_10s": "0.1235",
+        "imbalance_30s": "-0.2346",
     }
     assert body["series"][0]["book"] == {
-        "book_imbalance": "0.25000000",
+        "book_imbalance": "0.2500",
         "microprice": "62074.17",
     }
     assert "buy_quote" not in body["series"][0]["flow"]
