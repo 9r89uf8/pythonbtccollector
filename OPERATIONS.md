@@ -10,6 +10,7 @@ On the droplet:
 systemctl status price-collector --no-pager
 systemctl status price-collector-polymarket-chainlink --no-pager
 systemctl status price-collector-binance-futures --no-pager
+systemctl status price-collector-polymarket-probabilities --no-pager
 systemctl status redis-server --no-pager
 systemctl status price-api --no-pager
 ```
@@ -20,6 +21,7 @@ Follow logs:
 journalctl -u price-collector -f
 journalctl -u price-collector-polymarket-chainlink -f
 journalctl -u price-collector-binance-futures -f
+journalctl -u price-collector-polymarket-probabilities -f
 journalctl -u price-api -f
 ```
 
@@ -88,7 +90,7 @@ After pushing code-only changes to GitHub, update the droplet:
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-systemctl restart redis-server price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-api
+sudo systemctl restart price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 ```
 
 If the update adds database columns, seed rows, indexes, or new systemd unit files, use this fuller sequence instead. Apply the schema before restarting services so new code does not start before PostgreSQL has the expected tables, columns, and seed data:
@@ -99,16 +101,17 @@ cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 
-sudo -u postgres psql -d price_collector -f /opt/price-collector/schema.sql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
 
 sudo cp /opt/price-collector/deployment/price-collector.service /etc/systemd/system/price-collector.service
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.service /etc/systemd/system/price-collector-polymarket-chainlink.service
 sudo cp /opt/price-collector/deployment/price-collector-binance-futures.service /etc/systemd/system/price-collector-binance-futures.service
+sudo cp /opt/price-collector/deployment/price-collector-polymarket-probabilities.service /etc/systemd/system/price-collector-polymarket-probabilities.service
 sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
 sudo systemctl daemon-reload
-sudo systemctl enable redis-server price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-api
+sudo systemctl enable redis-server price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 
-sudo systemctl restart redis-server price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-api
+sudo systemctl restart price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 ```
 
 Verify after restart:
@@ -117,6 +120,7 @@ Verify after restart:
 systemctl status price-collector --no-pager
 systemctl status price-collector-polymarket-chainlink --no-pager
 systemctl status price-collector-binance-futures --no-pager
+systemctl status price-collector-polymarket-probabilities --no-pager
 systemctl status redis-server --no-pager
 systemctl status price-api --no-pager
 curl http://127.0.0.1:9000/healthz
