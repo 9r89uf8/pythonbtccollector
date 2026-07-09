@@ -35,6 +35,14 @@ def decimal_fixed_or_none(
     return format(value.quantize(quantum, rounding=ROUND_HALF_UP), "f")
 
 
+def decimal_string_or_none(value: Optional[Decimal]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    return format(value, "f")
+
+
 def decimal_2dp_or_none(value: Optional[Decimal]) -> Optional[str]:
     return decimal_fixed_or_none(value, "0.01")
 
@@ -975,6 +983,8 @@ def build_market_download_payload(
     include_probabilities: bool,
     include_futures: bool,
     include_oi: bool,
+    include_flow: bool = False,
+    include_book: bool = False,
 ) -> Optional[dict[str, Any]]:
     if not rows:
         return None
@@ -996,6 +1006,13 @@ def build_market_download_payload(
         premium_index_time_ms = row.get("premium_index_time_ms")
         open_interest_time_ms = row.get("open_interest_time_ms")
         futures_received_ms = row.get("futures_received_ms")
+        flow_last_trade_time_ms = row.get("flow_last_trade_time_ms")
+        flow_last_event_time_ms = row.get("flow_last_event_time_ms")
+        flow_received_ms = row.get("flow_received_ms")
+        book_event_time_ms = row.get("book_event_time_ms")
+        book_transaction_time_ms = row.get("book_transaction_time_ms")
+        book_received_ms = row.get("book_received_ms")
+        book_source_time_ms = book_event_time_ms or book_transaction_time_ms
         item = {
             "t": (sample_second_ms - market_start_ms) // 1000,
             "timestamp_ms": sample_second_ms,
@@ -1048,6 +1065,72 @@ def build_market_download_payload(
                 },
             },
         }
+
+        if include_flow:
+            item["flow"] = {
+                "buy_base": decimal_string_or_none(row.get("flow_buy_base")),
+                "sell_base": decimal_string_or_none(row.get("flow_sell_base")),
+                "buy_quote": decimal_string_or_none(row.get("flow_buy_quote")),
+                "sell_quote": decimal_string_or_none(row.get("flow_sell_quote")),
+                "delta_quote": decimal_string_or_none(row.get("flow_delta_quote")),
+                "total_quote": decimal_string_or_none(row.get("flow_total_quote")),
+                "taker_imbalance": decimal_string_or_none(
+                    row.get("flow_taker_imbalance")
+                ),
+                "cvd_quote": decimal_string_or_none(row.get("flow_cvd_quote")),
+                "cvd_10s": decimal_string_or_none(row.get("flow_cvd_10s")),
+                "cvd_30s": decimal_string_or_none(row.get("flow_cvd_30s")),
+                "imbalance_10s": decimal_string_or_none(
+                    row.get("flow_imbalance_10s")
+                ),
+                "imbalance_30s": decimal_string_or_none(
+                    row.get("flow_imbalance_30s")
+                ),
+                "agg_trade_count": row.get("flow_agg_trade_count"),
+                "trade_count": row.get("flow_trade_count"),
+                "max_trade_quote": decimal_string_or_none(
+                    row.get("flow_max_trade_quote")
+                ),
+                "first_agg_trade_id": row.get("flow_first_agg_trade_id"),
+                "last_agg_trade_id": row.get("flow_last_agg_trade_id"),
+            }
+            item["freshness"]["futures_flow"] = {
+                "source_ms": flow_last_trade_time_ms,
+                "event_ms": flow_last_event_time_ms,
+                "received_ms": flow_received_ms,
+                **freshness_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=flow_last_trade_time_ms,
+                    received_ms=flow_received_ms,
+                ),
+            }
+
+        if include_book:
+            item["book"] = {
+                "bid": decimal_string_or_none(row.get("book_bid")),
+                "ask": decimal_string_or_none(row.get("book_ask")),
+                "bid_qty": decimal_string_or_none(row.get("book_bid_qty")),
+                "ask_qty": decimal_string_or_none(row.get("book_ask_qty")),
+                "mid": decimal_string_or_none(row.get("book_mid")),
+                "spread": decimal_string_or_none(row.get("book_spread")),
+                "spread_bps": decimal_string_or_none(row.get("book_spread_bps")),
+                "book_imbalance": decimal_string_or_none(
+                    row.get("book_book_imbalance")
+                ),
+                "microprice": decimal_string_or_none(row.get("book_microprice")),
+                "update_id": row.get("book_update_id"),
+            }
+            item["freshness"]["futures_book"] = {
+                "source_ms": book_source_time_ms,
+                "event_ms": book_event_time_ms,
+                "transaction_ms": book_transaction_time_ms,
+                "received_ms": book_received_ms,
+                **freshness_meta(
+                    server_time_ms=server_time_ms,
+                    source_time_ms=book_source_time_ms,
+                    received_ms=book_received_ms,
+                ),
+            }
 
         if include_probabilities:
             item["probabilities"] = {
@@ -1114,6 +1197,8 @@ async def fetch_market_download_payload(
     include_probabilities: bool,
     include_futures: bool,
     include_oi: bool,
+    include_flow: bool = False,
+    include_book: bool = False,
     fill_display: bool = False,
     max_carry_forward_ms: int = 10_000,
 ) -> Optional[dict[str, Any]]:
@@ -1169,6 +1254,20 @@ async def fetch_market_download_payload(
                 SELECT *
                 FROM binance_futures_snapshots
                 WHERE market_id = $1
+                  AND symbol = 'BTCUSDT'
+            ),
+            flow AS (
+                SELECT *
+                FROM binance_flow_1s
+                WHERE market_id = $1
+                  AND venue = 'binance_usdm_perp'
+                  AND symbol = 'BTCUSDT'
+            ),
+            book AS (
+                SELECT *
+                FROM binance_book_1s
+                WHERE market_id = $1
+                  AND venue = 'binance_usdm_perp'
                   AND symbol = 'BTCUSDT'
             ),
             oi_prev AS (
@@ -1262,6 +1361,41 @@ async def fetch_market_download_payload(
                 (f.open_interest - oi_60.open_interest_60s_ago) AS oi_delta_60s,
                 (f.open_interest - oi_300.open_interest_300s_ago) AS oi_delta_300s,
 
+                flow.buy_base AS flow_buy_base,
+                flow.sell_base AS flow_sell_base,
+                flow.buy_quote AS flow_buy_quote,
+                flow.sell_quote AS flow_sell_quote,
+                flow.delta_quote AS flow_delta_quote,
+                flow.total_quote AS flow_total_quote,
+                flow.taker_imbalance AS flow_taker_imbalance,
+                flow.cvd_quote AS flow_cvd_quote,
+                flow.cvd_10s AS flow_cvd_10s,
+                flow.cvd_30s AS flow_cvd_30s,
+                flow.imbalance_10s AS flow_imbalance_10s,
+                flow.imbalance_30s AS flow_imbalance_30s,
+                flow.agg_trade_count AS flow_agg_trade_count,
+                flow.trade_count AS flow_trade_count,
+                flow.max_trade_quote AS flow_max_trade_quote,
+                flow.first_agg_trade_id AS flow_first_agg_trade_id,
+                flow.last_agg_trade_id AS flow_last_agg_trade_id,
+                flow.last_trade_time_ms AS flow_last_trade_time_ms,
+                flow.last_event_time_ms AS flow_last_event_time_ms,
+                flow.received_ms AS flow_received_ms,
+
+                book.bid AS book_bid,
+                book.ask AS book_ask,
+                book.bid_qty AS book_bid_qty,
+                book.ask_qty AS book_ask_qty,
+                book.mid AS book_mid,
+                book.spread AS book_spread,
+                book.spread_bps AS book_spread_bps,
+                book.book_imbalance AS book_book_imbalance,
+                book.microprice AS book_microprice,
+                book.update_id AS book_update_id,
+                book.event_time_ms AS book_event_time_ms,
+                book.transaction_time_ms AS book_transaction_time_ms,
+                book.received_ms AS book_received_ms,
+
                 oi_prev.source_window_start_ms AS prev_oi_source_window_start_ms,
                 oi_prev.source_window_end_ms AS prev_oi_source_window_end_ms,
                 oi_prev.sum_open_interest AS prev_oi_sum_open_interest,
@@ -1287,6 +1421,8 @@ async def fetch_market_download_payload(
             ) c ON TRUE
             LEFT JOIN probs ON probs.sample_second_ms = s.sample_second_ms
             LEFT JOIN futures f ON f.sample_second_ms = s.sample_second_ms
+            LEFT JOIN flow ON flow.sample_second_ms = s.sample_second_ms
+            LEFT JOIN book ON book.sample_second_ms = s.sample_second_ms
             LEFT JOIN oi_30 ON oi_30.sample_second_ms = s.sample_second_ms
             LEFT JOIN oi_60 ON oi_60.sample_second_ms = s.sample_second_ms
             LEFT JOIN oi_300 ON oi_300.sample_second_ms = s.sample_second_ms
@@ -1304,6 +1440,8 @@ async def fetch_market_download_payload(
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        include_flow=include_flow,
+        include_book=include_book,
     )
 
 

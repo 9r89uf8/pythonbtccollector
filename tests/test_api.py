@@ -355,6 +355,8 @@ def market_data_payload(
     include_probabilities=False,
     include_futures=False,
     include_oi=False,
+    include_flow=False,
+    include_book=False,
 ):
     row = {
         "t": 0,
@@ -399,6 +401,26 @@ def market_data_payload(
             "premium_bps": "0.76",
         }
 
+    if include_flow:
+        row["flow"] = {
+            "buy_quote": "1000.00",
+            "sell_quote": "250.00",
+            "delta_quote": "750.00",
+            "total_quote": "1250.00",
+            "taker_imbalance": "0.60000000",
+            "cvd_10s": "900.00",
+            "cvd_30s": "1200.00",
+        }
+
+    if include_book:
+        row["book"] = {
+            "bid": "62074.10",
+            "ask": "62074.20",
+            "spread_bps": "0.01610935",
+            "book_imbalance": "0.25000000",
+            "microprice": "62074.16",
+        }
+
     payload = {
         "schema_version": 1,
         "market": {
@@ -439,6 +461,8 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
         include_probabilities,
         include_futures,
         include_oi,
+        include_flow,
+        include_book,
         fill_display,
         max_carry_forward_ms,
     ):
@@ -447,6 +471,8 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
         assert include_probabilities is False
         assert include_futures is False
         assert include_oi is False
+        assert include_flow is False
+        assert include_book is False
         assert fill_display is False
         assert max_carry_forward_ms == 10_000
         return market_data_payload()
@@ -476,6 +502,8 @@ def test_markets_data_by_id_can_include_probabilities(client, monkeypatch):
         include_probabilities,
         include_futures,
         include_oi,
+        include_flow,
+        include_book,
         fill_display,
         max_carry_forward_ms,
     ):
@@ -484,6 +512,8 @@ def test_markets_data_by_id_can_include_probabilities(client, monkeypatch):
         assert include_probabilities is True
         assert include_futures is False
         assert include_oi is False
+        assert include_flow is False
+        assert include_book is False
         assert fill_display is False
         assert max_carry_forward_ms == 10_000
         return market_data_payload(include_probabilities=True)
@@ -509,6 +539,8 @@ def test_markets_data_by_id_can_include_futures_and_oi(client, monkeypatch):
         include_probabilities,
         include_futures,
         include_oi,
+        include_flow,
+        include_book,
         fill_display,
         max_carry_forward_ms,
     ):
@@ -517,6 +549,8 @@ def test_markets_data_by_id_can_include_futures_and_oi(client, monkeypatch):
         assert include_probabilities is False
         assert include_futures is True
         assert include_oi is True
+        assert include_flow is False
+        assert include_book is False
         assert fill_display is False
         assert max_carry_forward_ms == 10_000
         return market_data_payload(include_futures=True, include_oi=True)
@@ -536,6 +570,66 @@ def test_markets_data_by_id_can_include_futures_and_oi(client, monkeypatch):
     assert body["previous_5m_oi_summary"]["sum_open_interest"] == "74000.123"
 
 
+def test_markets_data_by_id_can_include_futures_flow_and_book(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        server_time_ms,
+        include_probabilities,
+        include_futures,
+        include_oi,
+        include_flow,
+        include_book,
+        fill_display,
+        max_carry_forward_ms,
+    ):
+        assert market_id == 5_944_864
+        assert isinstance(server_time_ms, int)
+        assert include_probabilities is False
+        assert include_futures is False
+        assert include_oi is False
+        assert include_flow is True
+        assert include_book is True
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
+        return market_data_payload(include_flow=True, include_book=True)
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get("/markets/5944864/data?include_flow=true&include_book=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["series"][0]["flow"]["delta_quote"] == "750.00"
+    assert body["series"][0]["flow"]["taker_imbalance"] == "0.60000000"
+    assert body["series"][0]["book"]["spread_bps"] == "0.01610935"
+    assert body["series"][0]["book"]["book_imbalance"] == "0.25000000"
+
+
+def test_openapi_lists_futures_flow_and_book_include_flags(client):
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    schema = response.json()
+    current_data_params = {
+        param["name"]
+        for param in schema["paths"]["/markets/current/data"]["get"]["parameters"]
+    }
+    market_data_params = {
+        param["name"]
+        for param in schema["paths"]["/markets/{market_id}/data"]["get"]["parameters"]
+    }
+
+    assert "include_flow" in current_data_params
+    assert "include_book" in current_data_params
+    assert "include_flow" in market_data_params
+    assert "include_book" in market_data_params
+
+
 def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
     async def fake_fetch_market_download_payload(
         pool,
@@ -544,6 +638,8 @@ def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
         include_probabilities,
         include_futures,
         include_oi,
+        include_flow,
+        include_book,
         fill_display,
         max_carry_forward_ms,
     ):
@@ -552,6 +648,8 @@ def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
         assert include_probabilities is False
         assert include_futures is False
         assert include_oi is False
+        assert include_flow is False
+        assert include_book is False
         assert fill_display is True
         assert max_carry_forward_ms == 5_000
         return market_data_payload()
@@ -617,6 +715,8 @@ def test_markets_download_returns_attachment_filename(client, monkeypatch):
         include_probabilities,
         include_futures,
         include_oi,
+        include_flow,
+        include_book,
         fill_display,
         max_carry_forward_ms,
     ):
@@ -625,6 +725,8 @@ def test_markets_download_returns_attachment_filename(client, monkeypatch):
         assert include_probabilities is True
         assert include_futures is False
         assert include_oi is False
+        assert include_flow is False
+        assert include_book is False
         assert fill_display is False
         assert max_carry_forward_ms == 10_000
         return market_data_payload(include_probabilities=True)
@@ -656,6 +758,8 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
         include_probabilities,
         include_futures,
         include_oi,
+        include_flow,
+        include_book,
         fill_display,
         max_carry_forward_ms,
     ):
@@ -664,6 +768,8 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
         assert include_probabilities is True
         assert include_futures is True
         assert include_oi is True
+        assert include_flow is False
+        assert include_book is False
         assert fill_display is False
         assert max_carry_forward_ms == 10_000
         return market_data_payload(

@@ -260,6 +260,8 @@ async def markets_current_data(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    include_flow: bool = Query(False),
+    include_book: bool = Query(False),
     fill_display: bool = Query(False),
     max_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
@@ -274,6 +276,8 @@ async def markets_current_data(
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        include_flow=include_flow,
+        include_book=include_book,
         fill_display=fill_display,
         max_carry_forward_ms=max_carry_forward_ms,
     )
@@ -289,6 +293,8 @@ async def markets_data_by_id(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    include_flow: bool = Query(False),
+    include_book: bool = Query(False),
     fill_display: bool = Query(False),
     max_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
@@ -300,6 +306,8 @@ async def markets_data_by_id(
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        include_flow=include_flow,
+        include_book=include_book,
         fill_display=fill_display,
         max_carry_forward_ms=max_carry_forward_ms,
     )
@@ -317,6 +325,8 @@ async def markets_current_download(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    include_flow: bool = Query(False),
+    include_book: bool = Query(False),
     fill_display: bool = Query(False),
     max_carry_forward_ms: int = Query(10_000),
 ) -> Response:
@@ -331,6 +341,8 @@ async def markets_current_download(
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        include_flow=include_flow,
+        include_book=include_book,
         fill_display=fill_display,
         max_carry_forward_ms=max_carry_forward_ms,
     )
@@ -343,6 +355,8 @@ async def markets_download_by_id(
     include_probabilities: bool = Query(False),
     include_futures: bool = Query(False),
     include_oi: bool = Query(False),
+    include_flow: bool = Query(False),
+    include_book: bool = Query(False),
     fill_display: bool = Query(False),
     max_carry_forward_ms: int = Query(10_000),
 ) -> Response:
@@ -354,6 +368,8 @@ async def markets_download_by_id(
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        include_flow=include_flow,
+        include_book=include_book,
         fill_display=fill_display,
         max_carry_forward_ms=max_carry_forward_ms,
     )
@@ -440,6 +456,8 @@ async def market_download_response(
     include_probabilities: bool,
     include_futures: bool,
     include_oi: bool,
+    include_flow: bool,
+    include_book: bool,
     fill_display: bool,
     max_carry_forward_ms: int,
 ) -> Response:
@@ -450,6 +468,8 @@ async def market_download_response(
         include_probabilities=include_probabilities,
         include_futures=include_futures,
         include_oi=include_oi,
+        include_flow=include_flow,
+        include_book=include_book,
         fill_display=fill_display,
         max_carry_forward_ms=max_carry_forward_ms,
     )
@@ -464,6 +484,10 @@ async def market_download_response(
         parts.append("futures")
     if include_oi:
         parts.append("oi")
+    if include_flow:
+        parts.append("flow")
+    if include_book:
+        parts.append("book")
     if include_probabilities:
         parts.append("probabilities")
     filename = "_".join(parts) + ".json"

@@ -513,6 +513,109 @@ def test_build_market_download_payload_adds_optional_futures_and_oi():
     }
 
 
+def test_build_market_download_payload_adds_optional_futures_flow_and_book():
+    rows = market_download_rows()
+    row = rows[12]
+    row.update(
+        {
+            "flow_buy_base": Decimal("0.10000000"),
+            "flow_sell_base": Decimal("0.02500000"),
+            "flow_buy_quote": Decimal("6207.500000000000000000"),
+            "flow_sell_quote": Decimal("1551.875000000000000000"),
+            "flow_delta_quote": Decimal("4655.625000000000000000"),
+            "flow_total_quote": Decimal("7759.375000000000000000"),
+            "flow_taker_imbalance": Decimal("0.60000000"),
+            "flow_cvd_quote": Decimal("98765.432100000000000000"),
+            "flow_cvd_10s": Decimal("12345.670000000000000000"),
+            "flow_cvd_30s": Decimal("23456.780000000000000000"),
+            "flow_imbalance_10s": Decimal("0.12345678"),
+            "flow_imbalance_30s": Decimal("-0.23456789"),
+            "flow_agg_trade_count": 7,
+            "flow_trade_count": 10,
+            "flow_max_trade_quote": Decimal("2500.125000000000000000"),
+            "flow_first_agg_trade_id": 100,
+            "flow_last_agg_trade_id": 106,
+            "flow_last_trade_time_ms": 1_783_459_212_075,
+            "flow_last_event_time_ms": 1_783_459_212_090,
+            "flow_received_ms": 1_783_459_212_120,
+            "book_bid": Decimal("62074.100000000000000000"),
+            "book_ask": Decimal("62074.200000000000000000"),
+            "book_bid_qty": Decimal("1.500000000000000000"),
+            "book_ask_qty": Decimal("0.900000000000000000"),
+            "book_mid": Decimal("62074.150000000000000000"),
+            "book_spread": Decimal("0.100000000000000000"),
+            "book_spread_bps": Decimal("0.01610935"),
+            "book_book_imbalance": Decimal("0.25000000"),
+            "book_microprice": Decimal("62074.162500000000000000"),
+            "book_update_id": 123456,
+            "book_event_time_ms": 1_783_459_212_080,
+            "book_transaction_time_ms": 1_783_459_212_070,
+            "book_received_ms": 1_783_459_212_115,
+        }
+    )
+
+    payload = db.build_market_download_payload(
+        rows,
+        server_time_ms=1_783_459_212_250,
+        include_probabilities=False,
+        include_futures=False,
+        include_oi=False,
+        include_flow=True,
+        include_book=True,
+    )
+
+    assert payload is not None
+    item = payload["series"][12]
+    assert item["flow"] == {
+        "buy_base": "0.10000000",
+        "sell_base": "0.02500000",
+        "buy_quote": "6207.500000000000000000",
+        "sell_quote": "1551.875000000000000000",
+        "delta_quote": "4655.625000000000000000",
+        "total_quote": "7759.375000000000000000",
+        "taker_imbalance": "0.60000000",
+        "cvd_quote": "98765.432100000000000000",
+        "cvd_10s": "12345.670000000000000000",
+        "cvd_30s": "23456.780000000000000000",
+        "imbalance_10s": "0.12345678",
+        "imbalance_30s": "-0.23456789",
+        "agg_trade_count": 7,
+        "trade_count": 10,
+        "max_trade_quote": "2500.125000000000000000",
+        "first_agg_trade_id": 100,
+        "last_agg_trade_id": 106,
+    }
+    assert item["book"] == {
+        "bid": "62074.100000000000000000",
+        "ask": "62074.200000000000000000",
+        "bid_qty": "1.500000000000000000",
+        "ask_qty": "0.900000000000000000",
+        "mid": "62074.150000000000000000",
+        "spread": "0.100000000000000000",
+        "spread_bps": "0.01610935",
+        "book_imbalance": "0.25000000",
+        "microprice": "62074.162500000000000000",
+        "update_id": 123456,
+    }
+    assert item["freshness"]["futures_flow"] == {
+        "source_ms": 1_783_459_212_075,
+        "event_ms": 1_783_459_212_090,
+        "received_ms": 1_783_459_212_120,
+        "source_age_ms": 175,
+        "received_age_ms": 130,
+        "transport_lag_ms": 45,
+    }
+    assert item["freshness"]["futures_book"] == {
+        "source_ms": 1_783_459_212_080,
+        "event_ms": 1_783_459_212_080,
+        "transaction_ms": 1_783_459_212_070,
+        "received_ms": 1_783_459_212_115,
+        "source_age_ms": 170,
+        "received_age_ms": 135,
+        "transport_lag_ms": 35,
+    }
+
+
 def test_build_market_download_payload_marks_chainlink_display_carry_forward():
     rows = market_download_rows()
     rows[1]["chainlink_sample_second_ms"] = rows[0]["sample_second_ms"]
@@ -617,7 +720,7 @@ def test_fetch_current_live_payload_returns_latest_values_with_freshness():
     assert payload["open_interest"]["source_age_ms"] == 10_123
 
 
-def test_fetch_market_download_payload_query_includes_futures_and_oi_joins():
+def test_fetch_market_download_payload_query_includes_optional_futures_joins():
     source = inspect.getsource(db.fetch_market_download_payload)
 
     assert "server_time_ms: int" in source
@@ -629,8 +732,16 @@ def test_fetch_market_download_payload_query_includes_futures_and_oi_joins():
     assert "LEFT JOIN LATERAL" in source
     assert "include_futures: bool" in source
     assert "include_oi: bool" in source
+    assert "include_flow: bool" in source
+    assert "include_book: bool" in source
     assert "FROM binance_futures_snapshots" in source
     assert "FROM binance_futures_oi_5m_summaries" in source
+    assert "FROM binance_flow_1s" in source
+    assert "FROM binance_book_1s" in source
+    assert "flow.delta_quote AS flow_delta_quote" in source
+    assert "book.spread_bps AS book_spread_bps" in source
+    assert "LEFT JOIN flow ON flow.sample_second_ms = s.sample_second_ms" in source
+    assert "LEFT JOIN book ON book.sample_second_ms = s.sample_second_ms" in source
     assert "f.sample_second_ms - 30000" in source
     assert "f.sample_second_ms - 60000" in source
     assert "f.sample_second_ms - 300000" in source
