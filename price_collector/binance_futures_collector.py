@@ -7,6 +7,14 @@ from typing import Any, Mapping, Optional
 
 import httpx
 
+from price_collector.binance_futures_streams import (
+    AsyncBookTickerAggregator,
+    AsyncFlowAggregator,
+    futures_agg_trade_reader_loop,
+    futures_book_flush_loop,
+    futures_book_ticker_reader_loop,
+    futures_flow_flush_loop,
+)
 from price_collector.collector import (
     current_utc_epoch_ms,
     require_collector_database_url,
@@ -357,7 +365,11 @@ async def collect_once(
         oi_notional_usdt=snapshot.oi_notional_usdt,
         premium_bps=snapshot.premium_bps,
         received_ms=snapshot.received_ms,
-        raw=snapshot.raw,
+        raw=(
+            snapshot.raw
+            if getattr(settings, "BINANCE_FUTURES_STORE_RAW_JSON", False)
+            else None
+        ),
     )
 
     LOGGER.info(
@@ -434,7 +446,11 @@ async def collect_historical_oi_once(
             sum_open_interest=summary.sum_open_interest,
             sum_open_interest_value=summary.sum_open_interest_value,
             received_ms=summary.received_ms,
-            raw=summary.raw,
+            raw=(
+                summary.raw
+                if getattr(settings, "BINANCE_FUTURES_STORE_RAW_JSON", False)
+                else None
+            ),
         )
         stored += 1
 
@@ -511,6 +527,8 @@ async def run_collector(settings: Settings) -> None:
             "base_url": settings.BINANCE_FUTURES_BASE_URL,
             "symbol": settings.BINANCE_FUTURES_SYMBOL,
             "historical_oi_enabled": settings.BINANCE_FUTURES_HIST_OI_ENABLED,
+            "streams_enabled": settings.BINANCE_FUTURES_STREAMS_ENABLED,
+            "store_raw_json": settings.BINANCE_FUTURES_STORE_RAW_JSON,
         },
     )
 
@@ -534,6 +552,40 @@ async def run_collector(settings: Settings) -> None:
                     asyncio.create_task(
                         historical_oi_loop(pool=pool, client=client, settings=settings)
                     )
+                )
+
+            if settings.BINANCE_FUTURES_STREAMS_ENABLED:
+                flow_store = AsyncFlowAggregator(
+                    venue=settings.BINANCE_FUTURES_PROVIDER_CODE,
+                    symbol=settings.BINANCE_FUTURES_SYMBOL,
+                )
+                book_store = AsyncBookTickerAggregator(
+                    venue=settings.BINANCE_FUTURES_PROVIDER_CODE,
+                    symbol=settings.BINANCE_FUTURES_SYMBOL,
+                )
+                tasks.extend(
+                    [
+                        asyncio.create_task(
+                            futures_agg_trade_reader_loop(settings, flow_store)
+                        ),
+                        asyncio.create_task(
+                            futures_flow_flush_loop(
+                                pool=pool,
+                                settings=settings,
+                                flow_store=flow_store,
+                            )
+                        ),
+                        asyncio.create_task(
+                            futures_book_ticker_reader_loop(settings, book_store)
+                        ),
+                        asyncio.create_task(
+                            futures_book_flush_loop(
+                                pool=pool,
+                                settings=settings,
+                                book_store=book_store,
+                            )
+                        ),
+                    ]
                 )
 
             await asyncio.gather(*tasks)

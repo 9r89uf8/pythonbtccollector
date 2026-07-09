@@ -96,6 +96,35 @@ def test_upsert_binance_futures_oi_5m_summary_updates_duplicate_source_window_ro
     assert "DO UPDATE SET" in source
 
 
+def test_upsert_binance_flow_1s_updates_duplicate_venue_symbol_second_rows():
+    source = inspect.getsource(db.upsert_binance_flow_1s)
+
+    assert "await _ensure_market_window(connection, window)" in source
+    assert "ON CONFLICT (venue, symbol, sample_second_ms)" in source
+    assert "DO UPDATE SET" in source
+    assert "cvd_10s = EXCLUDED.cvd_10s" in source
+    assert "imbalance_30s = EXCLUDED.imbalance_30s" in source
+
+
+def test_upsert_binance_book_1s_updates_duplicate_venue_symbol_second_rows():
+    source = inspect.getsource(db.upsert_binance_book_1s)
+
+    assert "await _ensure_market_window(connection, window)" in source
+    assert "ON CONFLICT (venue, symbol, sample_second_ms)" in source
+    assert "DO UPDATE SET" in source
+    assert "microprice = EXCLUDED.microprice" in source
+
+
+def test_binance_futures_raw_json_upserts_accept_nullable_raw_payloads():
+    snapshot_source = inspect.getsource(db.upsert_binance_futures_snapshot)
+    oi_source = inspect.getsource(db.upsert_binance_futures_oi_5m_summary)
+
+    assert "raw: Optional[Mapping[str, Any]]" in snapshot_source
+    assert "raw: Optional[Mapping[str, Any]]" in oi_source
+    assert "if raw is not None else None" in snapshot_source
+    assert "if raw is not None else None" in oi_source
+
+
 def test_upsert_polymarket_market_ensures_market_window_before_metadata_insert():
     source = inspect.getsource(db.upsert_polymarket_btc_5m_market)
 
@@ -157,11 +186,18 @@ def test_schema_includes_binance_futures_tables_and_seed():
 
     assert "CREATE TABLE IF NOT EXISTS binance_futures_snapshots" in schema
     assert "CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries" in schema
+    assert "CREATE TABLE IF NOT EXISTS binance_flow_1s" in schema
+    assert "CREATE TABLE IF NOT EXISTS binance_book_1s" in schema
     assert "PRIMARY KEY (symbol, sample_second_ms)" in schema
     assert "PRIMARY KEY (symbol, source_window_start_ms, source_window_end_ms)" in schema
+    assert "PRIMARY KEY (venue, symbol, sample_second_ms)" in schema
     assert "open_interest NUMERIC(38, 18)" in schema
     assert "premium_bps NUMERIC(20, 8)" in schema
     assert "sum_open_interest_value NUMERIC(38, 18)" in schema
+    assert "buy_quote NUMERIC(38, 18)" in schema
+    assert "cvd_30s NUMERIC(38, 18)" in schema
+    assert "bid NUMERIC(38, 18)" in schema
+    assert "microprice NUMERIC(38, 18)" in schema
     assert "'binance_usdm_perp'" in schema
     assert "'binance_usdm_perp:BTCUSDT'" in schema
 

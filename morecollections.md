@@ -287,8 +287,10 @@ Binance says the legacy futures websocket URLs are no longer available after Apr
 1. **Futures `aggTrade` → `binance_flow_1s`**
 2. **Futures `bookTicker` → `binance_book_1s`**
 3. **Keep your existing futures/OI snapshots, but remove long-term raw JSON**
-4. **Add spot `aggTrade` only after futures flow is stable**
-5. **Add liquidation-per-second only if you see it helps around sharp moves**
+
+do not add number 4 or 5
+4. **Add spot `aggTrade` only after futures flow is stable**(dont do this)
+5. **Add liquidation-per-second only if you see it helps around sharp moves**(dont do this)
 
 This should give you a clean, interpretable dataset for 10–30 second BTC movement without filling the database with noise.
 

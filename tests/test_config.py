@@ -70,6 +70,13 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
     monkeypatch.delenv("BINANCE_FUTURES_REST_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("BINANCE_FUTURES_HIST_OI_ENABLED", raising=False)
     monkeypatch.delenv("BINANCE_FUTURES_HIST_OI_POLL_SECONDS", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_STREAMS_ENABLED", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_AGG_TRADE_WS_URL", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_BOOK_TICKER_WS_URL", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_FLOW_FLUSH_DELAY_MS", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_BOOK_FLUSH_DELAY_MS", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_STREAM_FLUSH_SECONDS", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_STORE_RAW_JSON", raising=False)
 
     settings = Settings()
 
@@ -80,6 +87,19 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
     assert settings.BINANCE_FUTURES_REST_TIMEOUT_SECONDS == 5
     assert settings.BINANCE_FUTURES_HIST_OI_ENABLED is True
     assert settings.BINANCE_FUTURES_HIST_OI_POLL_SECONDS == 30
+    assert settings.BINANCE_FUTURES_STREAMS_ENABLED is True
+    assert (
+        settings.BINANCE_FUTURES_AGG_TRADE_WS_URL
+        == "wss://fstream.binance.com/market/ws/btcusdt@aggTrade"
+    )
+    assert (
+        settings.BINANCE_FUTURES_BOOK_TICKER_WS_URL
+        == "wss://fstream.binance.com/public/ws/btcusdt@bookTicker"
+    )
+    assert settings.BINANCE_FUTURES_FLOW_FLUSH_DELAY_MS == 1_500
+    assert settings.BINANCE_FUTURES_BOOK_FLUSH_DELAY_MS == 1_500
+    assert settings.BINANCE_FUTURES_STREAM_FLUSH_SECONDS == 0.25
+    assert settings.BINANCE_FUTURES_STORE_RAW_JSON is False
 
 
 def test_settings_include_local_redis_defaults(monkeypatch):

@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     BINANCE_FUTURES_REST_TIMEOUT_SECONDS: int = 5
     BINANCE_FUTURES_HIST_OI_ENABLED: bool = True
     BINANCE_FUTURES_HIST_OI_POLL_SECONDS: int = 30
+    BINANCE_FUTURES_STREAMS_ENABLED: bool = True
+    BINANCE_FUTURES_AGG_TRADE_WS_URL: str = (
+        "wss://fstream.binance.com/market/ws/btcusdt@aggTrade"
+    )
+    BINANCE_FUTURES_BOOK_TICKER_WS_URL: str = (
+        "wss://fstream.binance.com/public/ws/btcusdt@bookTicker"
+    )
+    BINANCE_FUTURES_FLOW_FLUSH_DELAY_MS: int = 1_500
+    BINANCE_FUTURES_BOOK_FLUSH_DELAY_MS: int = 1_500
+    BINANCE_FUTURES_STREAM_FLUSH_SECONDS: float = 0.25
+    BINANCE_FUTURES_STORE_RAW_JSON: bool = False
 
     REDIS_HOST: str = "127.0.0.1"
     REDIS_PORT: int = 6379

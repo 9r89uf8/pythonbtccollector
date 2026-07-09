@@ -28,6 +28,16 @@ def test_collector_env_example_contains_writer_credentials_only():
     assert "DATABASE_URL=postgresql://price_writer:REPLACE_ME@127.0.0.1:5432/price_collector" in lines
     assert "REDIS_HOST=127.0.0.1" in lines
     assert "REDIS_PORT=6379" in lines
+    assert "BINANCE_FUTURES_STREAMS_ENABLED=true" in lines
+    assert (
+        "BINANCE_FUTURES_AGG_TRADE_WS_URL=wss://fstream.binance.com/market/ws/btcusdt@aggTrade"
+        in lines
+    )
+    assert (
+        "BINANCE_FUTURES_BOOK_TICKER_WS_URL=wss://fstream.binance.com/public/ws/btcusdt@bookTicker"
+        in lines
+    )
+    assert "BINANCE_FUTURES_STORE_RAW_JSON=false" in lines
     assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
 
 

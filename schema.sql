@@ -194,6 +194,112 @@ CREATE INDEX IF NOT EXISTS binance_futures_snapshots_market_idx
 CREATE INDEX IF NOT EXISTS binance_futures_snapshots_latest_idx
     ON binance_futures_snapshots (symbol, sample_second_ms DESC);
 
+CREATE TABLE IF NOT EXISTS binance_flow_1s (
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    sample_second_ms BIGINT NOT NULL,
+    sample_second_at TIMESTAMPTZ NOT NULL,
+
+    buy_base NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    sell_base NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    buy_quote NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    sell_quote NUMERIC(38, 18) NOT NULL DEFAULT 0,
+
+    delta_quote NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    total_quote NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    taker_imbalance NUMERIC(20, 8),
+
+    cvd_quote NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    cvd_10s NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    cvd_30s NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    imbalance_10s NUMERIC(20, 8),
+    imbalance_30s NUMERIC(20, 8),
+
+    agg_trade_count INTEGER NOT NULL DEFAULT 0,
+    trade_count INTEGER NOT NULL DEFAULT 0,
+    max_trade_quote NUMERIC(38, 18),
+
+    first_agg_trade_id BIGINT,
+    last_agg_trade_id BIGINT,
+    last_trade_time_ms BIGINT,
+    last_event_time_ms BIGINT,
+    received_ms BIGINT NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (venue, symbol, sample_second_ms),
+
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms >= market_id * 300000),
+    CHECK (sample_second_ms < (market_id + 1) * 300000),
+    CHECK (buy_base >= 0),
+    CHECK (sell_base >= 0),
+    CHECK (buy_quote >= 0),
+    CHECK (sell_quote >= 0),
+    CHECK (total_quote >= 0),
+    CHECK (agg_trade_count >= 0),
+    CHECK (trade_count >= 0),
+    CHECK (taker_imbalance IS NULL OR (taker_imbalance >= -1 AND taker_imbalance <= 1)),
+    CHECK (imbalance_10s IS NULL OR (imbalance_10s >= -1 AND imbalance_10s <= 1)),
+    CHECK (imbalance_30s IS NULL OR (imbalance_30s >= -1 AND imbalance_30s <= 1))
+);
+
+CREATE INDEX IF NOT EXISTS binance_flow_1s_market_idx
+    ON binance_flow_1s (market_id, venue, symbol, sample_second_ms);
+
+CREATE INDEX IF NOT EXISTS binance_flow_1s_latest_idx
+    ON binance_flow_1s (venue, symbol, sample_second_ms DESC);
+
+CREATE TABLE IF NOT EXISTS binance_book_1s (
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    sample_second_ms BIGINT NOT NULL,
+    sample_second_at TIMESTAMPTZ NOT NULL,
+
+    bid NUMERIC(38, 18) NOT NULL,
+    ask NUMERIC(38, 18) NOT NULL,
+    bid_qty NUMERIC(38, 18) NOT NULL,
+    ask_qty NUMERIC(38, 18) NOT NULL,
+
+    mid NUMERIC(38, 18) NOT NULL,
+    spread NUMERIC(38, 18) NOT NULL,
+    spread_bps NUMERIC(20, 8) NOT NULL,
+    book_imbalance NUMERIC(20, 8),
+    microprice NUMERIC(38, 18),
+
+    update_id BIGINT,
+    event_time_ms BIGINT,
+    transaction_time_ms BIGINT,
+    received_ms BIGINT NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (venue, symbol, sample_second_ms),
+
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms >= market_id * 300000),
+    CHECK (sample_second_ms < (market_id + 1) * 300000),
+    CHECK (bid > 0),
+    CHECK (ask > 0),
+    CHECK (ask >= bid),
+    CHECK (bid_qty >= 0),
+    CHECK (ask_qty >= 0),
+    CHECK (mid > 0),
+    CHECK (spread >= 0),
+    CHECK (spread_bps >= 0),
+    CHECK (book_imbalance IS NULL OR (book_imbalance >= -1 AND book_imbalance <= 1))
+);
+
+CREATE INDEX IF NOT EXISTS binance_book_1s_market_idx
+    ON binance_book_1s (market_id, venue, symbol, sample_second_ms);
+
+CREATE INDEX IF NOT EXISTS binance_book_1s_latest_idx
+    ON binance_book_1s (venue, symbol, sample_second_ms DESC);
+
 CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
     symbol TEXT NOT NULL,
 

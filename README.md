@@ -13,7 +13,7 @@ DigitalOcean droplet
 ├── local Redis live cache bound to 127.0.0.1:6379
 └── local PostgreSQL database price_collector
 ```
-The Binance collector connects to Binance Spot WebSocket stream `btcusdt@ticker`, writes the latest event to Redis immediately, keeps the latest price in memory, and writes at most one PostgreSQL sample per UTC second. The Polymarket collector connects to Polymarket RTDS topic `crypto_prices_chainlink` with filter `{"symbol":"btc/usd"}` and writes Chainlink BTC/USD samples by the source payload timestamp. The Binance futures collector polls REST and writes its latest price to Redis before historical storage. The API is read-only, `/markets/current/live` reads Redis, and the API must bind only to `127.0.0.1:9000`.
+The Binance collector connects to Binance Spot WebSocket stream `btcusdt@ticker`, writes the latest event to Redis immediately, keeps the latest price in memory, and writes at most one PostgreSQL sample per UTC second. The Polymarket collector connects to Polymarket RTDS topic `crypto_prices_chainlink` with filter `{"symbol":"btc/usd"}` and writes Chainlink BTC/USD samples by the source payload timestamp. The Binance futures collector polls REST for futures/OI snapshots, writes its latest price to Redis before historical storage, and also aggregates futures `btcusdt@aggTrade` into `binance_flow_1s` plus `btcusdt@bookTicker` into `binance_book_1s`. The API is read-only, `/markets/current/live` reads Redis, and the API must bind only to `127.0.0.1:9000`.
 Do not run Docker. Do not run a dashboard on the droplet. Do not expose PostgreSQL or the API publicly.
 Droplet Assumptions
 Ubuntu 24.04 LTS
@@ -211,6 +211,13 @@ POLYMARKET_CHAINLINK_SYMBOL=BTCUSD
 POLYMARKET_CHAINLINK_RTD_SYMBOL=btc/usd
 POLYMARKET_CHAINLINK_TOPIC=crypto_prices_chainlink
 ```
+It can also override the Binance futures stream defaults:
+```text
+BINANCE_FUTURES_STREAMS_ENABLED=true
+BINANCE_FUTURES_AGG_TRADE_WS_URL=wss://fstream.binance.com/market/ws/btcusdt@aggTrade
+BINANCE_FUTURES_BOOK_TICKER_WS_URL=wss://fstream.binance.com/public/ws/btcusdt@bookTicker
+BINANCE_FUTURES_STORE_RAW_JSON=false
+```
 `api.env` contains reader credentials only:
 ```text
 READ_DATABASE_URL=postgresql://price_reader:REPLACE_ME@127.0.0.1:5432/price_collector
@@ -284,6 +291,13 @@ JOIN price_samples ps ON ps.market_id = mw.market_id
 GROUP BY mw.market_id, mw.market_start_at, mw.market_end_at
 ORDER BY mw.market_id DESC
 LIMIT 10;
+```
+```sql
+SELECT 'binance_flow_1s' AS table_name, count(*) AS rows, max(sample_second_at) AS latest_sample
+FROM binance_flow_1s
+UNION ALL
+SELECT 'binance_book_1s' AS table_name, count(*) AS rows, max(sample_second_at) AS latest_sample
+FROM binance_book_1s;
 ```
 Exit psql:
 ```sql

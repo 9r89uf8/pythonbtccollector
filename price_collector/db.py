@@ -413,7 +413,7 @@ async def upsert_binance_futures_snapshot(
     oi_notional_usdt: Optional[Decimal],
     premium_bps: Optional[Decimal],
     received_ms: int,
-    raw: Mapping[str, Any],
+    raw: Optional[Mapping[str, Any]],
 ) -> None:
     async with pool.acquire() as connection:
         async with connection.transaction():
@@ -482,7 +482,7 @@ async def upsert_binance_futures_snapshot(
                 oi_notional_usdt,
                 premium_bps,
                 received_ms,
-                json.dumps(raw, default=str),
+                json.dumps(raw, default=str) if raw is not None else None,
             )
 
 
@@ -497,7 +497,7 @@ async def upsert_binance_futures_oi_5m_summary(
     sum_open_interest: Optional[Decimal],
     sum_open_interest_value: Optional[Decimal],
     received_ms: int,
-    raw: Mapping[str, Any],
+    raw: Optional[Mapping[str, Any]],
 ) -> None:
     async with pool.acquire() as connection:
         async with connection.transaction():
@@ -533,7 +533,223 @@ async def upsert_binance_futures_oi_5m_summary(
                 sum_open_interest,
                 sum_open_interest_value,
                 received_ms,
-                json.dumps(raw, default=str),
+                json.dumps(raw, default=str) if raw is not None else None,
+            )
+
+
+async def upsert_binance_flow_1s(
+    pool: asyncpg.Pool,
+    *,
+    venue: str,
+    symbol: str,
+    window: MarketWindow,
+    sample_second_ms: int,
+    buy_base: Decimal,
+    sell_base: Decimal,
+    buy_quote: Decimal,
+    sell_quote: Decimal,
+    delta_quote: Decimal,
+    total_quote: Decimal,
+    taker_imbalance: Optional[Decimal],
+    cvd_quote: Decimal,
+    cvd_10s: Decimal,
+    cvd_30s: Decimal,
+    imbalance_10s: Optional[Decimal],
+    imbalance_30s: Optional[Decimal],
+    agg_trade_count: int,
+    trade_count: int,
+    max_trade_quote: Optional[Decimal],
+    first_agg_trade_id: Optional[int],
+    last_agg_trade_id: Optional[int],
+    last_trade_time_ms: Optional[int],
+    last_event_time_ms: Optional[int],
+    received_ms: int,
+) -> None:
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _ensure_market_window(connection, window)
+            await connection.execute(
+                """
+                INSERT INTO binance_flow_1s (
+                    venue,
+                    symbol,
+                    market_id,
+                    sample_second_ms,
+                    sample_second_at,
+                    buy_base,
+                    sell_base,
+                    buy_quote,
+                    sell_quote,
+                    delta_quote,
+                    total_quote,
+                    taker_imbalance,
+                    cvd_quote,
+                    cvd_10s,
+                    cvd_30s,
+                    imbalance_10s,
+                    imbalance_30s,
+                    agg_trade_count,
+                    trade_count,
+                    max_trade_quote,
+                    first_agg_trade_id,
+                    last_agg_trade_id,
+                    last_trade_time_ms,
+                    last_event_time_ms,
+                    received_ms
+                )
+                VALUES (
+                    $1, $2,
+                    $3, $4, $5,
+                    $6, $7, $8, $9,
+                    $10, $11, $12,
+                    $13, $14, $15, $16, $17,
+                    $18, $19, $20,
+                    $21, $22, $23, $24,
+                    $25
+                )
+                ON CONFLICT (venue, symbol, sample_second_ms)
+                DO UPDATE SET
+                    market_id = EXCLUDED.market_id,
+                    sample_second_at = EXCLUDED.sample_second_at,
+                    buy_base = EXCLUDED.buy_base,
+                    sell_base = EXCLUDED.sell_base,
+                    buy_quote = EXCLUDED.buy_quote,
+                    sell_quote = EXCLUDED.sell_quote,
+                    delta_quote = EXCLUDED.delta_quote,
+                    total_quote = EXCLUDED.total_quote,
+                    taker_imbalance = EXCLUDED.taker_imbalance,
+                    cvd_quote = EXCLUDED.cvd_quote,
+                    cvd_10s = EXCLUDED.cvd_10s,
+                    cvd_30s = EXCLUDED.cvd_30s,
+                    imbalance_10s = EXCLUDED.imbalance_10s,
+                    imbalance_30s = EXCLUDED.imbalance_30s,
+                    agg_trade_count = EXCLUDED.agg_trade_count,
+                    trade_count = EXCLUDED.trade_count,
+                    max_trade_quote = EXCLUDED.max_trade_quote,
+                    first_agg_trade_id = EXCLUDED.first_agg_trade_id,
+                    last_agg_trade_id = EXCLUDED.last_agg_trade_id,
+                    last_trade_time_ms = EXCLUDED.last_trade_time_ms,
+                    last_event_time_ms = EXCLUDED.last_event_time_ms,
+                    received_ms = EXCLUDED.received_ms
+                """,
+                venue,
+                symbol,
+                window.market_id,
+                sample_second_ms,
+                epoch_ms_to_utc_datetime(sample_second_ms),
+                buy_base,
+                sell_base,
+                buy_quote,
+                sell_quote,
+                delta_quote,
+                total_quote,
+                taker_imbalance,
+                cvd_quote,
+                cvd_10s,
+                cvd_30s,
+                imbalance_10s,
+                imbalance_30s,
+                agg_trade_count,
+                trade_count,
+                max_trade_quote,
+                first_agg_trade_id,
+                last_agg_trade_id,
+                last_trade_time_ms,
+                last_event_time_ms,
+                received_ms,
+            )
+
+
+async def upsert_binance_book_1s(
+    pool: asyncpg.Pool,
+    *,
+    venue: str,
+    symbol: str,
+    window: MarketWindow,
+    sample_second_ms: int,
+    bid: Decimal,
+    ask: Decimal,
+    bid_qty: Decimal,
+    ask_qty: Decimal,
+    mid: Decimal,
+    spread: Decimal,
+    spread_bps: Decimal,
+    book_imbalance: Optional[Decimal],
+    microprice: Optional[Decimal],
+    update_id: Optional[int],
+    event_time_ms: Optional[int],
+    transaction_time_ms: Optional[int],
+    received_ms: int,
+) -> None:
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _ensure_market_window(connection, window)
+            await connection.execute(
+                """
+                INSERT INTO binance_book_1s (
+                    venue,
+                    symbol,
+                    market_id,
+                    sample_second_ms,
+                    sample_second_at,
+                    bid,
+                    ask,
+                    bid_qty,
+                    ask_qty,
+                    mid,
+                    spread,
+                    spread_bps,
+                    book_imbalance,
+                    microprice,
+                    update_id,
+                    event_time_ms,
+                    transaction_time_ms,
+                    received_ms
+                )
+                VALUES (
+                    $1, $2,
+                    $3, $4, $5,
+                    $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14,
+                    $15, $16, $17,
+                    $18
+                )
+                ON CONFLICT (venue, symbol, sample_second_ms)
+                DO UPDATE SET
+                    market_id = EXCLUDED.market_id,
+                    sample_second_at = EXCLUDED.sample_second_at,
+                    bid = EXCLUDED.bid,
+                    ask = EXCLUDED.ask,
+                    bid_qty = EXCLUDED.bid_qty,
+                    ask_qty = EXCLUDED.ask_qty,
+                    mid = EXCLUDED.mid,
+                    spread = EXCLUDED.spread,
+                    spread_bps = EXCLUDED.spread_bps,
+                    book_imbalance = EXCLUDED.book_imbalance,
+                    microprice = EXCLUDED.microprice,
+                    update_id = EXCLUDED.update_id,
+                    event_time_ms = EXCLUDED.event_time_ms,
+                    transaction_time_ms = EXCLUDED.transaction_time_ms,
+                    received_ms = EXCLUDED.received_ms
+                """,
+                venue,
+                symbol,
+                window.market_id,
+                sample_second_ms,
+                epoch_ms_to_utc_datetime(sample_second_ms),
+                bid,
+                ask,
+                bid_qty,
+                ask_qty,
+                mid,
+                spread,
+                spread_bps,
+                book_imbalance,
+                microprice,
+                update_id,
+                event_time_ms,
+                transaction_time_ms,
+                received_ms,
             )
 
 

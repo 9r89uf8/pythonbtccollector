@@ -45,6 +45,7 @@ def futures_settings():
     return SimpleNamespace(
         BINANCE_FUTURES_BASE_URL="https://fapi.binance.com",
         BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        BINANCE_FUTURES_STORE_RAW_JSON=False,
     )
 
 
@@ -225,6 +226,41 @@ def test_collect_once_fetches_three_endpoints_and_upserts_snapshot(monkeypatch):
     assert upserts[0]["symbol"] == "BTCUSDT"
     assert upserts[0]["sample_second_ms"] == 1_783_459_500_000
     assert upserts[0]["open_interest"] == Decimal("74321.123")
+    assert upserts[0]["raw"] is None
+
+
+def test_collect_once_can_store_raw_json_when_enabled(monkeypatch):
+    upserts = []
+
+    async def fake_get_json(client, base_url, path, params):
+        return {
+            "/fapi/v1/openInterest": open_interest_payload(),
+            "/fapi/v1/premiumIndex": premium_index_payload(),
+            "/fapi/v2/ticker/price": ticker_payload(),
+        }[path]
+
+    async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
+        upserts.append(kwargs)
+
+    settings = futures_settings()
+    settings.BINANCE_FUTURES_STORE_RAW_JSON = True
+
+    monkeypatch.setattr(collector, "get_json", fake_get_json)
+    monkeypatch.setattr(
+        collector,
+        "upsert_binance_futures_snapshot",
+        fake_upsert_binance_futures_snapshot,
+    )
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+
+    asyncio.run(
+        collector.collect_once(
+            pool="pool",
+            client="client",
+            settings=settings,
+        )
+    )
+
     assert upserts[0]["raw"]["openInterest"]["openInterest"] == "74321.123"
 
 
@@ -333,3 +369,4 @@ def test_collect_historical_oi_once_stores_only_completed_summaries(monkeypatch)
     assert upserts[0]["source_window_start_ms"] == 1_783_459_200_000
     assert upserts[0]["source_window_end_ms"] == 1_783_459_500_000
     assert upserts[0]["effective_window"].market_start_ms == 1_783_459_500_000
+    assert upserts[0]["raw"] is None

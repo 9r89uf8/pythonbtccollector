@@ -170,6 +170,18 @@ LIMIT 10;
 "
 ```
 
+Futures flow and top-of-book row counts:
+
+```bash
+sudo -u postgres psql -d price_collector -c "
+SELECT 'binance_flow_1s' AS table_name, count(*) AS rows, max(sample_second_at) AS latest_sample
+FROM binance_flow_1s
+UNION ALL
+SELECT 'binance_book_1s' AS table_name, count(*) AS rows, max(sample_second_at) AS latest_sample
+FROM binance_book_1s;
+"
+```
+
 ## Confirm Local-Only Binding
 
 On the droplet:
