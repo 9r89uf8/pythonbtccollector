@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import json
 from typing import Any, Mapping, Optional
 
@@ -30,6 +30,17 @@ from price_collector.market import market_for_sample_second
 DEFAULT_PROVIDER = "binance_spot"
 DEFAULT_SYMBOL = "BTCUSDT"
 SERVICE_NAME = "price-api"
+DOWNLOAD_FLOW_FIELDS = (
+    "taker_imbalance",
+    "cvd_10s",
+    "cvd_30s",
+    "imbalance_10s",
+    "imbalance_30s",
+)
+DOWNLOAD_BOOK_FIELDS = (
+    "book_imbalance",
+    "microprice",
+)
 
 
 def utc_datetime_to_z(value: datetime) -> str:
@@ -40,6 +51,35 @@ def utc_datetime_to_z(value: datetime) -> str:
 
 def decimal_to_string(value: Decimal) -> str:
     return format(value, "f")
+
+
+def _format_download_decimal_string(value: Any, places: str) -> Any:
+    if value is None or not isinstance(value, str):
+        return value
+    quantized = Decimal(value).quantize(Decimal(places), rounding=ROUND_HALF_UP)
+    return format(quantized, "f")
+
+
+def serialize_download_flow(flow: Mapping[str, Any]) -> dict[str, Any]:
+    exported = {
+        key: flow.get(key)
+        for key in DOWNLOAD_FLOW_FIELDS
+    }
+    exported["cvd_10s"] = _format_download_decimal_string(exported["cvd_10s"], "0.01")
+    exported["cvd_30s"] = _format_download_decimal_string(exported["cvd_30s"], "0.01")
+    return exported
+
+
+def serialize_download_book(book: Mapping[str, Any]) -> dict[str, Any]:
+    exported = {
+        key: book.get(key)
+        for key in DOWNLOAD_BOOK_FIELDS
+    }
+    exported["microprice"] = _format_download_decimal_string(
+        exported["microprice"],
+        "0.01",
+    )
+    return exported
 
 
 def serialize_latest_price(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -124,6 +164,14 @@ def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
         prices["futures"] = futures.get("last")
     exported["prices"] = prices
     exported.pop("futures", None)
+
+    flow = exported.get("flow")
+    if isinstance(flow, Mapping):
+        exported["flow"] = serialize_download_flow(flow)
+
+    book = exported.get("book")
+    if isinstance(book, Mapping):
+        exported["book"] = serialize_download_book(book)
 
     return exported
 

@@ -408,8 +408,12 @@ def market_data_payload(
             "delta_quote": "750.00",
             "total_quote": "1250.00",
             "taker_imbalance": "0.60000000",
-            "cvd_10s": "900.00",
-            "cvd_30s": "1200.00",
+            "cvd_10s": "900.123456000000000000",
+            "cvd_30s": "1200.129000000000000000",
+            "imbalance_10s": "0.12345678",
+            "imbalance_30s": "-0.23456789",
+            "agg_trade_count": 4,
+            "max_trade_quote": "777.770000000000000000",
         }
 
     if include_book:
@@ -418,7 +422,8 @@ def market_data_payload(
             "ask": "62074.20",
             "spread_bps": "0.01610935",
             "book_imbalance": "0.25000000",
-            "microprice": "62074.16",
+            "microprice": "62074.166789000000000000",
+            "update_id": 123456,
         }
 
     payload = {
@@ -804,4 +809,58 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
         "futures": "62075.12",
     }
     assert "futures" not in body["series"][0]
+    assert "freshness" not in body["series"][0]
+
+
+def test_markets_download_trims_flow_and_book_to_export_fields(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        server_time_ms,
+        include_probabilities,
+        include_futures,
+        include_oi,
+        include_flow,
+        include_book,
+        fill_display,
+        max_carry_forward_ms,
+    ):
+        assert market_id == 5_944_864
+        assert isinstance(server_time_ms, int)
+        assert include_probabilities is False
+        assert include_futures is False
+        assert include_oi is False
+        assert include_flow is True
+        assert include_book is True
+        assert fill_display is False
+        assert max_carry_forward_ms == 10_000
+        return market_data_payload(include_flow=True, include_book=True)
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get("/markets/5944864/download?include_flow=true&include_book=true")
+
+    assert response.status_code == 200
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="btc_5m_market_5944864_flow_book.json"'
+    )
+    body = response.json()
+    assert body["series"][0]["flow"] == {
+        "taker_imbalance": "0.60000000",
+        "cvd_10s": "900.12",
+        "cvd_30s": "1200.13",
+        "imbalance_10s": "0.12345678",
+        "imbalance_30s": "-0.23456789",
+    }
+    assert body["series"][0]["book"] == {
+        "book_imbalance": "0.25000000",
+        "microprice": "62074.17",
+    }
+    assert "buy_quote" not in body["series"][0]["flow"]
+    assert "bid" not in body["series"][0]["book"]
     assert "freshness" not in body["series"][0]
