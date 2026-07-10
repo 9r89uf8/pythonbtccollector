@@ -44,6 +44,10 @@ def test_settings_include_polymarket_probability_defaults(monkeypatch):
     monkeypatch.delenv("POLYMARKET_NEXT_MARKET_PRELOAD_SECONDS", raising=False)
     monkeypatch.delenv("POLYMARKET_NEXT_MARKET_RETRY_MS", raising=False)
     monkeypatch.delenv("POLYMARKET_REST_PRIME_SECONDS", raising=False)
+    monkeypatch.delenv("POLYMARKET_RESOLUTION_POLL_SECONDS", raising=False)
+    monkeypatch.delenv("POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS", raising=False)
+    monkeypatch.delenv("POLYMARKET_RESOLUTION_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("POLYMARKET_RESOLUTION_WS_GRACE_SECONDS", raising=False)
 
     settings = Settings()
 
@@ -60,6 +64,10 @@ def test_settings_include_polymarket_probability_defaults(monkeypatch):
     assert settings.POLYMARKET_NEXT_MARKET_PRELOAD_SECONDS == 45
     assert settings.POLYMARKET_NEXT_MARKET_RETRY_MS == 500
     assert settings.POLYMARKET_REST_PRIME_SECONDS == 15
+    assert settings.POLYMARKET_RESOLUTION_POLL_SECONDS == 5
+    assert settings.POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS == 300
+    assert settings.POLYMARKET_RESOLUTION_BATCH_SIZE == 20
+    assert settings.POLYMARKET_RESOLUTION_WS_GRACE_SECONDS == 30
 
 
 def test_settings_include_binance_futures_defaults(monkeypatch):

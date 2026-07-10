@@ -43,6 +43,17 @@ def decimal_string_or_none(value: Optional[Decimal]) -> Optional[str]:
     return format(value, "f")
 
 
+def decimal_compact_or_none(value: Optional[Decimal]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
 def decimal_2dp_or_none(value: Optional[Decimal]) -> Optional[str]:
     return decimal_fixed_or_none(value, "0.01")
 
@@ -312,6 +323,298 @@ async def upsert_polymarket_btc_5m_market(
                 seen_ms,
                 seen_ms,
             )
+
+
+async def fetch_due_polymarket_resolutions(
+    pool: asyncpg.Pool,
+    *,
+    now_ms: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                pm.market_id,
+                pm.slug,
+                pm.gamma_event_id,
+                pm.gamma_market_id,
+                pm.condition_id,
+                pm.up_token_id,
+                pm.down_token_id,
+                pm.up_outcome,
+                pm.down_outcome,
+                mw.market_end_ms,
+                COALESCE(resolution.resolution_status, 'pending')
+                    AS resolution_status,
+                COALESCE(resolution.resolution_attempts, 0)
+                    AS resolution_attempts
+            FROM polymarket_btc_5m_markets pm
+            JOIN market_windows mw ON mw.market_id = pm.market_id
+            LEFT JOIN polymarket_btc_5m_resolutions resolution
+              ON resolution.market_id = pm.market_id
+            WHERE mw.market_end_ms <= $1
+              AND (
+                resolution.market_id IS NULL
+                OR resolution.resolution_status = 'pending'
+                OR resolution.chainlink_open_price IS NULL
+                OR resolution.chainlink_close_price IS NULL
+              )
+              AND (
+                resolution.next_check_ms IS NULL
+                OR resolution.next_check_ms <= $1
+              )
+            ORDER BY
+                COALESCE(resolution.next_check_ms, 0) ASC,
+                mw.market_end_ms DESC
+            LIMIT $2
+            """,
+            now_ms,
+            max(1, int(limit)),
+        )
+
+    return [dict(row) for row in rows]
+
+
+async def upsert_polymarket_btc_5m_resolution(
+    pool: asyncpg.Pool,
+    *,
+    market_id: int,
+    resolution_status: str,
+    resolution_type: Optional[str],
+    chainlink_open_price: Optional[Decimal],
+    chainlink_close_price: Optional[Decimal],
+    chainlink_source: Optional[str],
+    winner: Optional[str],
+    winning_token_id: Optional[str],
+    up_payout: Optional[Decimal],
+    down_payout: Optional[Decimal],
+    resolved_at_ms: Optional[int],
+    resolution_source: Optional[str],
+    raw_resolution: Optional[Mapping[str, Any]],
+    checked_ms: int,
+    next_check_ms: Optional[int],
+    resolution_attempts: int,
+) -> None:
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                """
+                INSERT INTO polymarket_btc_5m_resolutions (
+                    market_id,
+                    resolution_status,
+                    resolution_type,
+                    chainlink_open_price,
+                    chainlink_close_price,
+                    chainlink_source,
+                    winner,
+                    winning_token_id,
+                    up_payout,
+                    down_payout,
+                    resolved_at_ms,
+                    resolution_source,
+                    raw_resolution,
+                    first_checked_ms,
+                    last_checked_ms,
+                    next_check_ms,
+                    resolution_attempts
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10,
+                    $11, $12, $13::jsonb, $14, $15, $16, $17
+                )
+                ON CONFLICT (market_id)
+                DO UPDATE SET
+                    resolution_status = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.resolution_status
+                        ELSE EXCLUDED.resolution_status
+                    END,
+                    resolution_type = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.resolution_type
+                        ELSE EXCLUDED.resolution_type
+                    END,
+                    chainlink_open_price = COALESCE(
+                        EXCLUDED.chainlink_open_price,
+                        polymarket_btc_5m_resolutions.chainlink_open_price
+                    ),
+                    chainlink_close_price = COALESCE(
+                        EXCLUDED.chainlink_close_price,
+                        polymarket_btc_5m_resolutions.chainlink_close_price
+                    ),
+                    chainlink_source = COALESCE(
+                        EXCLUDED.chainlink_source,
+                        polymarket_btc_5m_resolutions.chainlink_source
+                    ),
+                    winner = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.winner
+                        ELSE EXCLUDED.winner
+                    END,
+                    winning_token_id = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.winning_token_id
+                        ELSE EXCLUDED.winning_token_id
+                    END,
+                    up_payout = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.up_payout
+                        ELSE EXCLUDED.up_payout
+                    END,
+                    down_payout = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.down_payout
+                        ELSE EXCLUDED.down_payout
+                    END,
+                    resolved_at_ms = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.resolved_at_ms
+                        ELSE EXCLUDED.resolved_at_ms
+                    END,
+                    resolution_source = CASE
+                        WHEN polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                        THEN polymarket_btc_5m_resolutions.resolution_source
+                        ELSE EXCLUDED.resolution_source
+                    END,
+                    raw_resolution = COALESCE(
+                        polymarket_btc_5m_resolutions.raw_resolution,
+                        '{}'::jsonb
+                    ) || COALESCE(EXCLUDED.raw_resolution, '{}'::jsonb),
+                    last_checked_ms = GREATEST(
+                        polymarket_btc_5m_resolutions.last_checked_ms,
+                        EXCLUDED.last_checked_ms
+                    ),
+                    next_check_ms = CASE
+                        WHEN (
+                            polymarket_btc_5m_resolutions.resolution_status
+                                = 'resolved'
+                            OR EXCLUDED.resolution_status = 'resolved'
+                        )
+                        AND COALESCE(
+                            EXCLUDED.chainlink_open_price,
+                            polymarket_btc_5m_resolutions.chainlink_open_price
+                        ) IS NOT NULL
+                        AND COALESCE(
+                            EXCLUDED.chainlink_close_price,
+                            polymarket_btc_5m_resolutions.chainlink_close_price
+                        ) IS NOT NULL
+                        THEN NULL
+                        WHEN EXCLUDED.last_checked_ms
+                                < polymarket_btc_5m_resolutions.last_checked_ms
+                        THEN polymarket_btc_5m_resolutions.next_check_ms
+                        WHEN EXCLUDED.next_check_ms IS NULL
+                        THEN NULL
+                        ELSE GREATEST(
+                            EXCLUDED.next_check_ms,
+                            polymarket_btc_5m_resolutions.last_checked_ms,
+                            EXCLUDED.last_checked_ms
+                        )
+                    END,
+                    resolution_attempts = GREATEST(
+                        polymarket_btc_5m_resolutions.resolution_attempts,
+                        EXCLUDED.resolution_attempts
+                    ),
+                    updated_at = now()
+                """,
+                market_id,
+                resolution_status,
+                resolution_type,
+                chainlink_open_price,
+                chainlink_close_price,
+                chainlink_source,
+                winner,
+                winning_token_id,
+                up_payout,
+                down_payout,
+                resolved_at_ms,
+                resolution_source,
+                (
+                    json.dumps(raw_resolution, default=str)
+                    if raw_resolution is not None
+                    else None
+                ),
+                checked_ms,
+                checked_ms,
+                next_check_ms,
+                max(0, int(resolution_attempts)),
+            )
+
+            if resolution_status == "resolved":
+                await connection.execute(
+                    """
+                    UPDATE polymarket_btc_5m_markets
+                    SET closed = TRUE,
+                        updated_at = now()
+                    WHERE market_id = $1
+                    """,
+                    market_id,
+                )
+
+
+async def schedule_polymarket_resolution_retry(
+    pool: asyncpg.Pool,
+    *,
+    market_id: int,
+    checked_ms: int,
+    next_check_ms: int,
+    resolution_attempts: int,
+) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO polymarket_btc_5m_resolutions (
+                market_id,
+                resolution_status,
+                first_checked_ms,
+                last_checked_ms,
+                next_check_ms,
+                resolution_attempts
+            )
+            VALUES ($1, 'pending', $2, $2, $3, $4)
+            ON CONFLICT (market_id)
+            DO UPDATE SET
+                last_checked_ms = GREATEST(
+                    polymarket_btc_5m_resolutions.last_checked_ms,
+                    EXCLUDED.last_checked_ms
+                ),
+                next_check_ms = CASE
+                    WHEN polymarket_btc_5m_resolutions.resolution_status
+                            = 'resolved'
+                         AND polymarket_btc_5m_resolutions.chainlink_open_price
+                            IS NOT NULL
+                         AND polymarket_btc_5m_resolutions.chainlink_close_price
+                            IS NOT NULL
+                    THEN NULL
+                    WHEN EXCLUDED.last_checked_ms
+                            < polymarket_btc_5m_resolutions.last_checked_ms
+                    THEN polymarket_btc_5m_resolutions.next_check_ms
+                    ELSE GREATEST(
+                        EXCLUDED.next_check_ms,
+                        polymarket_btc_5m_resolutions.last_checked_ms,
+                        EXCLUDED.last_checked_ms
+                    )
+                END,
+                resolution_attempts = GREATEST(
+                    polymarket_btc_5m_resolutions.resolution_attempts,
+                    EXCLUDED.resolution_attempts
+                ),
+                updated_at = now()
+            """,
+            market_id,
+            checked_ms,
+            next_check_ms,
+            max(0, int(resolution_attempts)),
+        )
 
 
 async def upsert_polymarket_probability_sample(
@@ -1320,8 +1623,20 @@ def build_market_download_payload(
 
         series.append(item)
 
+    resolution_status = str(first.get("resolution_status") or "pending")
+    chainlink_open = decimal_compact_or_none(
+        first.get("resolution_chainlink_open_price")
+    )
+    chainlink_close = decimal_compact_or_none(
+        first.get("resolution_chainlink_close_price")
+    )
+    if chainlink_open is not None and chainlink_close is not None:
+        chainlink_status = "official"
+    else:
+        chainlink_status = "pending"
+
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "server_time_ms": server_time_ms,
         "market": {
             "market_id": int(first["market_id"]),
@@ -1330,6 +1645,28 @@ def build_market_download_payload(
             "market_start_at": utc_datetime_to_z(first["market_start_at"]),
             "market_end_at": utc_datetime_to_z(first["market_end_at"]),
             "seconds_expected": (market_end_ms - market_start_ms) // 1000,
+            "chainlink_resolution": {
+                "open": chainlink_open,
+                "close": chainlink_close,
+                "status": chainlink_status,
+                "source": first.get("resolution_chainlink_source"),
+            },
+            "resolution": {
+                "status": resolution_status,
+                "resolution_type": first.get("resolution_type"),
+                "winner": first.get("resolution_winner"),
+                "winning_token_id": first.get("resolution_winning_token_id"),
+                "resolved_at_ms": first.get("resolution_resolved_at_ms"),
+                "official_payouts": {
+                    "up": decimal_compact_or_none(
+                        first.get("resolution_up_payout")
+                    ),
+                    "down": decimal_compact_or_none(
+                        first.get("resolution_down_payout")
+                    ),
+                },
+                "source": first.get("resolution_source"),
+            },
         },
         "series": series,
     }
@@ -1468,6 +1805,11 @@ async def fetch_market_download_payload(
                 SELECT *
                 FROM polymarket_btc_5m_markets
                 WHERE market_id = $1
+            ),
+            resolution AS (
+                SELECT *
+                FROM polymarket_btc_5m_resolutions
+                WHERE market_id = $1
             )
             SELECT
                 mw.market_id,
@@ -1481,6 +1823,21 @@ async def fetch_market_download_payload(
                 pm.condition_id,
                 pm.up_token_id,
                 pm.down_token_id,
+
+                resolution.resolution_status,
+                resolution.resolution_type,
+                resolution.chainlink_open_price
+                    AS resolution_chainlink_open_price,
+                resolution.chainlink_close_price
+                    AS resolution_chainlink_close_price,
+                resolution.chainlink_source
+                    AS resolution_chainlink_source,
+                resolution.winner AS resolution_winner,
+                resolution.winning_token_id AS resolution_winning_token_id,
+                resolution.up_payout AS resolution_up_payout,
+                resolution.down_payout AS resolution_down_payout,
+                resolution.resolved_at_ms AS resolution_resolved_at_ms,
+                resolution.resolution_source,
 
                 s.sample_second_ms,
 
@@ -1562,6 +1919,7 @@ async def fetch_market_download_payload(
             FROM seconds s
             CROSS JOIN mw
             LEFT JOIN pm ON pm.market_id = mw.market_id
+            LEFT JOIN resolution ON resolution.market_id = mw.market_id
             LEFT JOIN binance b ON b.sample_second_ms = s.sample_second_ms
             LEFT JOIN LATERAL (
                 SELECT *

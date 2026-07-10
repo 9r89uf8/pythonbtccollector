@@ -21,7 +21,10 @@ from price_collector.collector import (
 from price_collector.config import Settings
 from price_collector.db import (
     create_pool,
+    fetch_due_polymarket_resolutions,
+    schedule_polymarket_resolution_retry,
     upsert_polymarket_btc_5m_market,
+    upsert_polymarket_btc_5m_resolution,
     upsert_polymarket_probability_sample,
 )
 from price_collector.market import MarketWindow, market_for_sample_second
@@ -35,6 +38,10 @@ class GammaDiscoveryError(ValueError):
 
 
 class ClobMessageParseError(ValueError):
+    pass
+
+
+class ResolutionParseError(ValueError):
     pass
 
 
@@ -58,6 +65,30 @@ class CurrentPolymarketMarket:
     raw_gamma: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class PolymarketResolution:
+    status: str
+    resolution_type: Optional[str]
+    chainlink_open_price: Optional[Decimal]
+    chainlink_close_price: Optional[Decimal]
+    chainlink_source: Optional[str]
+    winner: Optional[str]
+    winning_token_id: Optional[str]
+    up_payout: Optional[Decimal]
+    down_payout: Optional[Decimal]
+    resolved_at_ms: Optional[int]
+    resolution_source: Optional[str]
+    raw_resolution: Mapping[str, Any]
+
+    @property
+    def is_complete(self) -> bool:
+        return (
+            self.status == "resolved"
+            and self.chainlink_open_price is not None
+            and self.chainlink_close_price is not None
+        )
+
+
 @dataclass
 class ProbabilityState:
     up_token_id: str
@@ -70,6 +101,10 @@ class ProbabilityState:
     latest_received_ms: Optional[int] = None
     latest_event_type: Optional[str] = None
     resolved: bool = False
+    winning_outcome: Optional[str] = None
+    winning_asset_id: Optional[str] = None
+    resolution_event_ms: Optional[int] = None
+    raw_resolution_event: Optional[Mapping[str, Any]] = None
 
     def update_token(
         self,
@@ -108,8 +143,15 @@ class ProbabilityState:
         provider_event_ms: Optional[int],
         received_ms: int,
         event_type: str,
+        winning_outcome: Optional[str],
+        winning_asset_id: Optional[str],
+        raw_event: Mapping[str, Any],
     ) -> None:
         self.resolved = True
+        self.winning_outcome = winning_outcome
+        self.winning_asset_id = winning_asset_id
+        self.resolution_event_ms = provider_event_ms
+        self.raw_resolution_event = dict(raw_event)
         self._mark_seen(
             provider_event_ms=provider_event_ms,
             received_ms=received_ms,
@@ -136,6 +178,8 @@ class ProbabilityState:
         return {
             "event_type": self.latest_event_type,
             "resolved": self.resolved,
+            "winning_outcome": self.winning_outcome,
+            "winning_asset_id": self.winning_asset_id,
             "up_token_id": self.up_token_id,
             "down_token_id": self.down_token_id,
             "up_bid": self.up_bid,
@@ -239,6 +283,12 @@ def _parse_epoch_or_iso_ms(value: Any) -> Optional[int]:
         if stripped.isdecimal():
             int_value = int(stripped)
             return int_value * 1000 if int_value < 100_000_000_000 else int_value
+        if (
+            len(stripped) >= 3
+            and stripped[-3] in {"+", "-"}
+            and stripped[-2:].isdigit()
+        ):
+            stripped = f"{stripped}:00"
         try:
             parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         except ValueError:
@@ -485,6 +535,515 @@ async def store_current_market(
         raw_gamma=current_market.raw_gamma,
         seen_ms=seen_ms,
     )
+
+
+def _resolution_decimal(
+    value: Any,
+    *,
+    minimum: Decimal,
+    maximum: Optional[Decimal] = None,
+) -> Optional[Decimal]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ResolutionParseError("resolution value must be numeric")
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ResolutionParseError("resolution value is invalid") from exc
+
+    if not parsed.is_finite() or parsed < minimum:
+        raise ResolutionParseError("resolution value is outside its valid range")
+    if maximum is not None and parsed > maximum:
+        raise ResolutionParseError("resolution value is outside its valid range")
+    return parsed
+
+
+def _find_gamma_resolution_market(
+    data: Any,
+    *,
+    slug: str,
+    gamma_market_id: Optional[str],
+    condition_id: Optional[str],
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    fallback: Optional[tuple[Mapping[str, Any], Mapping[str, Any]]] = None
+    for event, market in _iter_event_markets(data):
+        market_id = _string_or_none(_first_value(market, "id", "market_id"))
+        market_condition_id = _string_or_none(
+            _first_value(market, "conditionId", "condition_id", "conditionID")
+        )
+        market_slug = _string_or_none(_first_value(market, "slug"))
+        event_slug = _string_or_none(_first_value(event, "slug"))
+
+        has_stored_identity = gamma_market_id is not None or condition_id is not None
+        if has_stored_identity:
+            gamma_id_matches = (
+                gamma_market_id is None or market_id == gamma_market_id
+            )
+            condition_matches = (
+                condition_id is None or market_condition_id == condition_id
+            )
+            if gamma_id_matches and condition_matches:
+                return event, market
+        elif market_slug == slug or (market_slug is None and event_slug == slug):
+            fallback = (event, market)
+
+    if gamma_market_id is not None or condition_id is not None:
+        raise ResolutionParseError(
+            f"Gamma resolution identity mismatch for slug={slug!r}"
+        )
+    if fallback is not None:
+        return fallback
+    raise ResolutionParseError(f"Gamma resolution market not found for slug={slug!r}")
+
+
+def _gamma_outcome_map(
+    market: Mapping[str, Any],
+    value_field: str,
+) -> dict[str, Any]:
+    outcomes = parse_jsonish(_first_value(market, "outcomes"))
+    values = parse_jsonish(_first_value(market, value_field))
+    if not isinstance(outcomes, list) or not isinstance(values, list):
+        return {}
+    if len(outcomes) != len(values):
+        raise ResolutionParseError(
+            f"Gamma outcomes and {value_field} differ in length"
+        )
+
+    mapped = {}
+    for outcome, value in zip(outcomes, values):
+        mapped[_outcome_label(outcome).strip().lower()] = value
+    return mapped
+
+
+def _parse_clob_resolution(
+    data: Any,
+    *,
+    up_token_id: str,
+    down_token_id: str,
+) -> Optional[tuple[str, Optional[str], Optional[str], Decimal, Decimal]]:
+    if not isinstance(data, Mapping) or _bool_or_none(data.get("closed")) is not True:
+        return None
+
+    tokens = data.get("tokens")
+    if not isinstance(tokens, list):
+        return None
+
+    winners = [
+        token
+        for token in tokens
+        if isinstance(token, Mapping)
+        and _bool_or_none(token.get("winner")) is True
+    ]
+    if len(winners) == 1:
+        winner_token = winners[0]
+        outcome = _outcome_label(winner_token.get("outcome")).strip().lower()
+        token_id = _token_id(winner_token)
+        if outcome == "up":
+            if token_id != up_token_id:
+                raise ResolutionParseError("CLOB Up winner token does not match Gamma")
+            return "winner", "Up", token_id, Decimal("1"), Decimal("0")
+        if outcome == "down":
+            if token_id != down_token_id:
+                raise ResolutionParseError("CLOB Down winner token does not match Gamma")
+            return "winner", "Down", token_id, Decimal("0"), Decimal("1")
+        raise ResolutionParseError("CLOB winner is not an Up or Down outcome")
+
+    if _bool_or_none(data.get("is_50_50_outcome")) is True:
+        return "split", None, None, Decimal("0.5"), Decimal("0.5")
+    return None
+
+
+def parse_polymarket_resolution(
+    gamma_data: Any,
+    *,
+    slug: str,
+    gamma_market_id: Optional[str],
+    condition_id: Optional[str],
+    up_token_id: str,
+    down_token_id: str,
+    clob_data: Any = None,
+) -> PolymarketResolution:
+    event, market = _find_gamma_resolution_market(
+        gamma_data,
+        slug=slug,
+        gamma_market_id=gamma_market_id,
+        condition_id=condition_id,
+    )
+
+    metadata = _first_value(event, "eventMetadata", "event_metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    chainlink_open_price = _resolution_decimal(
+        _first_value(metadata, "priceToBeat", "price_to_beat"),
+        minimum=Decimal("0.000000000000000001"),
+    )
+    chainlink_close_price = _resolution_decimal(
+        _first_value(metadata, "finalPrice", "final_price"),
+        minimum=Decimal("0.000000000000000001"),
+    )
+    chainlink_source = (
+        "polymarket_gamma_event_metadata"
+        if chainlink_open_price is not None or chainlink_close_price is not None
+        else None
+    )
+
+    payout_values = _gamma_outcome_map(market, "outcomePrices")
+    up_payout_candidate = _resolution_decimal(
+        payout_values.get("up"),
+        minimum=Decimal("0"),
+        maximum=Decimal("1"),
+    )
+    down_payout_candidate = _resolution_decimal(
+        payout_values.get("down"),
+        minimum=Decimal("0"),
+        maximum=Decimal("1"),
+    )
+
+    token_values = _gamma_outcome_map(market, "clobTokenIds")
+    gamma_up_token = _string_or_none(token_values.get("up"))
+    gamma_down_token = _string_or_none(token_values.get("down"))
+    if gamma_up_token is not None and gamma_up_token != up_token_id:
+        raise ResolutionParseError("Gamma Up token changed before resolution")
+    if gamma_down_token is not None and gamma_down_token != down_token_id:
+        raise ResolutionParseError("Gamma Down token changed before resolution")
+
+    gamma_terminal = None
+    gamma_status = _string_or_none(
+        _first_value(market, "umaResolutionStatus", "uma_resolution_status")
+    )
+    if gamma_status is not None and gamma_status.strip().lower() == "resolved":
+        if up_payout_candidate == 1 and down_payout_candidate == 0:
+            gamma_terminal = (
+                "winner",
+                "Up",
+                up_token_id,
+                Decimal("1"),
+                Decimal("0"),
+            )
+        elif up_payout_candidate == 0 and down_payout_candidate == 1:
+            gamma_terminal = (
+                "winner",
+                "Down",
+                down_token_id,
+                Decimal("0"),
+                Decimal("1"),
+            )
+        elif up_payout_candidate == Decimal("0.5") and down_payout_candidate == Decimal(
+            "0.5"
+        ):
+            gamma_terminal = (
+                "split",
+                None,
+                None,
+                Decimal("0.5"),
+                Decimal("0.5"),
+            )
+
+    clob_terminal = _parse_clob_resolution(
+        clob_data,
+        up_token_id=up_token_id,
+        down_token_id=down_token_id,
+    )
+    if gamma_terminal is not None and clob_terminal is not None:
+        if gamma_terminal != clob_terminal:
+            raise ResolutionParseError("Gamma and CLOB official resolutions disagree")
+
+    terminal = clob_terminal or gamma_terminal
+    if terminal is None:
+        status = "pending"
+        resolution_type = None
+        winner = None
+        winning_token_id = None
+        up_payout = None
+        down_payout = None
+        resolution_source = None
+    else:
+        status = "resolved"
+        resolution_type, winner, winning_token_id, up_payout, down_payout = terminal
+        resolution_source = (
+            "polymarket_clob_rest"
+            if clob_terminal is not None
+            else "polymarket_gamma"
+        )
+
+    raw_resolution = {"gamma": gamma_data}
+    if clob_data is not None:
+        raw_resolution["clob"] = clob_data
+
+    return PolymarketResolution(
+        status=status,
+        resolution_type=resolution_type,
+        chainlink_open_price=chainlink_open_price,
+        chainlink_close_price=chainlink_close_price,
+        chainlink_source=chainlink_source,
+        winner=winner,
+        winning_token_id=winning_token_id,
+        up_payout=up_payout,
+        down_payout=down_payout,
+        resolved_at_ms=(
+            _parse_epoch_or_iso_ms(_first_value(market, "closedTime", "closed_time"))
+            if terminal is not None
+            else None
+        ),
+        resolution_source=resolution_source,
+        raw_resolution=raw_resolution,
+    )
+
+
+async def fetch_polymarket_resolution(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    market: Mapping[str, Any],
+) -> PolymarketResolution:
+    gamma_base_url = settings.POLYMARKET_GAMMA_BASE_URL.rstrip("/")
+    response = await client.get(f"{gamma_base_url}/events/slug/{market['slug']}")
+    if response.status_code == 404 and market.get("gamma_market_id") is not None:
+        response = await client.get(
+            f"{gamma_base_url}/markets/{market['gamma_market_id']}"
+        )
+    response.raise_for_status()
+    gamma_data = json.loads(response.text, parse_float=Decimal)
+
+    clob_data = None
+    condition_id = market.get("condition_id")
+    if condition_id is not None:
+        clob_base_url = settings.POLYMARKET_CLOB_BASE_URL.rstrip("/")
+        try:
+            clob_response = await client.get(f"{clob_base_url}/markets/{condition_id}")
+            if clob_response.status_code != 404:
+                clob_response.raise_for_status()
+                clob_data = json.loads(clob_response.text, parse_float=Decimal)
+        except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            LOGGER.warning(
+                "polymarket_resolution_clob_check_failed",
+                extra={
+                    "event": "polymarket_resolution_clob_check_failed",
+                    "market_id": market["market_id"],
+                    "error": repr(exc),
+                },
+            )
+
+    return parse_polymarket_resolution(
+        gamma_data,
+        slug=str(market["slug"]),
+        gamma_market_id=market.get("gamma_market_id"),
+        condition_id=condition_id,
+        up_token_id=str(market["up_token_id"]),
+        down_token_id=str(market["down_token_id"]),
+        clob_data=clob_data,
+    )
+
+
+def resolution_retry_delay_ms(
+    attempt: int,
+    *,
+    base_seconds: int,
+    max_seconds: int,
+) -> int:
+    exponent = min(max(0, int(attempt) - 1), 16)
+    delay_seconds = min(
+        max(1, int(max_seconds)),
+        max(1, int(base_seconds)) * (2**exponent),
+    )
+    return delay_seconds * 1000
+
+
+async def persist_websocket_resolution(
+    *,
+    settings: Settings,
+    pool: Any,
+    current_market: CurrentPolymarketMarket,
+    state: ProbabilityState,
+    checked_ms: int,
+) -> bool:
+    if not state.resolved:
+        return False
+    if state.winning_outcome is None or state.winning_asset_id is None:
+        return False
+
+    normalized_outcome = state.winning_outcome.strip().lower()
+    if normalized_outcome == "up":
+        if state.winning_asset_id != current_market.up_token_id:
+            raise ResolutionParseError("WebSocket Up winner token does not match Gamma")
+        winner = "Up"
+        up_payout = Decimal("1")
+        down_payout = Decimal("0")
+    elif normalized_outcome == "down":
+        if state.winning_asset_id != current_market.down_token_id:
+            raise ResolutionParseError("WebSocket Down winner token does not match Gamma")
+        winner = "Down"
+        up_payout = Decimal("0")
+        down_payout = Decimal("1")
+    else:
+        raise ResolutionParseError("WebSocket winner is not an Up or Down outcome")
+
+    await upsert_polymarket_btc_5m_resolution(
+        pool,
+        market_id=current_market.window.market_id,
+        resolution_status="resolved",
+        resolution_type="winner",
+        chainlink_open_price=None,
+        chainlink_close_price=None,
+        chainlink_source=None,
+        winner=winner,
+        winning_token_id=state.winning_asset_id,
+        up_payout=up_payout,
+        down_payout=down_payout,
+        resolved_at_ms=state.resolution_event_ms,
+        resolution_source="polymarket_clob_ws",
+        raw_resolution={"websocket": state.raw_resolution_event},
+        checked_ms=checked_ms,
+        next_check_ms=(
+            checked_ms
+            + max(1, int(settings.POLYMARKET_RESOLUTION_POLL_SECONDS)) * 1000
+        ),
+        resolution_attempts=1,
+    )
+    return True
+
+
+async def reconcile_polymarket_resolution_once(
+    *,
+    settings: Settings,
+    pool: Any,
+    client: httpx.AsyncClient,
+    market: Mapping[str, Any],
+    now_ms: Optional[int] = None,
+) -> bool:
+    attempt = int(market.get("resolution_attempts") or 0) + 1
+    retry_ms = resolution_retry_delay_ms(
+        attempt,
+        base_seconds=settings.POLYMARKET_RESOLUTION_POLL_SECONDS,
+        max_seconds=settings.POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS,
+    )
+
+    try:
+        resolution = await fetch_polymarket_resolution(client, settings, market)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        checked_ms = current_utc_epoch_ms() if now_ms is None else now_ms
+        await schedule_polymarket_resolution_retry(
+            pool,
+            market_id=int(market["market_id"]),
+            checked_ms=checked_ms,
+            next_check_ms=checked_ms + retry_ms,
+            resolution_attempts=attempt,
+        )
+        LOGGER.warning(
+            "polymarket_resolution_retry_scheduled",
+            extra={
+                "event": "polymarket_resolution_retry_scheduled",
+                "market_id": market["market_id"],
+                "attempt": attempt,
+                "next_check_ms": checked_ms + retry_ms,
+                "error": repr(exc),
+            },
+        )
+        return False
+
+    checked_ms = current_utc_epoch_ms() if now_ms is None else now_ms
+    next_check_ms = None if resolution.is_complete else checked_ms + retry_ms
+    await upsert_polymarket_btc_5m_resolution(
+        pool,
+        market_id=int(market["market_id"]),
+        resolution_status=resolution.status,
+        resolution_type=resolution.resolution_type,
+        chainlink_open_price=resolution.chainlink_open_price,
+        chainlink_close_price=resolution.chainlink_close_price,
+        chainlink_source=resolution.chainlink_source,
+        winner=resolution.winner,
+        winning_token_id=resolution.winning_token_id,
+        up_payout=resolution.up_payout,
+        down_payout=resolution.down_payout,
+        resolved_at_ms=resolution.resolved_at_ms,
+        resolution_source=resolution.resolution_source,
+        raw_resolution=resolution.raw_resolution,
+        checked_ms=checked_ms,
+        next_check_ms=next_check_ms,
+        resolution_attempts=attempt,
+    )
+    LOGGER.info(
+        "polymarket_resolution_checked",
+        extra={
+            "event": "polymarket_resolution_checked",
+            "market_id": market["market_id"],
+            "status": resolution.status,
+            "winner": resolution.winner,
+            "complete": resolution.is_complete,
+            "next_check_ms": next_check_ms,
+        },
+    )
+    return resolution.is_complete
+
+
+async def _resolution_reconciler_session(settings: Settings, pool: Any) -> None:
+    poll_seconds = max(1, int(settings.POLYMARKET_RESOLUTION_POLL_SECONDS))
+    batch_size = max(1, int(settings.POLYMARKET_RESOLUTION_BATCH_SIZE))
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            now_ms = current_utc_epoch_ms()
+            try:
+                markets = await fetch_due_polymarket_resolutions(
+                    pool,
+                    now_ms=now_ms,
+                    limit=batch_size,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning(
+                    "polymarket_resolution_scan_failed",
+                    extra={
+                        "event": "polymarket_resolution_scan_failed",
+                        "error": repr(exc),
+                    },
+                )
+                await asyncio.sleep(poll_seconds)
+                continue
+
+            for market in markets:
+                try:
+                    await reconcile_polymarket_resolution_once(
+                        settings=settings,
+                        pool=pool,
+                        client=client,
+                        market=market,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.warning(
+                        "polymarket_resolution_check_failed",
+                        extra={
+                            "event": "polymarket_resolution_check_failed",
+                            "market_id": market["market_id"],
+                            "error": repr(exc),
+                        },
+                    )
+
+            await asyncio.sleep(poll_seconds)
+
+
+async def resolution_reconciler_loop(settings: Settings, pool: Any) -> None:
+    restart_seconds = max(1, int(settings.POLYMARKET_RESOLUTION_POLL_SECONDS))
+    while True:
+        try:
+            await _resolution_reconciler_session(settings, pool)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.error(
+                "polymarket_resolution_reconciler_restarting",
+                extra={
+                    "event": "polymarket_resolution_reconciler_restarting",
+                    "delay_seconds": restart_seconds,
+                    "error": repr(exc),
+                },
+            )
+            await asyncio.sleep(restart_seconds)
 
 
 async def fetch_best_asks_from_clob_prices(
@@ -783,6 +1342,18 @@ def apply_clob_message(
             provider_event_ms=provider_event_ms,
             received_ms=received_ms,
             event_type=event_type,
+            winning_outcome=_string_or_none(
+                _first_value(message, "winning_outcome", "winningOutcome")
+            ),
+            winning_asset_id=_string_or_none(
+                _first_value(
+                    message,
+                    "winning_asset_id",
+                    "winningAssetId",
+                    "winning_token_id",
+                )
+            ),
+            raw_event=message,
         )
         return True
 
@@ -1012,25 +1583,48 @@ async def collect_current_market(
         )
 
         try:
+            resolution_deadline_ms = (
+                current_market.window.market_end_ms
+                + max(0, int(settings.POLYMARKET_RESOLUTION_WS_GRACE_SECONDS))
+                * 1000
+            )
             while True:
                 now_ms = current_utc_epoch_ms()
-                if now_ms >= current_market.window.market_end_ms:
+                if now_ms >= resolution_deadline_ms:
                     return
                 if sampler_task.done():
                     await sampler_task
-                    return
+                    if now_ms < current_market.window.market_end_ms:
+                        return
 
-                seconds_until_end = max(
-                    (current_market.window.market_end_ms - now_ms) / 1000,
+                seconds_until_deadline = max(
+                    (resolution_deadline_ms - now_ms) / 1000,
                     0.001,
                 )
                 try:
                     raw_message = await asyncio.wait_for(
                         websocket.recv(),
-                        timeout=min(30.0, seconds_until_end),
+                        timeout=min(30.0, seconds_until_deadline),
                     )
                 except asyncio.TimeoutError:
                     continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if (
+                        current_utc_epoch_ms()
+                        < current_market.window.market_end_ms
+                    ):
+                        raise
+                    LOGGER.warning(
+                        "polymarket_resolution_grace_socket_closed",
+                        extra={
+                            "event": "polymarket_resolution_grace_socket_closed",
+                            "market_id": current_market.window.market_id,
+                            "error": repr(exc),
+                        },
+                    )
+                    return
 
                 received_ms = current_utc_epoch_ms()
                 try:
@@ -1056,6 +1650,29 @@ async def collect_current_market(
                                 "error": str(exc),
                             },
                         )
+                        continue
+
+                    if state.resolved:
+                        try:
+                            await persist_websocket_resolution(
+                                settings=settings,
+                                pool=pool,
+                                current_market=current_market,
+                                state=state,
+                                checked_ms=received_ms,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "polymarket_websocket_resolution_skipped",
+                                extra={
+                                    "event": "polymarket_websocket_resolution_skipped",
+                                    "market_id": current_market.window.market_id,
+                                    "error": str(exc),
+                                },
+                            )
+                        return
         finally:
             ping_task.cancel()
             sampler_task.cancel()
@@ -1180,12 +1797,20 @@ async def run_collector(settings: Settings) -> None:
             "clob_ws_url": settings.POLYMARKET_CLOB_WS_URL,
             "source": settings.POLYMARKET_PROBABILITY_SOURCE,
             "stale_ms": settings.POLYMARKET_PROBABILITY_STALE_MS,
+            "resolution_poll_seconds": settings.POLYMARKET_RESOLUTION_POLL_SECONDS,
+            "resolution_batch_size": settings.POLYMARKET_RESOLUTION_BATCH_SIZE,
+            "resolution_ws_grace_seconds": (
+                settings.POLYMARKET_RESOLUTION_WS_GRACE_SECONDS
+            ),
         },
     )
 
     pool = await create_pool(require_collector_database_url(settings))
     current_task: Optional[asyncio.Task] = None
     next_task: Optional[asyncio.Task] = None
+    resolution_task: Optional[asyncio.Task] = asyncio.create_task(
+        resolution_reconciler_loop(settings, pool)
+    )
     try:
         attempt = 0
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1252,7 +1877,24 @@ async def run_collector(settings: Settings) -> None:
                         )
                     )
 
-                    await current_task
+                    try:
+                        await current_task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if (
+                            current_utc_epoch_ms()
+                            < current_market.window.market_end_ms
+                        ):
+                            raise
+                        LOGGER.warning(
+                            "polymarket_resolution_grace_ended_early",
+                            extra={
+                                "event": "polymarket_resolution_grace_ended_early",
+                                "market_id": current_market.window.market_id,
+                                "error": repr(exc),
+                            },
+                        )
 
                     current_market = next_market
                     current_task = next_task
@@ -1294,6 +1936,8 @@ async def run_collector(settings: Settings) -> None:
                         window=current_window,
                     )
     finally:
+        if resolution_task is not None:
+            await cancel_and_drain_task(resolution_task)
         if current_task is not None:
             await cancel_and_drain_task(current_task)
         if next_task is not None:

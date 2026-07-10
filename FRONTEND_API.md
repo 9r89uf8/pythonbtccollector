@@ -504,7 +504,7 @@ These fields are always present on a successful response:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1783459250123,
   "market": {
     "market_id": 5944864,
@@ -512,7 +512,25 @@ These fields are always present on a successful response:
     "market_end_ms": 1783459500000,
     "market_start_at": "2026-07-07T21:00:00Z",
     "market_end_at": "2026-07-07T21:05:00Z",
-    "seconds_expected": 300
+    "seconds_expected": 300,
+    "chainlink_resolution": {
+      "open": null,
+      "close": null,
+      "status": "pending",
+      "source": null
+    },
+    "resolution": {
+      "status": "pending",
+      "resolution_type": null,
+      "winner": null,
+      "winning_token_id": null,
+      "resolved_at_ms": null,
+      "official_payouts": {
+        "up": null,
+        "down": null
+      },
+      "source": null
+    }
   },
   "series": [
     {
@@ -568,6 +586,59 @@ When `fill_display=true`, only Chainlink is carried forward, and
 `freshness.chainlink.is_carried_forward` reports whether the row uses an older
 sample. Stored data is not changed.
 
+### Official market resolution
+
+`market.chainlink_resolution` and `market.resolution` are always present on the
+data and download routes. They do not require `include_probabilities=true`.
+For a completed market they can look like:
+
+```json
+{
+  "market": {
+    "chainlink_resolution": {
+      "open": "63337.115841440165",
+      "close": "63336.71900847139",
+      "status": "official",
+      "source": "polymarket_gamma_event_metadata"
+    },
+    "resolution": {
+      "status": "resolved",
+      "resolution_type": "winner",
+      "winner": "Down",
+      "winning_token_id": "22257037717815677829542896526504988088700721885271716267073503286407544507251",
+      "resolved_at_ms": 1783647917000,
+      "official_payouts": {
+        "up": "0",
+        "down": "1"
+      },
+      "source": "polymarket_clob_rest"
+    }
+  }
+}
+```
+
+The Chainlink `open` and `close` values are exact decimal strings from
+Polymarket's official Gamma event metadata. `chainlink_resolution.status` is:
+
+- `pending` while either official price is not yet available; or
+- `official` when both official prices are available.
+
+`resolution.status` is `pending` or `resolved`. While pending,
+`resolution_type` is `null`. A normal resolved binary market has
+`resolution_type: "winner"`, `winner` set to `Up` or `Down`, its winning token
+ID, and official `1`/`0` payouts. A split resolution has
+`resolution_type: "split"`, `winner` and `winning_token_id` set to `null`, and
+official payouts of `0.5`/`0.5`. `resolved_at_ms` can be `null` when Polymarket
+does not supply a resolution timestamp. Source fields are also `null` until
+their corresponding official data is available.
+`resolution.source` identifies whether the official result came from the CLOB
+WebSocket (`polymarket_clob_ws`), CLOB REST market
+(`polymarket_clob_rest`), or Gamma (`polymarket_gamma`).
+
+Resolution is reconciled after the market ends. The API can therefore return
+`pending` briefly for a completed window. Only official Gamma/CLOB resolution
+data can set `winner`; probability quotes are never treated as a result.
+
 ### Optional `probabilities`
 
 Added to each series row by `include_probabilities=true`:
@@ -581,7 +652,9 @@ Added to each series row by `include_probabilities=true`:
 }
 ```
 
-The ask values are two-decimal strings or `null`.
+The ask values are two-decimal strings or `null`. They are market quotes, not
+settlement results. In particular, the last Up/Down probability snapshot never
+determines `market.resolution.winner`.
 
 ### Optional `futures`
 
@@ -749,7 +822,9 @@ a smaller export shape:
 - With `include_book=true`, `series[].book` contains only `book_imbalance` and
   `microprice`.
 - Probability, open-interest, market, server-time, and series timestamp fields
-  otherwise keep their data-route shapes.
+  otherwise keep their data-route shapes. In particular,
+  `market.chainlink_resolution` and `market.resolution` are always retained in
+  the download, even when `include_probabilities=false`.
 
 Exported flow/book formatting is fixed:
 

@@ -67,6 +67,97 @@ CREATE INDEX IF NOT EXISTS polymarket_btc_5m_markets_slug_idx
 CREATE INDEX IF NOT EXISTS polymarket_btc_5m_markets_tokens_idx
     ON polymarket_btc_5m_markets (up_token_id, down_token_id);
 
+CREATE TABLE IF NOT EXISTS polymarket_btc_5m_resolutions (
+    market_id BIGINT PRIMARY KEY REFERENCES polymarket_btc_5m_markets(market_id),
+
+    resolution_status TEXT NOT NULL DEFAULT 'pending',
+    resolution_type TEXT,
+
+    chainlink_open_price NUMERIC(38, 18),
+    chainlink_close_price NUMERIC(38, 18),
+    chainlink_source TEXT,
+
+    winner TEXT,
+    winning_token_id TEXT,
+    up_payout NUMERIC(18, 8),
+    down_payout NUMERIC(18, 8),
+
+    resolved_at_ms BIGINT,
+    resolution_source TEXT,
+    raw_resolution JSONB,
+
+    first_checked_ms BIGINT NOT NULL,
+    last_checked_ms BIGINT NOT NULL,
+    next_check_ms BIGINT,
+    resolution_attempts INTEGER NOT NULL DEFAULT 0,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (resolution_status IN ('pending', 'resolved')),
+    CHECK (resolution_type IS NULL OR resolution_type IN ('winner', 'split')),
+    CHECK (chainlink_open_price IS NULL OR chainlink_open_price > 0),
+    CHECK (chainlink_close_price IS NULL OR chainlink_close_price > 0),
+    CHECK (
+        (chainlink_open_price IS NULL AND chainlink_close_price IS NULL
+            AND chainlink_source IS NULL)
+        OR
+        ((chainlink_open_price IS NOT NULL OR chainlink_close_price IS NOT NULL)
+            AND chainlink_source IS NOT NULL)
+    ),
+    CHECK (up_payout IS NULL OR (up_payout >= 0 AND up_payout <= 1)),
+    CHECK (down_payout IS NULL OR (down_payout >= 0 AND down_payout <= 1)),
+    CHECK (resolved_at_ms IS NULL OR resolved_at_ms >= 0),
+    CHECK (last_checked_ms >= first_checked_ms),
+    CHECK (next_check_ms IS NULL OR next_check_ms >= last_checked_ms),
+    CHECK (resolution_attempts >= 0),
+    CHECK (
+        (
+            resolution_status = 'pending'
+            AND resolution_type IS NULL
+            AND winner IS NULL
+            AND winning_token_id IS NULL
+            AND up_payout IS NULL
+            AND down_payout IS NULL
+            AND resolved_at_ms IS NULL
+            AND resolution_source IS NULL
+        )
+        OR
+        (
+            resolution_status = 'resolved'
+            AND resolution_type IS NOT NULL
+            AND resolution_type = 'winner'
+            AND resolution_source IS NOT NULL
+            AND winner IS NOT NULL
+            AND winning_token_id IS NOT NULL
+            AND up_payout IS NOT NULL
+            AND down_payout IS NOT NULL
+            AND (
+                (winner = 'Up' AND up_payout = 1 AND down_payout = 0)
+                OR
+                (winner = 'Down' AND up_payout = 0 AND down_payout = 1)
+            )
+        )
+        OR
+        (
+            resolution_status = 'resolved'
+            AND resolution_type IS NOT NULL
+            AND resolution_type = 'split'
+            AND winner IS NULL
+            AND winning_token_id IS NULL
+            AND up_payout IS NOT NULL
+            AND down_payout IS NOT NULL
+            AND up_payout = 0.5
+            AND down_payout = 0.5
+            AND resolution_source IS NOT NULL
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_resolutions_due_idx
+    ON polymarket_btc_5m_resolutions (next_check_ms, market_id)
+    WHERE next_check_ms IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS price_samples (
     instrument_id BIGINT NOT NULL REFERENCES instruments(instrument_id),
     sample_second_ms BIGINT NOT NULL,

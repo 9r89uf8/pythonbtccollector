@@ -132,6 +132,27 @@ def test_upsert_polymarket_market_ensures_market_window_before_metadata_insert()
     assert "ON CONFLICT (market_id)" in source
 
 
+def test_polymarket_resolution_db_helpers_are_retryable_and_non_regressing():
+    fetch_source = inspect.getsource(db.fetch_due_polymarket_resolutions)
+    upsert_source = inspect.getsource(db.upsert_polymarket_btc_5m_resolution)
+    retry_source = inspect.getsource(db.schedule_polymarket_resolution_retry)
+
+    assert "mw.market_end_ms <= $1" in fetch_source
+    assert "resolution.next_check_ms <= $1" in fetch_source
+    assert "resolution.resolution_status = 'pending'" in fetch_source
+    assert "resolution.chainlink_open_price IS NULL" in fetch_source
+    assert "resolution.chainlink_close_price IS NULL" in fetch_source
+    assert "ON CONFLICT (market_id)" in upsert_source
+    assert "= 'resolved'" in upsert_source
+    assert "EXCLUDED.resolution_status = 'resolved'" in upsert_source
+    assert "EXCLUDED.last_checked_ms" in upsert_source
+    assert "< polymarket_btc_5m_resolutions.last_checked_ms" in upsert_source
+    assert "raw_resolution" in upsert_source
+    assert "ON CONFLICT (market_id)" in retry_source
+    assert "GREATEST(" in retry_source
+    assert "< polymarket_btc_5m_resolutions.last_checked_ms" in retry_source
+
+
 def test_fetch_recent_market_windows_uses_time_cursor_and_real_observations():
     row = {
         "market_id": 5_944_864,
@@ -215,6 +236,16 @@ def test_decimal_2dp_or_none():
     assert db.decimal_2dp_or_none(None) is None
 
 
+def test_decimal_compact_or_none_preserves_resolution_precision_without_padding():
+    assert db.decimal_compact_or_none(
+        Decimal("63337.115841440165000000")
+    ) == "63337.115841440165"
+    assert db.decimal_compact_or_none(Decimal("1.00000000")) == "1"
+    assert db.decimal_compact_or_none(Decimal("0.50000000")) == "0.5"
+    assert db.decimal_compact_or_none(Decimal("0.00000000")) == "0"
+    assert db.decimal_compact_or_none(None) is None
+
+
 def test_oi_3dp_rounds_contract_values():
     assert db.oi_3dp(Decimal("74321.1234")) == "74321.123"
     assert db.oi_3dp(Decimal("74321.1235")) == "74321.124"
@@ -249,7 +280,15 @@ def test_schema_includes_polymarket_probability_tables():
     schema = (ROOT / "schema.sql").read_text()
 
     assert "CREATE TABLE IF NOT EXISTS polymarket_btc_5m_markets" in schema
+    assert "CREATE TABLE IF NOT EXISTS polymarket_btc_5m_resolutions" in schema
     assert "CREATE TABLE IF NOT EXISTS polymarket_probability_samples" in schema
+    assert "chainlink_open_price NUMERIC(38, 18)" in schema
+    assert "chainlink_close_price NUMERIC(38, 18)" in schema
+    assert "resolution_status IN ('pending', 'resolved')" in schema
+    assert "resolution_type IS NULL OR resolution_type IN ('winner', 'split')" in schema
+    assert "AND resolution_type IS NOT NULL" in schema
+    assert "AND resolved_at_ms IS NULL" in schema
+    assert "polymarket_btc_5m_resolutions_due_idx" in schema
     assert "PRIMARY KEY (market_id, source, sample_second_ms)" in schema
     assert "up_bid NUMERIC(18, 8)" in schema
     assert "down_prob_norm NUMERIC(18, 8)" in schema
@@ -422,7 +461,7 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     )
 
     assert payload is not None
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["server_time_ms"] == 1_783_459_200_250
     assert payload["market"] == {
         "market_id": 5_944_864,
@@ -431,6 +470,24 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
         "market_start_at": "2026-07-07T21:00:00Z",
         "market_end_at": "2026-07-07T21:05:00Z",
         "seconds_expected": 300,
+        "chainlink_resolution": {
+            "open": None,
+            "close": None,
+            "status": "pending",
+            "source": None,
+        },
+        "resolution": {
+            "status": "pending",
+            "resolution_type": None,
+            "winner": None,
+            "winning_token_id": None,
+            "resolved_at_ms": None,
+            "official_payouts": {
+                "up": None,
+                "down": None,
+            },
+            "source": None,
+        },
     }
     assert len(payload["series"]) == 300
     assert [row["t"] for row in payload["series"]] == list(range(300))
@@ -459,6 +516,55 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     assert "futures" not in payload["series"][1]
     assert "open_interest" not in payload["series"][1]
     assert "previous_5m_oi_summary" not in payload
+
+
+def test_build_market_download_payload_adds_official_chainlink_and_winner_metadata():
+    rows = market_download_rows()
+    rows[0].update(
+        {
+            "resolution_status": "resolved",
+            "resolution_type": "winner",
+            "resolution_chainlink_open_price": Decimal(
+                "63337.115841440165000000"
+            ),
+            "resolution_chainlink_close_price": Decimal(
+                "63336.719008471390000000"
+            ),
+            "resolution_chainlink_source": "polymarket_gamma_event_metadata",
+            "resolution_winner": "Down",
+            "resolution_winning_token_id": "down-token",
+            "resolution_up_payout": Decimal("0.00000000"),
+            "resolution_down_payout": Decimal("1.00000000"),
+            "resolution_resolved_at_ms": 1_783_459_517_000,
+            "resolution_source": "polymarket_clob_rest",
+        }
+    )
+
+    payload = db.build_market_download_payload(
+        rows,
+        server_time_ms=1_783_459_520_000,
+        include_probabilities=False,
+        include_futures=False,
+        include_oi=False,
+    )
+
+    assert payload is not None
+    assert payload["schema_version"] == 2
+    assert payload["market"]["chainlink_resolution"] == {
+        "open": "63337.115841440165",
+        "close": "63336.71900847139",
+        "status": "official",
+        "source": "polymarket_gamma_event_metadata",
+    }
+    assert payload["market"]["resolution"] == {
+        "status": "resolved",
+        "resolution_type": "winner",
+        "winner": "Down",
+        "winning_token_id": "down-token",
+        "resolved_at_ms": 1_783_459_517_000,
+        "official_payouts": {"up": "0", "down": "1"},
+        "source": "polymarket_clob_rest",
+    }
 
 
 def test_build_market_download_payload_adds_probabilities_only_when_requested():
@@ -813,6 +919,9 @@ def test_fetch_market_download_payload_query_includes_optional_futures_joins():
     assert "FROM binance_futures_oi_5m_summaries" in source
     assert "FROM binance_flow_1s" in source
     assert "FROM binance_book_1s" in source
+    assert "FROM polymarket_btc_5m_resolutions" in source
+    assert "resolution.chainlink_open_price" in source
+    assert "resolution.winner AS resolution_winner" in source
     assert "flow.delta_quote AS flow_delta_quote" in source
     assert "book.spread_bps AS book_spread_bps" in source
     assert "LEFT JOIN flow ON flow.sample_second_ms = s.sample_second_ms" in source

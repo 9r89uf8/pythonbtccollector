@@ -622,7 +622,7 @@ def market_data_payload(
         }
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "market": {
             "market_id": 5_944_864,
             "market_start_ms": 1_783_459_200_000,
@@ -630,6 +630,21 @@ def market_data_payload(
             "market_start_at": "2026-07-07T21:00:00Z",
             "market_end_at": "2026-07-07T21:05:00Z",
             "seconds_expected": 300,
+            "chainlink_resolution": {
+                "open": None,
+                "close": None,
+                "status": "pending",
+                "source": None,
+            },
+            "resolution": {
+                "status": "pending",
+                "resolution_type": None,
+                "winner": None,
+                "winning_token_id": None,
+                "resolved_at_ms": None,
+                "official_payouts": {"up": None, "down": None},
+                "source": None,
+            },
         },
         "series": [row],
     }
@@ -948,6 +963,61 @@ def test_markets_download_returns_attachment_filename(client, monkeypatch):
     body = response.json()
     assert body["series"][0]["probabilities"]["down"]["normalized"] == "0.51758794"
     assert "freshness" not in body["series"][0]
+
+
+def test_markets_download_preserves_official_resolution_metadata(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        server_time_ms,
+        include_probabilities,
+        include_futures,
+        include_oi,
+        include_flow,
+        include_book,
+        fill_display,
+        max_carry_forward_ms,
+    ):
+        payload = market_data_payload()
+        payload["market"]["chainlink_resolution"] = {
+            "open": "63337.115841440165",
+            "close": "63336.71900847139",
+            "status": "official",
+            "source": "polymarket_gamma_event_metadata",
+        }
+        payload["market"]["resolution"] = {
+            "status": "resolved",
+            "resolution_type": "winner",
+            "winner": "Down",
+            "winning_token_id": "down-token",
+            "resolved_at_ms": 1_783_459_517_000,
+            "official_payouts": {"up": "0", "down": "1"},
+            "source": "polymarket_clob_rest",
+        }
+        return payload
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+
+    response = client.get("/markets/5944864/download")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 2
+    assert body["market"]["chainlink_resolution"]["open"] == (
+        "63337.115841440165"
+    )
+    assert body["market"]["chainlink_resolution"]["close"] == (
+        "63336.71900847139"
+    )
+    assert body["market"]["resolution"]["winner"] == "Down"
+    assert body["market"]["resolution"]["official_payouts"] == {
+        "up": "0",
+        "down": "1",
+    }
 
 
 def test_markets_download_filename_includes_requested_optional_layers(client, monkeypatch):

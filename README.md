@@ -88,6 +88,11 @@ columns, and are serialized as strings by the API.
 - Stores one-second bid, ask, midpoint, and normalized probability snapshots
   when the source data is complete and fresh.
 - Preloads the next market before the current five-minute boundary.
+- Reconciles ended markets against Polymarket Gamma and CLOB REST data, with
+  durable retries for resolutions that are not official yet.
+- Stores Polymarket's official Chainlink open/close prices, winner or split
+  result, official payouts, winning token ID, and resolution timestamp when
+  available. Probability quotes are never used to infer the winner.
 
 ## Five-Minute Market Windows
 
@@ -108,7 +113,9 @@ PostgreSQL is the historical source of record. The main tables are:
 
 - `providers`, `instruments`, and `market_windows`
 - `price_samples` for Binance Spot and Polymarket Chainlink prices
-- `polymarket_btc_5m_markets` and `polymarket_probability_samples`
+- `polymarket_btc_5m_markets`, `polymarket_probability_samples`, and
+  `polymarket_btc_5m_resolutions` for discovered markets, probability history,
+  and official Polymarket resolution metadata
 - `binance_futures_snapshots`
 - `binance_futures_oi_5m_summaries`
 - `binance_flow_1s`
@@ -159,6 +166,15 @@ The data and download routes accept optional `include_probabilities`,
 `include_futures`, `include_oi`, `include_flow`, `include_book`, `fill_display`,
 and `max_carry_forward_ms` query parameters. `/markets/current/live` reads Redis;
 the historical and aggregate routes read PostgreSQL.
+
+The data and download responses use schema version `2` and always include
+`market.chainlink_resolution` and `market.resolution`, independently of the
+optional series flags. These objects contain only official Polymarket
+Gamma/CLOB data. Ended markets can remain `pending` briefly while the collector
+waits for official resolution; the last Up/Down probability is never treated as
+the winner. The active CLOB connection stays open for a short grace period after
+the market boundary to capture an official resolution event, while durable REST
+reconciliation handles delayed results and fills the official Chainlink values.
 
 `GET /markets` is the frontend discovery route. It returns the newest three
 completed markets by default, newest first, with market timestamps and
@@ -233,6 +249,19 @@ At minimum, replace the database passwords in:
 DATABASE_URL=postgresql://price_writer:REPLACE_ME@127.0.0.1:5432/price_collector
 READ_DATABASE_URL=postgresql://price_reader:REPLACE_ME@127.0.0.1:5432/price_collector
 ```
+
+The probability collector's resolution reconciler uses these settings from
+`collector.env`:
+
+- `POLYMARKET_RESOLUTION_POLL_SECONDS=5` sets the scan interval and initial
+  retry delay.
+- `POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS=300` caps exponential retry
+  backoff while official data is pending or temporarily unavailable.
+- `POLYMARKET_RESOLUTION_BATCH_SIZE=20` limits the number of due markets checked
+  in one scan.
+- `POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30` keeps the ending market's CLOB
+  subscription open briefly for an official winner event without delaying
+  collection of the preloaded next market.
 
 Do not commit `collector.env`, `api.env`, `droplet.env`, `.env`, or real
 credentials. These files are ignored by Git; only their examples belong in the

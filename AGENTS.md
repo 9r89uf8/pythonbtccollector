@@ -117,6 +117,9 @@ The corresponding Python entry points are:
 - Skip stale, resolved, incomplete, or out-of-window snapshots instead of
   backfilling fabricated values.
 - Preload the next market before the current market boundary.
+- Reconcile ended markets against official Polymarket Gamma/CLOB resolution
+  data and persist the official Chainlink open/final prices and outcome.
+- Never infer an official winner from the final Up/Down probability quote.
 
 ## Live Cache Rules
 

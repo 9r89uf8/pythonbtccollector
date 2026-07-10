@@ -36,6 +36,21 @@ curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
 ```
 
+Inspect the official resolution objects returned by both historical response
+paths. `GET /markets` defaults to completed markets, so its first ID is suitable
+for this check:
+
+```bash
+MARKET_ID="$(curl -fsS 'http://127.0.0.1:9000/markets?limit=1' | python3 -c 'import json, sys; print(json.load(sys.stdin)["markets"][0]["market_id"])')"
+curl -fsS "http://127.0.0.1:9000/markets/${MARKET_ID}/data" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "market": payload["market"]}, indent=2))'
+curl -fsS "http://127.0.0.1:9000/markets/${MARKET_ID}/download" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "market": payload["market"]}, indent=2))'
+```
+
+Both responses should use schema version `2` and include
+`market.chainlink_resolution` and `market.resolution`. A recently completed
+market can legitimately remain `pending` until Polymarket publishes official
+resolution data.
+
 ## Connect From Your Local Machine
 
 The API is intentionally bound only to `127.0.0.1` on the droplet. Use an SSH tunnel from your local machine:
@@ -114,6 +129,21 @@ sudo systemctl enable redis-server price-collector price-collector-polymarket-ch
 sudo systemctl restart price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 ```
 
+When deploying the Polymarket resolution reconciler for the first time, review
+`/etc/price-collector/collector.env` manually and add these settings if they are
+not already present. Do not replace the production file with the example:
+
+```text
+POLYMARKET_RESOLUTION_POLL_SECONDS=5
+POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS=300
+POLYMARKET_RESOLUTION_BATCH_SIZE=20
+POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30
+```
+
+Apply `schema.sql`, confirm the new table grants for `price_writer` and
+`price_reader`, and review the environment file before restarting the four
+collector services and `price-api`.
+
 Verify after restart:
 
 ```bash
@@ -128,6 +158,9 @@ curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
 ```
+
+For an update that changes the market data/download contract, repeat the
+completed-market API check from **Check Services** above.
 
 ## Redis Spot Checks
 
@@ -185,6 +218,36 @@ SELECT 'binance_book_1s' AS table_name, count(*) AS rows, max(sample_second_at) 
 FROM binance_book_1s;
 "
 ```
+
+Latest Polymarket resolution reconciliation state:
+
+```bash
+sudo -u postgres psql -d price_collector -c "
+SELECT
+    market_id,
+    resolution_status,
+    resolution_type,
+    chainlink_open_price,
+    chainlink_close_price,
+    winner,
+    winning_token_id,
+    up_payout,
+    down_payout,
+    resolved_at_ms,
+    resolution_source,
+    last_checked_ms,
+    next_check_ms,
+    resolution_attempts
+FROM polymarket_btc_5m_resolutions
+ORDER BY market_id DESC
+LIMIT 10;
+"
+```
+
+`pending` rows with a future `next_check_ms` are scheduled for another attempt.
+Terminal `resolved` rows use `resolution_type` to distinguish a normal
+`winner` from a `split`. Their `next_check_ms` becomes `NULL` after official
+Chainlink open/close metadata is also stored.
 
 ## Confirm Local-Only Binding
 
