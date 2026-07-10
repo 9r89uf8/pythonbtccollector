@@ -278,6 +278,10 @@ python -m pytest
 
 - Keep `README.md` aligned with the current architecture, settings, service
   names, and API routes.
+- Keep `FRONTEND_API.md` synchronized with `price_collector/api.py`. In the same
+  checkpoint as any FastAPI endpoint addition, change, rename, or removal,
+  update its frontend-facing method and path, request parameters, example call,
+  response fields and shape, and relevant error responses.
 - Keep `OPERATIONS.md` aligned with deploy, restart, verification, and recovery
   commands.
 - When adding a collector or service, update the README, operations guide,

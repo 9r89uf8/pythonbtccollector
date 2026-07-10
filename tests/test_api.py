@@ -235,6 +235,201 @@ def test_markets_latest_returns_ohlc_sample_count_and_samples(client, monkeypatc
     assert body["samples"][0]["sample_second_at"] == "2026-07-07T21:00:00Z"
 
 
+def test_markets_index_defaults_to_three_completed_markets(client, monkeypatch):
+    async def fake_fetch_recent_market_windows(
+        pool,
+        *,
+        server_time_ms,
+        include_current,
+        before_market_id,
+        limit,
+    ):
+        assert pool is client.fake_pool
+        assert server_time_ms == 1_783_460_100_000
+        assert include_current is False
+        assert before_market_id is None
+        assert limit == 4
+        return [
+            {
+                "market_id": 5_944_866,
+                "market_start_ms": 1_783_459_800_000,
+                "market_end_ms": 1_783_460_100_000,
+                "market_start_at": utc_dt(2026, 7, 7, 21, 10, 0),
+                "market_end_at": utc_dt(2026, 7, 7, 21, 15, 0),
+                "binance_sample_count": 300,
+                "chainlink_sample_count": 298,
+                "futures_sample_count": 60,
+                "open_interest_sample_count": 60,
+                "flow_sample_count": 300,
+                "book_sample_count": 299,
+                "probability_sample_count": 297,
+            },
+            {
+                "market_id": 5_944_865,
+                "market_start_ms": 1_783_459_500_000,
+                "market_end_ms": 1_783_459_800_000,
+                "market_start_at": utc_dt(2026, 7, 7, 21, 5, 0),
+                "market_end_at": utc_dt(2026, 7, 7, 21, 10, 0),
+                "binance_sample_count": 300,
+                "chainlink_sample_count": 299,
+                "futures_sample_count": 60,
+                "open_interest_sample_count": 59,
+                "flow_sample_count": 300,
+                "book_sample_count": 300,
+                "probability_sample_count": 296,
+            },
+            {
+                "market_id": 5_944_864,
+                "market_start_ms": 1_783_459_200_000,
+                "market_end_ms": 1_783_459_500_000,
+                "market_start_at": utc_dt(2026, 7, 7, 21, 0, 0),
+                "market_end_at": utc_dt(2026, 7, 7, 21, 5, 0),
+                "binance_sample_count": 299,
+                "chainlink_sample_count": 297,
+                "futures_sample_count": 60,
+                "open_interest_sample_count": 60,
+                "flow_sample_count": 298,
+                "book_sample_count": 300,
+                "probability_sample_count": 295,
+            },
+            {
+                "market_id": 5_944_863,
+                "market_start_ms": 1_783_458_900_000,
+                "market_end_ms": 1_783_459_200_000,
+                "market_start_at": utc_dt(2026, 7, 7, 20, 55, 0),
+                "market_end_at": utc_dt(2026, 7, 7, 21, 0, 0),
+            },
+        ]
+
+    monkeypatch.setattr(
+        api,
+        "fetch_recent_market_windows",
+        fake_fetch_recent_market_windows,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_000)
+
+    response = client.get("/markets")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 1
+    assert body["server_time_ms"] == 1_783_460_100_000
+    assert [market["market_id"] for market in body["markets"]] == [
+        5_944_866,
+        5_944_865,
+        5_944_864,
+    ]
+    assert body["markets"][0] == {
+        "market_id": 5_944_866,
+        "market_start_ms": 1_783_459_800_000,
+        "market_end_ms": 1_783_460_100_000,
+        "market_start_at": "2026-07-07T21:10:00Z",
+        "market_end_at": "2026-07-07T21:15:00Z",
+        "is_complete": True,
+        "availability": {
+            "binance": 300,
+            "chainlink": 298,
+            "futures": 60,
+            "open_interest": 60,
+            "flow": 300,
+            "book": 299,
+            "probabilities": 297,
+        },
+    }
+    assert body["next_before_market_id"] == 5_944_864
+
+
+def test_markets_index_passes_include_current_and_exclusive_cursor(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_recent_market_windows(
+        pool,
+        *,
+        server_time_ms,
+        include_current,
+        before_market_id,
+        limit,
+    ):
+        assert pool is client.fake_pool
+        assert server_time_ms == 1_783_459_920_123
+        assert include_current is True
+        assert before_market_id == 5_944_867
+        assert limit == 3
+        return [
+            {
+                "market_id": 5_944_866,
+                "market_start_ms": 1_783_459_800_000,
+                "market_end_ms": 1_783_460_100_000,
+                "market_start_at": utc_dt(2026, 7, 7, 21, 10, 0),
+                "market_end_at": utc_dt(2026, 7, 7, 21, 15, 0),
+                "binance_sample_count": 120,
+            }
+        ]
+
+    monkeypatch.setattr(
+        api,
+        "fetch_recent_market_windows",
+        fake_fetch_recent_market_windows,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_920_123)
+
+    response = client.get(
+        "/markets?limit=2&include_current=true&before_market_id=5944867"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["markets"][0]["market_id"] == 5_944_866
+    assert body["markets"][0]["is_complete"] is False
+    assert body["markets"][0]["availability"] == {
+        "binance": 120,
+        "chainlink": 0,
+        "futures": 0,
+        "open_interest": 0,
+        "flow": 0,
+        "book": 0,
+        "probabilities": 0,
+    }
+    assert body["next_before_market_id"] is None
+
+
+def test_markets_index_returns_empty_list_with_200(client, monkeypatch):
+    async def fake_fetch_recent_market_windows(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs["limit"] == 4
+        return []
+
+    monkeypatch.setattr(
+        api,
+        "fetch_recent_market_windows",
+        fake_fetch_recent_market_windows,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_920_123)
+
+    response = client.get("/markets")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": 1,
+        "server_time_ms": 1_783_459_920_123,
+        "markets": [],
+        "next_before_market_id": None,
+    }
+
+
+@pytest.mark.parametrize("limit", [0, 51])
+def test_markets_index_rejects_out_of_range_limits(client, monkeypatch, limit):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid limit must be rejected before database access")
+
+    monkeypatch.setattr(api, "fetch_recent_market_windows", unexpected_fetch)
+
+    response = client.get(f"/markets?limit={limit}")
+
+    assert response.status_code == 422
+
+
 def test_markets_by_id_returns_404_when_no_samples_exist(client, monkeypatch):
     async def fake_fetch_market_summary(pool, provider_code, symbol, market_id):
         assert market_id == 5_944_864

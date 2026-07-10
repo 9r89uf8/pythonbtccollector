@@ -144,6 +144,7 @@ Current routes:
 
 - `GET /healthz`
 - `GET /prices/latest?provider=...&symbol=...`
+- `GET /markets?limit=3&include_current=false&before_market_id=...`
 - `GET /markets/latest?provider=...&symbol=...`
 - `GET /markets/{market_id}?provider=...&symbol=...`
 - `GET /markets/current/sources`
@@ -159,6 +160,17 @@ The data and download routes accept optional `include_probabilities`,
 and `max_carry_forward_ms` query parameters. `/markets/current/live` reads Redis;
 the historical and aggregate routes read PostgreSQL.
 
+`GET /markets` is the frontend discovery route. It returns the newest three
+completed markets by default, newest first, with market timestamps and
+per-source availability counts. Use `include_current=true` to include an
+observed active market, and pass the returned `next_before_market_id` as the
+exclusive `before_market_id` cursor for older pages. Future and observation-empty
+windows are not returned. The frontend should select a returned `market_id` and
+then request `/markets/{market_id}/data` with the desired optional datasets.
+
+See [`FRONTEND_API.md`](FRONTEND_API.md) for frontend call examples, query
+parameters, complete response shapes, optional fields, and error responses.
+
 ## Repository Layout
 
 ```text
@@ -167,6 +179,7 @@ deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
+FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 requirements.txt       Python runtime and test dependencies
 ```
 

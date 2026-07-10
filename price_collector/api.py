@@ -16,6 +16,7 @@ from price_collector.db import (
     fetch_latest_price,
     fetch_market_summaries_for_btc_sources,
     fetch_market_summary,
+    fetch_recent_market_windows,
     health_check,
 )
 from price_collector.live_cache import (
@@ -170,6 +171,30 @@ def serialize_market_sources_summary(
     }
 
 
+def serialize_market_index_item(
+    row: Mapping[str, Any],
+    *,
+    now_ms: int,
+) -> dict[str, Any]:
+    return {
+        "market_id": int(row["market_id"]),
+        "market_start_ms": int(row["market_start_ms"]),
+        "market_end_ms": int(row["market_end_ms"]),
+        "market_start_at": utc_datetime_to_z(row["market_start_at"]),
+        "market_end_at": utc_datetime_to_z(row["market_end_at"]),
+        "is_complete": now_ms >= int(row["market_end_ms"]),
+        "availability": {
+            "binance": int(row.get("binance_sample_count") or 0),
+            "chainlink": int(row.get("chainlink_sample_count") or 0),
+            "futures": int(row.get("futures_sample_count") or 0),
+            "open_interest": int(row.get("open_interest_sample_count") or 0),
+            "flow": int(row.get("flow_sample_count") or 0),
+            "book": int(row.get("book_sample_count") or 0),
+            "probabilities": int(row.get("probability_sample_count") or 0),
+        },
+    }
+
+
 def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
     exported = dict(item)
     exported.pop("freshness", None)
@@ -291,6 +316,39 @@ async def markets_latest(
         symbol=symbol,
         market_id=market_id,
     )
+
+
+@app.get("/markets")
+async def markets_index(
+    request: Request,
+    limit: int = Query(3, ge=1, le=50),
+    include_current: bool = Query(False),
+    before_market_id: Optional[int] = Query(None, ge=0),
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    rows = await fetch_recent_market_windows(
+        get_pool(request),
+        server_time_ms=now_ms,
+        include_current=include_current,
+        before_market_id=before_market_id,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+
+    return {
+        "schema_version": 1,
+        "server_time_ms": now_ms,
+        "markets": [
+            serialize_market_index_item(row, now_ms=now_ms)
+            for row in page_rows
+        ],
+        "next_before_market_id": (
+            int(page_rows[-1]["market_id"])
+            if has_more and page_rows
+            else None
+        ),
+    }
 
 
 @app.get("/markets/current/sources")

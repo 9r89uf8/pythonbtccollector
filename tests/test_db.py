@@ -132,6 +132,81 @@ def test_upsert_polymarket_market_ensures_market_window_before_metadata_insert()
     assert "ON CONFLICT (market_id)" in source
 
 
+def test_fetch_recent_market_windows_uses_time_cursor_and_real_observations():
+    row = {
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "market_start_at": datetime(2026, 7, 7, 21, 0, tzinfo=timezone.utc),
+        "market_end_at": datetime(2026, 7, 7, 21, 5, tzinfo=timezone.utc),
+        "is_complete": True,
+        "binance_sample_count": 300,
+        "chainlink_sample_count": 298,
+        "futures_sample_count": 60,
+        "open_interest_sample_count": 60,
+        "flow_sample_count": 300,
+        "book_sample_count": 299,
+        "probability_sample_count": 297,
+    }
+
+    class FakeAcquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeConnection:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch(self, query, *args):
+            self.calls.append((query, args))
+            return [row]
+
+    class FakePool:
+        def __init__(self):
+            self.connection = FakeConnection()
+
+        def acquire(self):
+            return FakeAcquire(self.connection)
+
+    pool = FakePool()
+    result = asyncio.run(
+        db.fetch_recent_market_windows(
+            pool,
+            server_time_ms=1_783_459_800_123,
+            include_current=False,
+            before_market_id=5_944_865,
+            limit=3,
+        )
+    )
+
+    assert result == [row]
+    query, args = pool.connection.calls[0]
+    assert args == (1_783_459_800_123, False, 5_944_865, 3)
+
+    normalized_query = " ".join(query.split())
+    assert "mw.market_start_ms <= $1::BIGINT" in normalized_query
+    assert "($2::BOOLEAN OR mw.market_end_ms <= $1::BIGINT)" in normalized_query
+    assert "($3::BIGINT IS NULL OR mw.market_id < $3::BIGINT)" in normalized_query
+    assert "ORDER BY mw.market_id DESC LIMIT $4::INTEGER" in normalized_query
+    assert normalized_query.count("OR EXISTS") == 4
+    assert "FROM price_samples" in normalized_query
+    assert "FROM binance_futures_snapshots" in normalized_query
+    assert "FROM binance_flow_1s" in normalized_query
+    assert "FROM binance_book_1s" in normalized_query
+    assert "FROM polymarket_probability_samples" in normalized_query
+    assert "f.futures_last_price IS NOT NULL" in normalized_query
+    assert "f.open_interest IS NOT NULL" in normalized_query
+    assert "probabilities.up_ask IS NOT NULL" in normalized_query
+    assert "probabilities.down_ask IS NOT NULL" in normalized_query
+    assert "ORDER BY candidates.market_id DESC" in normalized_query
+
+
 def test_decimal_2dp_or_none():
     assert db.decimal_2dp_or_none(Decimal("62012.870302750816000000")) == "62012.87"
     assert db.decimal_2dp_or_none(Decimal("62067.890000000000000000")) == "62067.89"

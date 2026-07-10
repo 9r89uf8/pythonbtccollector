@@ -823,6 +823,165 @@ async def fetch_latest_market_id(
     return int(market_id) if market_id is not None else None
 
 
+async def fetch_recent_market_windows(
+    pool: asyncpg.Pool,
+    *,
+    server_time_ms: int,
+    include_current: bool,
+    before_market_id: Optional[int],
+    limit: int,
+) -> list[dict[str, Any]]:
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            WITH instrument_ids AS (
+                SELECT
+                    max(i.instrument_id) FILTER (
+                        WHERE p.provider_code = 'binance_spot'
+                          AND i.symbol = 'BTCUSDT'
+                    ) AS binance_id,
+                    max(i.instrument_id) FILTER (
+                        WHERE p.provider_code = 'polymarket_chainlink_rtds'
+                          AND i.symbol = 'BTCUSD'
+                    ) AS chainlink_id
+                FROM instruments i
+                JOIN providers p ON p.provider_id = i.provider_id
+            ),
+            candidates AS MATERIALIZED (
+                SELECT
+                    mw.market_id,
+                    mw.market_start_ms,
+                    mw.market_end_ms,
+                    mw.market_start_at,
+                    mw.market_end_at
+                FROM market_windows mw
+                CROSS JOIN instrument_ids ids
+                WHERE mw.market_start_ms <= $1::BIGINT
+                  AND ($2::BOOLEAN OR mw.market_end_ms <= $1::BIGINT)
+                  AND ($3::BIGINT IS NULL OR mw.market_id < $3::BIGINT)
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM price_samples ps
+                        WHERE ps.market_id = mw.market_id
+                          AND ps.instrument_id IN (ids.binance_id, ids.chainlink_id)
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM binance_futures_snapshots f
+                        WHERE f.market_id = mw.market_id
+                          AND f.symbol = 'BTCUSDT'
+                          AND (
+                            f.futures_last_price IS NOT NULL
+                            OR f.open_interest IS NOT NULL
+                          )
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM binance_flow_1s flow
+                        WHERE flow.market_id = mw.market_id
+                          AND flow.venue = 'binance_usdm_perp'
+                          AND flow.symbol = 'BTCUSDT'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM binance_book_1s book
+                        WHERE book.market_id = mw.market_id
+                          AND book.venue = 'binance_usdm_perp'
+                          AND book.symbol = 'BTCUSDT'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM polymarket_probability_samples probabilities
+                        WHERE probabilities.market_id = mw.market_id
+                          AND probabilities.source = 'polymarket_clob'
+                          AND probabilities.up_ask IS NOT NULL
+                          AND probabilities.down_ask IS NOT NULL
+                    )
+                  )
+                ORDER BY mw.market_id DESC
+                LIMIT $4::INTEGER
+            )
+            SELECT
+                candidates.market_id,
+                candidates.market_start_ms,
+                candidates.market_end_ms,
+                candidates.market_start_at,
+                candidates.market_end_at,
+                candidates.market_end_ms <= $1::BIGINT AS is_complete,
+                COALESCE(price_counts.binance_count, 0)::INTEGER
+                    AS binance_sample_count,
+                COALESCE(price_counts.chainlink_count, 0)::INTEGER
+                    AS chainlink_sample_count,
+                COALESCE(futures_counts.futures_count, 0)::INTEGER
+                    AS futures_sample_count,
+                COALESCE(futures_counts.open_interest_count, 0)::INTEGER
+                    AS open_interest_sample_count,
+                COALESCE(flow_counts.sample_count, 0)::INTEGER
+                    AS flow_sample_count,
+                COALESCE(book_counts.sample_count, 0)::INTEGER
+                    AS book_sample_count,
+                COALESCE(probability_counts.sample_count, 0)::INTEGER
+                    AS probability_sample_count
+            FROM candidates
+            CROSS JOIN instrument_ids ids
+            LEFT JOIN LATERAL (
+                SELECT
+                    count(*) FILTER (
+                        WHERE ps.instrument_id = ids.binance_id
+                    ) AS binance_count,
+                    count(*) FILTER (
+                        WHERE ps.instrument_id = ids.chainlink_id
+                    ) AS chainlink_count
+                FROM price_samples ps
+                WHERE ps.market_id = candidates.market_id
+                  AND ps.instrument_id IN (ids.binance_id, ids.chainlink_id)
+            ) price_counts ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    count(*) FILTER (
+                        WHERE futures_last_price IS NOT NULL
+                    ) AS futures_count,
+                    count(*) FILTER (
+                        WHERE open_interest IS NOT NULL
+                    ) AS open_interest_count
+                FROM binance_futures_snapshots
+                WHERE market_id = candidates.market_id
+                  AND symbol = 'BTCUSDT'
+            ) futures_counts ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT count(*) AS sample_count
+                FROM binance_flow_1s
+                WHERE market_id = candidates.market_id
+                  AND venue = 'binance_usdm_perp'
+                  AND symbol = 'BTCUSDT'
+            ) flow_counts ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT count(*) AS sample_count
+                FROM binance_book_1s
+                WHERE market_id = candidates.market_id
+                  AND venue = 'binance_usdm_perp'
+                  AND symbol = 'BTCUSDT'
+            ) book_counts ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT count(*) AS sample_count
+                FROM polymarket_probability_samples
+                WHERE market_id = candidates.market_id
+                  AND source = 'polymarket_clob'
+                  AND up_ask IS NOT NULL
+                  AND down_ask IS NOT NULL
+            ) probability_counts ON TRUE
+            ORDER BY candidates.market_id DESC
+            """,
+            server_time_ms,
+            include_current,
+            before_market_id,
+            max(1, int(limit)),
+        )
+
+    return [dict(row) for row in rows]
+
+
 async def fetch_market_summary(
     pool: asyncpg.Pool,
     provider_code: str,
