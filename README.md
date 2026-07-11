@@ -138,9 +138,11 @@ tested bounded-write infrastructure:
 - `raw_capture.binance_futures_price_trace_100ms` is the partitioned
   destination for one compact OHLC row per futures WebSocket connection and
   active 100 ms receive bucket.
-- `raw_capture.chainlink_price_events` is the planned partitioned destination
-  for individual valid RTDS ticks that are successfully captured.
-- `raw_capture.feed_sessions` is the planned connection/session metadata table.
+- `raw_capture.chainlink_price_events` is the partitioned destination for every
+  individual valid RTDS tick successfully accepted by the best-effort capture
+  queue; same-millisecond and unchanged-price ticks are not coalesced.
+- `raw_capture.feed_sessions` stores connection/session metadata for each
+  enabled futures or Chainlink capture source.
 
 The `raw_capture` schema is owned separately from the normal historical tables,
 is unavailable to `PUBLIC` and the API's `price_reader` role, and grants the
@@ -156,14 +158,31 @@ for the dedicated raw database writer. Connection/session records, bounded
 queueing, batched `COPY`, and partition maintenance run only while capture is
 enabled.
 
-Chainlink capture remains unintegrated in Phase 2 and
-`RAW_CHAINLINK_EVENTS_ENABLED` must stay `false`. The public futures live value
-also remains the Binance REST `/fapi/v2/ticker/price` result: the futures
-WebSocket evidence does not update Redis or change the API response. With both
-flags `false`, no capture queue, task, or extra raw database connection is
-created. Deploying the Phase 2 code is only the code checkpoint; Phase 2 is not
-operationally complete until the futures-only canary in `OPERATIONS.md` has run
-continuously for 24 hours and passed its checks.
+Phase 3 integrates the Chainlink RTDS reader while keeping
+`RAW_CHAINLINK_EVENTS_ENABLED` opt-in. The reader records wall receive time
+immediately after `recv()` and before parsing, synchronously updates versioned
+latest-wins live state, publishes the critical provider-second historical
+version, offers each valid raw event without waiting when enabled, and returns
+to RTDS receive work. A separate worker attempts Redis for the newest live
+version, which remains pending until that attempt completes. The historical
+worker waits for the relevant live-cache attempt and holds the newest provider
+second for 1,000 ms after its latest receipt unless a newer second makes it
+ready sooner. Pending versions for one provider second are coalesced, reducing
+repeated same-second upserts, but a later corrective tick can upsert that second
+again even after an earlier write. An update received during an in-flight write
+also remains pending for a follow-up upsert. The historical store is bounded at
+5,000 pending provider seconds with explicit overflow and failure counters.
+Shutdown uses a bounded final drain. The raw queue is independent of both normal
+delivery states.
+
+The public futures live value remains the Binance REST
+`/fapi/v2/ticker/price` result, and the public Chainlink value remains the RTDS
+`payload.value` delivered through `btc:live:chainlink`; evidence capture changes
+neither API response. With both raw flags `false`, no raw capture queue, task,
+session UUID, monotonic receive stamp, or extra raw database connection is
+created. A phase's deployed code is only its code checkpoint. The corresponding
+24-hour production canary and all acceptance checks in `OPERATIONS.md` must pass
+before that phase is operationally complete.
 
 Redis is not a historical store. It contains only these live keys:
 
@@ -333,6 +352,16 @@ For the Phase 2 production canary, manually set only
 `BINANCE_FUTURES_STREAMS_ENABLED=true`. Do not commit that production override
 to the example file. Follow the full 24-hour acceptance and rollback procedure
 in [`OPERATIONS.md`](OPERATIONS.md).
+
+Prepare and deploy the Phase 3 code with Chainlink capture still `false`. Do not
+enable it until the futures-only Phase 2 canary has completed its uninterrupted
+24-hour acceptance window. The Phase 3 production canary keeps
+`BINANCE_FUTURES_STREAMS_ENABLED=true` and
+`RAW_FUTURES_TRACE_ENABLED=true`, manually sets
+`RAW_CHAINLINK_EVENTS_ENABLED=true`, and restarts only
+`price-collector-polymarket-chainlink`. The two enabled collectors can then use
+at most two dedicated raw-capture database connections in total. The repository
+example remains disabled.
 
 Do not commit `collector.env`, `api.env`, `droplet.env`, `.env`, or real
 credentials. These files are ignored by Git; only their examples belong in the

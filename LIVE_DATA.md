@@ -90,22 +90,59 @@ subscription; `filters` is a JSON-encoded string in the actual message:
 }
 ```
 
-For every valid `update` event, the collector:
+Immediately after each RTDS receive returns, the collector records local wall
+time before JSON parsing or validation. That wall timestamp, floored from
+nanoseconds to milliseconds, is the accepted tick's `received_ms`. When private
+Chainlink evidence capture is enabled, the collector also records monotonic time
+and assigns a receive sequence within the current WebSocket connection at this
+same pre-parse boundary.
+
+For every valid `update` event, the reader then:
 
 1. Confirms the topic is `crypto_prices_chainlink` and the payload symbol is
    `btc/usd`.
-2. Parses `payload.value` as a finite, positive `Decimal`.
-3. Uses `payload.timestamp` as the authoritative source timestamp.
-4. Records the collector's local `received_ms`.
-5. Writes the value to `btc:live:chainlink` before historical storage.
+2. Parses `payload.value` as a finite, positive `Decimal` and uses
+   `payload.timestamp` as the authoritative source timestamp.
+3. Synchronously publishes a new version to a process-local latest-wins live
+   state.
+4. Offers the versioned sample to the critical provider-second historical
+   state.
+5. When `RAW_CHAINLINK_EVENTS_ENABLED=true`, offers the individual event to the
+   bounded private raw-capture queue without awaiting it, then returns to
+   receiving RTDS messages without awaiting Redis or PostgreSQL.
+
+A separate live worker attempts to write the newest published version to
+`btc:live:chainlink`. If several ticks arrive while an earlier Redis call is in
+flight, obsolete intermediate versions can be coalesced, but the newest version
+remains pending until its live-cache attempt completes. A separate historical
+worker waits until the corresponding live-cache attempt has completed before
+writing PostgreSQL, preserving the Redis-before-historical-storage rule without
+delaying the RTDS reader.
 
 For PostgreSQL, `payload.timestamp` is floored to its UTC second and used to
-choose the five-minute market window. Multiple source events in the same second
-update the same historical row. This deduplication does not reduce live-cache
-updates: each accepted event can replace the Redis value.
+choose the five-minute market window. The historical state is versioned by that
+provider second. It coalesces replacements while a second is pending, and holds
+the newest provider second for 1,000 ms after its latest local receipt unless a
+newer provider second makes it ready sooner. This reduces repeated same-second
+upserts. A later corrective tick can still update the same `price_samples` row,
+including after an earlier version was written; a newer tick that arrives while
+a write is in flight remains pending for a follow-up upsert. The pending
+historical state is capped at 5,000 provider seconds; overflow and worker
+failures are explicitly counted and logged instead of being silent. Shutdown
+performs a bounded final drain.
 
-The optional top-level RTDS message timestamp is stored only as historical
-metadata. It is not the live price's `source_timestamp_ms`.
+The optional top-level RTDS message timestamp is stored as historical and raw
+evidence metadata. It is not the live price's `source_timestamp_ms`.
+
+Private Chainlink evidence is deliberately independent of both delivery
+workers. Every valid tick, including an unchanged price or another tick received
+in the same local millisecond, is offered without intentional sampling to
+`raw_capture.chainlink_price_events`. The connection UUID and receive sequence
+preserve order. This bounded raw queue is best-effort: any overload or database
+loss is counted and makes the affected evidence interval unsuitable for
+analysis, but it cannot block or discard the normal Redis and one-second paths.
+With the flag `false`, the Chainlink process creates no raw queue, writer task,
+session UUID, or dedicated raw database connection.
 
 ## 3. Binance USD-M Futures
 
@@ -140,11 +177,12 @@ WebSocket continues to feed the historical one-second book table. Neither
 WebSocket updates `btc:live:futures`; the public live futures value remains the
 REST ticker price.
 
-The private evidence path is intentionally absent from the live-flow diagram
-above because Redis and the API do not read it. Its bounded PostgreSQL writer
-is best-effort and is never awaited by the WebSocket reader; the live and
-one-second paths do not share its queue. Chainlink high-resolution capture
-remains disabled and unintegrated during Phase 2.
+The private futures and Chainlink evidence paths are intentionally absent from
+the live-flow diagram above because Redis and the API do not read them. Their
+bounded PostgreSQL writers are best-effort and are never awaited by either
+WebSocket reader; the live and one-second paths do not share their queues. Both
+capture flags remain opt-in and default to `false` even after their collector
+integrations are deployed.
 
 ## Redis Live Cache
 

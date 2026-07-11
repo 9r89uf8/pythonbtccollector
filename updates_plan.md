@@ -209,11 +209,11 @@ In the later integration phases, valid events are offered to capture. Invalid
 messages increment counters but their raw body is discarded. Phase 1 does not
 change either reader loop.
 
-## Important later Chainlink refactor
+## Phase 3 Chainlink refactor
 
-This is Phase 3 work, not Phase 1. The Chainlink receive loop should eventually
-stop awaiting a PostgreSQL upsert for every tick. Otherwise, a temporary
-database delay can delay the next `recv()` and falsely look like RTDS latency.
+Phase 3 makes the Chainlink receive loop stop awaiting both Redis and PostgreSQL
+for every tick. Otherwise, a temporary downstream delay can delay the next
+`recv()` and falsely look like RTDS latency.
 
 Use this flow:
 
@@ -222,22 +222,33 @@ RTDS recv
    │
    ├─ capture receive clocks immediately
    ├─ parse and validate
-   ├─ update in-memory latest Chainlink state
+   ├─ synchronously publish versioned latest-live state
+   ├─ offer versioned provider-second history
    ├─ offer event to bounded raw-capture queue
-   └─ notify latest-value/historical workers
+   └─ return immediately to RTDS receive
 ```
 
-A separate worker should:
+A separate latest-wins live worker attempts Redis for the newest published
+version. A separate historical worker waits for the corresponding live attempt,
+then writes the latest-received pending sample for each provider second. The
+newest provider second settles 1,000 ms after its latest local receipt unless a
+newer provider second makes it ready sooner. Versions prevent an update arriving
+during an in-flight operation from being mistakenly acknowledged as persisted.
+Intermediate live versions may be coalesced, but the newest remains pending
+until its live attempt completes. The historical pending store is bounded at
+5,000 provider seconds, reports overflow and write failures explicitly, and
+performs a bounded shutdown drain.
 
-* Publish the latest Chainlink value to Redis
-* Collapse events to the existing one-second historical representation
-* Write the one-second row outside the receive loop
-
-This also eliminates repeated updates to the same `price_samples` row when several Chainlink messages share one source second. The current historical function performs a transaction and an upsert for each call. 
+Pending same-second versions are coalesced, which reduces repeated normal
+updates to the same `price_samples` row while preserving the latest-received
+value. It does not eliminate every repeated upsert: a later corrective tick can
+update an already-written provider second, and a version arriving during an
+in-flight write remains pending for a follow-up upsert.
 
 The critical Redis and one-second historical path must not share the
-best-effort raw-capture buffer. A raw-capture drop is allowed; silently losing a
-live update or a historical second because that raw buffer filled is not.
+best-effort raw-capture buffer. A raw-capture drop is allowed; silently losing
+the newest live version or a historical second because that raw buffer filled
+is not.
 
 ---
 
@@ -666,11 +677,57 @@ This keeps any capture bug separate from a user-visible price-source change.
 
 ## Phase 3 — Chainlink capture
 
-1. Refactor the RTDS reader so it does not await PostgreSQL.
-2. Enable `RAW_CHAINLINK_EVENTS_ENABLED`.
-3. Confirm successfully enqueued ticks retain receive order, including two
-   events sharing a millisecond, and that any overload drops are counted.
-4. Compare provider-time and local-receive-time lag independently.
+### Phase 3 code checkpoint
+
+1. Refactor the RTDS reader to stamp receive time before parsing, synchronously
+   update versioned delivery state, offer critical provider-second history
+   before best-effort raw evidence, and await neither Redis nor PostgreSQL.
+2. Add independent live and historical workers. The live worker is latest-wins;
+   its newest version remains pending until an attempt completes. The historical
+   worker waits for that live attempt, holds the newest provider second for
+   1,000 ms unless a newer second makes it ready, coalesces pending versions,
+   retains later corrective and concurrent updates, caps pending history at
+   5,000 provider seconds, exposes overflow/failure counters, and performs a
+   bounded shutdown drain.
+3. Integrate `FeedSession`, individual `ChainlinkPriceEvent` records, the
+   non-blocking capture sink, and a 60-second `raw_capture_summary` containing
+   both raw and delivery health plus signed provider/local timing fields.
+4. Keep `RAW_CHAINLINK_EVENTS_ENABLED=False` in code and
+   `deployment/collector.env.example`. Deploy and verify the refactored normal
+   Redis and one-second paths with Chainlink raw capture still disabled.
+5. Add focused timing, same-millisecond ordering, reconnect/session,
+   latest-wins, same-provider-second, in-flight update, bounded-overflow,
+   failure-isolation, disabled-path, telemetry, and shutdown tests.
+
+### Phase 3 operational completion
+
+1. Do not begin until the uninterrupted futures-only Phase 2 canary has passed
+   all 24-hour acceptance checks. Enabling Chainlink sooner invalidates that
+   isolation window.
+2. Keep `BINANCE_FUTURES_STREAMS_ENABLED=true` and
+   `RAW_FUTURES_TRACE_ENABLED=true`, manually set only
+   `RAW_CHAINLINK_EVENTS_ENABLED=true`, and restart only
+   `price-collector-polymarket-chainlink` so the futures service is not reset.
+3. Run Chainlink capture continuously for 24 hours. Require zero raw drops,
+   failed batches, storage suspension, and unexplained parse errors; require a
+   queue that repeatedly returns near zero and never reaches capacity.
+4. Confirm successfully persisted ticks have unique connection/sequence pairs,
+   monotonic receive order, and distinct rows when two ticks share a local
+   millisecond. Sequence gaps caused by counted RTDS control or malformed frames
+   are legitimate and must be reconciled rather than treated as raw loss.
+5. Audit session readiness and closure, compare provider timestamps, local wall
+   delivery differences, monotonic arrival cadence, and optional message time
+   independently, and verify host clock synchronization before interpreting
+   signed wall-clock lag.
+6. Confirm settled captured provider seconds reach normal `price_samples`, the
+   latest Redis/API Chainlink value stays healthy, delivery overflow and worker
+   failure counters remain zero, and historical coverage does not regress.
+7. Confirm futures evidence and service uptime remain unaffected, relation and
+   filesystem growth are acceptable, and the two enabled collectors together
+   use no more than two dedicated raw database connections.
+8. On a raw-only failure, disable only Chainlink raw capture and restart only
+   its service. On a delivery-refactor failure, deploy a code revert as well;
+   the raw feature flag does not disable the new live and historical workers.
 
 ## Phase 4 — Validate retention
 
@@ -715,6 +772,40 @@ raw_table_bytes
 connection_id
 ```
 
+The Phase 3 Chainlink summary also reports its versioned delivery state and
+signed timing diagnostics:
+
+```text
+delivery_sequence
+delivery_live_attempted_sequence
+delivery_live_attempts_total
+delivery_live_successes_total
+delivery_live_failures_total
+delivery_history_collapsed_total
+delivery_history_persisted_total
+delivery_history_failures_total
+delivery_history_pending_dropped_total
+delivery_history_pending_seconds
+delivery_history_pending_high_water
+delivery_last_live_attempt_ms
+delivery_last_history_write_ms
+chainlink_connections_opened_total
+chainlink_reconnects_total
+chainlink_latest_price
+chainlink_provider_event_ms
+chainlink_provider_message_ms
+chainlink_received_ms
+chainlink_latest_receive_sequence
+chainlink_latest_connection_id
+chainlink_provider_event_to_receive_ms
+chainlink_provider_message_to_receive_ms
+chainlink_provider_message_minus_event_ms
+chainlink_provider_event_age_ms
+chainlink_received_age_ms
+chainlink_raw_interarrival_ns
+chainlink_raw_max_interarrival_ns
+```
+
 Do not log every raw event.
 
 A dropped-event count of zero is expected under normal conditions. A nonzero count should be visible and should mark that interval as unsuitable for model training, but it should never stop the live collector.
@@ -752,7 +843,10 @@ Sequence 1 is complete when all of these are true:
   counted.
 * No raw JSON or full book depth is persisted.
 * The receive loops never await the raw database writer.
-* The Chainlink receive loop no longer awaits a per-event PostgreSQL upsert.
+* The Chainlink receive loop awaits neither Redis nor PostgreSQL; its latest-live
+  and provider-second states are versioned, bounded, and independently worked.
+* Delivery overflow and worker failures are explicit counters rather than silent
+  loss, and the final pending state receives a bounded shutdown drain.
 * Queue memory has a fixed upper bound.
 * PostgreSQL uses batched append-only `COPY`.
 * Raw tables have an age limit and a relation-size budget, while filesystem
