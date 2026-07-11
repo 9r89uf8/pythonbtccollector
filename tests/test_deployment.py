@@ -38,7 +38,24 @@ def test_collector_env_example_contains_writer_credentials_only():
         in lines
     )
     assert "BINANCE_FUTURES_STORE_RAW_JSON=false" in lines
+    assert "RAW_FUTURES_TRACE_ENABLED=false" in lines
+    assert "RAW_CHAINLINK_EVENTS_ENABLED=false" in lines
+    assert "RAW_FUTURES_BUCKET_MS=100" in lines
+    assert "RAW_CAPTURE_QUEUE_MAX_EVENTS=5000" in lines
+    assert "RAW_CAPTURE_BATCH_MAX_ROWS=500" in lines
+    assert "RAW_CAPTURE_FLUSH_MS=1000" in lines
+    assert "RAW_CAPTURE_RETENTION_HOURS=72" in lines
+    assert "RAW_CAPTURE_MAX_RELATION_MB=2048" in lines
+    assert "RAW_CAPTURE_RETENTION_CHECK_SECONDS=60" in lines
     assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
+    assert not any(line.startswith("RAW_CAPTURE_MAX_DISK_MB=") for line in lines)
+
+
+def test_api_env_example_has_no_raw_capture_or_writer_settings():
+    lines = (ROOT / "deployment" / "api.env.example").read_text().splitlines()
+
+    assert not any(line.startswith("RAW_") for line in lines)
+    assert not any(line.startswith("DATABASE_URL=") for line in lines)
 
 
 def test_polymarket_chainlink_collector_service_execs_new_module():

@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from price_collector.config import Settings
 
 
@@ -122,3 +125,51 @@ def test_settings_include_local_redis_defaults(monkeypatch):
     assert settings.REDIS_PORT == 6379
     assert settings.REDIS_DB == 0
     assert settings.REDIS_SOCKET_TIMEOUT_SECONDS == 0.25
+
+
+RAW_CAPTURE_ENV_NAMES = (
+    "RAW_FUTURES_TRACE_ENABLED",
+    "RAW_CHAINLINK_EVENTS_ENABLED",
+    "RAW_FUTURES_BUCKET_MS",
+    "RAW_CAPTURE_QUEUE_MAX_EVENTS",
+    "RAW_CAPTURE_BATCH_MAX_ROWS",
+    "RAW_CAPTURE_FLUSH_MS",
+    "RAW_CAPTURE_RETENTION_HOURS",
+    "RAW_CAPTURE_MAX_RELATION_MB",
+    "RAW_CAPTURE_RETENTION_CHECK_SECONDS",
+)
+
+
+def test_settings_include_inactive_raw_capture_defaults(monkeypatch):
+    for name in RAW_CAPTURE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings()
+
+    assert settings.RAW_FUTURES_TRACE_ENABLED is False
+    assert settings.RAW_CHAINLINK_EVENTS_ENABLED is False
+    assert settings.RAW_FUTURES_BUCKET_MS == 100
+    assert settings.RAW_CAPTURE_QUEUE_MAX_EVENTS == 5_000
+    assert settings.RAW_CAPTURE_BATCH_MAX_ROWS == 500
+    assert settings.RAW_CAPTURE_FLUSH_MS == 1_000
+    assert settings.RAW_CAPTURE_RETENTION_HOURS == 72
+    assert settings.RAW_CAPTURE_MAX_RELATION_MB == 2_048
+    assert settings.RAW_CAPTURE_RETENTION_CHECK_SECONDS == 60
+
+
+def test_settings_raw_capture_bucket_is_fixed_at_100ms(monkeypatch):
+    monkeypatch.setenv("RAW_FUTURES_BUCKET_MS", "50")
+
+    with pytest.raises(ValidationError, match="RAW_FUTURES_BUCKET_MS"):
+        Settings()
+
+
+def test_settings_raw_capture_batch_cannot_exceed_queue(monkeypatch):
+    monkeypatch.setenv("RAW_CAPTURE_QUEUE_MAX_EVENTS", "100")
+    monkeypatch.setenv("RAW_CAPTURE_BATCH_MAX_ROWS", "101")
+
+    with pytest.raises(
+        ValidationError,
+        match="RAW_CAPTURE_BATCH_MAX_ROWS must be less than or equal to",
+    ):
+        Settings()

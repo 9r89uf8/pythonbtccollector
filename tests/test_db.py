@@ -1,9 +1,11 @@
 import asyncio
 import inspect
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -12,6 +14,11 @@ from price_collector.market import MarketWindow
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _schema_create_table_statement(schema, qualified_table_name):
+    start = schema.index(f"CREATE TABLE IF NOT EXISTS {qualified_table_name}")
+    return schema[start : schema.index(";", start) + 1]
 
 
 def test_create_read_pool_prefers_read_database_url(monkeypatch):
@@ -64,6 +71,462 @@ def test_create_read_pool_requires_at_least_one_database_url(monkeypatch):
         match="READ_DATABASE_URL or DATABASE_URL must be set for the API",
     ):
         asyncio.run(db.create_read_pool(settings))
+
+
+def test_create_raw_capture_pool_is_lazy_and_dedicated(monkeypatch):
+    calls = []
+
+    async def fake_create_pool(database_url, **kwargs):
+        calls.append((database_url, kwargs))
+        return "raw-pool"
+
+    monkeypatch.setattr(db.asyncpg, "create_pool", fake_create_pool)
+
+    result = asyncio.run(
+        db.create_raw_capture_pool(
+            "postgresql://writer@127.0.0.1:5432/price_collector"
+        )
+    )
+
+    assert result == "raw-pool"
+    assert calls == [
+        (
+            "postgresql://writer@127.0.0.1:5432/price_collector",
+            {
+                "min_size": 0,
+                "max_size": 1,
+                "timeout": 5,
+                "command_timeout": 5,
+                "server_settings": {
+                    "application_name": "price_collector_raw_capture"
+                },
+            },
+        )
+    ]
+
+
+def test_raw_capture_partition_boundaries_and_names_are_six_hour_aligned():
+    width_ms = 6 * 60 * 60 * 1000
+    boundary_ms = 1_783_447_200_000
+
+    assert boundary_ms % width_ms == 0
+    assert db.raw_capture_partition_start_ms(boundary_ms) == boundary_ms
+    assert db.raw_capture_partition_start_ms(boundary_ms + width_ms - 1) == boundary_ms
+    assert db.raw_capture_partition_start_ms(boundary_ms + width_ms) == (
+        boundary_ms + width_ms
+    )
+    assert db.raw_capture_partition_name(
+        "chainlink_price_events", boundary_ms
+    ) == f"chainlink_price_events_p{boundary_ms}"
+
+    with pytest.raises(ValueError, match="six-hour aligned"):
+        db.raw_capture_partition_name("chainlink_price_events", boundary_ms + 1)
+
+
+def test_ensure_raw_capture_partitions_creates_current_and_next_for_both_tables():
+    class FakeConnection:
+        def __init__(self):
+            self.queries = []
+            self.catalog_calls = []
+
+        async def fetch(self, query, *args):
+            self.catalog_calls.append((query, args))
+            return []
+
+        async def execute(self, query, *args):
+            self.queries.append((query, args))
+
+    connection = FakeConnection()
+    width_ms = db.RAW_CAPTURE_PARTITION_WIDTH_MS
+    boundary_ms = 1_783_447_200_000
+
+    asyncio.run(
+        db.ensure_raw_capture_partitions(
+            connection,
+            now_ms=boundary_ms + 123,
+        )
+    )
+
+    normalized = [" ".join(query.split()) for query, _args in connection.queries]
+    assert len(normalized) == 4
+    assert (
+        f'raw_capture."binance_futures_price_trace_100ms_p{boundary_ms}"'
+        in normalized[0]
+    )
+    assert f"FROM ({boundary_ms}) TO ({boundary_ms + width_ms})" in normalized[0]
+    assert f'raw_capture."chainlink_price_events_p{boundary_ms}"' in normalized[1]
+    assert (
+        f"FROM ({boundary_ms * 1_000_000}) "
+        f"TO ({(boundary_ms + width_ms) * 1_000_000})"
+        in normalized[1]
+    )
+    assert f"_p{boundary_ms + width_ms}" in normalized[2]
+    assert f"_p{boundary_ms + width_ms}" in normalized[3]
+    catalog_query, catalog_args = connection.catalog_calls[0]
+    assert "to_regclass(candidate.qualified_name)" in catalog_query
+    assert len(catalog_args[0]) == 4
+
+
+def test_ensure_raw_capture_partitions_skips_ddl_for_existing_children():
+    width_ms = db.RAW_CAPTURE_PARTITION_WIDTH_MS
+    boundary_ms = 1_783_447_200_000
+    existing_names = [
+        f"raw_capture.{parent}_p{partition_start_ms}"
+        for partition_start_ms in (boundary_ms, boundary_ms + width_ms)
+        for parent in (
+            "binance_futures_price_trace_100ms",
+            "chainlink_price_events",
+        )
+    ]
+
+    class FakeConnection:
+        def __init__(self):
+            self.execute_calls = []
+
+        async def fetch(self, query, names):
+            assert "to_regclass(candidate.qualified_name)" in query
+            assert names == existing_names
+            return [{"qualified_name": name} for name in names]
+
+        async def execute(self, query, *args):
+            self.execute_calls.append((query, args))
+
+    connection = FakeConnection()
+
+    asyncio.run(
+        db.ensure_raw_capture_partitions(
+            connection,
+            now_ms=boundary_ms + 123,
+        )
+    )
+
+    assert connection.execute_calls == []
+
+
+def test_raw_capture_copy_helpers_use_fixed_binary_copy_targets():
+    class FakeConnection:
+        def __init__(self):
+            self.calls = []
+
+        async def copy_records_to_table(self, table_name, **kwargs):
+            self.calls.append((table_name, kwargs))
+
+    connection = FakeConnection()
+    futures_rows = [(1,) * len(db.RAW_FUTURES_TRACE_COLUMNS)]
+    chainlink_rows = [(1,) * len(db.RAW_CHAINLINK_EVENT_COLUMNS)]
+
+    asyncio.run(db.copy_binance_futures_price_traces(connection, futures_rows))
+    asyncio.run(db.copy_chainlink_price_events(connection, chainlink_rows))
+
+    assert connection.calls[0] == (
+        "binance_futures_price_trace_100ms",
+        {
+            "schema_name": "raw_capture",
+            "columns": db.RAW_FUTURES_TRACE_COLUMNS,
+            "records": futures_rows,
+            "timeout": 5,
+        },
+    )
+    assert connection.calls[1] == (
+        "chainlink_price_events",
+        {
+            "schema_name": "raw_capture",
+            "columns": db.RAW_CHAINLINK_EVENT_COLUMNS,
+            "records": chainlink_rows,
+            "timeout": 5,
+        },
+    )
+
+
+def test_raw_capture_copy_helpers_skip_empty_batches():
+    class FakeConnection:
+        async def copy_records_to_table(self, *args, **kwargs):
+            raise AssertionError("empty raw capture batch must not execute COPY")
+
+    connection = FakeConnection()
+    asyncio.run(db.copy_binance_futures_price_traces(connection, []))
+    asyncio.run(db.copy_chainlink_price_events(connection, []))
+
+
+def test_raw_capture_backend_preserves_decimal_uuid_and_does_not_retry_copy():
+    connection_id = UUID("12345678-1234-5678-1234-567812345678")
+    record = SimpleNamespace(
+        bucket_start_ms=1_783_447_200_100,
+        connection_id=connection_id,
+        first_received_wall_ns=1_783_447_200_100_000_000,
+        last_received_wall_ns=1_783_447_200_150_000_000,
+        first_received_monotonic_ns=100,
+        last_received_monotonic_ns=150,
+        first_trade_time_ms=1_783_447_200_090,
+        last_trade_time_ms=1_783_447_200_140,
+        first_event_time_ms=1_783_447_200_091,
+        last_event_time_ms=1_783_447_200_141,
+        open_price=Decimal("62000.100000000000000001"),
+        high_price=Decimal("62001.100000000000000001"),
+        low_price=Decimal("61999.100000000000000001"),
+        close_price=Decimal("62000.900000000000000001"),
+        event_count=2,
+        first_agg_trade_id=10,
+        last_agg_trade_id=11,
+    )
+
+    class FakeConnection:
+        def __init__(self):
+            self.calls = 0
+            self.records = None
+
+        async def copy_records_to_table(self, _table_name, **kwargs):
+            self.calls += 1
+            self.records = kwargs["records"]
+            raise RuntimeError("ambiguous COPY failure")
+
+    class FakeAcquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakePool:
+        def __init__(self):
+            self.connection = FakeConnection()
+
+        def acquire(self, **_kwargs):
+            return FakeAcquire(self.connection)
+
+    pool = FakePool()
+    backend = db.AsyncpgRawCaptureBackend(
+        pool,
+        retention_hours=72,
+        max_relation_mb=2_048,
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous COPY failure"):
+        asyncio.run(backend.copy_futures_traces([record]))
+
+    assert pool.connection.calls == 1
+    copied = pool.connection.records[0]
+    assert copied[1] is connection_id
+    assert copied[10] is record.open_price
+    assert isinstance(copied[10], Decimal)
+
+
+class _FakeAsyncContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _RawMaintenanceConnection:
+    def __init__(self, partitions, *, lock_acquired=True):
+        self.partitions = partitions
+        self.lock_acquired = lock_acquired
+        self.executed = []
+
+    def transaction(self):
+        return _FakeAsyncContext(self)
+
+    async def fetchval(self, query, *args):
+        assert "pg_try_advisory_xact_lock" in query
+        assert args == (db.RAW_CAPTURE_MAINTENANCE_LOCK_ID,)
+        return self.lock_acquired
+
+    async def fetch(self, query, *args):
+        if "to_regclass(candidate.qualified_name)" in query:
+            return [{"qualified_name": name} for name in args[0]]
+        assert "pg_total_relation_size(child.oid)" in query
+        assert "parent_namespace.nspname = 'raw_capture'" in query
+        return self.partitions
+
+    async def execute(self, query, *args):
+        self.executed.append((" ".join(query.split()), args))
+
+
+class _RawMaintenancePool:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def acquire(self, **kwargs):
+        assert kwargs == {"timeout": 5}
+        return _FakeAsyncContext(self.connection)
+
+
+def test_raw_capture_maintenance_drops_oldest_completed_interval_for_budget():
+    current_start_ms = 1_783_447_200_000
+    old_start_ms = current_start_ms - db.RAW_CAPTURE_PARTITION_WIDTH_MS
+    partitions = [
+        {
+            "parent_table": "binance_futures_price_trace_100ms",
+            "partition_name": f"binance_futures_price_trace_100ms_p{old_start_ms}",
+            "partition_start_ms": old_start_ms,
+            "total_bytes": 700_000,
+        },
+        {
+            "parent_table": "chainlink_price_events",
+            "partition_name": f"chainlink_price_events_p{old_start_ms}",
+            "partition_start_ms": old_start_ms,
+            "total_bytes": 700_000,
+        },
+    ]
+    connection = _RawMaintenanceConnection(partitions)
+
+    status = asyncio.run(
+        db.maintain_raw_capture_partitions(
+            _RawMaintenancePool(connection),
+            retention_hours=72,
+            max_relation_mb=1,
+            now_ms=current_start_ms + 123,
+        )
+    )
+
+    assert status == db.RawCaptureMaintenanceStatus(
+        storage_permitted=True,
+        current_partition=f"p{current_start_ms}",
+        current_partition_start_ms=current_start_ms,
+        raw_table_bytes=0,
+    )
+    executed_sql = [query for query, _args in connection.executed]
+    drop_sql = next(query for query in executed_sql if query.startswith("DROP TABLE"))
+    assert f"_p{old_start_ms}" in drop_sql
+    delete_sql, delete_args = next(
+        (query, args)
+        for query, args in connection.executed
+        if query.startswith("DELETE FROM raw_capture.feed_sessions")
+    )
+    assert "disconnected_wall_ns IS NOT NULL" in delete_sql
+    assert delete_args == (current_start_ms * 1_000_000,)
+
+
+def test_raw_capture_session_pruning_uses_oldest_retained_partition_start():
+    current_start_ms = 1_783_447_200_000
+    oldest_retained_start_ms = (
+        current_start_ms - 12 * db.RAW_CAPTURE_PARTITION_WIDTH_MS
+    )
+    connection = _RawMaintenanceConnection(
+        [
+            {
+                "parent_table": "binance_futures_price_trace_100ms",
+                "partition_name": (
+                    "binance_futures_price_trace_100ms_p"
+                    f"{oldest_retained_start_ms}"
+                ),
+                "partition_start_ms": oldest_retained_start_ms,
+                "total_bytes": 1,
+            },
+            {
+                "parent_table": "chainlink_price_events",
+                "partition_name": f"chainlink_price_events_p{current_start_ms}",
+                "partition_start_ms": current_start_ms,
+                "total_bytes": 1,
+            },
+        ]
+    )
+
+    status = asyncio.run(
+        db.maintain_raw_capture_partitions(
+            _RawMaintenancePool(connection),
+            retention_hours=72,
+            max_relation_mb=1,
+            now_ms=current_start_ms + 3 * 60 * 60 * 1000,
+        )
+    )
+
+    assert status is not None
+    assert status.storage_permitted is True
+    assert status.current_partition == f"p{current_start_ms}"
+    assert status.current_partition_start_ms == current_start_ms
+    assert status.raw_table_bytes == 2
+    _delete_sql, delete_args = next(
+        (query, args)
+        for query, args in connection.executed
+        if query.startswith("DELETE FROM raw_capture.feed_sessions")
+    )
+    assert delete_args == (oldest_retained_start_ms * 1_000_000,)
+
+
+def test_raw_capture_maintenance_refuses_to_drop_current_interval():
+    current_start_ms = 1_783_447_200_000
+    connection = _RawMaintenanceConnection(
+        [
+            {
+                "parent_table": "binance_futures_price_trace_100ms",
+                "partition_name": (
+                    f"binance_futures_price_trace_100ms_p{current_start_ms}"
+                ),
+                "partition_start_ms": current_start_ms,
+                "total_bytes": 2 * 1024 * 1024,
+            }
+        ]
+    )
+
+    status = asyncio.run(
+        db.maintain_raw_capture_partitions(
+            _RawMaintenancePool(connection),
+            retention_hours=72,
+            max_relation_mb=1,
+            now_ms=current_start_ms + 123,
+        )
+    )
+
+    assert status is not None
+    assert status.storage_permitted is False
+    assert status.raw_table_bytes == 2 * 1024 * 1024
+    assert not any(
+        query.startswith("DROP TABLE") for query, _args in connection.executed
+    )
+
+
+def test_raw_capture_backend_retains_suspended_state_when_advisory_lock_is_busy(
+    monkeypatch,
+):
+    status = db.RawCaptureMaintenanceStatus(
+        storage_permitted=False,
+        current_partition="p1783447200000",
+        current_partition_start_ms=1_783_447_200_000,
+        raw_table_bytes=2 * 1024 * 1024,
+    )
+    results = iter((status, None))
+
+    async def fake_maintain(*args, **kwargs):
+        return next(results)
+
+    monkeypatch.setattr(db, "maintain_raw_capture_partitions", fake_maintain)
+    backend = db.AsyncpgRawCaptureBackend(
+        object(),
+        retention_hours=72,
+        max_relation_mb=1,
+    )
+
+    assert backend.current_partition is None
+    assert backend.raw_table_bytes is None
+    assert asyncio.run(backend.maintain()) is False
+    assert backend.current_partition == status.current_partition
+    assert backend.raw_table_bytes == status.raw_table_bytes
+    assert asyncio.run(backend.maintain()) is False
+    assert backend.current_partition == status.current_partition
+    assert backend.raw_table_bytes == status.raw_table_bytes
+
+    with pytest.raises(FrozenInstanceError):
+        status.raw_table_bytes = 0
+
+
+def test_raw_capture_session_upsert_cannot_regress_completed_snapshot():
+    source = inspect.getsource(db.AsyncpgRawCaptureBackend.upsert_feed_sessions)
+
+    assert "ON CONFLICT (connection_id)" in source
+    assert "existing.disconnected_wall_ns" in source
+    assert "COALESCE(" in source
+    assert "GREATEST(" in source
+    assert "messages_received_total" in source
+    assert "last_receive_sequence" in source
 
 
 def test_upsert_price_sample_updates_duplicate_instrument_second_rows():
@@ -314,6 +777,70 @@ def test_schema_includes_binance_futures_tables_and_seed():
     assert "microprice NUMERIC(38, 18)" in schema
     assert "'binance_usdm_perp'" in schema
     assert "'binance_usdm_perp:BTCUSDT'" in schema
+
+
+def test_schema_isolates_partitioned_raw_capture_tables_from_api_reader():
+    schema = (ROOT / "schema.sql").read_text()
+    futures = _schema_create_table_statement(
+        schema,
+        "raw_capture.binance_futures_price_trace_100ms",
+    )
+    chainlink = _schema_create_table_statement(
+        schema,
+        "raw_capture.chainlink_price_events",
+    )
+    sessions = _schema_create_table_statement(schema, "raw_capture.feed_sessions")
+
+    assert "CREATE SCHEMA IF NOT EXISTS raw_capture" in schema
+    assert "ALTER SCHEMA raw_capture OWNER TO CURRENT_USER" in schema
+    assert "REVOKE ALL ON SCHEMA raw_capture FROM PUBLIC, price_reader" in schema
+    assert "GRANT USAGE, CREATE ON SCHEMA raw_capture TO price_writer" in schema
+    assert (
+        "REVOKE ALL ON ALL TABLES IN SCHEMA raw_capture FROM PUBLIC, price_reader"
+        in schema
+    )
+
+    assert "PARTITION BY RANGE (bucket_start_ms)" in futures
+    assert "bucket_start_ms % 100 = 0" in futures
+    assert "open_price NUMERIC(38, 18)" in futures
+    assert "event_count INTEGER NOT NULL" in futures
+    assert "first_received_wall_ns >= bucket_start_ms * 1000000" in futures
+    assert "last_received_wall_ns >= bucket_start_ms * 1000000" in futures
+    assert "PARTITION BY RANGE (received_wall_ns)" in chainlink
+    assert "price NUMERIC(38, 18) NOT NULL" in chainlink
+    assert "receive_sequence BIGINT NOT NULL" in chainlink
+
+    for event_table in (futures, chainlink):
+        assert "JSONB" not in event_table
+        assert "REFERENCES" not in event_table
+        assert "SERIAL" not in event_table
+        assert "PRIMARY KEY" not in event_table
+        assert "UNIQUE" not in event_table
+        assert "created_at" not in event_table
+
+    assert "connection_id UUID PRIMARY KEY" in sessions
+    assert "messages_received_total BIGINT NOT NULL DEFAULT 0" in sessions
+    assert "last_receive_sequence = messages_received_total" in sessions
+    assert "(disconnected_wall_ns IS NULL) = (close_reason IS NULL)" in sessions
+    assert "disconnected_monotonic_ns >= ready_monotonic_ns" in sessions
+    for close_reason in (
+        "remote_close",
+        "error",
+        "proactive_reconnect",
+        "cancelled",
+        "shutdown",
+    ):
+        assert f"'{close_reason}'" in sessions
+
+    assert "ALTER TABLE raw_capture.binance_futures_price_trace_100ms" in schema
+    assert "ALTER TABLE raw_capture.chainlink_price_events" in schema
+    assert "ALTER TABLE raw_capture.feed_sessions" in schema
+    assert "SET ROLE price_writer" in schema
+    assert "FOR offset_index IN 0..1 LOOP" in schema
+    assert "PARTITION_WIDTH_MS" not in schema
+    assert "PARTITION OF raw_capture.binance_futures_price_trace_100ms" in schema
+    assert "PARTITION OF raw_capture.chainlink_price_events" in schema
+    assert "DEFAULT PARTITION" not in schema
 
 
 def test_build_market_sources_summary_returns_both_btc_sources():

@@ -9,26 +9,37 @@ The purpose is not to reproduce every upstream message. It is to answer four spe
 3. When did our collector receive it?
 4. When did the corresponding Chainlink movement occur?
 
-For that purpose, the first checkpoint only needs:
+For that purpose, the completed Sequence 1 runtime scope needs:
 
 * A capped **100 ms Binance futures price trace** derived from `aggTrade`
-* Every accepted **Chainlink RTDS price tick**
+* Every valid **Chainlink RTDS price tick** offered to bounded capture without
+  intentional sampling
 * Tiny connection/session records so outages and reconnects are distinguishable from genuine lag
 
 It does **not** need raw `bookTicker`, full trade payloads, Polymarket order-book depth, raw JSON, or permanent storage.
+
+The first implementation checkpoint is deliberately smaller than that runtime
+scope. Phase 1 adds only schema, validated configuration, and inactive capture
+primitives. Both feature flags default to `False`, and no collector imports,
+constructs, or invokes the new capture path in that phase. Live values,
+one-second history, WebSocket timing, and API behavior therefore remain
+unchanged until later phases.
 
 ---
 
 ## 1. Exact capture scope
 
-### Capture now
+### Sequence 1 runtime capture scope
 
-| Dataset                | Source             |          Stored resolution | Why it is required                                  |
-| ---------------------- | ------------------ | -------------------------: | --------------------------------------------------- |
-| Futures price trace    | Binance `aggTrade` | At most one row per 100 ms | Leading price signal                                |
-| Chainlink price events | Polymarket RTDS    |      Every accepted update | Prediction target                                   |
-| Feed sessions          | Both WebSockets    |     One row per connection | Detect reconnects, outages, gaps and clock problems |
-| Existing aggregates    | Current tables     |   Existing one-second rows | Flow, book and probability context                  |
+| Dataset                | Source             |                         Stored resolution | Why it is required                                  |
+| ---------------------- | ------------------ | ----------------------------------------: | --------------------------------------------------- |
+| Futures price trace    | Binance `aggTrade` | One row per connection and active 100 ms bucket | Leading price signal                         |
+| Chainlink price events | Polymarket RTDS    | Every valid update offered; overload loss counted | Prediction target                         |
+| Feed sessions          | Both WebSockets    |                    One row per connection | Detect reconnects, outages, gaps and clock changes  |
+| Existing aggregates    | Current tables     |                  Existing one-second rows | Flow, book and probability context                  |
+
+Phase 1 creates the storage and inactive primitives for this scope but captures
+none of these new rows.
 
 ### Do not capture now
 
@@ -52,11 +63,14 @@ The current CLOB code already reduces `book`, `price_change`, and `best_bid_ask`
 
 Do **not** insert every `aggTrade` into PostgreSQL.
 
-Instead, process every event in memory and produce one compact OHLC row for each active 100 ms receive-time bucket.
+Instead, process every event in memory and produce one compact OHLC row for
+each active 100 ms receive-time bucket and WebSocket connection. Keeping the
+connection boundary prevents a reconnect from being hidden by merging two
+sessions into one row.
 
 ### Proposed fields
 
-`binance_futures_price_trace_100ms`
+`raw_capture.binance_futures_price_trace_100ms`
 
 | Column                        | Purpose                                          |
 | ----------------------------- | ------------------------------------------------ |
@@ -92,27 +106,35 @@ Those values either already contribute to `binance_flow_1s` or are not required 
 
 ### Why 100 ms is a good initial resolution
 
-A 3–4 second response window contains 30–40 observations at 100 ms resolution. That is enough to estimate the response shape while placing a hard upper bound on storage:
+A 3–4 second response window contains 30–40 observations at 100 ms resolution.
+In steady state, a single connection is capped at:
 
 [
 10\ rows/second \times 86{,}400 = 864{,}000\ rows/day
 ]
 
-For 72 hours, the absolute maximum is approximately **2.59 million futures rows**. Quiet periods will produce fewer rows because empty buckets should not be inserted.
+For 72 hours, that steady-state rate is approximately **2.59 million futures
+rows**. Quiet periods produce fewer rows because empty buckets are not
+inserted. A reconnect within a 100 ms bucket can legitimately create one row
+for each connection, so 10 rows per second is not a strict global bound.
 
 OHLC preserves a jump and retracement that both occur inside one bucket. A simple last-price-only sample would lose that information.
 
-If later testing demonstrates that 100 ms causes material forecast error, the bucket can temporarily be changed to 50 ms. Full event persistence should not become the default without evidence that it improves out-of-sample results.
+Phase 1 fixes and validates the bucket width at 100 ms. If later testing
+demonstrates material forecast error at that resolution, a 50 ms experiment
+must use an explicit schema/version change rather than silently writing a new
+resolution into a table named `_100ms`. Full event persistence should not
+become the default without evidence that it improves out-of-sample results.
 
 ---
 
-# 3. Chainlink capture: preserve every accepted tick
+# 3. Chainlink capture: offer every valid tick
 
 Chainlink is the target, so its individual events should not be aggregated before short-term storage.
 
 ### Proposed fields
 
-`chainlink_price_events`
+`raw_capture.chainlink_price_events`
 
 | Column                  | Purpose                                           |
 | ----------------------- | ------------------------------------------------- |
@@ -126,7 +148,14 @@ Chainlink is the target, so its individual events should not be aggregated befor
 
 Do not store topic, symbol or event type because every row in this source-specific table has the same values.
 
-Two Chainlink messages received in the same millisecond must remain two rows. `connection_id + receive_sequence` preserves their order without requiring a heavy unique index.
+Two successfully captured Chainlink messages received in the same millisecond
+remain two rows. `connection_id + receive_sequence` preserves their order
+without requiring a heavy unique index.
+
+The reader does not intentionally sample or coalesce valid Chainlink ticks, but
+the bounded best-effort queue cannot promise lossless storage during database
+failure or sustained overload. Every drop must be counted and must mark that
+interval as unsuitable for model training.
 
 Unchanged-price Chainlink ticks should still be retained. They help determine:
 
@@ -148,7 +177,8 @@ The futures loops currently:
 3. Validate the event
 4. Only then record `received_ms`
 
-That means JSON parsing and validation time are included in the apparent network latency. 
+That means JSON parsing and validation time are included in the apparent
+delivery latency.
 
 The Chainlink reader similarly parses the RTDS message and only assigns receive time later inside `handle_tick`. It also awaits Redis and PostgreSQL work before returning to receive the next message.  
 
@@ -168,11 +198,22 @@ latest_state.update(event, received_wall_ns)
 capture.offer_nowait(event)
 ```
 
-Only accepted events are stored. Invalid messages increment counters but their raw body is discarded.
+This timestamp is the collector application's observation immediately after
+`recv()` returns. It excludes the application's JSON parsing time, but it is
+not a kernel or wire-arrival timestamp, and nanosecond representation does not
+imply nanosecond clock accuracy. `time.monotonic_ns()` can expose local wall
+clock jumps within a process; it cannot prove that the host's absolute clock
+offset is correct.
 
-## Important Chainlink refactor
+In the later integration phases, valid events are offered to capture. Invalid
+messages increment counters but their raw body is discarded. Phase 1 does not
+change either reader loop.
 
-The Chainlink receive loop should no longer await a PostgreSQL upsert for every tick. Otherwise, a temporary database delay can delay the next `recv()` and falsely look like RTDS latency.
+## Important later Chainlink refactor
+
+This is Phase 3 work, not Phase 1. The Chainlink receive loop should eventually
+stop awaiting a PostgreSQL upsert for every tick. Otherwise, a temporary
+database delay can delay the next `recv()` and falsely look like RTDS latency.
 
 Use this flow:
 
@@ -193,6 +234,10 @@ A separate worker should:
 * Write the one-second row outside the receive loop
 
 This also eliminates repeated updates to the same `price_samples` row when several Chainlink messages share one source second. The current historical function performs a transaction and an upsert for each call. 
+
+The critical Redis and one-second historical path must not share the
+best-effort raw-capture buffer. A raw-capture drop is allowed; silently losing a
+live update or a historical second because that raw buffer filled is not.
 
 ---
 
@@ -233,7 +278,7 @@ When the buffer is full:
 
 1. Drop the oldest pending capture record.
 2. Preserve the newest data.
-3. Increment `capture_dropped_total`.
+3. Increment `records_dropped_total`.
 4. Emit a rate-limited warning.
 
 The live price state, existing flow calculation and WebSocket receive loop continue normally.
@@ -247,8 +292,11 @@ Raw capture is useful but non-critical. Therefore:
 * Do not pause the WebSocket reader.
 * Do not retry the same batch forever.
 * Do not create an unbounded local disk spool.
-* Attempt one short retry.
-* If it still fails, discard that raw batch and increment a failure counter.
+* Do not retry the same `COPY` batch. A connection failure after PostgreSQL
+  commits but before the acknowledgement is ambiguous, and retrying an
+  append-only batch without a unique index can create duplicates.
+* Discard the reported failed batch, increment a failure counter, and reacquire
+  a connection for later batches.
 * Keep the existing live and one-second collectors operating.
 
 ---
@@ -269,7 +317,7 @@ or equivalent PostgreSQL binary `COPY`, with:
 
 * One dedicated raw-capture connection
 * At most one flush per second under ordinary volume
-* No transaction per row
+* One implicit atomic operation per `COPY` batch, with no transaction per row
 * No `ON CONFLICT`
 * No per-row market-window lookup
 * No `_ensure_market_window` call
@@ -292,7 +340,9 @@ A generic table would require:
 * More complicated indexes
 * Potential JSON storage
 
-Two narrow tables are smaller, easier to query and harder to misuse.
+Two narrow event tables are smaller, easier to query and harder to misuse.
+They and the small session table live in a dedicated `raw_capture` PostgreSQL
+schema. The API reader role receives no access to that schema.
 
 ## Table design rules
 
@@ -307,7 +357,15 @@ Both raw tables should be:
 * Free of large B-tree indexes
 * Queried only by internal analysis jobs
 
-Use one small BRIN index on receive time if testing shows it is beneficial. Partition pruning may already be sufficient for short retention windows.
+Do not add a raw-event index in Phase 1. Six-hour partition pruning may already
+be sufficient for the short retention window. Add a small BRIN index on receive
+time only if canary query measurements show that it is beneficial.
+
+`raw_capture.feed_sessions` is required, not optional. It stores one small row
+per futures or Chainlink WebSocket connection, using an application-generated
+UUID also present on captured event rows. It records connection/ready and close
+timing plus final counters. The event tables deliberately have no foreign key
+to it, so a failed session-metadata write cannot reject an evidence batch.
 
 Do not associate every row with `market_windows` during insertion. A market ID can be derived later:
 
@@ -319,7 +377,7 @@ Avoiding a foreign key and market-window write keeps the capture path independen
 
 ---
 
-# 8. Retention and hard storage limits
+# 8. Retention and relation-size budget
 
 Use native PostgreSQL range partitions covering **six hours** each.
 
@@ -335,26 +393,47 @@ Six-hour partitions give:
 
 ```text
 RAW_CAPTURE_RETENTION_HOURS=72
-RAW_CAPTURE_MAX_DISK_MB=2048
-RAW_CAPTURE_RETENTION_CHECK_SECONDS=3600
+RAW_CAPTURE_MAX_RELATION_MB=2048
+RAW_CAPTURE_RETENTION_CHECK_SECONDS=60
 ```
 
 Delete the oldest complete partition whenever either condition is true:
 
 1. It is older than 72 hours.
-2. The combined raw-capture tables exceed the configured disk budget.
+2. The combined raw-capture leaf relations exceed the configured relation
+   budget.
 
-The age and size limits are both required. Age protects against permanent accumulation; the disk limit protects against an unexpected increase in event volume.
+The age and size limits are both required. Age protects against permanent
+accumulation; the relation budget bounds the intended capture relations during
+an unexpected increase in event volume.
 
-The suggested 2 GB limit should be adjusted to the droplet’s actual free-disk budget, but it should be explicit rather than inferred.
+This is not a hard filesystem limit. PostgreSQL WAL, temporary files, other
+tables, and filesystem overhead are outside the relation-size calculation.
+The suggested 2 GB budget must be reviewed against the droplet's real free
+space, and operations must continue monitoring `df -h` and total PostgreSQL
+size.
 
 ### Partition management
 
-* Pre-create the current and next partition.
-* Run retention once per hour.
+* Pre-create the current and next partition interval for both event tables.
+* Check retention and relation size every 60 seconds.
+* Drop matching six-hour futures and Chainlink partitions as a pair so the
+  retained sources keep the same time coverage.
+* Under relation pressure, keep dropping the oldest completed pair until the
+  budget is met. Never drop the current interval; suspend raw capture and count
+  drops if no completed interval remains.
+* Sum leaf-relation sizes, rather than measuring only the partitioned parents.
 * Use a PostgreSQL advisory lock so only one collector performs maintenance.
 * If a partition is missing, raw capture may drop a batch and alert; it must not block the reader while creating schema.
 * Do not include these tables in long-term backups or exports unless specifically needed.
+
+Partition DDL is isolated from the main `public` schema. The `raw_capture`
+schema remains owned by `postgres`, access is revoked from `PUBLIC`, and the
+API reader receives no schema access. `price_writer` receives `USAGE` and
+`CREATE` only within `raw_capture` and owns only the two raw event parents and
+the session table. This allows its maintenance worker to create and drop their
+partitions without granting DDL rights in `public`. All runtime SQL uses fixed,
+fully qualified raw object names and the advisory lock.
 
 Once Sequence 2 produces compact model-evaluation rows, reduce raw retention from 72 to **48 hours**. Keep the compact lag/prediction observations for a longer period, such as 90 days.
 
@@ -432,9 +511,14 @@ RAW_CAPTURE_BATCH_MAX_ROWS: int = 500
 RAW_CAPTURE_FLUSH_MS: int = 1_000
 
 RAW_CAPTURE_RETENTION_HOURS: int = 72
-RAW_CAPTURE_MAX_DISK_MB: int = 2_048
-RAW_CAPTURE_RETENTION_CHECK_SECONDS: int = 3_600
+RAW_CAPTURE_MAX_RELATION_MB: int = 2_048
+RAW_CAPTURE_RETENTION_CHECK_SECONDS: int = 60
 ```
+
+Validate every numeric setting as positive, require
+`RAW_CAPTURE_BATCH_MAX_ROWS <= RAW_CAPTURE_QUEUE_MAX_EVENTS`, and reject any
+`RAW_FUTURES_BUCKET_MS` value other than `100` in this schema version. The two
+feature flags remain `False` in code and in the production environment example.
 
 Do not overload `BINANCE_FUTURES_STORE_RAW_JSON`. That existing setting concerns JSON attached to existing futures snapshots, not the new high-resolution price trace. The current configuration contains no bounded raw-capture or retention settings. 
 
@@ -444,27 +528,21 @@ There should be no CLOB raw-capture setting in this checkpoint because the featu
 
 # 12. File-change plan
 
-## Required
+## Phase 1 required
 
-| File                                | Change                                                                                                        |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `price_collector/raw_capture.py`    | New bounded writer, futures coalescer, records, counters and retention                                        |
-| `binance_futures_streams.py`        | Capture clocks before parsing; connection IDs; latest WS trade state; send compact events to 100 ms coalescer |
-| `binance_futures_collector.py`      | Construct capture components and later consume the latest validated WS trade                                  |
-| `polymarket_chainlink_collector.py` | Capture clocks before parsing; fast latest state; raw offer; move Redis/Postgres work out of reader           |
-| `db.py`                             | Dedicated raw pool, batch `COPY`, partition creation and retention functions                                  |
-| `schema.sql`                        | Two narrow partitioned tables and optional tiny session table                                                 |
-| `config.py`                         | Settings listed above                                                                                         |
-| `deployment/collector.env.example`  | Document settings                                                                                             |
-| `LIVE_DATA.md`                      | Explain timing and WS futures source rollout                                                                  |
-| `OPERATIONS.md`                     | Disk growth, drop counters, partition retention and rollback                                                  |
+| File                               | Change                                                                                              |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `price_collector/raw_capture.py`   | Inactive record types, bounded buffer, futures coalescer, counters, batch writer, and maintenance   |
+| `db.py`                            | Dedicated one-connection raw pool plus batch `COPY` and restricted maintenance calls               |
+| `schema.sql`                       | Isolated `raw_capture` schema, two narrow partitioned event tables, required session table, partitions, and restricted ownership/grants |
+| `config.py`                        | Disabled and validated settings listed above                                                       |
+| `deployment/collector.env.example` | Document all settings with both flags `false`                                                       |
+| `README.md`                        | Document the inactive foundation without claiming capture is active                                |
+| `OPERATIONS.md`                    | Manual environment review, Phase 1 verification, relation/disk monitoring, and rollback            |
 
 ## Tests
 
 * New `tests/test_raw_capture.py`
-* `tests/test_binance_futures_streams.py`
-* `tests/test_binance_futures_collector.py`
-* `tests/test_polymarket_chainlink_collector.py`
 * `tests/test_db.py`
 * `tests/test_config.py`
 * `tests/test_deployment.py`
@@ -472,12 +550,20 @@ There should be no CLOB raw-capture setting in this checkpoint because the featu
 ## Intentionally unchanged
 
 * `polymarket_probability_collector.py`
+* `binance_futures_streams.py`
+* `binance_futures_collector.py`
+* `polymarket_chainlink_collector.py`
 * API response schema
 * Frontend
-* `live_cache.py`, until the separate futures source cutover
+* `live_cache.py`
+* `LIVE_DATA.md`, because Phase 1 changes no live source or timing behavior
 * Full `bookTicker` persistence
 * CLOB raw persistence
 * Existing one-second flow and book tables
+
+Phase 2 integrates the futures reader and adds its focused stream/collector
+tests. Phase 3 integrates and refactors the Chainlink reader and adds its
+focused tests. Deferring those files is what makes Phase 1 observably inactive.
 
 ---
 
@@ -513,23 +599,35 @@ This keeps any capture bug separate from a user-visible price-source change.
 
 ## Phase 1 — Schema and inactive code
 
-1. Add schema, partitions and config with both capture flags `False`.
-2. Add the writer and coalescer.
-3. Verify that disabled capture produces no queue, connection or storage overhead.
+1. Add the private `raw_capture` schema, two event parents, required session
+   table, six-hour partitions, and narrowly scoped `price_writer` ownership and
+   grants.
+2. Add and validate configuration with both capture flags `False` and the
+   futures bucket fixed at 100 ms.
+3. Add record types, coalescer, bounded buffer, counters, dedicated writer,
+   batch `COPY`, and partition-maintenance primitives without importing them
+   from a collector.
+4. Verify that applying the schema succeeds idempotently and that `price_reader`
+   cannot access `raw_capture`.
+5. Verify that disabled capture creates no queue, extra database pool/task, or
+   raw rows. Empty pre-created partitions are expected and are not capture
+   activity.
 
 ## Phase 2 — Futures-only canary
 
 1. Enable `RAW_FUTURES_TRACE_ENABLED`.
 2. Run for 24 hours.
 3. Measure actual rows/hour, bytes/hour, queue high-water, database latency and collector CPU.
-4. Confirm the row rate never exceeds 10 per second with a 100 ms bucket.
+4. Confirm at most one row exists per connection and active 100 ms bucket;
+   reconnect boundaries may make the global rate briefly exceed 10 per second.
 5. Confirm existing one-second flow and book completeness is unchanged.
 
 ## Phase 3 — Chainlink capture
 
 1. Refactor the RTDS reader so it does not await PostgreSQL.
 2. Enable `RAW_CHAINLINK_EVENTS_ENABLED`.
-3. Confirm all accepted ticks retain receive order, including two events sharing a millisecond.
+3. Confirm successfully enqueued ticks retain receive order, including two
+   events sharing a millisecond, and that any overload drops are counted.
 4. Compare provider-time and local-receive-time lag independently.
 
 ## Phase 4 — Validate retention
@@ -537,8 +635,11 @@ This keeps any capture bug separate from a user-visible price-source change.
 1. Create deliberately expired test partitions.
 2. Run maintenance.
 3. Confirm partitions are dropped, not row-deleted.
-4. Confirm the hard disk cap also drops the oldest complete partition.
+4. Confirm the relation-size budget drops the oldest completed futures and
+   Chainlink partition pair.
 5. Confirm normal collection continues if retention fails.
+6. Confirm `df -h` and total database-size monitoring remain in place because
+   the relation budget does not bound PostgreSQL WAL or filesystem usage.
 
 ## Phase 5 — Futures WS source cutover
 
@@ -580,21 +681,47 @@ A dropped-event count of zero is expected under normal conditions. A nonzero cou
 
 # Definition of done
 
+Phase 1 is complete when all of these are true:
+
+* The private `raw_capture` schema contains the two narrow partitioned event
+  parents, the required session table, and current/next six-hour partitions.
+* `PUBLIC` and `price_reader` cannot access `raw_capture`; `price_writer` has
+  only the ownership and schema-local DDL permissions required for raw
+  partitions.
+* Both capture flags default to `False`, the bucket setting accepts only 100,
+  and the remaining numeric settings are validated.
+* Record, coalescer, bounded-buffer, batch-writer, counters, and maintenance
+  primitives have focused tests, including full-buffer and failed-`COPY`
+  behavior.
+* A failed `COPY` batch is counted and discarded without an ambiguous
+  same-batch retry.
+* No collector imports or constructs the capture primitives.
+* Disabled capture creates no queue, extra pool/task, or raw rows. Live Redis,
+  existing one-second PostgreSQL data, and API behavior are unchanged.
+* Operations documentation explains manual environment review, relation and
+  filesystem monitoring, verification, and rollback.
+
 Sequence 1 is complete when all of these are true:
 
 * Receive clocks are captured immediately after `recv()` and before JSON parsing.
-* The futures trace is capped at one row per 100 ms.
-* Every accepted Chainlink tick remains individually ordered.
+* The futures trace is capped at one row per connection and active 100 ms bucket.
+* Every valid Chainlink tick is offered without intentional sampling;
+  successfully captured ticks remain individually ordered and drops are
+  counted.
 * No raw JSON or full book depth is persisted.
 * The receive loops never await the raw database writer.
 * The Chainlink receive loop no longer awaits a per-event PostgreSQL upsert.
 * Queue memory has a fixed upper bound.
 * PostgreSQL uses batched append-only `COPY`.
-* Raw tables have an age limit and a hard disk limit.
+* Raw tables have an age limit and a relation-size budget, while filesystem
+  monitoring remains separate.
 * Expired data is removed by dropping partitions.
 * Raw-capture failure cannot interrupt live values or existing one-second data.
 * The dashboard and predictor do not query raw tables.
 * CLOB BBO capture remains deferred until an executable-edge requirement exists.
 * REST-to-WebSocket futures cutover is deployed separately from capture.
 
-The first implementation checkpoint should therefore contain only **Binance futures 100 ms price trace + individual Chainlink ticks + bounded writer + retention**. Everything else should remain outside the scope until data demonstrates that it adds predictive value.
+The first implementation checkpoint therefore contains only the inactive
+schema, configuration, and tested primitives. Futures integration, Chainlink
+integration/refactoring, live-source cutover, and model production remain
+separate later phases.

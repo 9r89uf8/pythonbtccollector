@@ -417,6 +417,199 @@ CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
 CREATE INDEX IF NOT EXISTS binance_futures_oi_5m_effective_market_idx
     ON binance_futures_oi_5m_summaries (effective_market_id);
 
+-- High-resolution evidence is isolated from the public application schema.
+-- The writer may manage partitions only inside this schema; the API reader is
+-- intentionally not granted access.
+CREATE SCHEMA IF NOT EXISTS raw_capture;
+ALTER SCHEMA raw_capture OWNER TO CURRENT_USER;
+REVOKE ALL ON SCHEMA raw_capture FROM PUBLIC, price_reader;
+GRANT USAGE, CREATE ON SCHEMA raw_capture TO price_writer;
+
+CREATE TABLE IF NOT EXISTS raw_capture.binance_futures_price_trace_100ms (
+    bucket_start_ms BIGINT NOT NULL,
+    connection_id UUID NOT NULL,
+
+    first_received_wall_ns BIGINT NOT NULL,
+    last_received_wall_ns BIGINT NOT NULL,
+    first_received_monotonic_ns BIGINT NOT NULL,
+    last_received_monotonic_ns BIGINT NOT NULL,
+
+    first_trade_time_ms BIGINT NOT NULL,
+    last_trade_time_ms BIGINT NOT NULL,
+    first_event_time_ms BIGINT NOT NULL,
+    last_event_time_ms BIGINT NOT NULL,
+
+    open_price NUMERIC(38, 18) NOT NULL,
+    high_price NUMERIC(38, 18) NOT NULL,
+    low_price NUMERIC(38, 18) NOT NULL,
+    close_price NUMERIC(38, 18) NOT NULL,
+
+    event_count INTEGER NOT NULL,
+    first_agg_trade_id BIGINT NOT NULL,
+    last_agg_trade_id BIGINT NOT NULL,
+
+    CHECK (bucket_start_ms >= 0 AND bucket_start_ms % 100 = 0),
+    CHECK (first_received_wall_ns > 0),
+    CHECK (last_received_wall_ns > 0),
+    CHECK (
+        first_received_wall_ns >= bucket_start_ms * 1000000
+        AND first_received_wall_ns < (bucket_start_ms + 100) * 1000000
+    ),
+    CHECK (
+        last_received_wall_ns >= bucket_start_ms * 1000000
+        AND last_received_wall_ns < (bucket_start_ms + 100) * 1000000
+    ),
+    CHECK (first_received_monotonic_ns > 0),
+    CHECK (last_received_monotonic_ns >= first_received_monotonic_ns),
+    CHECK (first_trade_time_ms > 0),
+    CHECK (last_trade_time_ms > 0),
+    CHECK (first_event_time_ms > 0),
+    CHECK (last_event_time_ms > 0),
+    CHECK (low_price > 0),
+    CHECK (high_price >= low_price),
+    CHECK (open_price >= low_price AND open_price <= high_price),
+    CHECK (close_price >= low_price AND close_price <= high_price),
+    CHECK (event_count > 0),
+    CHECK (first_agg_trade_id >= 0),
+    CHECK (last_agg_trade_id >= 0)
+) PARTITION BY RANGE (bucket_start_ms);
+
+ALTER TABLE raw_capture.binance_futures_price_trace_100ms
+    OWNER TO price_writer;
+
+CREATE TABLE IF NOT EXISTS raw_capture.chainlink_price_events (
+    received_wall_ns BIGINT NOT NULL,
+    received_monotonic_ns BIGINT NOT NULL,
+    connection_id UUID NOT NULL,
+    receive_sequence BIGINT NOT NULL,
+    provider_event_ms BIGINT NOT NULL,
+    provider_message_ms BIGINT,
+    price NUMERIC(38, 18) NOT NULL,
+
+    CHECK (received_wall_ns > 0),
+    CHECK (received_monotonic_ns > 0),
+    CHECK (receive_sequence > 0),
+    CHECK (provider_event_ms > 0),
+    CHECK (provider_message_ms IS NULL OR provider_message_ms > 0),
+    CHECK (price > 0)
+) PARTITION BY RANGE (received_wall_ns);
+
+ALTER TABLE raw_capture.chainlink_price_events
+    OWNER TO price_writer;
+
+CREATE TABLE IF NOT EXISTS raw_capture.feed_sessions (
+    connection_id UUID PRIMARY KEY,
+    source TEXT NOT NULL,
+    connected_wall_ns BIGINT NOT NULL,
+    connected_monotonic_ns BIGINT NOT NULL,
+    ready_wall_ns BIGINT,
+    ready_monotonic_ns BIGINT,
+    disconnected_wall_ns BIGINT,
+    disconnected_monotonic_ns BIGINT,
+    close_reason TEXT,
+    messages_received_total BIGINT NOT NULL DEFAULT 0,
+    messages_accepted_total BIGINT NOT NULL DEFAULT 0,
+    parse_errors_total BIGINT NOT NULL DEFAULT 0,
+    records_dropped_total BIGINT NOT NULL DEFAULT 0,
+    last_receive_sequence BIGINT NOT NULL DEFAULT 0,
+
+    CHECK (source IN (
+        'binance_futures_agg_trade',
+        'polymarket_chainlink_rtds'
+    )),
+    CHECK (connected_wall_ns > 0),
+    CHECK (connected_monotonic_ns > 0),
+    CHECK ((ready_wall_ns IS NULL) = (ready_monotonic_ns IS NULL)),
+    CHECK (ready_wall_ns IS NULL OR ready_wall_ns > 0),
+    CHECK (ready_monotonic_ns IS NULL OR ready_monotonic_ns >= connected_monotonic_ns),
+    CHECK ((disconnected_wall_ns IS NULL) = (disconnected_monotonic_ns IS NULL)),
+    CHECK (disconnected_wall_ns IS NULL OR disconnected_wall_ns > 0),
+    CHECK (
+        disconnected_monotonic_ns IS NULL
+        OR disconnected_monotonic_ns >= connected_monotonic_ns
+    ),
+    CHECK (
+        disconnected_monotonic_ns IS NULL
+        OR ready_monotonic_ns IS NULL
+        OR disconnected_monotonic_ns >= ready_monotonic_ns
+    ),
+    CHECK (
+        close_reason IS NULL
+        OR close_reason IN (
+            'remote_close',
+            'error',
+            'proactive_reconnect',
+            'cancelled',
+            'shutdown'
+        )
+    ),
+    CHECK ((disconnected_wall_ns IS NULL) = (close_reason IS NULL)),
+    CHECK (messages_received_total >= 0),
+    CHECK (messages_accepted_total >= 0),
+    CHECK (parse_errors_total >= 0),
+    CHECK (records_dropped_total >= 0),
+    CHECK (messages_accepted_total <= messages_received_total),
+    CHECK (parse_errors_total <= messages_received_total),
+    CHECK (
+        messages_accepted_total + parse_errors_total
+        <= messages_received_total
+    ),
+    CHECK (last_receive_sequence = messages_received_total)
+);
+
+ALTER TABLE raw_capture.feed_sessions
+    OWNER TO price_writer;
+
+-- Seed the receive-time partition covering deployment and the following one.
+-- Runtime maintenance refreshes this pair before later boundaries.
+SET ROLE price_writer;
+
+DO $$
+DECLARE
+    partition_width_ms CONSTANT BIGINT := 21600000;
+    current_start_ms BIGINT;
+    partition_start_ms BIGINT;
+    partition_end_ms BIGINT;
+    partition_start_ns BIGINT;
+    partition_end_ns BIGINT;
+    offset_index INTEGER;
+BEGIN
+    current_start_ms := (
+        (floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT)
+        / partition_width_ms
+    ) * partition_width_ms;
+
+    FOR offset_index IN 0..1 LOOP
+        partition_start_ms := current_start_ms + offset_index * partition_width_ms;
+        partition_end_ms := partition_start_ms + partition_width_ms;
+        partition_start_ns := partition_start_ms * 1000000;
+        partition_end_ns := partition_end_ms * 1000000;
+
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS raw_capture.%I '
+            'PARTITION OF raw_capture.binance_futures_price_trace_100ms '
+            'FOR VALUES FROM (%s) TO (%s)',
+            'binance_futures_price_trace_100ms_p' || partition_start_ms,
+            partition_start_ms,
+            partition_end_ms
+        );
+
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS raw_capture.%I '
+            'PARTITION OF raw_capture.chainlink_price_events '
+            'FOR VALUES FROM (%s) TO (%s)',
+            'chainlink_price_events_p' || partition_start_ms,
+            partition_start_ns,
+            partition_end_ns
+        );
+    END LOOP;
+END
+$$;
+
+RESET ROLE;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA raw_capture FROM PUBLIC, price_reader;
+
 INSERT INTO providers (provider_code, display_name)
 VALUES ('binance_spot', 'Binance Spot')
 ON CONFLICT (provider_code) DO NOTHING;

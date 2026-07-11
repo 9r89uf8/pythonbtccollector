@@ -127,6 +127,30 @@ instrument and second updates the existing row instead of creating a duplicate.
 The other one-second tables follow the same upsert pattern with source-specific
 keys.
 
+### Inactive high-resolution capture foundation
+
+The first high-resolution-capture checkpoint adds an isolated PostgreSQL
+schema and tested infrastructure without changing any collector:
+
+- `raw_capture.binance_futures_price_trace_100ms` is the planned partitioned
+  destination for one compact OHLC row per futures WebSocket connection and
+  active 100 ms receive bucket.
+- `raw_capture.chainlink_price_events` is the planned partitioned destination
+  for individual valid RTDS ticks that are successfully captured.
+- `raw_capture.feed_sessions` is the planned connection/session metadata table.
+
+The `raw_capture` schema is owned separately from the normal historical tables,
+is unavailable to `PUBLIC` and the API's `price_reader` role, and grants the
+collector writer DDL capability only inside that schema. Six-hour current and
+next partitions can therefore exist while remaining empty.
+
+This checkpoint is intentionally inactive: both feature flags default to
+`false`, and the futures and Chainlink collectors do not yet construct the
+capture buffer, writer, or maintenance tasks. No high-resolution rows are
+written, no extra capture database connection is opened, and Redis, existing
+one-second history, and API responses are unchanged. `LIVE_DATA.md` therefore
+continues to describe the active live pipeline exactly.
+
 Redis is not a historical store. It contains only these live keys:
 
 - `btc:live:binance_spot`
@@ -270,6 +294,25 @@ The probability collector's resolution reconciler uses these settings from
   subscription open briefly for an official winner event without delaying
   collection of the preloaded next market.
 
+Phase 1 also defines these inactive high-resolution-capture settings. Keep both
+flags `false` until the corresponding later integration phase is deployed:
+
+```text
+RAW_FUTURES_TRACE_ENABLED=false
+RAW_CHAINLINK_EVENTS_ENABLED=false
+RAW_FUTURES_BUCKET_MS=100
+RAW_CAPTURE_QUEUE_MAX_EVENTS=5000
+RAW_CAPTURE_BATCH_MAX_ROWS=500
+RAW_CAPTURE_FLUSH_MS=1000
+RAW_CAPTURE_RETENTION_HOURS=72
+RAW_CAPTURE_MAX_RELATION_MB=2048
+RAW_CAPTURE_RETENTION_CHECK_SECONDS=60
+```
+
+The Phase 1 schema accepts only a 100 ms futures bucket. The relation budget
+applies only to raw-capture PostgreSQL relations; it is not a filesystem quota
+and does not include WAL, temporary files, or the rest of the database.
+
 Do not commit `collector.env`, `api.env`, `droplet.env`, `.env`, or real
 credentials. These files are ignored by Git; only their examples belong in the
 repository.
@@ -404,6 +447,11 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 GRANT SELECT ON TABLES TO price_reader;
 \q
 ```
+
+`schema.sql` separately creates and secures the `raw_capture` schema. Do not
+grant `price_reader` or `PUBLIC` access to it. Its narrowly scoped
+`price_writer` ownership and `CREATE` permission are for raw partition
+maintenance only and do not grant DDL access in `public`.
 
 ### Configure Redis
 
@@ -542,4 +590,8 @@ checks, Redis checks, and service verification.
 - Monitor disk space with `df -h`.
 - Check PostgreSQL size with
   `SELECT pg_size_pretty(pg_database_size('price_collector'));`.
-- No automatic historical-data pruning is currently included.
+- `RAW_CAPTURE_MAX_RELATION_MB` does not replace either check; PostgreSQL WAL
+  and non-capture relations remain outside that budget.
+- No automatic pruning is included for the long-term historical tables. The
+  raw-capture partition-maintenance primitive remains inactive until a later
+  collector integration phase.

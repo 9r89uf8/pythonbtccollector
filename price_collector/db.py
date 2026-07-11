@@ -1,7 +1,8 @@
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import asyncpg
 
@@ -9,6 +10,48 @@ from price_collector.market import MarketWindow
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+RAW_CAPTURE_SCHEMA = "raw_capture"
+RAW_CAPTURE_PARTITION_WIDTH_MS = 6 * 60 * 60 * 1000
+RAW_CAPTURE_MAINTENANCE_LOCK_ID = 0x5241574341505455
+RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS = 5
+
+RAW_FUTURES_TRACE_COLUMNS = (
+    "bucket_start_ms",
+    "connection_id",
+    "first_received_wall_ns",
+    "last_received_wall_ns",
+    "first_received_monotonic_ns",
+    "last_received_monotonic_ns",
+    "first_trade_time_ms",
+    "last_trade_time_ms",
+    "first_event_time_ms",
+    "last_event_time_ms",
+    "open_price",
+    "high_price",
+    "low_price",
+    "close_price",
+    "event_count",
+    "first_agg_trade_id",
+    "last_agg_trade_id",
+)
+
+RAW_CHAINLINK_EVENT_COLUMNS = (
+    "received_wall_ns",
+    "received_monotonic_ns",
+    "connection_id",
+    "receive_sequence",
+    "provider_event_ms",
+    "provider_message_ms",
+    "price",
+)
+
+
+@dataclass(frozen=True)
+class RawCaptureMaintenanceStatus:
+    storage_permitted: bool
+    current_partition: str
+    current_partition_start_ms: int
+    raw_table_bytes: int
 
 
 def epoch_ms_to_utc_datetime(epoch_ms: int) -> datetime:
@@ -110,11 +153,495 @@ async def create_pool(database_url: str) -> asyncpg.Pool:
     )
 
 
+async def create_raw_capture_pool(database_url: str) -> asyncpg.Pool:
+    """Create a lazy, single-connection pool used only by raw capture."""
+    return await asyncpg.create_pool(
+        database_url,
+        min_size=0,
+        max_size=1,
+        timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS,
+        command_timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS,
+        server_settings={"application_name": "price_collector_raw_capture"},
+    )
+
+
 async def create_read_pool(settings: Any) -> asyncpg.Pool:
     database_url = settings.READ_DATABASE_URL or settings.DATABASE_URL
     if not database_url:
         raise RuntimeError("READ_DATABASE_URL or DATABASE_URL must be set for the API")
     return await create_pool(database_url)
+
+
+def raw_capture_partition_start_ms(received_ms: int) -> int:
+    if received_ms < 0:
+        raise ValueError("received_ms must be non-negative")
+    return (
+        received_ms // RAW_CAPTURE_PARTITION_WIDTH_MS
+    ) * RAW_CAPTURE_PARTITION_WIDTH_MS
+
+
+def raw_capture_partition_name(parent_table: str, partition_start_ms: int) -> str:
+    if parent_table not in {
+        "binance_futures_price_trace_100ms",
+        "chainlink_price_events",
+    }:
+        raise ValueError("unsupported raw capture parent table")
+    if (
+        partition_start_ms < 0
+        or partition_start_ms % RAW_CAPTURE_PARTITION_WIDTH_MS != 0
+    ):
+        raise ValueError("raw capture partition start must be six-hour aligned")
+    return f"{parent_table}_p{partition_start_ms}"
+
+
+async def ensure_raw_capture_partitions(
+    connection: asyncpg.Connection,
+    *,
+    now_ms: int,
+) -> None:
+    current_start_ms = raw_capture_partition_start_ms(now_ms)
+    partition_specs = []
+    for partition_start_ms in (
+        current_start_ms,
+        current_start_ms + RAW_CAPTURE_PARTITION_WIDTH_MS,
+    ):
+        partition_end_ms = partition_start_ms + RAW_CAPTURE_PARTITION_WIDTH_MS
+        futures_partition = raw_capture_partition_name(
+            "binance_futures_price_trace_100ms",
+            partition_start_ms,
+        )
+        chainlink_partition = raw_capture_partition_name(
+            "chainlink_price_events",
+            partition_start_ms,
+        )
+        partition_specs.extend(
+            (
+                (
+                    futures_partition,
+                    "binance_futures_price_trace_100ms",
+                    partition_start_ms,
+                    partition_end_ms,
+                ),
+                (
+                    chainlink_partition,
+                    "chainlink_price_events",
+                    partition_start_ms * 1_000_000,
+                    partition_end_ms * 1_000_000,
+                ),
+            )
+        )
+
+    qualified_names = [
+        f"{RAW_CAPTURE_SCHEMA}.{partition_name}"
+        for partition_name, _parent, _start, _end in partition_specs
+    ]
+    existing_rows = await connection.fetch(
+        """
+        SELECT candidate.qualified_name
+        FROM unnest($1::TEXT[]) AS candidate(qualified_name)
+        WHERE to_regclass(candidate.qualified_name) IS NOT NULL
+        """,
+        qualified_names,
+    )
+    existing_names = {str(row["qualified_name"]) for row in existing_rows}
+
+    for partition_name, parent_table, partition_start, partition_end in partition_specs:
+        qualified_name = f"{RAW_CAPTURE_SCHEMA}.{partition_name}"
+        if qualified_name in existing_names:
+            continue
+        await connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {RAW_CAPTURE_SCHEMA}."{partition_name}"
+            PARTITION OF {RAW_CAPTURE_SCHEMA}.{parent_table}
+            FOR VALUES FROM ({partition_start}) TO ({partition_end})
+            """
+        )
+
+
+async def fetch_raw_capture_partitions(
+    connection: asyncpg.Connection,
+) -> list:
+    return await connection.fetch(
+        """
+        SELECT
+            parent.relname AS parent_table,
+            child.relname AS partition_name,
+            substring(child.relname FROM '_p([0-9]+)$')::BIGINT
+                AS partition_start_ms,
+            pg_total_relation_size(child.oid)::BIGINT AS total_bytes
+        FROM pg_inherits inheritance
+        JOIN pg_class parent ON parent.oid = inheritance.inhparent
+        JOIN pg_class child ON child.oid = inheritance.inhrelid
+        JOIN pg_namespace namespace ON namespace.oid = child.relnamespace
+        JOIN pg_namespace parent_namespace
+          ON parent_namespace.oid = parent.relnamespace
+        WHERE namespace.nspname = 'raw_capture'
+          AND parent_namespace.nspname = 'raw_capture'
+          AND parent.relname IN (
+              'binance_futures_price_trace_100ms',
+              'chainlink_price_events'
+          )
+          AND child.relname ~ '_p[0-9]+$'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_inherits descendants
+              WHERE descendants.inhparent = child.oid
+          )
+        ORDER BY partition_start_ms ASC, parent_table ASC
+        """
+    )
+
+
+async def drop_raw_capture_interval(
+    connection: asyncpg.Connection,
+    *,
+    partition_start_ms: int,
+) -> None:
+    futures_partition = raw_capture_partition_name(
+        "binance_futures_price_trace_100ms",
+        partition_start_ms,
+    )
+    chainlink_partition = raw_capture_partition_name(
+        "chainlink_price_events",
+        partition_start_ms,
+    )
+    await connection.execute(
+        f"""
+        DROP TABLE IF EXISTS
+            {RAW_CAPTURE_SCHEMA}."{futures_partition}",
+            {RAW_CAPTURE_SCHEMA}."{chainlink_partition}"
+        """
+    )
+
+
+async def maintain_raw_capture_partitions(
+    pool: asyncpg.Pool,
+    *,
+    retention_hours: int,
+    max_relation_mb: int,
+    now_ms: Optional[int] = None,
+) -> Optional[RawCaptureMaintenanceStatus]:
+    """Return maintenance telemetry, or None when another process owns it."""
+    if retention_hours < 6:
+        raise ValueError("retention_hours must be at least six")
+    if max_relation_mb <= 0:
+        raise ValueError("max_relation_mb must be positive")
+
+    async with pool.acquire(timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS) as connection:
+        async with connection.transaction():
+            lock_acquired = await connection.fetchval(
+                "SELECT pg_try_advisory_xact_lock($1)",
+                RAW_CAPTURE_MAINTENANCE_LOCK_ID,
+            )
+            if not lock_acquired:
+                return None
+
+            await connection.execute("SET LOCAL lock_timeout = '2s'")
+            await connection.execute("SET LOCAL statement_timeout = '5s'")
+            if now_ms is None:
+                now_ms = int(
+                    await connection.fetchval(
+                        """
+                        SELECT floor(
+                            extract(epoch FROM clock_timestamp()) * 1000
+                        )::BIGINT
+                        """
+                    )
+                )
+
+            await ensure_raw_capture_partitions(connection, now_ms=now_ms)
+            partitions = await fetch_raw_capture_partitions(connection)
+
+            grouped = {}
+            for row in partitions:
+                partition_start_ms = int(row["partition_start_ms"])
+                grouped.setdefault(partition_start_ms, 0)
+                grouped[partition_start_ms] += int(row["total_bytes"])
+
+            current_start_ms = raw_capture_partition_start_ms(now_ms)
+            retention_cutoff_ms = now_ms - retention_hours * 60 * 60 * 1000
+            dropped_starts = set()
+            total_bytes = sum(grouped.values())
+
+            for partition_start_ms in sorted(grouped):
+                partition_end_ms = (
+                    partition_start_ms + RAW_CAPTURE_PARTITION_WIDTH_MS
+                )
+                if partition_end_ms <= retention_cutoff_ms:
+                    await drop_raw_capture_interval(
+                        connection,
+                        partition_start_ms=partition_start_ms,
+                    )
+                    total_bytes -= grouped[partition_start_ms]
+                    dropped_starts.add(partition_start_ms)
+
+            relation_budget_bytes = max_relation_mb * 1024 * 1024
+            for partition_start_ms in sorted(grouped):
+                if total_bytes <= relation_budget_bytes:
+                    break
+                if partition_start_ms in dropped_starts:
+                    continue
+                partition_end_ms = (
+                    partition_start_ms + RAW_CAPTURE_PARTITION_WIDTH_MS
+                )
+                if partition_end_ms > current_start_ms:
+                    continue
+                await drop_raw_capture_interval(
+                    connection,
+                    partition_start_ms=partition_start_ms,
+                )
+                total_bytes -= grouped[partition_start_ms]
+                dropped_starts.add(partition_start_ms)
+
+            retained_starts = [
+                partition_start_ms
+                for partition_start_ms in grouped
+                if partition_start_ms not in dropped_starts
+            ]
+            oldest_retained_start_ms = min(
+                retained_starts,
+                default=current_start_ms,
+            )
+            await connection.execute(
+                """
+                DELETE FROM raw_capture.feed_sessions
+                WHERE disconnected_wall_ns IS NOT NULL
+                  AND disconnected_wall_ns < $1
+                """,
+                oldest_retained_start_ms * 1_000_000,
+            )
+
+            return RawCaptureMaintenanceStatus(
+                storage_permitted=total_bytes <= relation_budget_bytes,
+                current_partition=f"p{current_start_ms}",
+                current_partition_start_ms=current_start_ms,
+                raw_table_bytes=total_bytes,
+            )
+
+
+async def copy_binance_futures_price_traces(
+    connection: asyncpg.Connection,
+    records: Sequence[Any],
+) -> None:
+    if not records:
+        return
+    await connection.copy_records_to_table(
+        "binance_futures_price_trace_100ms",
+        schema_name=RAW_CAPTURE_SCHEMA,
+        columns=RAW_FUTURES_TRACE_COLUMNS,
+        records=records,
+        timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS,
+    )
+
+
+async def copy_chainlink_price_events(
+    connection: asyncpg.Connection,
+    records: Sequence[Any],
+) -> None:
+    if not records:
+        return
+    await connection.copy_records_to_table(
+        "chainlink_price_events",
+        schema_name=RAW_CAPTURE_SCHEMA,
+        columns=RAW_CHAINLINK_EVENT_COLUMNS,
+        records=records,
+        timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS,
+    )
+
+
+class AsyncpgRawCaptureBackend:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        *,
+        retention_hours: int,
+        max_relation_mb: int,
+    ) -> None:
+        self._pool = pool
+        self._retention_hours = retention_hours
+        self._max_relation_mb = max_relation_mb
+        self._maintenance_status: Optional[RawCaptureMaintenanceStatus] = None
+
+    @property
+    def current_partition(self) -> Optional[str]:
+        status = self._maintenance_status
+        return None if status is None else status.current_partition
+
+    @property
+    def raw_table_bytes(self) -> Optional[int]:
+        status = self._maintenance_status
+        return None if status is None else status.raw_table_bytes
+
+    async def copy_futures_traces(self, records: Sequence[Any]) -> None:
+        rows = [
+            (
+                record.bucket_start_ms,
+                record.connection_id,
+                record.first_received_wall_ns,
+                record.last_received_wall_ns,
+                record.first_received_monotonic_ns,
+                record.last_received_monotonic_ns,
+                record.first_trade_time_ms,
+                record.last_trade_time_ms,
+                record.first_event_time_ms,
+                record.last_event_time_ms,
+                record.open_price,
+                record.high_price,
+                record.low_price,
+                record.close_price,
+                record.event_count,
+                record.first_agg_trade_id,
+                record.last_agg_trade_id,
+            )
+            for record in records
+        ]
+        if not rows:
+            return
+        async with self._pool.acquire(
+            timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS
+        ) as connection:
+            await copy_binance_futures_price_traces(connection, rows)
+
+    async def copy_chainlink_events(self, records: Sequence[Any]) -> None:
+        rows = [
+            (
+                record.received_wall_ns,
+                record.received_monotonic_ns,
+                record.connection_id,
+                record.receive_sequence,
+                record.provider_event_ms,
+                record.provider_message_ms,
+                record.price,
+            )
+            for record in records
+        ]
+        if not rows:
+            return
+        async with self._pool.acquire(
+            timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS
+        ) as connection:
+            await copy_chainlink_price_events(connection, rows)
+
+    async def upsert_feed_sessions(self, records: Sequence[Any]) -> None:
+        if not records:
+            return
+        rows = [
+            (
+                record.connection_id,
+                record.source,
+                record.connected_wall_ns,
+                record.connected_monotonic_ns,
+                record.ready_wall_ns,
+                record.ready_monotonic_ns,
+                record.disconnected_wall_ns,
+                record.disconnected_monotonic_ns,
+                record.close_reason,
+                record.messages_received_total,
+                record.messages_accepted_total,
+                record.parse_errors_total,
+                record.records_dropped_total,
+                record.last_receive_sequence,
+            )
+            for record in records
+        ]
+        async with self._pool.acquire(
+            timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS
+        ) as connection:
+            await connection.executemany(
+                """
+                INSERT INTO raw_capture.feed_sessions AS existing (
+                    connection_id,
+                    source,
+                    connected_wall_ns,
+                    connected_monotonic_ns,
+                    ready_wall_ns,
+                    ready_monotonic_ns,
+                    disconnected_wall_ns,
+                    disconnected_monotonic_ns,
+                    close_reason,
+                    messages_received_total,
+                    messages_accepted_total,
+                    parse_errors_total,
+                    records_dropped_total,
+                    last_receive_sequence
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    $8, $9, $10, $11, $12, $13, $14
+                )
+                ON CONFLICT (connection_id)
+                DO UPDATE SET
+                    ready_wall_ns = COALESCE(
+                        existing.ready_wall_ns,
+                        EXCLUDED.ready_wall_ns
+                    ),
+                    ready_monotonic_ns = COALESCE(
+                        existing.ready_monotonic_ns,
+                        EXCLUDED.ready_monotonic_ns
+                    ),
+                    disconnected_wall_ns = COALESCE(
+                        existing.disconnected_wall_ns,
+                        EXCLUDED.disconnected_wall_ns
+                    ),
+                    disconnected_monotonic_ns = COALESCE(
+                        existing.disconnected_monotonic_ns,
+                        EXCLUDED.disconnected_monotonic_ns
+                    ),
+                    close_reason = COALESCE(
+                        existing.close_reason,
+                        EXCLUDED.close_reason
+                    ),
+                    messages_received_total = GREATEST(
+                        existing.messages_received_total,
+                        EXCLUDED.messages_received_total
+                    ),
+                    messages_accepted_total = GREATEST(
+                        existing.messages_accepted_total,
+                        EXCLUDED.messages_accepted_total
+                    ),
+                    parse_errors_total = GREATEST(
+                        existing.parse_errors_total,
+                        EXCLUDED.parse_errors_total
+                    ),
+                    records_dropped_total = GREATEST(
+                        existing.records_dropped_total,
+                        EXCLUDED.records_dropped_total
+                    ),
+                    last_receive_sequence = GREATEST(
+                        existing.last_receive_sequence,
+                        EXCLUDED.last_receive_sequence
+                    )
+                """,
+                rows,
+            )
+
+    async def maintain(self) -> bool:
+        result = await maintain_raw_capture_partitions(
+            self._pool,
+            retention_hours=self._retention_hours,
+            max_relation_mb=self._max_relation_mb,
+        )
+        if result is not None:
+            self._maintenance_status = result
+        status = self._maintenance_status
+        return True if status is None else status.storage_permitted
+
+    async def close(self) -> None:
+        await self._pool.close()
+
+
+async def create_raw_capture_backend(
+    database_url: str,
+    *,
+    retention_hours: int,
+    max_relation_mb: int,
+) -> AsyncpgRawCaptureBackend:
+    pool = await create_raw_capture_pool(database_url)
+    return AsyncpgRawCaptureBackend(
+        pool,
+        retention_hours=retention_hours,
+        max_relation_mb=max_relation_mb,
+    )
 
 
 async def get_instrument_id(

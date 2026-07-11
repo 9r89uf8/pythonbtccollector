@@ -165,6 +165,121 @@ curl http://127.0.0.1:9000/markets/current/live
 For an update that changes the market data/download contract, repeat the
 completed-market API check from **Check Services** above.
 
+## Phase 1 High-Resolution Capture Foundation
+
+Phase 1 installs only the private schema, configuration, and inactive capture
+primitives. It does not connect either collector to high-resolution capture and
+does not change the live API. Apply `schema.sql` before restarting services, as
+shown above.
+
+Review `/etc/price-collector/collector.env` manually and add these keys if they
+are absent. Do not replace the production file with the repository example,
+and keep both capture flags `false` throughout Phase 1:
+
+```text
+RAW_FUTURES_TRACE_ENABLED=false
+RAW_CHAINLINK_EVENTS_ENABLED=false
+RAW_FUTURES_BUCKET_MS=100
+RAW_CAPTURE_QUEUE_MAX_EVENTS=5000
+RAW_CAPTURE_BATCH_MAX_ROWS=500
+RAW_CAPTURE_FLUSH_MS=1000
+RAW_CAPTURE_RETENTION_HOURS=72
+RAW_CAPTURE_MAX_RELATION_MB=2048
+RAW_CAPTURE_RETENTION_CHECK_SECONDS=60
+```
+
+The bucket setting is fixed at `100` for the `_100ms` table schema. Review the
+2 GB relation budget against the droplet's real capacity before a later capture
+phase enables either source.
+
+Confirm the deployed flags without printing the database URL or other secrets:
+
+```bash
+sudo grep -E '^RAW_(FUTURES_TRACE_ENABLED|CHAINLINK_EVENTS_ENABLED)=' /etc/price-collector/collector.env
+```
+
+Both values must be `false`.
+
+Inspect the isolated schema, ownership, and privileges:
+
+```bash
+sudo -u postgres psql -d price_collector -c "
+SELECT
+    n.nspname AS schema_name,
+    pg_get_userbyid(n.nspowner) AS schema_owner,
+    has_schema_privilege('price_writer', n.oid, 'USAGE') AS writer_usage,
+    has_schema_privilege('price_writer', n.oid, 'CREATE') AS writer_create,
+    has_schema_privilege('price_reader', n.oid, 'USAGE') AS reader_usage
+FROM pg_namespace n
+WHERE n.nspname = 'raw_capture';
+"
+
+sudo -u postgres psql -d price_collector -c "
+SELECT
+    c.relname,
+    c.relkind,
+    pg_get_userbyid(c.relowner) AS owner
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'raw_capture'
+  AND c.relkind IN ('p', 'r')
+ORDER BY c.relname;
+"
+```
+
+Expected security state: `postgres` owns the schema, `price_writer` has schema
+`USAGE` and `CREATE`, and `price_reader` has no schema `USAGE`. The two event
+parents and `feed_sessions` are owned by `price_writer`; pre-created empty
+partitions are expected.
+
+With both flags false, all three raw parents must remain empty:
+
+```bash
+sudo -u postgres psql -d price_collector -c "
+SELECT
+    (SELECT count(*) FROM raw_capture.binance_futures_price_trace_100ms) AS futures_rows,
+    (SELECT count(*) FROM raw_capture.chainlink_price_events) AS chainlink_rows,
+    (SELECT count(*) FROM raw_capture.feed_sessions) AS session_rows;
+"
+```
+
+All counts should be zero. A nonzero count means Phase 1 is not inactive as
+intended and should be investigated before proceeding.
+
+The configured relation budget is not a hard disk quota. It excludes WAL,
+temporary files, and non-capture relations. Check both the capture relations
+and the actual filesystem:
+
+```bash
+sudo -u postgres psql -d price_collector -c "
+SELECT pg_size_pretty(COALESCE(sum(pg_total_relation_size(c.oid)), 0)) AS raw_capture_relation_size
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'raw_capture'
+  AND c.relkind = 'r';
+"
+sudo -u postgres psql -d price_collector -c "SELECT pg_size_pretty(pg_database_size('price_collector'));"
+df -h /var/lib/postgresql
+```
+
+### Phase 1 rollback
+
+Keep both feature flags `false`. Prefer reverting the Phase 1 application
+commit in GitHub and deploying that revert with the normal fast-forward update
+workflow. The unused `raw_capture` schema is inert and may safely remain for a
+subsequent corrected deployment.
+
+If Phase 1 must be removed completely, first confirm all three counts above are
+zero and that no later capture phase has ever been enabled. Then the PostgreSQL
+owner can remove only the isolated schema:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "DROP SCHEMA raw_capture CASCADE;"
+```
+
+Do not use this schema-removal rollback after capture has been enabled; it
+permanently deletes all retained high-resolution evidence.
+
 ## Redis Spot Checks
 
 Redis is the live-card cache only. PostgreSQL remains the historical source.

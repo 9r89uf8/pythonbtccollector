@@ -1,5 +1,6 @@
 from typing import Optional
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,6 +55,16 @@ class Settings(BaseSettings):
     BINANCE_FUTURES_STREAM_FLUSH_SECONDS: float = 0.25
     BINANCE_FUTURES_STORE_RAW_JSON: bool = False
 
+    RAW_FUTURES_TRACE_ENABLED: bool = False
+    RAW_CHAINLINK_EVENTS_ENABLED: bool = False
+    RAW_FUTURES_BUCKET_MS: int = Field(default=100, ge=100, le=100)
+    RAW_CAPTURE_QUEUE_MAX_EVENTS: int = Field(default=5_000, gt=0)
+    RAW_CAPTURE_BATCH_MAX_ROWS: int = Field(default=500, gt=0)
+    RAW_CAPTURE_FLUSH_MS: int = Field(default=1_000, gt=0)
+    RAW_CAPTURE_RETENTION_HOURS: int = Field(default=72, ge=6)
+    RAW_CAPTURE_MAX_RELATION_MB: int = Field(default=2_048, gt=0)
+    RAW_CAPTURE_RETENTION_CHECK_SECONDS: int = Field(default=60, gt=0)
+
     REDIS_HOST: str = "127.0.0.1"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
@@ -61,3 +72,12 @@ class Settings(BaseSettings):
 
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_raw_capture_batch_size(self) -> "Settings":
+        if self.RAW_CAPTURE_BATCH_MAX_ROWS > self.RAW_CAPTURE_QUEUE_MAX_EVENTS:
+            raise ValueError(
+                "RAW_CAPTURE_BATCH_MAX_ROWS must be less than or equal to "
+                "RAW_CAPTURE_QUEUE_MAX_EVENTS"
+            )
+        return self
