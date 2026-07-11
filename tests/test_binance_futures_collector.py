@@ -325,6 +325,78 @@ def test_collect_once_writes_futures_live_cache_before_postgres(monkeypatch):
     assert events[1][1]["sample_second_ms"] == 1_783_459_500_000
 
 
+def test_collect_once_observes_rest_shadow_without_changing_public_source(monkeypatch):
+    events = []
+
+    class FakeShadowMonitor:
+        def observe_rest(self, **kwargs):
+            events.append(("shadow", kwargs))
+
+    class FakeLiveCache:
+        async def set_price(
+            self,
+            key,
+            *,
+            value,
+            source_timestamp_ms,
+            received_ms,
+        ):
+            events.append(
+                (
+                    "redis",
+                    {
+                        "key": key,
+                        "value": value,
+                        "source_timestamp_ms": source_timestamp_ms,
+                        "received_ms": received_ms,
+                    },
+                )
+            )
+
+    async def fake_get_json(client, base_url, path, params):
+        return {
+            "/fapi/v1/openInterest": open_interest_payload(),
+            "/fapi/v1/premiumIndex": premium_index_payload(),
+            "/fapi/v2/ticker/price": ticker_payload(),
+        }[path]
+
+    async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
+        events.append(("postgres", kwargs))
+
+    monkeypatch.setattr(collector, "get_json", fake_get_json)
+    monkeypatch.setattr(
+        collector,
+        "upsert_binance_futures_snapshot",
+        fake_upsert_binance_futures_snapshot,
+    )
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+
+    snapshot = asyncio.run(
+        collector.collect_once(
+            pool="pool",
+            client="client",
+            settings=futures_settings(),
+            live_cache=FakeLiveCache(),
+            shadow_monitor=FakeShadowMonitor(),
+        )
+    )
+
+    assert [event_name for event_name, _payload in events] == [
+        "shadow",
+        "redis",
+        "postgres",
+    ]
+    expected_rest_value = Decimal("62075.12")
+    assert events[0][1] == {
+        "price": expected_rest_value,
+        "source_timestamp_ms": 1_783_459_500_510,
+        "received_ms": 1_783_459_500_700,
+    }
+    assert events[1][1]["value"] == expected_rest_value
+    assert events[2][1]["futures_last_price"] == expected_rest_value
+    assert snapshot.futures_last_price == expected_rest_value
+
+
 def test_collect_historical_oi_once_stores_only_completed_summaries(monkeypatch):
     upserts = []
 
@@ -370,3 +442,284 @@ def test_collect_historical_oi_once_stores_only_completed_summaries(monkeypatch)
     assert upserts[0]["source_window_end_ms"] == 1_783_459_500_000
     assert upserts[0]["effective_window"].market_start_ms == 1_783_459_500_000
     assert upserts[0]["raw"] is None
+
+
+def run_settings(*, raw_enabled, streams_enabled=True):
+    return SimpleNamespace(
+        APP_ENV="test",
+        LOG_LEVEL="INFO",
+        DATABASE_URL="postgresql://writer@localhost/price_collector",
+        BINANCE_FUTURES_BASE_URL="https://fapi.binance.com",
+        BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        BINANCE_FUTURES_PROVIDER_CODE="binance_usdm_perp",
+        BINANCE_FUTURES_REST_TIMEOUT_SECONDS=5,
+        BINANCE_FUTURES_HIST_OI_ENABLED=False,
+        BINANCE_FUTURES_STREAMS_ENABLED=streams_enabled,
+        BINANCE_FUTURES_STORE_RAW_JSON=False,
+        RAW_FUTURES_TRACE_ENABLED=raw_enabled,
+        RAW_CAPTURE_RETENTION_HOURS=72,
+        RAW_CAPTURE_MAX_RELATION_MB=2048,
+        RAW_CAPTURE_QUEUE_MAX_EVENTS=5000,
+        RAW_CAPTURE_BATCH_MAX_ROWS=500,
+        RAW_CAPTURE_FLUSH_MS=1000,
+        RAW_CAPTURE_RETENTION_CHECK_SECONDS=60,
+        RAW_FUTURES_BUCKET_MS=100,
+    )
+
+
+class FakeAsyncClient:
+    def __init__(self, *, timeout):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+def test_run_collector_rejects_raw_capture_without_futures_streams(monkeypatch):
+    monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(
+        collector,
+        "require_collector_database_url",
+        lambda _settings: pytest.fail("database must not be opened"),
+    )
+
+    with pytest.raises(RuntimeError, match="requires BINANCE_FUTURES_STREAMS_ENABLED"):
+        asyncio.run(
+            collector.run_collector(
+                run_settings(raw_enabled=True, streams_enabled=False)
+            )
+        )
+
+
+def test_sigterm_handler_cancels_current_task_and_can_be_removed(monkeypatch):
+    calls = []
+
+    class FakeTask:
+        def cancel(self):
+            calls.append("cancel")
+
+    class FakeLoop:
+        def add_signal_handler(self, sig, callback):
+            calls.append(("add", sig))
+            self.callback = callback
+
+        def remove_signal_handler(self, sig):
+            calls.append(("remove", sig))
+            return True
+
+    loop = FakeLoop()
+    monkeypatch.setattr(collector.asyncio, "get_running_loop", lambda: loop)
+    monkeypatch.setattr(collector.asyncio, "current_task", lambda: FakeTask())
+
+    remove_handler = collector._install_sigterm_cancellation()
+    assert remove_handler is not None
+    loop.callback()
+    remove_handler()
+
+    assert calls == [
+        ("add", collector.signal.SIGTERM),
+        "cancel",
+        ("remove", collector.signal.SIGTERM),
+    ]
+
+
+def test_run_collector_disabled_path_constructs_no_raw_resources(monkeypatch):
+    async def scenario():
+        started = asyncio.Event()
+        events = []
+
+        class FakePool:
+            async def close(self):
+                events.append("pool_close")
+
+        class FakeLiveCache:
+            async def close(self):
+                events.append("live_close")
+
+        async def fake_create_pool(database_url):
+            assert database_url == "postgresql://writer@localhost/price_collector"
+            return FakePool()
+
+        async def fake_snapshot_loop(**kwargs):
+            assert kwargs["shadow_monitor"] is None
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append("snapshot_stopped")
+
+        monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
+        monkeypatch.setattr(collector, "create_pool", fake_create_pool)
+        monkeypatch.setattr(collector, "create_live_cache", lambda _settings: FakeLiveCache())
+        monkeypatch.setattr(collector, "snapshot_loop", fake_snapshot_loop)
+        monkeypatch.setattr(collector.httpx, "AsyncClient", FakeAsyncClient)
+        monkeypatch.setattr(collector, "_install_sigterm_cancellation", lambda: None)
+        monkeypatch.setattr(
+            collector,
+            "create_raw_capture_runtime",
+            lambda **_kwargs: pytest.fail("disabled capture constructed a runtime"),
+        )
+        monkeypatch.setattr(
+            collector,
+            "FuturesShadowMonitor",
+            lambda: pytest.fail("disabled capture constructed a monitor"),
+        )
+
+        task = asyncio.create_task(
+            collector.run_collector(
+                run_settings(raw_enabled=False, streams_enabled=False)
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert events == ["snapshot_stopped", "live_close", "pool_close"]
+
+    asyncio.run(scenario())
+
+
+def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch):
+    async def scenario():
+        events = []
+        agg_started = asyncio.Event()
+        telemetry_started = asyncio.Event()
+        runtime_kwargs = {}
+        reader_kwargs = {}
+        telemetry_kwargs = {}
+        backend_calls = []
+
+        class FakePool:
+            async def close(self):
+                events.append("pool_close")
+
+        class FakeLiveCache:
+            async def close(self):
+                events.append("live_close")
+
+        class FakeRawRuntime:
+            def start(self):
+                events.append("raw_start")
+
+            async def close(self):
+                events.append("raw_close")
+
+        class FakeMonitor:
+            pass
+
+        raw_runtime = FakeRawRuntime()
+        monitor = FakeMonitor()
+
+        async def fake_create_pool(database_url):
+            assert database_url == "postgresql://writer@localhost/price_collector"
+            return FakePool()
+
+        async def fake_create_raw_capture_backend(database_url, **kwargs):
+            backend_calls.append((database_url, kwargs))
+            return "backend"
+
+        def fake_create_raw_capture_runtime(**kwargs):
+            runtime_kwargs.update(kwargs)
+            return raw_runtime
+
+        async def blocking_task(name):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append(f"{name}_stopped")
+
+        async def fake_snapshot_loop(**kwargs):
+            assert kwargs["shadow_monitor"] is monitor
+            await blocking_task("snapshot")
+
+        async def fake_agg_reader(settings, flow_store, **kwargs):
+            reader_kwargs.update(kwargs)
+            agg_started.set()
+            await blocking_task("agg")
+
+        async def fake_telemetry_loop(**kwargs):
+            telemetry_kwargs.update(kwargs)
+            telemetry_started.set()
+            await blocking_task("telemetry")
+
+        async def fake_flow_flush_loop(**kwargs):
+            await blocking_task("flow_flush")
+
+        async def fake_book_reader(settings, book_store):
+            await blocking_task("book_reader")
+
+        async def fake_book_flush_loop(**kwargs):
+            await blocking_task("book_flush")
+
+        monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
+        monkeypatch.setattr(collector, "create_pool", fake_create_pool)
+        monkeypatch.setattr(collector, "create_live_cache", lambda _settings: FakeLiveCache())
+        monkeypatch.setattr(collector, "create_raw_capture_backend", fake_create_raw_capture_backend)
+        monkeypatch.setattr(collector, "create_raw_capture_runtime", fake_create_raw_capture_runtime)
+        monkeypatch.setattr(collector, "FuturesShadowMonitor", lambda: monitor)
+        monkeypatch.setattr(collector, "AsyncFlowAggregator", lambda **_kwargs: "flow")
+        monkeypatch.setattr(collector, "AsyncBookTickerAggregator", lambda **_kwargs: "book")
+        monkeypatch.setattr(collector, "snapshot_loop", fake_snapshot_loop)
+        monkeypatch.setattr(collector, "futures_agg_trade_reader_loop", fake_agg_reader)
+        monkeypatch.setattr(collector, "futures_raw_capture_telemetry_loop", fake_telemetry_loop)
+        monkeypatch.setattr(collector, "futures_flow_flush_loop", fake_flow_flush_loop)
+        monkeypatch.setattr(collector, "futures_book_ticker_reader_loop", fake_book_reader)
+        monkeypatch.setattr(collector, "futures_book_flush_loop", fake_book_flush_loop)
+        monkeypatch.setattr(collector.httpx, "AsyncClient", FakeAsyncClient)
+        monkeypatch.setattr(collector, "_install_sigterm_cancellation", lambda: None)
+
+        task = asyncio.create_task(
+            collector.run_collector(run_settings(raw_enabled=True))
+        )
+        await asyncio.wait_for(agg_started.wait(), timeout=0.5)
+        await asyncio.wait_for(telemetry_started.wait(), timeout=0.5)
+
+        assert backend_calls == []
+        assert await runtime_kwargs["backend_factory"]() == "backend"
+        assert backend_calls == [
+            (
+                "postgresql://writer@localhost/price_collector",
+                {"retention_hours": 72, "max_relation_mb": 2048},
+            )
+        ]
+        assert runtime_kwargs["futures_enabled"] is True
+        assert runtime_kwargs["chainlink_enabled"] is False
+        assert runtime_kwargs["queue_max_events"] == 5000
+        assert runtime_kwargs["batch_max_rows"] == 500
+        assert runtime_kwargs["flush_ms"] == 1000
+        assert runtime_kwargs["maintenance_interval_seconds"] == 60
+        assert runtime_kwargs["bucket_ms"] == 100
+        assert reader_kwargs == {
+            "raw_capture": raw_runtime,
+            "shadow_monitor": monitor,
+        }
+        assert telemetry_kwargs == {
+            "raw_capture": raw_runtime,
+            "shadow_monitor": monitor,
+            "interval_seconds": 60.0,
+        }
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        raw_close_index = events.index("raw_close")
+        assert all(
+            events.index(f"{name}_stopped") < raw_close_index
+            for name in (
+                "snapshot",
+                "agg",
+                "telemetry",
+                "flow_flush",
+                "book_reader",
+                "book_flush",
+            )
+        )
+        assert raw_close_index < events.index("live_close") < events.index("pool_close")
+        assert events.count("raw_start") == 1
+
+    asyncio.run(scenario())

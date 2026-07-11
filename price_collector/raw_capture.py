@@ -871,7 +871,7 @@ class FuturesPriceTraceCoalescer:
         counters: Optional[CaptureCounters] = None,
     ) -> None:
         if bucket_ms != FUTURES_BUCKET_MS:
-            raise ValueError("Phase 1 futures capture requires 100 ms buckets")
+            raise ValueError("futures capture requires 100 ms buckets")
         self.bucket_ms = bucket_ms
         self._pending: Optional[_PendingFuturesBucket] = None
         self._counters = counters
@@ -1249,7 +1249,7 @@ class RawCaptureRuntime:
         bucket_ms: int = FUTURES_BUCKET_MS,
     ) -> None:
         if bucket_ms != FUTURES_BUCKET_MS:
-            raise ValueError("Phase 1 futures capture requires 100 ms buckets")
+            raise ValueError("futures capture requires 100 ms buckets")
         _require_int(queue_max_events, "queue_max_events", positive=True)
         _require_int(batch_max_rows, "batch_max_rows", positive=True)
         if batch_max_rows > queue_max_events:

@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Deque, Mapping, Optional
+from uuid import UUID, uuid4
 
 import websockets
 
@@ -17,6 +18,14 @@ from price_collector.collector import (
 from price_collector.config import Settings
 from price_collector.db import upsert_binance_book_1s, upsert_binance_flow_1s
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.raw_capture import (
+    BinanceFuturesPriceTrace,
+    FeedSession,
+    FeedSessionRecord,
+    FuturesPriceTraceCoalescer,
+    FuturesTradeObservation,
+    ReceiveStamp,
+)
 
 
 LOGGER = logging.getLogger("price_collector.binance_futures_streams")
@@ -49,6 +58,239 @@ class BinanceAggTrade:
     @property
     def trade_count(self) -> int:
         return self.last_trade_id - self.first_trade_id + 1
+
+
+class FuturesShadowMonitor:
+    """In-memory REST-versus-WebSocket diagnostics for the futures canary."""
+
+    def __init__(self) -> None:
+        self._current_connection_id: Optional[UUID] = None
+        self._connections_opened_total = 0
+        self._reconnects_total = 0
+        self._ws_messages_total = 0
+        self._ws_id_gap_events_total = 0
+        self._ws_missing_agg_trades_total = 0
+        self._ws_duplicate_ids_total = 0
+        self._ws_regressions_total = 0
+        self._ws_interarrival_ns: Optional[int] = None
+        self._ws_max_interarrival_ns: Optional[int] = None
+        self._ws_max_source_age_ms: Optional[int] = None
+        self._ws_max_received_age_ms: Optional[int] = None
+        self._last_observed_monotonic_ns: Optional[int] = None
+        self._latest_ws_trade: Optional[BinanceAggTrade] = None
+        self._latest_ws_stamp: Optional[ReceiveStamp] = None
+        self._rest_observations_total = 0
+        self._rest_comparisons_total = 0
+        self._rest_missing_ws_total = 0
+        self._rest_price: Optional[Decimal] = None
+        self._rest_source_timestamp_ms: Optional[int] = None
+        self._rest_received_ms: Optional[int] = None
+        self._ws_minus_rest_price: Optional[Decimal] = None
+        self._ws_minus_rest_bps: Optional[Decimal] = None
+        self._max_abs_ws_minus_rest_price: Optional[Decimal] = None
+        self._max_abs_ws_minus_rest_bps: Optional[Decimal] = None
+
+    @property
+    def current_connection_id(self) -> Optional[UUID]:
+        return self._current_connection_id
+
+    def connection_opened(self, connection_id: UUID) -> None:
+        if not isinstance(connection_id, UUID):
+            raise TypeError("connection_id must be UUID")
+        if self._current_connection_id == connection_id:
+            return
+        if self._connections_opened_total:
+            self._reconnects_total += 1
+        self._connections_opened_total += 1
+        self._current_connection_id = connection_id
+
+    def connection_closed(self, connection_id: UUID) -> None:
+        if not isinstance(connection_id, UUID):
+            raise TypeError("connection_id must be UUID")
+        if self._current_connection_id == connection_id:
+            self._current_connection_id = None
+
+    def _has_current_ws_trade(self) -> bool:
+        return (
+            self._current_connection_id is not None
+            and self._latest_ws_stamp is not None
+            and self._latest_ws_stamp.connection_id == self._current_connection_id
+        )
+
+    def update_ws(self, trade: BinanceAggTrade, stamp: ReceiveStamp) -> None:
+        if not isinstance(trade, BinanceAggTrade):
+            raise TypeError("trade must be BinanceAggTrade")
+        if not isinstance(stamp, ReceiveStamp):
+            raise TypeError("stamp must be ReceiveStamp")
+        if self._current_connection_id != stamp.connection_id:
+            self.connection_opened(stamp.connection_id)
+
+        self._ws_messages_total += 1
+        previous_monotonic_ns = self._last_observed_monotonic_ns
+        if previous_monotonic_ns is not None:
+            interarrival_ns = stamp.received_monotonic_ns - previous_monotonic_ns
+            if interarrival_ns >= 0:
+                self._ws_interarrival_ns = interarrival_ns
+                self._ws_max_interarrival_ns = (
+                    interarrival_ns
+                    if self._ws_max_interarrival_ns is None
+                    else max(self._ws_max_interarrival_ns, interarrival_ns)
+                )
+        self._last_observed_monotonic_ns = stamp.received_monotonic_ns
+
+        previous_trade = self._latest_ws_trade
+        if previous_trade is not None:
+            id_delta = trade.agg_trade_id - previous_trade.agg_trade_id
+            if id_delta == 0:
+                self._ws_duplicate_ids_total += 1
+                return
+            if id_delta < 0:
+                self._ws_regressions_total += 1
+                return
+            if id_delta > 1:
+                self._ws_id_gap_events_total += 1
+                self._ws_missing_agg_trades_total += id_delta - 1
+
+        self._latest_ws_trade = trade
+        self._latest_ws_stamp = stamp
+        self._update_comparison()
+
+    def observe_rest(
+        self,
+        price: Optional[Decimal],
+        source_timestamp_ms: Optional[int],
+        received_ms: int,
+    ) -> None:
+        if price is not None and not isinstance(price, Decimal):
+            raise TypeError("REST futures price must be Decimal or None")
+        if source_timestamp_ms is not None and (
+            isinstance(source_timestamp_ms, bool)
+            or not isinstance(source_timestamp_ms, int)
+        ):
+            raise TypeError("REST source timestamp must be an integer or None")
+        if isinstance(received_ms, bool) or not isinstance(received_ms, int):
+            raise TypeError("REST received_ms must be an integer")
+        self._rest_observations_total += 1
+        if not self._has_current_ws_trade():
+            self._rest_missing_ws_total += 1
+        elif price is not None:
+            self._rest_comparisons_total += 1
+        self._rest_price = price
+        self._rest_source_timestamp_ms = source_timestamp_ms
+        self._rest_received_ms = received_ms
+        self._update_comparison()
+
+    def _update_comparison(self) -> None:
+        trade = self._latest_ws_trade
+        rest_price = self._rest_price
+        if trade is None or rest_price is None:
+            self._ws_minus_rest_price = None
+            self._ws_minus_rest_bps = None
+            return
+
+        difference = trade.price - rest_price
+        self._ws_minus_rest_price = difference
+        self._ws_minus_rest_bps = (
+            None
+            if rest_price <= 0
+            else difference / rest_price * TEN_THOUSAND
+        )
+        absolute_difference = abs(difference)
+        self._max_abs_ws_minus_rest_price = (
+            absolute_difference
+            if self._max_abs_ws_minus_rest_price is None
+            else max(self._max_abs_ws_minus_rest_price, absolute_difference)
+        )
+        if self._ws_minus_rest_bps is not None:
+            absolute_bps = abs(self._ws_minus_rest_bps)
+            self._max_abs_ws_minus_rest_bps = (
+                absolute_bps
+                if self._max_abs_ws_minus_rest_bps is None
+                else max(self._max_abs_ws_minus_rest_bps, absolute_bps)
+            )
+
+    def telemetry_fields(self, now_ms: int) -> dict:
+        if isinstance(now_ms, bool) or not isinstance(now_ms, int):
+            raise TypeError("now_ms must be an integer")
+        trade = self._latest_ws_trade
+        stamp = self._latest_ws_stamp
+        ws_source_age_ms = None if trade is None else now_ms - trade.trade_time_ms
+        ws_received_age_ms = None if stamp is None else now_ms - stamp.received_ms
+        if ws_source_age_ms is not None:
+            self._ws_max_source_age_ms = (
+                ws_source_age_ms
+                if self._ws_max_source_age_ms is None
+                else max(self._ws_max_source_age_ms, ws_source_age_ms)
+            )
+        if ws_received_age_ms is not None:
+            self._ws_max_received_age_ms = (
+                ws_received_age_ms
+                if self._ws_max_received_age_ms is None
+                else max(self._ws_max_received_age_ms, ws_received_age_ms)
+            )
+        return {
+            "shadow_current_connection_id": self._current_connection_id,
+            "shadow_connections_opened_total": self._connections_opened_total,
+            "shadow_reconnects_total": self._reconnects_total,
+            "shadow_ws_current_for_connection": self._has_current_ws_trade(),
+            "shadow_ws_messages_total": self._ws_messages_total,
+            "shadow_ws_id_gap_events_total": self._ws_id_gap_events_total,
+            "shadow_ws_missing_agg_trades_total": self._ws_missing_agg_trades_total,
+            "shadow_ws_duplicate_ids_total": self._ws_duplicate_ids_total,
+            "shadow_ws_regressions_total": self._ws_regressions_total,
+            "shadow_ws_interarrival_ns": self._ws_interarrival_ns,
+            "shadow_ws_max_interarrival_ns": self._ws_max_interarrival_ns,
+            "shadow_ws_max_source_age_ms": self._ws_max_source_age_ms,
+            "shadow_ws_max_received_age_ms": self._ws_max_received_age_ms,
+            "shadow_ws_connection_id": (
+                None if stamp is None else stamp.connection_id
+            ),
+            "shadow_ws_receive_sequence": (
+                None if stamp is None else stamp.receive_sequence
+            ),
+            "shadow_ws_price": None if trade is None else trade.price,
+            "shadow_ws_agg_trade_id": (
+                None if trade is None else trade.agg_trade_id
+            ),
+            "shadow_ws_trade_time_ms": (
+                None if trade is None else trade.trade_time_ms
+            ),
+            "shadow_ws_event_time_ms": (
+                None if trade is None else trade.event_time_ms
+            ),
+            "shadow_ws_source_age_ms": ws_source_age_ms,
+            "shadow_ws_received_ms": None if stamp is None else stamp.received_ms,
+            "shadow_ws_received_age_ms": ws_received_age_ms,
+            "shadow_rest_observations_total": self._rest_observations_total,
+            "shadow_rest_comparisons_total": self._rest_comparisons_total,
+            "shadow_rest_missing_ws_total": self._rest_missing_ws_total,
+            "shadow_rest_price": self._rest_price,
+            "shadow_rest_source_timestamp_ms": self._rest_source_timestamp_ms,
+            "shadow_rest_received_ms": self._rest_received_ms,
+            "shadow_rest_source_age_ms": (
+                None
+                if self._rest_source_timestamp_ms is None
+                else now_ms - self._rest_source_timestamp_ms
+            ),
+            "shadow_rest_received_age_ms": (
+                None
+                if self._rest_received_ms is None
+                else now_ms - self._rest_received_ms
+            ),
+            "shadow_ws_minus_rest_source_time_ms": (
+                None
+                if trade is None or self._rest_source_timestamp_ms is None
+                else trade.trade_time_ms - self._rest_source_timestamp_ms
+            ),
+            "shadow_ws_minus_rest_price": self._ws_minus_rest_price,
+            "shadow_ws_minus_rest_bps": self._ws_minus_rest_bps,
+            "shadow_max_abs_ws_minus_rest_price": (
+                self._max_abs_ws_minus_rest_price
+            ),
+            "shadow_max_abs_ws_minus_rest_bps": (
+                self._max_abs_ws_minus_rest_bps
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -607,13 +849,257 @@ def build_book_sample(
     )
 
 
+def _record_raw_capture_drop(
+    raw_capture: Any,
+    session: Optional[FeedSession],
+    *,
+    increment_global: bool,
+) -> None:
+    if increment_global:
+        try:
+            raw_capture.counters.record_dropped()
+        except Exception:
+            LOGGER.exception(
+                "binance_futures_raw_capture_drop_counter_failed",
+                extra={"event": "binance_futures_raw_capture_drop_counter_failed"},
+            )
+    if session is not None:
+        try:
+            session.mark_record_dropped()
+        except Exception:
+            LOGGER.exception(
+                "binance_futures_raw_capture_session_drop_counter_failed",
+                extra={
+                    "event": "binance_futures_raw_capture_session_drop_counter_failed"
+                },
+            )
+
+
+def _offer_raw_capture_record(
+    raw_capture: Any,
+    record: Any,
+    *,
+    session: Optional[FeedSession],
+) -> bool:
+    try:
+        result = raw_capture.offer_nowait(record)
+    except Exception:
+        _record_raw_capture_drop(
+            raw_capture,
+            session,
+            increment_global=True,
+        )
+        LOGGER.exception(
+            "binance_futures_raw_capture_offer_failed",
+            extra={"event": "binance_futures_raw_capture_offer_failed"},
+        )
+        return False
+
+    if not result.accepted:
+        _record_raw_capture_drop(
+            raw_capture,
+            session,
+            increment_global=False,
+        )
+        return False
+
+    dropped_record = result.dropped_record if result.dropped_oldest else None
+    if (
+        session is not None
+        and isinstance(
+            dropped_record,
+            (BinanceFuturesPriceTrace, FeedSessionRecord),
+        )
+        and dropped_record.connection_id == session.connection_id
+    ):
+        _record_raw_capture_drop(
+            raw_capture,
+            session,
+            increment_global=False,
+        )
+    return True
+
+
+def _mark_capture_message(
+    session: Optional[FeedSession],
+    method_name: str,
+) -> None:
+    if session is None:
+        return
+    try:
+        getattr(session, method_name)()
+    except Exception:
+        LOGGER.exception(
+            "binance_futures_raw_capture_session_counter_failed",
+            extra={
+                "event": "binance_futures_raw_capture_session_counter_failed",
+                "counter": method_name,
+            },
+        )
+
+
+def _capture_futures_trade(
+    *,
+    raw_capture: Any,
+    session: FeedSession,
+    coalescer: FuturesPriceTraceCoalescer,
+    trade: BinanceAggTrade,
+    stamp: ReceiveStamp,
+) -> None:
+    try:
+        completed = coalescer.add_trade(
+            FuturesTradeObservation(
+                connection_id=stamp.connection_id,
+                received_wall_ns=stamp.received_wall_ns,
+                received_monotonic_ns=stamp.received_monotonic_ns,
+                trade_time_ms=trade.trade_time_ms,
+                event_time_ms=trade.event_time_ms,
+                price=trade.price,
+                agg_trade_id=trade.agg_trade_id,
+            )
+        )
+    except Exception:
+        _record_raw_capture_drop(
+            raw_capture,
+            session,
+            increment_global=True,
+        )
+        LOGGER.exception(
+            "binance_futures_raw_capture_coalesce_failed",
+            extra={"event": "binance_futures_raw_capture_coalesce_failed"},
+        )
+        return
+
+    if completed is not None:
+        _offer_raw_capture_record(
+            raw_capture,
+            completed,
+            session=session,
+        )
+
+
+def _seal_futures_capture(
+    *,
+    raw_capture: Any,
+    session: FeedSession,
+    coalescer: FuturesPriceTraceCoalescer,
+    idle: bool,
+) -> None:
+    try:
+        if idle:
+            completed = coalescer.finish_if_elapsed(
+                now_wall_ns=time.time_ns(),
+                now_monotonic_ns=time.monotonic_ns(),
+            )
+        else:
+            completed = coalescer.finish()
+    except Exception:
+        _record_raw_capture_drop(
+            raw_capture,
+            session,
+            increment_global=True,
+        )
+        LOGGER.exception(
+            "binance_futures_raw_capture_seal_failed",
+            extra={"event": "binance_futures_raw_capture_seal_failed"},
+        )
+        return
+
+    if completed is not None:
+        _offer_raw_capture_record(
+            raw_capture,
+            completed,
+            session=session,
+        )
+
+
+def _finish_feed_session(
+    *,
+    raw_capture: Any,
+    session: FeedSession,
+    close_reason: str,
+) -> None:
+    try:
+        record = session.finish(close_reason=close_reason)
+    except Exception:
+        LOGGER.exception(
+            "binance_futures_raw_capture_session_finish_failed",
+            extra={"event": "binance_futures_raw_capture_session_finish_failed"},
+        )
+        return
+    _offer_raw_capture_record(raw_capture, record, session=None)
+
+
+async def futures_raw_capture_telemetry_loop(
+    *,
+    raw_capture: Any,
+    shadow_monitor: FuturesShadowMonitor,
+    interval_seconds: float = 60.0,
+) -> None:
+    if interval_seconds <= 0:
+        raise ValueError("raw capture telemetry interval must be positive")
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            snapshot = raw_capture.counters.snapshot(
+                queue_depth=raw_capture.buffer.qsize(),
+                connection_id=shadow_monitor.current_connection_id,
+            )
+            fields = {
+                "event": "raw_capture_summary",
+                "source": "binance_futures_agg_trade",
+                "messages_received_total": snapshot.messages_received_total,
+                "messages_accepted_total": snapshot.messages_accepted_total,
+                "parse_errors_total": snapshot.parse_errors_total,
+                "records_coalesced_total": snapshot.records_coalesced_total,
+                "records_enqueued_total": snapshot.records_enqueued_total,
+                "records_persisted_total": snapshot.records_persisted_total,
+                "records_dropped_total": snapshot.records_dropped_total,
+                "batches_failed_total": snapshot.batches_failed_total,
+                "maintenance_runs_total": snapshot.maintenance_runs_total,
+                "maintenance_failures_total": snapshot.maintenance_failures_total,
+                "capture_suspended": snapshot.capture_suspended,
+                "queue_depth": snapshot.queue_depth,
+                "queue_high_water": snapshot.queue_high_water,
+                "last_batch_rows": snapshot.last_batch_rows,
+                "last_batch_duration_ms": snapshot.last_batch_duration_ms,
+                "current_partition": snapshot.current_partition,
+                "raw_table_bytes": snapshot.raw_table_bytes,
+                "connection_id": snapshot.connection_id,
+            }
+            fields.update(
+                shadow_monitor.telemetry_fields(now_ms=current_utc_epoch_ms())
+            )
+            LOGGER.info("raw_capture_summary", extra=fields)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "raw_capture_summary_failed",
+                extra={
+                    "event": "raw_capture_summary_failed",
+                    "source": "binance_futures_agg_trade",
+                },
+            )
+
+
 async def futures_agg_trade_reader_loop(
     settings: Settings,
     flow_store: AsyncFlowAggregator,
+    *,
+    raw_capture: Any = None,
+    shadow_monitor: Optional[FuturesShadowMonitor] = None,
 ) -> None:
     attempt = 0
 
     while True:
+        connection_id: Optional[UUID] = None
+        capture_session: Optional[FeedSession] = None
+        capture_coalescer: Optional[FuturesPriceTraceCoalescer] = None
+        close_reason = "error"
+        reconnect_error: Optional[Exception] = None
+        local_receive_sequence = 0
         try:
             LOGGER.info(
                 "binance_futures_agg_trade_websocket_connecting",
@@ -630,12 +1116,67 @@ async def futures_agg_trade_reader_loop(
             ) as websocket:
                 attempt = 0
                 connected_at = time.monotonic()
+                if raw_capture is not None or shadow_monitor is not None:
+                    connection_id = uuid4()
+                if shadow_monitor is not None and connection_id is not None:
+                    try:
+                        shadow_monitor.connection_opened(connection_id)
+                    except Exception:
+                        LOGGER.exception(
+                            "binance_futures_shadow_connection_open_failed",
+                            extra={
+                                "event": (
+                                    "binance_futures_shadow_connection_open_failed"
+                                ),
+                                "connection_id": connection_id,
+                            },
+                        )
+
+                if raw_capture is not None and connection_id is not None:
+                    try:
+                        capture_session = FeedSession(
+                            source="binance_futures_agg_trade",
+                            connection_id=connection_id,
+                            connected_wall_ns=time.time_ns(),
+                            connected_monotonic_ns=time.monotonic_ns(),
+                            counters=raw_capture.counters,
+                        )
+                        capture_session.mark_ready(
+                            ready_wall_ns=time.time_ns(),
+                            ready_monotonic_ns=time.monotonic_ns(),
+                        )
+                        capture_coalescer = FuturesPriceTraceCoalescer(
+                            bucket_ms=settings.RAW_FUTURES_BUCKET_MS,
+                            counters=raw_capture.counters,
+                        )
+                        _offer_raw_capture_record(
+                            raw_capture,
+                            capture_session.opened_record(),
+                            session=capture_session,
+                        )
+                    except Exception:
+                        capture_session = None
+                        capture_coalescer = None
+                        try:
+                            raw_capture.counters.record_dropped()
+                        except Exception:
+                            pass
+                        LOGGER.exception(
+                            "binance_futures_raw_capture_session_start_failed",
+                            extra={
+                                "event": (
+                                    "binance_futures_raw_capture_session_start_failed"
+                                )
+                            },
+                        )
+
                 LOGGER.info(
                     "binance_futures_agg_trade_websocket_connected",
                     extra={
                         "event": "binance_futures_agg_trade_websocket_connected",
                         "url": settings.BINANCE_FUTURES_AGG_TRADE_WS_URL,
                         "symbol": settings.BINANCE_FUTURES_SYMBOL,
+                        "connection_id": connection_id,
                     },
                 )
 
@@ -648,25 +1189,94 @@ async def futures_agg_trade_reader_loop(
                             extra={
                                 "event": "binance_futures_agg_trade_proactive_reconnect",
                                 "connected_seconds": int(connected_seconds),
+                                "connection_id": connection_id,
                             },
                         )
+                        close_reason = "proactive_reconnect"
                         break
 
+                    receive_timeout = min(30.0, remaining_seconds)
+                    if (
+                        capture_coalescer is not None
+                        and capture_coalescer.pending_event_count
+                    ):
+                        receive_timeout = min(0.1, remaining_seconds)
                     try:
                         message = await asyncio.wait_for(
                             websocket.recv(),
-                            timeout=min(30.0, remaining_seconds),
+                            timeout=receive_timeout,
                         )
                     except asyncio.TimeoutError:
+                        if (
+                            raw_capture is not None
+                            and capture_session is not None
+                            and capture_coalescer is not None
+                        ):
+                            _seal_futures_capture(
+                                raw_capture=raw_capture,
+                                session=capture_session,
+                                coalescer=capture_coalescer,
+                                idle=True,
+                            )
                         continue
+
+                    received_wall_ns = time.time_ns()
+                    stamp: Optional[ReceiveStamp] = None
+                    if capture_session is not None:
+                        received_monotonic_ns = time.monotonic_ns()
+                        try:
+                            stamp = capture_session.next_receive_stamp(
+                                received_wall_ns=received_wall_ns,
+                                received_monotonic_ns=received_monotonic_ns,
+                            )
+                            local_receive_sequence = stamp.receive_sequence
+                        except Exception:
+                            local_receive_sequence += 1
+                            stamp = ReceiveStamp(
+                                connection_id=connection_id,
+                                receive_sequence=local_receive_sequence,
+                                received_wall_ns=received_wall_ns,
+                                received_monotonic_ns=received_monotonic_ns,
+                            )
+                            _record_raw_capture_drop(
+                                raw_capture,
+                                capture_session,
+                                increment_global=True,
+                            )
+                            LOGGER.exception(
+                                "binance_futures_raw_capture_receive_stamp_failed",
+                                extra={
+                                    "event": (
+                                        "binance_futures_raw_capture_receive_stamp_failed"
+                                    )
+                                },
+                            )
+                    elif connection_id is not None:
+                        received_monotonic_ns = time.monotonic_ns()
+                        local_receive_sequence += 1
+                        stamp = ReceiveStamp(
+                            connection_id=connection_id,
+                            receive_sequence=local_receive_sequence,
+                            received_wall_ns=received_wall_ns,
+                            received_monotonic_ns=received_monotonic_ns,
+                        )
 
                     try:
                         payload = json.loads(message)
+                        if not isinstance(payload, Mapping):
+                            raise FuturesStreamParseError(
+                                "aggTrade payload must be an object"
+                            )
                         trade = parse_binance_futures_agg_trade_payload(
                             payload,
                             expected_symbol=settings.BINANCE_FUTURES_SYMBOL,
                         )
-                    except (json.JSONDecodeError, FuturesStreamParseError) as exc:
+                    except (
+                        json.JSONDecodeError,
+                        FuturesStreamParseError,
+                        TypeError,
+                    ) as exc:
+                        _mark_capture_message(capture_session, "mark_parse_error")
                         LOGGER.warning(
                             "binance_futures_agg_trade_message_skipped",
                             extra={
@@ -676,7 +1286,33 @@ async def futures_agg_trade_reader_loop(
                         )
                         continue
 
-                    received_ms = current_utc_epoch_ms()
+                    _mark_capture_message(capture_session, "mark_accepted")
+                    if shadow_monitor is not None and stamp is not None:
+                        try:
+                            shadow_monitor.update_ws(trade, stamp)
+                        except Exception:
+                            LOGGER.exception(
+                                "binance_futures_shadow_update_failed",
+                                extra={
+                                    "event": "binance_futures_shadow_update_failed"
+                                },
+                            )
+
+                    if (
+                        raw_capture is not None
+                        and capture_session is not None
+                        and capture_coalescer is not None
+                        and stamp is not None
+                    ):
+                        _capture_futures_trade(
+                            raw_capture=raw_capture,
+                            session=capture_session,
+                            coalescer=capture_coalescer,
+                            trade=trade,
+                            stamp=stamp,
+                        )
+
+                    received_ms = received_wall_ns // 1_000_000
                     accepted = await flow_store.add_trade(trade, received_ms=received_ms)
                     if not accepted:
                         LOGGER.debug(
@@ -688,8 +1324,45 @@ async def futures_agg_trade_reader_loop(
                             },
                         )
         except asyncio.CancelledError:
+            close_reason = "cancelled"
             raise
         except Exception as exc:
+            reconnect_error = exc
+            clean_close_type = getattr(websockets, "ConnectionClosedOK", None)
+            if (
+                clean_close_type is not None
+                and isinstance(exc, clean_close_type)
+            ) or exc.__class__.__name__ == "ConnectionClosedOK":
+                close_reason = "remote_close"
+        finally:
+            if (
+                raw_capture is not None
+                and capture_session is not None
+                and capture_coalescer is not None
+            ):
+                _seal_futures_capture(
+                    raw_capture=raw_capture,
+                    session=capture_session,
+                    coalescer=capture_coalescer,
+                    idle=False,
+                )
+                _finish_feed_session(
+                    raw_capture=raw_capture,
+                    session=capture_session,
+                    close_reason=close_reason,
+                )
+            if shadow_monitor is not None and connection_id is not None:
+                try:
+                    shadow_monitor.connection_closed(connection_id)
+                except Exception:
+                    LOGGER.exception(
+                        "binance_futures_shadow_connection_close_failed",
+                        extra={
+                            "event": "binance_futures_shadow_connection_close_failed"
+                        },
+                    )
+
+        if reconnect_error is not None:
             attempt += 1
             delay = reconnect_delay_seconds(attempt)
             LOGGER.warning(
@@ -698,7 +1371,8 @@ async def futures_agg_trade_reader_loop(
                     "event": "binance_futures_agg_trade_websocket_reconnect_scheduled",
                     "attempt": attempt,
                     "delay_seconds": round(delay, 3),
-                    "error": repr(exc),
+                    "error": repr(reconnect_error),
+                    "connection_id": connection_id,
                 },
             )
             await asyncio.sleep(delay)

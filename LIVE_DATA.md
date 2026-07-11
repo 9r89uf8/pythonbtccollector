@@ -133,8 +133,18 @@ After all three REST responses have been parsed, the collector:
 For this collector, `received_ms` is the local time captured at the start of the
 polling cycle. If any request in the combined cycle fails, that cycle does not
 replace the cached value; the prior value remains and becomes visibly older.
-The futures `aggTrade` and `bookTicker` WebSockets feed historical flow and book
-tables only. They do not update `btc:live:futures`.
+The futures `aggTrade` WebSocket continues to feed the historical one-second
+flow table. During the opt-in Phase 2 canary, it also feeds private 100 ms OHLC
+evidence capture when `RAW_FUTURES_TRACE_ENABLED=true`. The `bookTicker`
+WebSocket continues to feed the historical one-second book table. Neither
+WebSocket updates `btc:live:futures`; the public live futures value remains the
+REST ticker price.
+
+The private evidence path is intentionally absent from the live-flow diagram
+above because Redis and the API do not read it. Its bounded PostgreSQL writer
+is best-effort and is never awaited by the WebSocket reader; the live and
+one-second paths do not share its queue. Chainlink high-resolution capture
+remains disabled and unintegrated during Phase 2.
 
 ## Redis Live Cache
 

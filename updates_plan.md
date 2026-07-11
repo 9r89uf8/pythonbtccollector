@@ -562,8 +562,11 @@ There should be no CLOB raw-capture setting in this checkpoint because the featu
 * Existing one-second flow and book tables
 
 Phase 2 integrates the futures reader and adds its focused stream/collector
-tests. Phase 3 integrates and refactors the Chainlink reader and adds its
-focused tests. Deferring those files is what makes Phase 1 observably inactive.
+tests. The repository and environment-example flag remains `False`; integration
+being merged and deployed safely is the Phase 2 code checkpoint, not completion
+of its required 24-hour production canary. Phase 3 integrates and refactors the
+Chainlink reader and adds its focused tests. Deferring those files is what makes
+Phase 1 observably inactive.
 
 ---
 
@@ -615,12 +618,51 @@ This keeps any capture bug separate from a user-visible price-source change.
 
 ## Phase 2 — Futures-only canary
 
-1. Enable `RAW_FUTURES_TRACE_ENABLED`.
-2. Run for 24 hours.
-3. Measure actual rows/hour, bytes/hour, queue high-water, database latency and collector CPU.
-4. Confirm at most one row exists per connection and active 100 ms bucket;
-   reconnect boundaries may make the global rate briefly exceed 10 per second.
-5. Confirm existing one-second flow and book completeness is unchanged.
+### Phase 2 code checkpoint
+
+1. Integrate the futures `aggTrade` reader with the session tracker, 100 ms
+   coalescer, non-blocking capture sink, and 60-second structured telemetry.
+2. Capture wall and monotonic receive clocks immediately after `recv()` and
+   before JSON parsing while preserving the existing one-second flow path.
+3. Keep Binance REST as the public `futures.last`; do not update the Redis live
+   value from the WebSocket in this checkpoint.
+4. Keep `RAW_FUTURES_TRACE_ENABLED=False` in code and in
+   `deployment/collector.env.example`. Keep Chainlink capture unintegrated and
+   `RAW_CHAINLINK_EVENTS_ENABLED=False`.
+5. Add focused reader, connection lifecycle, disabled-path, failure-isolation,
+   telemetry, and shutdown tests. Deploy this checkpoint with both flags still
+   false before starting the production canary.
+
+### Phase 2 operational completion
+
+1. Confirm `BINANCE_FUTURES_STREAMS_ENABLED=true`, then manually enable only
+   `RAW_FUTURES_TRACE_ENABLED` in the existing production environment file.
+   Keep `RAW_CHAINLINK_EVENTS_ENABLED=false`.
+2. Restart only `price-collector-binance-futures` and run continuously for 24
+   hours. An unexpected collector-process restart resets the canary window; a
+   normal Binance WebSocket reconnect does not.
+3. Measure actual rows/hour, bytes/hour, queue high-water, batch/database
+   latency, collector CPU and memory, total database size, and filesystem free
+   space.
+4. Require zero capture drops, zero failed batches, no storage suspension, no
+   unexplained parse errors, and a queue that repeatedly returns near zero
+   without reaching capacity.
+5. Confirm at most one row exists per connection and active 100 ms bucket, and
+   no connection produces more than ten buckets per second. Reconnect
+   boundaries may make the global rate briefly exceed ten rows per second.
+6. Confirm every trace connection has a ready futures session row, completed
+   connections have a close reason, and no more than the current connection
+   remains open. Treat runtime-wide drops as authoritative if a final session
+   update itself was lost.
+7. Confirm Chainlink raw rows and sessions remain zero, the dedicated raw pool
+   uses no more than one connection, and the REST-backed Redis/API futures live
+   value remains healthy.
+8. Compare the canary's one-second flow and book coverage and gaps with the
+   immediately preceding 24-hour baseline; investigate any degradation.
+9. Declare Phase 2 complete only after all checks pass. On failure, set
+   `RAW_FUTURES_TRACE_ENABLED=false`, restart
+   `price-collector-binance-futures`, retain the populated raw schema, and
+   confirm capture rows stop increasing.
 
 ## Phase 3 — Chainlink capture
 

@@ -76,6 +76,9 @@ columns, and are serialized as strings by the API.
   summaries.
 - Aggregates `btcusdt@aggTrade` into one-second `binance_flow_1s` rows.
 - Aggregates `btcusdt@bookTicker` into one-second `binance_book_1s` rows.
+- Can optionally coalesce the same `aggTrade` feed into private 100 ms OHLC
+  evidence rows when `RAW_FUTURES_TRACE_ENABLED=true`. This shadow capture
+  does not replace the REST price written to `btc:live:futures`.
 
 ### Polymarket BTC 5-Minute Probabilities
 
@@ -127,12 +130,12 @@ instrument and second updates the existing row instead of creating a duplicate.
 The other one-second tables follow the same upsert pattern with source-specific
 keys.
 
-### Inactive high-resolution capture foundation
+### High-resolution evidence capture
 
-The first high-resolution-capture checkpoint adds an isolated PostgreSQL
-schema and tested infrastructure without changing any collector:
+The high-resolution-capture foundation adds an isolated PostgreSQL schema and
+tested bounded-write infrastructure:
 
-- `raw_capture.binance_futures_price_trace_100ms` is the planned partitioned
+- `raw_capture.binance_futures_price_trace_100ms` is the partitioned
   destination for one compact OHLC row per futures WebSocket connection and
   active 100 ms receive bucket.
 - `raw_capture.chainlink_price_events` is the planned partitioned destination
@@ -142,14 +145,25 @@ schema and tested infrastructure without changing any collector:
 The `raw_capture` schema is owned separately from the normal historical tables,
 is unavailable to `PUBLIC` and the API's `price_reader` role, and grants the
 collector writer DDL capability only inside that schema. Six-hour current and
-next partitions can therefore exist while remaining empty.
+next partitions are managed independently from the public historical tables.
 
-This checkpoint is intentionally inactive: both feature flags default to
-`false`, and the futures and Chainlink collectors do not yet construct the
-capture buffer, writer, or maintenance tasks. No high-resolution rows are
-written, no extra capture database connection is opened, and Redis, existing
-one-second history, and API responses are unchanged. `LIVE_DATA.md` therefore
-continues to describe the active live pipeline exactly.
+Phase 2 wires the Binance futures `aggTrade` reader to this infrastructure but
+keeps it opt-in. Both feature flags still default to `false`. When
+`RAW_FUTURES_TRACE_ENABLED=true`, receive clocks are recorded immediately after
+`recv()` and before JSON parsing, valid trades continue through the existing
+one-second flow path, and compact 100 ms buckets are offered without waiting
+for the dedicated raw database writer. Connection/session records, bounded
+queueing, batched `COPY`, and partition maintenance run only while capture is
+enabled.
+
+Chainlink capture remains unintegrated in Phase 2 and
+`RAW_CHAINLINK_EVENTS_ENABLED` must stay `false`. The public futures live value
+also remains the Binance REST `/fapi/v2/ticker/price` result: the futures
+WebSocket evidence does not update Redis or change the API response. With both
+flags `false`, no capture queue, task, or extra raw database connection is
+created. Deploying the Phase 2 code is only the code checkpoint; Phase 2 is not
+operationally complete until the futures-only canary in `OPERATIONS.md` has run
+continuously for 24 hours and passed its checks.
 
 Redis is not a historical store. It contains only these live keys:
 
@@ -294,8 +308,8 @@ The probability collector's resolution reconciler uses these settings from
   subscription open briefly for an official winner event without delaying
   collection of the preloaded next market.
 
-Phase 1 also defines these inactive high-resolution-capture settings. Keep both
-flags `false` until the corresponding later integration phase is deployed:
+High-resolution evidence capture uses these settings. Repository and production
+example defaults remain disabled:
 
 ```text
 RAW_FUTURES_TRACE_ENABLED=false
@@ -312,6 +326,13 @@ RAW_CAPTURE_RETENTION_CHECK_SECONDS=60
 The Phase 1 schema accepts only a 100 ms futures bucket. The relation budget
 applies only to raw-capture PostgreSQL relations; it is not a filesystem quota
 and does not include WAL, temporary files, or the rest of the database.
+
+For the Phase 2 production canary, manually set only
+`RAW_FUTURES_TRACE_ENABLED=true`, keep
+`RAW_CHAINLINK_EVENTS_ENABLED=false`, and keep
+`BINANCE_FUTURES_STREAMS_ENABLED=true`. Do not commit that production override
+to the example file. Follow the full 24-hour acceptance and rollback procedure
+in [`OPERATIONS.md`](OPERATIONS.md).
 
 Do not commit `collector.env`, `api.env`, `droplet.env`, `.env`, or real
 credentials. These files are ignored by Git; only their examples belong in the
@@ -593,5 +614,5 @@ checks, Redis checks, and service verification.
 - `RAW_CAPTURE_MAX_RELATION_MB` does not replace either check; PostgreSQL WAL
   and non-capture relations remain outside that budget.
 - No automatic pruning is included for the long-term historical tables. The
-  raw-capture partition-maintenance primitive remains inactive until a later
-  collector integration phase.
+  raw-capture partition-maintenance task runs only in a collector whose capture
+  flag is enabled.
