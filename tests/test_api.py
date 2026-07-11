@@ -690,7 +690,14 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
         assert include_book is False
         assert fill_display is False
         assert max_carry_forward_ms == 10_000
-        return market_data_payload()
+        payload = market_data_payload()
+        payload["market"]["chainlink_resolution"] = {
+            "open": "63337.115841440165",
+            "close": "63336.71900847139",
+            "status": "official",
+            "source": "polymarket_gamma_event_metadata",
+        }
+        return payload
 
     monkeypatch.setattr(
         api,
@@ -703,7 +710,14 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
 
     assert response.status_code == 200
     body = response.json()
+    assert body["schema_version"] == 2
     assert body["market"]["market_id"] == 5_944_864
+    assert body["market"]["market_start_ms"] == 1_783_459_200_000
+    assert body["market"]["market_end_ms"] == 1_783_459_500_000
+    assert body["market"]["chainlink_resolution"]["open"] == (
+        "63337.115841440165"
+    )
+    assert body["series"][0]["timestamp_ms"] == 1_783_459_200_000
     assert "probabilities" not in body["series"][0]
     assert "futures" not in body["series"][0]
     assert "open_interest" not in body["series"][0]
@@ -962,7 +976,95 @@ def test_markets_download_returns_attachment_filename(client, monkeypatch):
     )
     body = response.json()
     assert body["series"][0]["probabilities"]["down"]["normalized"] == "0.51758794"
+    assert "market_start_ms" not in body["market"]
+    assert "market_end_ms" not in body["market"]
+    assert body["market"]["market_start_at"] == "2026-07-07T21:00:00Z"
+    assert body["market"]["market_end_at"] == "2026-07-07T21:05:00Z"
+    assert "timestamp_ms" not in body["series"][0]
+    assert body["series"][0]["timestamp_at"] == "2026-07-07T21:00:00Z"
     assert "freshness" not in body["series"][0]
+
+
+def test_markets_current_download_uses_same_compact_shape(client, monkeypatch):
+    async def fake_fetch_market_download_payload(
+        pool,
+        market_id,
+        server_time_ms,
+        include_probabilities,
+        include_futures,
+        include_oi,
+        include_flow,
+        include_book,
+        fill_display,
+        max_carry_forward_ms,
+    ):
+        assert market_id == 5_944_864
+        payload = market_data_payload()
+        payload["market"]["chainlink_resolution"] = {
+            "open": "64159.4",
+            "close": None,
+            "status": "pending",
+            "source": "polymarket_gamma_event_metadata",
+        }
+        return payload
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get("/markets/current/download")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "market_start_ms" not in body["market"]
+    assert "market_end_ms" not in body["market"]
+    assert body["market"]["chainlink_resolution"]["open"] == "64159.40"
+    assert body["market"]["chainlink_resolution"]["close"] is None
+    assert "timestamp_ms" not in body["series"][0]
+    assert body["series"][0]["timestamp_at"] == "2026-07-07T21:00:00Z"
+
+
+def test_serialize_download_payload_is_compact_without_mutating_source():
+    payload = market_data_payload()
+    payload["market"]["chainlink_resolution"] = {
+        "open": "64159.345",
+        "close": "64171",
+        "status": "official",
+        "source": "polymarket_gamma_event_metadata",
+    }
+    payload["series"].append(
+        {
+            **payload["series"][0],
+            "t": 1,
+            "timestamp_ms": 1_783_459_201_000,
+            "timestamp_at": "2026-07-07T21:00:01Z",
+        }
+    )
+
+    exported = api.serialize_download_payload(payload)
+
+    assert exported["schema_version"] == 2
+    assert "market_start_ms" not in exported["market"]
+    assert "market_end_ms" not in exported["market"]
+    assert exported["market"]["market_start_at"] == "2026-07-07T21:00:00Z"
+    assert exported["market"]["market_end_at"] == "2026-07-07T21:05:00Z"
+    assert exported["market"]["chainlink_resolution"]["open"] == "64159.35"
+    assert exported["market"]["chainlink_resolution"]["close"] == "64171.00"
+    assert all("timestamp_ms" not in item for item in exported["series"])
+    assert [item["timestamp_at"] for item in exported["series"]] == [
+        "2026-07-07T21:00:00Z",
+        "2026-07-07T21:00:01Z",
+    ]
+    assert [item["t"] for item in exported["series"]] == [0, 1]
+
+    assert payload["market"]["market_start_ms"] == 1_783_459_200_000
+    assert payload["market"]["market_end_ms"] == 1_783_459_500_000
+    assert payload["market"]["chainlink_resolution"]["open"] == "64159.345"
+    assert payload["market"]["chainlink_resolution"]["close"] == "64171"
+    assert payload["series"][0]["timestamp_ms"] == 1_783_459_200_000
 
 
 def test_markets_download_preserves_official_resolution_metadata(client, monkeypatch):
@@ -1007,13 +1109,14 @@ def test_markets_download_preserves_official_resolution_metadata(client, monkeyp
     assert response.status_code == 200
     body = response.json()
     assert body["schema_version"] == 2
-    assert body["market"]["chainlink_resolution"]["open"] == (
-        "63337.115841440165"
-    )
-    assert body["market"]["chainlink_resolution"]["close"] == (
-        "63336.71900847139"
-    )
+    assert body["market"]["chainlink_resolution"]["open"] == "63337.12"
+    assert body["market"]["chainlink_resolution"]["close"] == "63336.72"
+    assert "market_start_ms" not in body["market"]
+    assert "market_end_ms" not in body["market"]
+    assert "timestamp_ms" not in body["series"][0]
+    assert body["series"][0]["timestamp_at"] == "2026-07-07T21:00:00Z"
     assert body["market"]["resolution"]["winner"] == "Down"
+    assert body["market"]["resolution"]["resolved_at_ms"] == 1_783_459_517_000
     assert body["market"]["resolution"]["official_payouts"] == {
         "up": "0",
         "down": "1",

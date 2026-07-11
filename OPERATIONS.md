@@ -49,7 +49,10 @@ curl -fsS "http://127.0.0.1:9000/markets/${MARKET_ID}/download" | python3 -c 'im
 Both responses should use schema version `2` and include
 `market.chainlink_resolution` and `market.resolution`. A recently completed
 market can legitimately remain `pending` until Polymarket publishes official
-resolution data.
+resolution data. The data response keeps `market_start_ms`, `market_end_ms`,
+and `series[].timestamp_ms`. The download omits those three fields, retains the
+corresponding UTC `*_at` strings, and formats official Chainlink open/close
+values to two decimal places.
 
 ## Connect From Your Local Machine
 

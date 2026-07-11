@@ -175,6 +175,10 @@ waits for official resolution; the last Up/Down probability is never treated as
 the winner. The active CLOB connection stays open for a short grace period after
 the market boundary to capture an official resolution event, while durable REST
 reconciliation handles delayed results and fills the official Chainlink values.
+Downloads keep schema version `2` as a compact projection: they omit the market
+start/end millisecond fields and per-row `timestamp_ms`, retain the equivalent
+UTC `*_at` strings, and format official Chainlink open/close values to two
+decimal places. The data routes retain their full timing and precision fields.
 
 `GET /markets` is the frontend discovery route. It returns the newest three
 completed markets by default, newest first, with market timestamps and

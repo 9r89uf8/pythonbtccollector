@@ -617,8 +617,9 @@ For a completed market they can look like:
 }
 ```
 
-The Chainlink `open` and `close` values are exact decimal strings from
-Polymarket's official Gamma event metadata. `chainlink_resolution.status` is:
+On the data routes, Chainlink `open` and `close` are exact decimal strings from
+Polymarket's official Gamma event metadata. The download routes format those
+two values to fixed two-decimal strings. `chainlink_resolution.status` is:
 
 - `pending` while either official price is not yet available; or
 - `official` when both official prices are available.
@@ -813,7 +814,13 @@ btc_5m_market_{market_id}[_futures][_oi][_flow][_book][_probabilities].json
 The downloaded JSON starts from the data-route response but intentionally uses
 a smaller export shape:
 
+- `market.market_start_ms` and `market.market_end_ms` are removed;
+  `market_start_at` and `market_end_at` are retained.
+- Every `series[].timestamp_ms` is removed; `series[].timestamp_at` and `t` are
+  retained.
 - Every `series[].freshness` object is removed.
+- `market.chainlink_resolution.open` and `.close` are formatted as fixed
+  two-decimal strings when present. `null` values remain `null`.
 - With `include_futures=true`, only the futures `last` value is retained. It is
   moved to `series[].prices.futures`; `mark`, `index`, and `premium_bps` are not
   exported.
@@ -821,8 +828,8 @@ a smaller export shape:
   `cvd_10s`, `cvd_30s`, `imbalance_10s`, and `imbalance_30s`.
 - With `include_book=true`, `series[].book` contains only `book_imbalance` and
   `microprice`.
-- Probability, open-interest, market, server-time, and series timestamp fields
-  otherwise keep their data-route shapes. In particular,
+- Probability, open-interest, resolution, and server-time fields otherwise keep
+  their data-route shapes. In particular,
   `market.chainlink_resolution` and `market.resolution` are always retained in
   the download, even when `include_probabilities=false`.
 

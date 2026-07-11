@@ -198,6 +198,7 @@ def serialize_market_index_item(
 def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
     exported = dict(item)
     exported.pop("freshness", None)
+    exported.pop("timestamp_ms", None)
 
     prices = dict(exported.get("prices") or {})
     futures = exported.get("futures")
@@ -217,6 +218,27 @@ def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
     return exported
 
 
+def serialize_download_market(market: Mapping[str, Any]) -> dict[str, Any]:
+    exported = dict(market)
+    exported.pop("market_start_ms", None)
+    exported.pop("market_end_ms", None)
+
+    chainlink_resolution = exported.get("chainlink_resolution")
+    if isinstance(chainlink_resolution, Mapping):
+        formatted_resolution = dict(chainlink_resolution)
+        formatted_resolution["open"] = _format_download_decimal_string(
+            formatted_resolution.get("open"),
+            "0.01",
+        )
+        formatted_resolution["close"] = _format_download_decimal_string(
+            formatted_resolution.get("close"),
+            "0.01",
+        )
+        exported["chainlink_resolution"] = formatted_resolution
+
+    return exported
+
+
 def serialize_download_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     exported = {}
     for key, value in payload.items():
@@ -225,6 +247,8 @@ def serialize_download_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                 serialize_download_series_item(item)
                 for item in value
             ]
+        elif key == "market" and isinstance(value, Mapping):
+            exported[key] = serialize_download_market(value)
         else:
             exported[key] = value
 
