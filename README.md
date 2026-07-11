@@ -68,17 +68,24 @@ columns, and are serialized as strings by the API.
 
 `python -m price_collector.binance_futures_collector`
 
-- Polls Binance futures REST data for the latest price, mark/index price,
-  funding data, and open interest.
-- Writes the latest futures price to Redis key `btc:live:futures` before its
-  PostgreSQL snapshot.
+- Uses the required `btcusdt@aggTrade` WebSocket as the futures last-price
+  source: `p` is the price and `T` is its source timestamp.
+- Records local wall time immediately after `recv()` and before parsing, then a
+  latest-wins worker writes accepted trades to Redis key `btc:live:futures`
+  independently of REST polling and optional raw capture.
+- Polls futures REST only for premium/index, funding, open interest, and the
+  separate historical open-interest series. It does not call the REST ticker
+  endpoint and does not use book midpoint or microprice as "last."
 - Stores futures snapshots and completed five-minute historical open-interest
-  summaries.
+  summaries. A snapshot uses only a fresh trade from the current WebSocket
+  connection; otherwise its last-price fields are `null` while the REST fields
+  can still be stored. `STALE_PRICE_MS` controls that freshness gate.
 - Aggregates `btcusdt@aggTrade` into one-second `binance_flow_1s` rows.
 - Aggregates `btcusdt@bookTicker` into one-second `binance_book_1s` rows.
 - Can optionally coalesce the same `aggTrade` feed into private 100 ms OHLC
-  evidence rows when `RAW_FUTURES_TRACE_ENABLED=true`. This shadow capture
-  does not replace the REST price written to `btc:live:futures`.
+  evidence rows when `RAW_FUTURES_TRACE_ENABLED=true`. The raw flag does not
+  select or disable the public price source; `BINANCE_FUTURES_STREAMS_ENABLED`
+  must be `true` for the collector to run.
 
 ### Polymarket BTC 5-Minute Probabilities
 
@@ -150,7 +157,7 @@ collector writer DDL capability only inside that schema. Six-hour current and
 next partitions are managed independently from the public historical tables.
 
 Phase 2 wires the Binance futures `aggTrade` reader to this infrastructure but
-keeps it opt-in. Both feature flags still default to `false`. When
+keeps raw capture opt-in. Both raw feature flags still default to `false`. When
 `RAW_FUTURES_TRACE_ENABLED=true`, receive clocks are recorded immediately after
 `recv()` and before JSON parsing, valid trades continue through the existing
 one-second flow path, and compact 100 ms buckets are offered without waiting
@@ -175,20 +182,34 @@ also remains pending for a follow-up upsert. The historical store is bounded at
 Shutdown uses a bounded final drain. The raw queue is independent of both normal
 delivery states.
 
-The public futures live value remains the Binance REST
-`/fapi/v2/ticker/price` result, and the public Chainlink value remains the RTDS
-`payload.value` delivered through `btc:live:chainlink`; evidence capture changes
-neither API response. With both raw flags `false`, no raw capture queue, task,
-session UUID, monotonic receive stamp, or extra raw database connection is
-created. A phase's deployed code is only its code checkpoint. The corresponding
+Phase 5 cuts the public futures last price over to the required Binance
+`btcusdt@aggTrade` WebSocket. The Redis value is `p`, its
+`source_timestamp_ms` is `T`, and `received_ms` is the local pre-parse receive
+wall time. The latest-wins Redis worker is independent of the one-second REST
+snapshot and raw-capture paths. REST remains responsible only for premium/index,
+funding, open interest, and historical open-interest data; there is no REST
+ticker fallback, and book-derived values are not labeled as last price. The API
+shape is unchanged.
+
+The public Chainlink value remains RTDS `payload.value` delivered through
+`btc:live:chainlink`. With both raw flags `false`, neither collector creates a
+raw queue, raw writer/maintenance task, raw feed-session record, or dedicated
+raw database connection. The futures reader still records its connection and
+pre-parse receive stamp because those are now part of the public last-price
+path. A phase's deployed code is only its code checkpoint. The corresponding
 explicitly accelerated three-hour production canary and all acceptance checks
 in `OPERATIONS.md` must pass before that phase is operationally complete. This
 short gate provides less confidence about slow leaks, reconnects, daily traffic
 variation, and sustained storage growth than a 24-hour canary. After advancing,
 leave capture enabled and continue background observation toward 24
 uninterrupted hours; a later failure still requires the documented rollback.
-Because three hours may not cross a six-hour raw partition boundary, Phase 4's
-deliberate partition and retention validation remains mandatory.
+
+Phase 4's deliberate partition-boundary and retention validation has been
+explicitly deferred while work proceeds to Phase 5. It is not proven by either
+three-hour canary: a short window may not cross a six-hour partition boundary.
+Automatic future-partition creation, expired-partition removal, the configured
+72-hour retention behavior, and sustained relation-budget enforcement therefore
+remain known production risks and must not be described as validated.
 
 Redis is not a historical store. It contains only these live keys:
 
@@ -370,9 +391,11 @@ production canary keeps
 `RAW_CHAINLINK_EVENTS_ENABLED=true`, and restarts only
 `price-collector-polymarket-chainlink`. The two enabled collectors can then use
 at most two dedicated raw-capture database connections in total. The repository
-example remains disabled. Passing this gate permits Phase 4 with reduced
-confidence; keep both captures enabled and continue background observation of
-each one toward 24 uninterrupted hours from its activation time.
+example remains disabled. Keep both captures enabled and continue background
+observation of each one toward 24 uninterrupted hours from its activation time.
+Phase 4 retention validation was explicitly deferred so Phase 5 source-cutover
+work could proceed; Phase 5 does not validate raw partition rollover, expiry,
+or storage-budget enforcement, and that residual risk remains open.
 
 Do not commit `collector.env`, `api.env`, `droplet.env`, `.env`, or real
 credentials. These files are ignored by Git; only their examples belong in the

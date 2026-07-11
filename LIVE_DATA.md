@@ -15,7 +15,7 @@ Binance Spot WebSocket ───────────────┐
                                       │
 Polymarket RTDS (Chainlink BTC/USD) ──┼─> Redis ─> FastAPI live endpoint ─> Dashboard
                                       │      │
-Binance USD-M Futures REST ───────────┘      └─ latest values only
+Binance USD-M Futures aggTrade WS ────┘      └─ latest values only
 
 Each collector ─────────────────────────> PostgreSQL historical tables
 ```
@@ -32,11 +32,12 @@ Binance:
 | --- | --- | --- | --- | --- | --- |
 | Binance Spot | WebSocket `btcusdt@ticker` | `c` | `E` | `btc:live:binance_spot` | `prices.binance_spot` |
 | Chainlink BTC/USD through Polymarket | Polymarket RTDS WebSocket | `payload.value` | `payload.timestamp` | `btc:live:chainlink` | `prices.chainlink` |
-| Binance USD-M Futures | REST `/fapi/v2/ticker/price` | `price` | `time` | `btc:live:futures` | `futures.last` |
+| Binance USD-M Futures | WebSocket `btcusdt@aggTrade` | `p` | `T` | `btc:live:futures` | `futures.last` |
 
 All prices are parsed and calculated as Python `Decimal` values. They are
 serialized as JSON strings so a binary floating-point conversion does not occur
-between collection and the dashboard.
+between collection and the dashboard. Phase 5 changes the futures upstream
+source and delivery path without changing the live API response shape.
 
 ## 1. Binance Spot
 
@@ -146,37 +147,60 @@ session UUID, or dedicated raw database connection.
 
 ## 3. Binance USD-M Futures
 
-The futures collector polls `https://fapi.binance.com` on a one-second cadence
-by default. Each polling cycle requests these endpoints concurrently:
+The futures collector requires the Binance USD-M `btcusdt@aggTrade` WebSocket.
+For every accepted trade, it uses `p` as the exact Decimal last price and `T` as
+the source timestamp. Local wall time is recorded immediately after `recv()`
+returns and before JSON parsing; that pre-parse time, floored to milliseconds,
+becomes the live value's `received_ms`.
+
+Accepted, non-duplicate, non-regressing trades publish to process-local
+latest-wins state. A dedicated worker writes the newest pending version to
+`btc:live:futures`. It does not wait for the one-second REST poll, PostgreSQL,
+or the optional raw writer. When updates arrive while Redis is in flight,
+obsolete intermediate versions may be coalesced, but the newest one remains
+eligible for an attempt.
+
+The collector also polls `https://fapi.binance.com` on a one-second cadence by
+default. Each snapshot cycle requests only these endpoints concurrently:
 
 - `/fapi/v1/openInterest`
 - `/fapi/v1/premiumIndex`
-- `/fapi/v2/ticker/price`
 
-Only `/fapi/v2/ticker/price` supplies the value shown at `futures.last` by the
-live endpoint. Its `price` field becomes the live value and its `time` field
-becomes `source_timestamp_ms`.
+REST still supplies mark price, index price, funding data, and open interest for
+PostgreSQL. Historical open-interest polling also remains separate. There is no
+call or fallback to `/fapi/v2/ticker/price`, and neither book midpoint nor
+microprice is treated as last price. Those REST and book fields are not written
+to the live Redis key and are not returned by `/markets/current/live`.
 
-The same polling cycle also collects mark price, index price, funding data, and
-open interest for PostgreSQL. Those fields are not written to the live Redis
-key and are not returned by `/markets/current/live`.
-
-After all three REST responses have been parsed, the collector:
+After both REST responses have been parsed, the collector:
 
 1. Builds a Decimal-only futures snapshot.
-2. Writes the ticker price to `btc:live:futures` when a price is present.
-3. Writes the complete historical snapshot to PostgreSQL.
+2. Adds `aggTrade.p` only when the latest accepted trade is fresh under
+   `STALE_PRICE_MS` and belongs to the currently open WebSocket connection.
+3. Waits until that trade's Redis attempt has completed, then writes the
+   historical snapshot to PostgreSQL. A Redis failure is logged but does not
+   discard an otherwise valid snapshot.
 
-For this collector, `received_ms` is the local time captured at the start of the
-polling cycle. If any request in the combined cycle fails, that cycle does not
-replace the cached value; the prior value remains and becomes visibly older.
-The futures `aggTrade` WebSocket continues to feed the historical one-second
-flow table. During the opt-in Phase 2 accelerated three-hour canary, it also
-feeds private 100 ms OHLC evidence capture when
-`RAW_FUTURES_TRACE_ENABLED=true`. The `bookTicker`
-WebSocket continues to feed the historical one-second book table. Neither
-WebSocket updates `btc:live:futures`; the public live futures value remains the
-REST ticker price.
+The historical snapshot's second and market window are based on the premium
+index timestamp, falling back to the snapshot observation time. They are not
+keyed by the trade timestamp. `futures_last_price_time_ms` still records
+`aggTrade.T`, while the row's historical `received_ms` remains the local
+snapshot observation time. This distinction keeps the REST observation aligned
+without changing the meaning of the WebSocket source timestamp.
+
+Until the first valid trade on a connection, while disconnected, or after the
+latest trade exceeds `STALE_PRICE_MS`, the Redis key is not deleted or replaced:
+its old value simply ages. REST snapshot cycles can continue, but the affected
+rows store `null` last-price and last-price-source-time fields. There is no
+ticker fallback. `BINANCE_FUTURES_STREAMS_ENABLED` must therefore be `true`;
+the collector refuses to start when it is `false`.
+
+The same `aggTrade` reader continues to feed the historical one-second flow
+table and can independently feed private 100 ms OHLC evidence capture when
+`RAW_FUTURES_TRACE_ENABLED=true`. The `bookTicker` WebSocket continues to feed
+the historical one-second book table. Turning raw capture off does not disable
+the live price, flow aggregation, connection identity, or pre-parse receive
+stamp, and turning it on does not change the public price selection.
 
 The private futures and Chainlink evidence paths are intentionally absent from
 the live-flow diagram above because Redis and the API do not read them. Their
@@ -192,9 +216,14 @@ behavior, daily traffic variation, and sustained storage growth. Passing a gate
 allows the next phase to start; it does not stop observation. Leave each
 successful capture enabled and continue monitoring its normal and raw paths
 toward at least 24 uninterrupted hours from that collector's activation time.
-Any later regression still invokes the phase's documented rollback. A
-three-hour window may not cross a six-hour raw partition boundary, so Phase 4's
-deliberate partition and retention validation remains mandatory.
+Any later regression still invokes the phase's documented rollback.
+
+Phase 4's deliberate partition-boundary and retention validation has been
+explicitly deferred while Phase 5 proceeds. It remains unproven in production:
+a three-hour window may not cross a six-hour raw partition boundary. Future
+partition creation, expired-partition removal, configured 72-hour retention,
+and sustained relation-budget enforcement remain known residual risks; the
+Phase 5 source cutover does not validate them.
 
 ## Redis Live Cache
 
@@ -219,8 +248,8 @@ Each key contains a compact JSON object:
 | Redis field | Meaning |
 | --- | --- |
 | `value` | Price encoded as a JSON string to preserve decimal precision |
-| `source_timestamp_ms` | Timestamp supplied by the upstream source; it can be `null` if a futures ticker omits `time` |
-| `received_ms` | Collector-local UTC epoch time associated with receiving or starting collection of the value |
+| `source_timestamp_ms` | Timestamp supplied by the upstream source; for futures this is required `aggTrade.T` |
+| `received_ms` | Collector-local UTC epoch time recorded for the value; for futures this is the pre-parse WebSocket receive time |
 
 The keys are written with plain Redis `SET` operations and have no application
 TTL. A Redis write failure is logged, but it does not change the price's numeric
@@ -322,8 +351,9 @@ unavailable states.
   `null`.
 - A cached value is not removed or rejected merely because it is old. HTTP
   `200` therefore means the cache read succeeded, not that every value is fresh.
-- A futures value may have a `null` source timestamp and `source_age_ms` if the
-  upstream response omitted `time`; `received_ms` is still required.
+- A valid newly written futures value has both `aggTrade.T` and its pre-parse
+  receive time. During a disconnect or stale interval the old Redis value is
+  retained and its ages grow; it is not replaced with a `null` snapshot value.
 - A Redis connection, read, or timeout failure returns HTTP `503` with
   `{"detail":"live cache unavailable"}`.
 - An invalid cached payload returns HTTP `503` with
@@ -332,9 +362,10 @@ unavailable states.
 ## Recommended Dashboard Consumption
 
 The live API is an HTTP polling endpoint, not a WebSocket or Server-Sent Events
-feed. A dashboard can poll it about once per second, matching the default
-futures collection cadence, while preventing overlapping requests and stopping
-the poll when the component is no longer active.
+feed. Although the futures Redis value is updated from the WebSocket rather
+than the one-second REST cycle, a dashboard can still poll about once per
+second while preventing overlapping requests and stopping the poll when the
+component is no longer active.
 
 ```javascript
 export async function fetchLiveBtc(signal) {
@@ -380,9 +411,8 @@ Dashboard handling guidelines:
   response is `200`.
 - Choose freshness thresholds per source; do not use
   `max_chainlink_carry_forward_ms` as a server-side freshness guarantee.
-- Evaluate both source and receive ages when the source timestamp is present.
-  A futures response without a source timestamp can still be evaluated by its
-  required receive age.
+- Evaluate both source and receive ages. Newly written futures values always
+  carry the required trade timestamp and local receive timestamp.
 - Use `market_id`, `market_start_ms`, and `market_end_ms` from each response to
   roll the dashboard into the current five-minute window.
 - On HTTP `503`, show an unavailable or last-known/stale state and retry with a
@@ -424,7 +454,10 @@ For the complete frontend API contract and all historical response shapes, see
 - [`price_collector/polymarket_chainlink_collector.py`](price_collector/polymarket_chainlink_collector.py)
   — Polymarket RTDS subscription and Chainlink event handling
 - [`price_collector/binance_futures_collector.py`](price_collector/binance_futures_collector.py)
-  — Binance futures REST polling and snapshot creation
+  — Binance futures live delivery, REST polling, and snapshot creation
+- [`price_collector/binance_futures_streams.py`](price_collector/binance_futures_streams.py)
+  — required futures WebSocket parsing, validated latest-trade state, flow, and
+  book aggregation
 - [`price_collector/live_cache.py`](price_collector/live_cache.py) — Redis keys,
   serialization, freshness ages, and live response construction
 - [`price_collector/api.py`](price_collector/api.py) — FastAPI route

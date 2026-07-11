@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import signal
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Optional
@@ -11,7 +12,8 @@ import httpx
 from price_collector.binance_futures_streams import (
     AsyncBookTickerAggregator,
     AsyncFlowAggregator,
-    FuturesShadowMonitor,
+    FuturesTradeState,
+    SequencedFuturesTrade,
     futures_agg_trade_reader_loop,
     futures_book_flush_loop,
     futures_book_ticker_reader_loop,
@@ -137,9 +139,17 @@ def build_binance_futures_snapshot(
     symbol: str,
     open_interest_payload: Mapping[str, Any],
     premium_index_payload: Mapping[str, Any],
-    ticker_payload: Mapping[str, Any],
+    futures_trade: Optional[SequencedFuturesTrade],
     received_ms: int,
 ) -> BinanceFuturesSnapshot:
+    if futures_trade is not None:
+        if not isinstance(futures_trade, SequencedFuturesTrade):
+            raise TypeError("futures_trade must be SequencedFuturesTrade or None")
+        if futures_trade.trade.symbol != symbol:
+            raise FuturesParseError(
+                "unexpected aggTrade symbol: "
+                f"expected {symbol!r}, got {futures_trade.trade.symbol!r}"
+            )
     _validate_symbol(
         open_interest_payload,
         expected_symbol=symbol,
@@ -150,12 +160,6 @@ def build_binance_futures_snapshot(
         expected_symbol=symbol,
         endpoint_name="premium index",
     )
-    _validate_symbol(
-        ticker_payload,
-        expected_symbol=symbol,
-        endpoint_name="ticker",
-    )
-
     open_interest = decimal_or_none(open_interest_payload.get("openInterest"))
     if open_interest is not None and open_interest < 0:
         raise FuturesParseError("openInterest must be non-negative")
@@ -166,14 +170,14 @@ def build_binance_futures_snapshot(
     last_funding_rate = decimal_or_none(premium_index_payload.get("lastFundingRate"))
     next_funding_time_ms = int_or_none(premium_index_payload.get("nextFundingTime"))
     premium_index_time_ms = int_or_none(premium_index_payload.get("time"))
-    futures_last_price = decimal_or_none(ticker_payload.get("price"))
-    futures_last_price_time_ms = int_or_none(ticker_payload.get("time"))
-
-    futures_row_time_ms = (
-        futures_last_price_time_ms
-        or premium_index_time_ms
-        or received_ms
+    futures_last_price = (
+        None if futures_trade is None else futures_trade.trade.price
     )
+    futures_last_price_time_ms = (
+        None if futures_trade is None else futures_trade.trade.trade_time_ms
+    )
+
+    futures_row_time_ms = premium_index_time_ms or received_ms
     sample_second_ms = _sample_second_ms_for_source_time(
         futures_row_time_ms,
         received_ms,
@@ -207,7 +211,21 @@ def build_binance_futures_snapshot(
         raw={
             "openInterest": dict(open_interest_payload),
             "premiumIndex": dict(premium_index_payload),
-            "ticker": dict(ticker_payload),
+            "aggTrade": (
+                None
+                if futures_trade is None
+                else {
+                    "source": "binance_futures_agg_trade",
+                    "symbol": futures_trade.trade.symbol,
+                    "agg_trade_id": futures_trade.trade.agg_trade_id,
+                    "price": str(futures_trade.trade.price),
+                    "trade_time_ms": futures_trade.trade.trade_time_ms,
+                    "event_time_ms": futures_trade.trade.event_time_ms,
+                    "connection_id": str(futures_trade.stamp.connection_id),
+                    "receive_sequence": futures_trade.stamp.receive_sequence,
+                    "received_ms": futures_trade.stamp.received_ms,
+                }
+            ),
         },
     )
 
@@ -284,17 +302,17 @@ async def get_json(
 
 async def update_futures_live_cache(
     live_cache: Any,
-    snapshot: BinanceFuturesSnapshot,
+    item: SequencedFuturesTrade,
 ) -> bool:
-    if live_cache is None or snapshot.futures_last_price is None:
+    if live_cache is None:
         return False
 
     try:
         await live_cache.set_price(
             FUTURES_LIVE_KEY,
-            value=snapshot.futures_last_price,
-            source_timestamp_ms=snapshot.futures_last_price_time_ms,
-            received_ms=snapshot.received_ms,
+            value=item.trade.price,
+            source_timestamp_ms=item.trade.trade_time_ms,
+            received_ms=item.stamp.received_ms,
         )
     except LIVE_CACHE_WRITE_ERRORS as exc:
         LOGGER.warning(
@@ -311,19 +329,43 @@ async def update_futures_live_cache(
     return True
 
 
+async def futures_live_worker(
+    *,
+    trade_state: FuturesTradeState,
+    live_cache: Any,
+) -> None:
+    processed_sequence = 0
+    while True:
+        item = await trade_state.wait_for_latest_after(processed_sequence)
+        succeeded = False
+        try:
+            succeeded = await update_futures_live_cache(live_cache, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "binance_futures_live_worker_failed",
+                extra={"event": "binance_futures_live_worker_failed"},
+            )
+        trade_state.mark_live_attempted(
+            item,
+            succeeded=succeeded,
+            attempted_ms=current_utc_epoch_ms(),
+        )
+        processed_sequence = item.sequence
+
+
 async def collect_once(
     *,
     pool: Any,
     client: httpx.AsyncClient,
     settings: Settings,
-    live_cache: Any = None,
-    shadow_monitor: Optional[FuturesShadowMonitor] = None,
+    trade_state: FuturesTradeState,
 ) -> BinanceFuturesSnapshot:
-    received_ms = current_utc_epoch_ms()
     symbol = settings.BINANCE_FUTURES_SYMBOL
     base_url = settings.BINANCE_FUTURES_BASE_URL
 
-    open_interest_data, premium_index_data, ticker_data = await asyncio.gather(
+    open_interest_data, premium_index_data = await asyncio.gather(
         get_json(
             client,
             base_url,
@@ -336,39 +378,31 @@ async def collect_once(
             "/fapi/v1/premiumIndex",
             {"symbol": symbol},
         ),
-        get_json(
-            client,
-            base_url,
-            "/fapi/v2/ticker/price",
-            {"symbol": symbol},
-        ),
     )
+
+    futures_trade = trade_state.fresh_current(
+        now_monotonic_ns=time.monotonic_ns(),
+        stale_after_ms=settings.STALE_PRICE_MS,
+    )
+    if futures_trade is not None:
+        futures_trade = await trade_state.wait_until_live_attempted(
+            futures_trade.sequence
+        )
+        if not trade_state.is_fresh_current_item(
+            futures_trade,
+            now_monotonic_ns=time.monotonic_ns(),
+            stale_after_ms=settings.STALE_PRICE_MS,
+        ):
+            futures_trade = None
+    received_ms = current_utc_epoch_ms()
 
     snapshot = build_binance_futures_snapshot(
         symbol=symbol,
         open_interest_payload=_require_mapping(open_interest_data, "open interest"),
         premium_index_payload=_require_mapping(premium_index_data, "premium index"),
-        ticker_payload=_require_mapping(ticker_data, "ticker"),
+        futures_trade=futures_trade,
         received_ms=received_ms,
     )
-
-    if shadow_monitor is not None:
-        try:
-            shadow_monitor.observe_rest(
-                price=snapshot.futures_last_price,
-                source_timestamp_ms=snapshot.futures_last_price_time_ms,
-                received_ms=snapshot.received_ms,
-            )
-        except Exception:
-            LOGGER.exception(
-                "binance_futures_shadow_rest_observation_failed",
-                extra={
-                    "event": "binance_futures_shadow_rest_observation_failed",
-                    "received_ms": snapshot.received_ms,
-                },
-            )
-
-    await update_futures_live_cache(live_cache, snapshot)
 
     await upsert_binance_futures_snapshot(
         pool,
@@ -401,6 +435,9 @@ async def collect_once(
             "symbol": snapshot.symbol,
             "sample_second_ms": snapshot.sample_second_ms,
             "market_id": snapshot.window.market_id,
+            "futures_last_source": "binance_futures_agg_trade",
+            "futures_last_available": snapshot.futures_last_price is not None,
+            "futures_last_price_time_ms": snapshot.futures_last_price_time_ms,
             "open_interest_time_ms": snapshot.open_interest_time_ms,
             "received_ms": snapshot.received_ms,
         },
@@ -495,8 +532,7 @@ async def snapshot_loop(
     pool: Any,
     client: httpx.AsyncClient,
     settings: Settings,
-    live_cache: Any = None,
-    shadow_monitor: Optional[FuturesShadowMonitor] = None,
+    trade_state: FuturesTradeState,
 ) -> None:
     while True:
         if settings.BINANCE_FUTURES_POLL_SECONDS <= 1:
@@ -509,8 +545,7 @@ async def snapshot_loop(
                 pool=pool,
                 client=client,
                 settings=settings,
-                live_cache=live_cache,
-                shadow_monitor=shadow_monitor,
+                trade_state=trade_state,
             )
         except asyncio.CancelledError:
             raise
@@ -562,12 +597,12 @@ def _install_sigterm_cancellation() -> Optional[Callable[[], None]]:
 async def _run_raw_capture_telemetry_noncritical(
     *,
     raw_capture: Any,
-    shadow_monitor: FuturesShadowMonitor,
+    trade_state: FuturesTradeState,
 ) -> None:
     try:
         await futures_raw_capture_telemetry_loop(
             raw_capture=raw_capture,
-            shadow_monitor=shadow_monitor,
+            trade_state=trade_state,
             interval_seconds=60.0,
         )
     except asyncio.CancelledError:
@@ -581,14 +616,13 @@ async def _run_raw_capture_telemetry_noncritical(
 
 async def run_collector(settings: Settings) -> None:
     setup_logging(settings.LOG_LEVEL)
-    if (
-        settings.RAW_FUTURES_TRACE_ENABLED
-        and not settings.BINANCE_FUTURES_STREAMS_ENABLED
-    ):
+    if not settings.BINANCE_FUTURES_STREAMS_ENABLED:
         raise RuntimeError(
-            "RAW_FUTURES_TRACE_ENABLED requires "
-            "BINANCE_FUTURES_STREAMS_ENABLED"
+            "Phase 5 futures last-price collection requires "
+            "BINANCE_FUTURES_STREAMS_ENABLED=true"
         )
+    if settings.STALE_PRICE_MS <= 0:
+        raise RuntimeError("STALE_PRICE_MS must be positive")
 
     LOGGER.info(
         "binance_futures_collector_starting",
@@ -599,6 +633,8 @@ async def run_collector(settings: Settings) -> None:
             "symbol": settings.BINANCE_FUTURES_SYMBOL,
             "historical_oi_enabled": settings.BINANCE_FUTURES_HIST_OI_ENABLED,
             "streams_enabled": settings.BINANCE_FUTURES_STREAMS_ENABLED,
+            "futures_last_source": "binance_futures_agg_trade",
+            "futures_last_stale_ms": settings.STALE_PRICE_MS,
             "store_raw_json": settings.BINANCE_FUTURES_STORE_RAW_JSON,
             "raw_futures_trace_enabled": settings.RAW_FUTURES_TRACE_ENABLED,
         },
@@ -608,7 +644,7 @@ async def run_collector(settings: Settings) -> None:
     pool = await create_pool(database_url)
     live_cache = None
     raw_capture = None
-    shadow_monitor = None
+    trade_state = FuturesTradeState()
     tasks = []
     remove_sigterm_handler = _install_sigterm_cancellation()
     try:
@@ -637,21 +673,63 @@ async def run_collector(settings: Settings) -> None:
             if raw_capture is None:
                 raise RuntimeError("futures raw capture runtime was not created")
             raw_capture.start()
-            shadow_monitor = FuturesShadowMonitor()
 
         timeout = httpx.Timeout(settings.BINANCE_FUTURES_REST_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
-                tasks.append(
-                    asyncio.create_task(
-                        snapshot_loop(
-                            pool=pool,
-                            client=client,
-                            settings=settings,
-                            live_cache=live_cache,
-                            shadow_monitor=shadow_monitor,
-                        )
-                    )
+                flow_store = AsyncFlowAggregator(
+                    venue=settings.BINANCE_FUTURES_PROVIDER_CODE,
+                    symbol=settings.BINANCE_FUTURES_SYMBOL,
+                )
+                book_store = AsyncBookTickerAggregator(
+                    venue=settings.BINANCE_FUTURES_PROVIDER_CODE,
+                    symbol=settings.BINANCE_FUTURES_SYMBOL,
+                )
+                tasks.extend(
+                    [
+                        asyncio.create_task(
+                            futures_live_worker(
+                                trade_state=trade_state,
+                                live_cache=live_cache,
+                            )
+                        ),
+                        asyncio.create_task(
+                            futures_agg_trade_reader_loop(
+                                settings,
+                                flow_store,
+                                trade_state=trade_state,
+                                raw_capture=raw_capture,
+                            )
+                        ),
+                        asyncio.create_task(
+                            futures_flow_flush_loop(
+                                pool=pool,
+                                settings=settings,
+                                flow_store=flow_store,
+                            )
+                        ),
+                        asyncio.create_task(
+                            futures_book_ticker_reader_loop(
+                                settings,
+                                book_store,
+                            )
+                        ),
+                        asyncio.create_task(
+                            futures_book_flush_loop(
+                                pool=pool,
+                                settings=settings,
+                                book_store=book_store,
+                            )
+                        ),
+                        asyncio.create_task(
+                            snapshot_loop(
+                                pool=pool,
+                                client=client,
+                                settings=settings,
+                                trade_state=trade_state,
+                            )
+                        ),
+                    ]
                 )
                 if settings.BINANCE_FUTURES_HIST_OI_ENABLED:
                     tasks.append(
@@ -664,54 +742,12 @@ async def run_collector(settings: Settings) -> None:
                         )
                     )
 
-                if settings.BINANCE_FUTURES_STREAMS_ENABLED:
-                    flow_store = AsyncFlowAggregator(
-                        venue=settings.BINANCE_FUTURES_PROVIDER_CODE,
-                        symbol=settings.BINANCE_FUTURES_SYMBOL,
-                    )
-                    book_store = AsyncBookTickerAggregator(
-                        venue=settings.BINANCE_FUTURES_PROVIDER_CODE,
-                        symbol=settings.BINANCE_FUTURES_SYMBOL,
-                    )
-                    tasks.extend(
-                        [
-                            asyncio.create_task(
-                                futures_agg_trade_reader_loop(
-                                    settings,
-                                    flow_store,
-                                    raw_capture=raw_capture,
-                                    shadow_monitor=shadow_monitor,
-                                )
-                            ),
-                            asyncio.create_task(
-                                futures_flow_flush_loop(
-                                    pool=pool,
-                                    settings=settings,
-                                    flow_store=flow_store,
-                                )
-                            ),
-                            asyncio.create_task(
-                                futures_book_ticker_reader_loop(
-                                    settings,
-                                    book_store,
-                                )
-                            ),
-                            asyncio.create_task(
-                                futures_book_flush_loop(
-                                    pool=pool,
-                                    settings=settings,
-                                    book_store=book_store,
-                                )
-                            ),
-                        ]
-                    )
-
-                if raw_capture is not None and shadow_monitor is not None:
+                if raw_capture is not None:
                     tasks.append(
                         asyncio.create_task(
                             _run_raw_capture_telemetry_noncritical(
                                 raw_capture=raw_capture,
-                                shadow_monitor=shadow_monitor,
+                                trade_state=trade_state,
                             )
                         )
                     )
@@ -739,7 +775,10 @@ async def run_collector(settings: Settings) -> None:
 
 def main() -> None:
     settings = Settings()
-    asyncio.run(run_collector(settings))
+    try:
+        asyncio.run(run_collector(settings))
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
 
 
 if __name__ == "__main__":

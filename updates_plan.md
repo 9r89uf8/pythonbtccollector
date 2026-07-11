@@ -581,13 +581,18 @@ files is what makes Phase 1 observably inactive. The three-hour gate deliberatel
 accepts less confidence than a 24-hour canary; successful captures remain
 enabled and under background observation toward 24 uninterrupted hours after
 the rollout advances. Because three hours may not cross a six-hour partition
-boundary, Phase 4's deliberate partition and retention checks remain required.
+boundary, automatic maintenance staying healthy is not proof of retention.
+Phase 4's deliberate validation is explicitly deferred and remains unproven
+technical debt; its checklist is retained below.
 
 ---
 
 # 13. Separate capture deployment from futures-price cutover
 
-The live futures value currently comes from `/fapi/v2/ticker/price`; the existing `aggTrade` and `bookTicker` WebSockets do not update the futures Redis value. 
+Before Phase 5, the live futures value came from `/fapi/v2/ticker/price`; the
+existing `aggTrade` and `bookTicker` WebSockets did not update the futures Redis
+value. The Phase 2 and Phase 3 REST-source checks remain valid pre-cutover
+evidence rather than a description of the post-Phase 5 collector.
 
 Do not change the live source in the same rollout that first enables raw capture.
 
@@ -598,16 +603,26 @@ Use two checkpoints:
 * Keep REST as the public `futures.last`.
 * Update an in-memory latest WS trade state.
 * Record REST-versus-WS differences, source age and gaps.
-* Run for at least a full day.
+* The original design called for a full day. The user explicitly accepted the
+  completed three-hour accelerated Phase 2 evidence instead, with the reduced
+  confidence and continued background monitoring documented in this plan.
 * Confirm reconnect and staleness behavior.
 
 ### Checkpoint B: WS cutover
 
-* Use `aggTrade.p` as `futures.last`.
-* Existing one-second snapshots read the latest validated WS trade.
-* Remove `/fapi/v2/ticker/price`.
-* Keep REST premium/index price and open-interest calls.
+* Use only `aggTrade.p` as `futures.last`, with `aggTrade.T` as its source
+  timestamp and the receive stamp captured immediately after `recv()` as its
+  Redis `received_ms`.
+* Existing one-second snapshots read the latest validated trade from the
+  current WebSocket connection.
+* Remove `/fapi/v2/ticker/price` with no REST fallback.
+* Keep REST only for premium/index price, current open interest, and the
+  existing five-minute historical open-interest request.
 * Do not call book midpoint or microprice “last.”
+* If the current connection has no accepted trade, or its latest local receive
+  age exceeds `STALE_PRICE_MS`, leave the previous Redis value in place so its
+  API ages increase and persist the snapshot with its two futures-last fields
+  `NULL`. Do not substitute a REST or book-derived value.
 
 This keeps any capture bug separate from a user-visible price-source change.
 
@@ -737,15 +752,21 @@ This keeps any capture bug separate from a user-visible price-source change.
    filesystem growth are acceptable, and the two enabled collectors together
    use no more than two dedicated raw database connections.
 8. Declare Phase 3 operationally complete only after the full three-hour window
-   and all accelerated acceptance checks pass. Advancing to Phase 4 does not end
-   observation: keep both captures enabled and monitor each collector toward at
-   least 24 uninterrupted hours from its own activation time. Treat a later
-   regression as a canary failure.
+   and all accelerated acceptance checks pass. Advancing to Phase 5 while Phase
+   4 is deferred does not end observation: keep both captures enabled and
+   monitor each collector toward at least 24 uninterrupted hours from its own
+   activation time. Treat a later regression as a canary failure.
 9. On a raw-only failure, disable only Chainlink raw capture and restart only
    its service. On a delivery-refactor failure, deploy a code revert as well;
    the raw feature flag does not disable the new live and historical workers.
 
-## Phase 4 — Validate retention
+## Phase 4 — Validate retention — DEFERRED / UNPROVEN
+
+The user explicitly deferred this phase on 2026-07-11. Automatic 60-second
+partition maintenance remains enabled and monitored, but successful maintenance
+runs do not prove expired-partition or relation-pressure behavior. The following
+checklist remains open technical debt and is not a Phase 5 prerequisite under
+this risk decision:
 
 1. Create deliberately expired test partitions.
 2. Run maintenance.
@@ -758,7 +779,34 @@ This keeps any capture bug separate from a user-visible price-source change.
 
 ## Phase 5 — Futures WS source cutover
 
-Only after the capture data shows that WS state is stable and complete, replace the REST ticker price with `aggTrade.p`.
+Production deployment must wait until the fixed Phase 3 evidence and telemetry
+window has ended at `2026-07-11T20:29:53Z`, the full Phase 3 acceptance checklist
+passes, and the Chainlink service still reports `MainPID=77219`, `NRestarts=0`,
+and `ActiveEnterTimestamp=Sat 2026-07-11 17:27:53 UTC`. Do not restart the
+futures collector before that acceptance decision because its unchanged uptime
+is part of the Phase 3 evidence.
+
+After that gate:
+
+1. Deploy the Phase 5 code and restart only
+   `price-collector-binance-futures`. Keep both raw-capture flags enabled and do
+   not restart Chainlink.
+2. Record the cutover commit and UTC instant.
+3. Make `aggTrade.p` / `aggTrade.T` / the exact local WebSocket receive stamp
+   the sole futures-last value, source time, and live receive time. Continue the
+   REST premium/index, current open-interest, and historical open-interest
+   requests, but make no ticker request or REST/book fallback.
+4. During missing, reconnecting, or stale current-connection state, let the old
+   Redis value age naturally and write `NULL` snapshot last-price/time fields.
+5. Supervise service state, Redis/API freshness, live-delivery counters,
+   one-second snapshots, flow/book coverage, raw capture, and bounded logs for
+   at least 15 minutes.
+6. Accept only with no unexpected restart, live delivery failure, REST ticker
+   use, snapshot/flow/book stall, or raw-capture regression. If the public value
+   stalls or any cutover invariant fails, create and push a Git revert of the
+   Phase 5 commit, pull it on the droplet, and restart only the futures service.
+
+Phase 4 remains deferred and unproven after Phase 5 acceptance.
 
 ## Phase 6 — Produce the compact modeling dataset
 

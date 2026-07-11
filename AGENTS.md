@@ -98,15 +98,46 @@ The corresponding Python entry points are:
 
 ### Binance Futures, Flow, and Book
 
-- Poll Binance USD-M futures REST for futures price, premium/index data, and
-  open interest.
-- Write Redis key `btc:live:futures` before historical snapshot storage.
+- Require `BINANCE_FUTURES_STREAMS_ENABLED=true`; the collector cannot provide
+  its Phase 5 last-price path when streams are disabled.
+- Use only `btcusdt@aggTrade.p` as the futures last price and `aggTrade.T` as
+  its source timestamp. Do not restore `/fapi/v2/ticker/price`, add a REST
+  fallback, or label book midpoint/microprice as "last."
+- Record the futures WebSocket wall receive time immediately after `recv()` and
+  before parsing. Publish accepted current-connection trades to latest-wins
+  state and deliver Redis key `btc:live:futures` from a worker independent of
+  REST and optional raw capture.
+- Reuse `STALE_PRICE_MS`, default `10000`, to accept a current-connection trade
+  for snapshots. Startup, disconnect, or staleness leaves the Redis value aging
+  and stores `null` snapshot last-price fields instead of using a fallback.
+- Poll Binance USD-M futures REST only for premium/index, funding, and open
+  interest, plus the separate historical open-interest series.
+- Key snapshot seconds/windows from the premium-index timestamp or snapshot
+  observation fallback, not from the aggTrade timestamp. Keep historical
+  `received_ms` as the snapshot observation time while the last-price source
+  timestamp remains `aggTrade.T`.
+- Ensure a selected trade's Redis attempt completes before its historical
+  snapshot write; a logged Redis failure must not discard the snapshot.
 - Keep financial values as `Decimal` throughout parsing and derived math.
 - Aggregate `btcusdt@aggTrade` into one-second `binance_flow_1s` rows.
 - Aggregate `btcusdt@bookTicker` into one-second `binance_book_1s` rows.
 - Keep the historical five-minute open-interest summary aligned with its
   effective market window.
+- Keep `RAW_FUTURES_TRACE_ENABLED` independent of the public live and snapshot
+  source. Disabling raw capture must not disable connection identity,
+  pre-parse receive timing, Redis delivery, or normal flow aggregation.
 - Respect the stream flush-delay and raw-JSON settings in `Settings`.
+
+### High-Resolution Rollout Status
+
+- Phase 4 partition-boundary and retention validation was explicitly deferred
+  while Phase 5 proceeded. Do not claim it is complete or infer it from the
+  accelerated three-hour Phase 2/3 canaries.
+- Future-partition creation, expired-partition removal, configured 72-hour
+  retention, and sustained raw-relation budget enforcement remain unproven
+  production risks until Phase 4 is deliberately run and accepted.
+- Phase 5 changes the public futures last-price source only; it does not close
+  any of those raw-capture retention risks.
 
 ### Polymarket Probabilities
 

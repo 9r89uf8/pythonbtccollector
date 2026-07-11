@@ -292,12 +292,15 @@ and every acceptance check below passes. Three hours is enough for functional,
 queue, batch, session, and short-term resource validation, but it provides less
 confidence than the original 24-hour window. Continue background monitoring
 toward at least 24 uninterrupted hours after advancing to the next phase.
-A three-hour window may not cross a six-hour raw partition boundary; Phase 4's
-deliberate partition and retention checks therefore remain mandatory.
+A three-hour window may not cross a six-hour raw partition boundary. The
+deliberate Phase 4 checks that would close that evidence gap are now explicitly
+deferred and remain unproven technical debt.
 
-This is shadow evidence capture only. Keep Binance REST
-`/fapi/v2/ticker/price` as the Redis/API `futures.last` source, keep the existing
-one-second flow and book paths active, and do not enable Chainlink capture.
+This was the pre-cutover shadow-evidence checkpoint. It kept Binance REST
+`/fapi/v2/ticker/price` as the Redis/API `futures.last` source, kept the existing
+one-second flow and book paths active, and did not enable Chainlink capture.
+The REST assertions and measurements in this Phase 2 section remain historical
+evidence; they are not post-Phase 5 operating instructions.
 
 ### Deploy the code checkpoint disabled
 
@@ -974,7 +977,8 @@ of these are true after a continuous three-hour run:
   interarrival time, reconnects, and aggregate-trade ID continuity were
   reviewed; there are no unexplained gaps, duplicates, or regressions.
 - Existing flow and book completeness show no unexplained regression.
-- `btc:live:futures` and `/markets/current/live` remain healthy and REST-based.
+- For this pre-cutover Phase 2 gate, `btc:live:futures` and
+  `/markets/current/live` remain healthy and REST-based.
 
 Passing these checks authorizes the accelerated move to Phase 3; it does not
 make three hours equivalent to a full-day soak. Keep the futures collector
@@ -1037,10 +1041,11 @@ This rollout uses an explicitly risk-accepted three-hour accelerated canary.
 It validates short-term correctness, isolation, ordering, queueing, batching,
 and resource behavior, but has less confidence than a 24-hour soak for slow
 leaks, traffic variation, rare reconnects, and storage trends. Passing it
-authorizes Phase 4 while both collectors continue background monitoring toward
-at least 24 uninterrupted hours.
-A three-hour window may not cross a six-hour raw partition boundary; Phase 4's
-deliberate partition and retention checks are the required compensation.
+authorizes the separately gated Phase 5 source cutover while both collectors
+continue background monitoring toward at least 24 uninterrupted hours. The
+user explicitly deferred Phase 4 retention validation; automatic maintenance
+remains active, but its deliberate expired-partition and relation-pressure
+checks remain unproven technical debt.
 
 The Phase 3 code checkpoint may be deployed while the futures-only Phase 2
 canary is still running. Do **not** enable Chainlink raw capture until Phase 2
@@ -1851,8 +1856,8 @@ Both row counts should be positive. Across the two independent collector
 processes, the dedicated raw pools may use zero, one, or two connections as work
 and reconnects occur, but never more than two. The futures service activation
 timestamp and restart count must still match the pre-Phase 3 values, and its raw
-loss/failure state must remain clean. The public futures value remains REST
-based.
+loss/failure state must remain clean. During this pre-cutover Phase 3 evidence
+window, the public futures value was REST-based.
 
 Measure Chainlink rows per UTC hour and final storage use:
 
@@ -1911,18 +1916,21 @@ uninterrupted three-hour Chainlink run in which all of these are true:
   unexplained anomaly.
 - Settled raw provider seconds match normal `price_samples`; Redis/API Chainlink
   remains healthy and normal historical coverage has no unexplained regression.
-- Futures capture, flow/book behavior, REST live price, service uptime, and raw
-  counters remain healthy and unchanged by the Chainlink enablement.
+- Futures capture, flow/book behavior, the then-REST-backed live price, service
+  uptime, and raw counters remain healthy and unchanged by the Chainlink
+  enablement. This is pre-cutover Phase 3 evidence.
 - The two raw pools use no more than two database connections, and CPU, memory,
   rows/hour, batch latency, relation growth, total database size, and filesystem
   free space remain acceptable.
 
-Passing these checks authorizes the accelerated move to Phase 4; it does not
-make three hours equivalent to a full-day soak. Keep both capture flags enabled
-and continue ordinary counter, restart, resource, database-size, and filesystem
-monitoring until the collectors have accumulated at least 24 uninterrupted
-hours. Any later drop, failed batch, suspension, delivery failure, restart, or
-capacity pressure remains a canary failure and triggers the rollback below.
+Passing these checks after the fixed telemetry endpoint authorizes the
+separately supervised Phase 5 source cutover; it does not make three hours
+equivalent to a full-day soak or prove Phase 4 retention behavior. Keep both
+capture flags enabled and continue ordinary counter, restart, resource,
+database-size, and filesystem monitoring until the collectors have accumulated
+at least 24 uninterrupted hours. Any later drop, failed batch, suspension,
+delivery failure, restart, or capacity pressure remains a canary failure and
+triggers the rollback below.
 
 ### Phase 3 rollback
 
@@ -1980,6 +1988,400 @@ curl -fsS http://127.0.0.1:9000/markets/current/live
 
 Do not drop `raw_capture`; the futures process still uses it and retained
 Chainlink evidence may be needed to diagnose the failure.
+
+## Phase 4 Retention Validation - Deferred and Unproven
+
+Phase 4 was explicitly deferred on 2026-07-11. The 60-second automatic
+partition-maintenance worker remains active, and its counters, relation size,
+database size, and filesystem capacity must continue to be monitored. Healthy
+automatic runs do **not** prove the two destructive-policy branches that Phase 4
+was intended to test.
+
+Keep this open checklist as technical debt:
+
+1. Create deliberately expired test partitions.
+2. Run maintenance and prove that it drops whole partitions rather than rows.
+3. Prove that relation-size pressure drops the oldest completed futures and
+   Chainlink partition pair without touching the current interval.
+4. Prove that normal collection continues if retention maintenance fails.
+5. Recheck `df -h`, total database size, and raw relation size because the
+   relation budget does not bound WAL or total filesystem use.
+
+Until those checks are deliberately executed, describe retention as
+**automatic but unvalidated**, not complete. This deferral does not disable
+maintenance and does not authorize dropping the `raw_capture` schema.
+
+## Phase 5 Futures WebSocket Last-Price Cutover
+
+Phase 5 is a direct source cutover for the futures service only. The Phase 2 and
+Phase 3 statements that `/fapi/v2/ticker/price` supplied `futures.last` document
+the accepted pre-cutover state and remain useful baseline evidence.
+
+### Phase 5 behavior contract
+
+- `aggTrade.p` is the sole value for Redis/API `futures.last` and the snapshot
+  `futures_last_price`; `aggTrade.T` is the source timestamp.
+- Redis `received_ms` is the exact local wall-clock receive stamp captured
+  immediately after the WebSocket `recv()`, not a REST-poll or worker time.
+- The snapshot loop uses only a validated trade from the current WebSocket
+  connection whose local monotonic receive age is at most `STALE_PRICE_MS`.
+- If there is no accepted trade for the current connection, or the latest trade
+  is stale, the collector does not delete or overwrite `btc:live:futures`; its
+  API `source_age_ms` and `received_age_ms` increase naturally. The snapshot
+  still stores premium/index and open-interest data, with
+  `futures_last_price` and `futures_last_price_time_ms` set to `NULL`.
+- Futures REST remains limited to `/fapi/v1/premiumIndex`,
+  `/fapi/v1/openInterest`, and the existing
+  `/futures/data/openInterestHist` request. There is no ticker fallback and no
+  book-midpoint or microprice substitute for "last."
+- `BINANCE_FUTURES_STREAMS_ENABLED=true` is mandatory after this cutover. Keep
+  `RAW_FUTURES_TRACE_ENABLED=true` and `RAW_CHAINLINK_EVENTS_ENABLED=true`
+  unless a separate accepted raw-capture rollback requires otherwise.
+
+### Do not deploy before Phase 3 acceptance
+
+The fixed Phase 3 telemetry endpoint is `2026-07-11T20:29:53Z`. Do not pull or
+restart the futures service before that instant, and do not treat reaching the
+clock time alone as acceptance. Run all Phase 3 acceptance checks above first.
+The Chainlink process must still have the exact activation identity recorded at
+the start of this canary:
+
+```text
+MainPID=77219
+NRestarts=0
+ActiveEnterTimestamp=Sat 2026-07-11 17:27:53 UTC
+```
+
+Use this hard gate after the Phase 3 evidence queries have passed:
+
+```bash
+(
+set -e
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase3-canary-window.env)
+PHASE3_NOW_MS="$(date -u +%s%3N)"
+CHAINLINK_PID="$(systemctl show price-collector-polymarket-chainlink -p MainPID --value)"
+CHAINLINK_RESTARTS="$(systemctl show price-collector-polymarket-chainlink -p NRestarts --value)"
+CHAINLINK_ACTIVE="$(systemctl show price-collector-polymarket-chainlink -p ActiveEnterTimestamp --value)"
+FUTURES_PID="$(systemctl show price-collector-binance-futures -p MainPID --value)"
+FUTURES_RESTARTS="$(systemctl show price-collector-binance-futures -p NRestarts --value)"
+FUTURES_ACTIVE="$(systemctl show price-collector-binance-futures -p ActiveEnterTimestamp --value)"
+
+test "$PHASE3_NOW_MS" -ge "$PHASE3_TELEMETRY_END_MS"
+test "$PHASE3_START_MS" = "1783790873000"
+test "$PHASE3_END_MS" = "1783801673000"
+test "$PHASE3_TELEMETRY_END_MS" = "1783801793000"
+test "$CHAINLINK_PID" = "77219"
+test "$CHAINLINK_RESTARTS" = "0"
+test "$CHAINLINK_ACTIVE" = "Sat 2026-07-11 17:27:53 UTC"
+test "$FUTURES_PID" = "74081"
+test "$FUTURES_RESTARTS" = "0"
+test "$FUTURES_ACTIVE" = "Sat 2026-07-11 13:44:42 UTC"
+sudo systemctl is-active --quiet price-collector-polymarket-chainlink
+sudo systemctl is-active --quiet price-collector-binance-futures
+sudo systemctl show price-collector-binance-futures \
+  -p MainPID -p NRestarts -p ActiveEnterTimestamp
+printf 'Phase 3 identity/time gate passed; complete the acceptance checklist before Phase 5.\n'
+)
+```
+
+Any failed `test` stops this command block with a nonzero status. A changed
+Chainlink PID, restart count, or activation timestamp invalidates this fixed
+window; repeat Phase 3 rather than deploying Phase 5. The unchanged futures
+PID/restart evidence must also satisfy the Phase 3 checklist.
+
+### Deploy and record the cutover
+
+Run this only after the Phase 5 change is pushed to GitHub and the preceding
+gate and full Phase 3 acceptance both pass. This checkpoint changes futures
+runtime code only: it has no schema or systemd-unit step. It installs the locked
+requirements as usual, records the exact before/after Git commits and UTC
+cutover instant, and restarts **only** `price-collector-binance-futures`.
+
+```bash
+(
+set -e
+cd /opt/price-collector
+PHASE5_PREVIOUS_COMMIT="$(sudo -u pricecollector git rev-parse HEAD)"
+sudo -u pricecollector git pull --ff-only
+PHASE5_COMMIT="$(sudo -u pricecollector git rev-parse HEAD)"
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+
+if grep -R -n --include='*.py' --fixed-strings '/fapi/v2/ticker/price' price_collector; then
+  printf 'Refusing Phase 5: the removed REST ticker endpoint is still present.\n' >&2
+  exit 1
+fi
+
+for expected in \
+  'BINANCE_FUTURES_STREAMS_ENABLED=true' \
+  'RAW_FUTURES_TRACE_ENABLED=true' \
+  'RAW_CHAINLINK_EVENTS_ENABLED=true'; do
+  sudo grep -Fqx "$expected" /etc/price-collector/collector.env
+done
+sudo grep -E '^(BINANCE_FUTURES_STREAMS_ENABLED|RAW_FUTURES_TRACE_ENABLED|RAW_CHAINLINK_EVENTS_ENABLED|STALE_PRICE_MS)=' /etc/price-collector/collector.env
+redis-cli -h 127.0.0.1 GET btc:live:futures
+
+PHASE5_CUTOVER_MS="$(date -u +%s%3N)"
+PHASE5_CUTOVER_UTC="$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')"
+PHASE5_FILE=/var/lib/price-collector/phase5-cutover.env
+{
+  printf 'PHASE5_PREVIOUS_COMMIT=%s\n' "$PHASE5_PREVIOUS_COMMIT"
+  printf 'PHASE5_COMMIT=%s\n' "$PHASE5_COMMIT"
+  printf 'PHASE5_CUTOVER_MS=%s\n' "$PHASE5_CUTOVER_MS"
+  printf 'PHASE5_CUTOVER_UTC=%s\n' "$PHASE5_CUTOVER_UTC"
+} | sudo -u pricecollector tee "$PHASE5_FILE" >/dev/null
+sudo -u pricecollector chmod 600 "$PHASE5_FILE"
+
+sudo systemctl restart price-collector-binance-futures
+PHASE5_MAIN_PID="$(systemctl show price-collector-binance-futures -p MainPID --value)"
+PHASE5_ACTIVE="$(systemctl show price-collector-binance-futures -p ActiveEnterTimestamp --value)"
+{
+  printf 'PHASE5_MAIN_PID=%s\n' "$PHASE5_MAIN_PID"
+  printf 'PHASE5_ACTIVE=%q\n' "$PHASE5_ACTIVE"
+} | sudo -u pricecollector tee -a "$PHASE5_FILE" >/dev/null
+
+sudo -u pricecollector cat "$PHASE5_FILE"
+sudo systemctl status price-collector-binance-futures --no-pager
+sudo systemctl show price-collector-binance-futures \
+  -p MainPID -p Result -p NRestarts -p ActiveEnterTimestamp
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE5_CUTOVER_UTC" -n 100 --no-pager
+curl -fsS http://127.0.0.1:9000/healthz
+curl -fsS http://127.0.0.1:9000/markets/current/live
+)
+```
+
+`STALE_PRICE_MS` may be absent from the environment file; in that case its code
+default is `10000`. The other three displayed flags must all be `true`. Do not
+restart Chainlink, the API, Redis, or any other collector for this checkpoint.
+
+The terminated pre-Phase 5 futures process can emit the already-known
+`asyncio.CancelledError` and exit-status-1 shutdown record during this one
+restart because it is still running the old code. Judge the cutover by the new
+PID and service state. Phase 5 handles cancellation as a clean exit, so that
+legacy shutdown record must not recur on later restarts of the new build.
+
+### Supervise the first 15 minutes
+
+Keep one terminal on the following bounded loop. It confirms that the original
+Phase 5 process remains active and prints the public futures value and both age
+fields once per minute. The values and `aggTrade.T` source timestamp should
+continue advancing, and the receive age should normally remain small during an
+active BTC market:
+
+```bash
+(
+set -e
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase5-cutover.env)
+for minute in $(seq 1 16); do
+  printf '\nminute=%s at=%s\n' "$minute" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  test "$(systemctl show price-collector-binance-futures -p MainPID --value)" = "$PHASE5_MAIN_PID"
+  test "$(systemctl show price-collector-binance-futures -p NRestarts --value)" = "0"
+  sudo systemctl is-active --quiet price-collector-binance-futures
+  curl -fsS http://127.0.0.1:9000/markets/current/live | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+print(json.dumps(payload["futures"]["last"], indent=2))
+'
+  if [ "$minute" -lt 16 ]; then sleep 60; fi
+done
+)
+```
+
+After at least one 60-second telemetry interval, inspect only the Phase 5
+window. The final summary should show an advancing live delivery/attempted
+sequence, increasing successes, zero live failures, a current WS trade, and no
+new unexplained ID gap, duplicate, regression, raw drop, failed batch, or
+storage-suspension counters:
+
+```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase5-cutover.env)
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE5_CUTOVER_UTC" -o cat --no-pager \
+  | grep '"event": "raw_capture_summary"' \
+  | tail -n 3
+
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE5_CUTOVER_UTC" -o cat --no-pager \
+  | grep '"event": "raw_capture_summary"' \
+  | tail -n 1 \
+  | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+keys = (
+    "futures_live_delivery_sequence",
+    "futures_live_attempted_sequence",
+    "futures_live_successes_total",
+    "futures_live_failures_total",
+    "shadow_ws_current_for_connection",
+    "shadow_ws_id_gap_events_total",
+    "shadow_ws_duplicate_ids_total",
+    "shadow_ws_regressions_total",
+    "records_dropped_total",
+    "batches_failed_total",
+    "capture_suspended",
+    "queue_depth",
+)
+print(json.dumps({key: row.get(key) for key in keys}, indent=2))
+'
+```
+
+Check snapshot, flow, book, and raw-trace progress since the recorded cutover.
+An isolated `NULL` futures last during startup, reconnect, or a proven stale
+period is the intended safe behavior; investigate repeated `NULL` values during
+an otherwise active current WebSocket connection. The latest normal snapshot
+should have non-null last-price/time, premium/index, and open-interest fields:
+
+```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase5-cutover.env)
+sudo -u postgres psql -d price_collector -v cutover_ms="$PHASE5_CUTOVER_MS" -c "
+SELECT
+    count(*) AS snapshots,
+    count(*) FILTER (WHERE futures_last_price IS NULL) AS null_last_snapshots,
+    max(sample_second_at) AS latest_snapshot
+FROM binance_futures_snapshots
+WHERE received_ms >= :'cutover_ms'::bigint;
+
+SELECT
+    sample_second_at,
+    futures_last_price,
+    futures_last_price_time_ms,
+    mark_price,
+    index_price,
+    open_interest,
+    received_ms
+FROM binance_futures_snapshots
+ORDER BY sample_second_ms DESC
+LIMIT 5;
+
+SELECT 'flow' AS dataset, count(*) AS rows, max(sample_second_at) AS latest_sample
+FROM binance_flow_1s
+WHERE received_ms >= :'cutover_ms'::bigint
+UNION ALL
+SELECT 'book', count(*), max(sample_second_at)
+FROM binance_book_1s
+WHERE received_ms >= :'cutover_ms'::bigint;
+
+SELECT
+    count(*) AS historical_oi_rows,
+    max(binance_timestamp_ms) AS latest_binance_oi_timestamp_ms,
+    max(received_ms) AS latest_historical_oi_received_ms
+FROM binance_futures_oi_5m_summaries
+WHERE received_ms >= :'cutover_ms'::bigint;
+
+SELECT
+    count(*) AS trace_rows,
+    max(last_received_wall_ns) AS latest_trace_received_wall_ns
+FROM raw_capture.binance_futures_price_trace_100ms
+WHERE last_received_wall_ns >= :'cutover_ms'::bigint * 1000000;
+"
+```
+
+Finally, scan a bounded journal and confirm the Chainlink canary service was not
+restarted by this rollout:
+
+```bash
+(
+set -e
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase5-cutover.env)
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE5_CUTOVER_UTC" --no-pager \
+  | grep -E 'live_cache_write_failed|binance_futures_(live_worker_failed|snapshot_failed|flow_flush_failed|book_flush_failed|historical_oi_failed|raw_capture_.*failed)|raw_capture_(summary_failed|queue_oldest_dropped|batch_group_failed|background_task_failed|maintenance_failed|suspended_by_storage_budget)' || true
+sudo systemctl show price-collector-binance-futures \
+  -p MainPID -p Result -p NRestarts -p ActiveEnterTimestamp -p MemoryCurrent -p CPUUsageNSec
+test "$(systemctl show price-collector-polymarket-chainlink -p MainPID --value)" = "77219"
+test "$(systemctl show price-collector-polymarket-chainlink -p NRestarts --value)" = "0"
+test "$(systemctl show price-collector-polymarket-chainlink -p ActiveEnterTimestamp --value)" = "Sat 2026-07-11 17:27:53 UTC"
+sudo systemctl show price-collector-polymarket-chainlink \
+  -p MainPID -p Result -p NRestarts -p ActiveEnterTimestamp
+curl -fsS http://127.0.0.1:9000/healthz
+redis-cli -h 127.0.0.1 GET btc:live:futures
+redis-cli -h 127.0.0.1 GET btc:live:chainlink
+sudo -u postgres psql -d price_collector -v cutover_ms="$PHASE5_CUTOVER_MS" -c "
+SELECT
+    count(*) AS chainlink_raw_rows_since_cutover,
+    max(received_wall_ns) AS latest_chainlink_raw_received_wall_ns
+FROM raw_capture.chainlink_price_events
+WHERE received_wall_ns >= :'cutover_ms'::bigint * 1000000;
+
+SELECT
+    count(*) AS chainlink_samples_since_cutover,
+    max(ps.sample_second_at) AS latest_chainlink_sample
+FROM price_samples ps
+JOIN instruments i ON i.instrument_id = ps.instrument_id
+JOIN providers p ON p.provider_id = i.provider_id
+WHERE p.provider_code = 'polymarket_chainlink_rtds'
+  AND i.symbol = 'BTCUSD'
+  AND ps.received_ms >= :'cutover_ms'::bigint;
+"
+)
+```
+
+Investigate every matching failure line. A transient REST timeout does not
+change the source back to REST, but repeated premium/open-interest failures or
+a stalled snapshot path fail the supervised check.
+
+### Phase 5 acceptance
+
+Accept the source cutover only when all of these are true for at least 15
+continuous minutes:
+
+- The futures PID remains `PHASE5_MAIN_PID`, `NRestarts=0`, and the service and
+  API remain healthy.
+- Redis/API futures value, `aggTrade.T` source timestamp, and exact local
+  receive timestamp advance; both age fields normally remain fresh.
+- Live-delivery successes advance with zero live-delivery failures, and the
+  current connection has a fresh accepted trade.
+- The deployed Python source contains no `/fapi/v2/ticker/price` call and there
+  is no REST or book-derived fallback.
+- Snapshots, flow, book, historical five-minute open interest, and raw futures
+  trace continue advancing. Any null-last snapshot is explained by startup,
+  reconnect, or `STALE_PRICE_MS` behavior.
+- Raw drops, failed batches, capture suspension, unexplained stream integrity
+  counters, and repeated REST/snapshot failures remain zero.
+- The Chainlink PID, restart count, live/history output, and raw capture remain
+  unchanged by the futures-only restart.
+
+Record the retained `/var/lib/price-collector/phase5-cutover.env` file with the
+acceptance evidence. Phase 4 remains deferred and unproven.
+
+### Phase 5 Git-revert rollback
+
+If futures live data stalls, receipt/source times are wrong, snapshot/flow/book
+collection regresses, or any sole-source invariant fails, do not reintroduce a
+runtime REST fallback by editing production. Create a Git revert of the exact
+Phase 5 commit (or commit range) and push it. On the development checkout,
+first compare the intended commit with `PHASE5_COMMIT` recorded on the droplet.
+If Phase 5 was the single latest commit:
+
+```bash
+git pull --ff-only
+git log -1 --oneline
+git revert --no-edit HEAD
+git push
+```
+
+If the recorded deployment contained multiple Phase 5 commits, revert the
+complete `PHASE5_PREVIOUS_COMMIT..PHASE5_COMMIT` range instead and push the
+resulting revert commit(s). After the revert is on GitHub, run this on the
+droplet; restart only futures:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo systemctl restart price-collector-binance-futures
+sudo systemctl status price-collector-binance-futures --no-pager
+sudo systemctl show price-collector-binance-futures \
+  -p MainPID -p Result -p NRestarts -p ActiveEnterTimestamp
+sudo journalctl -u price-collector-binance-futures -n 100 --no-pager
+curl -fsS http://127.0.0.1:9000/healthz
+curl -fsS http://127.0.0.1:9000/markets/current/live
+redis-cli -h 127.0.0.1 GET btc:live:futures
+```
+
+The revert restores the accepted pre-cutover REST behavior. It does not require
+a schema change and must not restart Chainlink or disable either raw-capture
+flag unless a separate raw-capture failure justifies that action.
 
 ## Redis Spot Checks
 

@@ -292,8 +292,9 @@ async def run_reader_until_flow(
     websocket,
     flow_store,
     raw=None,
-    shadow=None,
+    trade_state=None,
 ):
+    trade_state = trade_state or streams.FuturesTradeState()
     flow_store.reached_target = asyncio.Event()
     monkeypatch.setattr(
         streams.websockets,
@@ -304,8 +305,8 @@ async def run_reader_until_flow(
         streams.futures_agg_trade_reader_loop(
             stream_settings(),
             flow_store,
+            trade_state=trade_state,
             raw_capture=raw,
-            shadow_monitor=shadow,
         )
     )
     await asyncio.wait_for(flow_store.reached_target.wait(), timeout=1)
@@ -330,35 +331,47 @@ def install_capture_clocks(monkeypatch):
     monkeypatch.setattr(streams.time, "monotonic_ns", next_monotonic_ns)
 
 
-def test_futures_shadow_monitor_tracks_decimal_comparison_gaps_and_clock_skew():
-    monitor = streams.FuturesShadowMonitor()
+def test_futures_trade_state_tracks_gaps_duplicates_regressions_and_freshness():
+    state = streams.FuturesTradeState()
     first_connection = UUID("11111111-1111-1111-1111-111111111111")
     second_connection = UUID("22222222-2222-2222-2222-222222222222")
-    monitor.observe_rest(Decimal("99"), 1_783_459_500_150, 1_783_459_500_160)
-    monitor.connection_opened(first_connection)
+    state.connection_opened(first_connection)
     first = streams.parse_binance_futures_agg_trade_payload(
         agg_trade_payload(a=10, p="100", T=1_783_459_500_100),
         expected_symbol="BTCUSDT",
     )
-    monitor.update_ws(
+    first_item = state.update_ws(
         first,
         raw_capture.ReceiveStamp(
             connection_id=first_connection,
             receive_sequence=1,
             received_wall_ns=1_783_459_500_120_000_000,
-            received_monotonic_ns=100,
+            received_monotonic_ns=1_000_000_000,
         ),
     )
-    monitor.observe_rest(Decimal("99"), 1_783_459_500_150, 1_783_459_500_160)
-    monitor.connection_closed(first_connection)
-    monitor.observe_rest(Decimal("99"), 1_783_459_500_175, 1_783_459_500_180)
-    assert (
-        monitor.telemetry_fields(1_783_459_500_180)[
-            "shadow_ws_current_for_connection"
-        ]
-        is False
-    )
-    monitor.connection_opened(second_connection)
+    assert first_item is not None
+    assert first_item.sequence == 1
+    assert state.fresh_current(
+        now_monotonic_ns=11_000_000_000,
+        stale_after_ms=10_000,
+    ) == first_item
+    assert state.fresh_current(
+        now_monotonic_ns=11_001_000_000,
+        stale_after_ms=10_000,
+    ) is None
+
+    state.connection_closed(first_connection)
+    assert state.fresh_current(
+        now_monotonic_ns=1_000_000_001,
+        stale_after_ms=10_000,
+    ) is None
+
+    state.connection_opened(second_connection)
+    assert state.fresh_current(
+        now_monotonic_ns=1_000_000_001,
+        stale_after_ms=10_000,
+    ) is None
+
     gap = streams.parse_binance_futures_agg_trade_payload(
         agg_trade_payload(a=12, p="103", T=1_783_459_500_200),
         expected_symbol="BTCUSDT",
@@ -367,49 +380,176 @@ def test_futures_shadow_monitor_tracks_decimal_comparison_gaps_and_clock_skew():
         connection_id=second_connection,
         receive_sequence=1,
         received_wall_ns=1_783_459_500_220_000_000,
-        received_monotonic_ns=200,
+        received_monotonic_ns=1_100_000_000,
     )
-    monitor.update_ws(gap, gap_stamp)
-    monitor.update_ws(gap, gap_stamp)
-    monitor.update_ws(
+    gap_item = state.update_ws(gap, gap_stamp)
+    assert gap_item is not None
+    assert gap_item.sequence == 2
+    assert state.update_ws(gap, gap_stamp) is None
+    assert state.update_ws(
         streams.parse_binance_futures_agg_trade_payload(
-            agg_trade_payload(a=11, p="200"),
+            agg_trade_payload(a=11, p="200", T=1_783_459_500_190),
             expected_symbol="BTCUSDT",
         ),
         raw_capture.ReceiveStamp(
             connection_id=second_connection,
             receive_sequence=2,
             received_wall_ns=1_783_459_500_230_000_000,
-            received_monotonic_ns=210,
+            received_monotonic_ns=1_110_000_000,
         ),
+    ) is None
+
+    current = state.fresh_current(
+        now_monotonic_ns=1_100_000_001,
+        stale_after_ms=10_000,
     )
-
-    fields = monitor.telemetry_fields(now_ms=1_783_459_500_190)
-
+    assert current == gap_item
+    assert current.trade.price == Decimal("103")
+    fields = state.telemetry_fields(now_ms=1_783_459_500_190)
     assert fields["shadow_reconnects_total"] == 1
     assert fields["shadow_ws_id_gap_events_total"] == 1
     assert fields["shadow_ws_missing_agg_trades_total"] == 1
     assert fields["shadow_ws_duplicate_ids_total"] == 1
     assert fields["shadow_ws_regressions_total"] == 1
-    assert fields["shadow_rest_observations_total"] == 3
-    assert fields["shadow_rest_missing_ws_total"] == 2
-    assert fields["shadow_rest_comparisons_total"] == 1
     assert fields["shadow_ws_current_for_connection"] is True
     assert fields["shadow_ws_price"] == Decimal("103")
-    assert fields["shadow_ws_minus_rest_price"] == Decimal("4")
-    assert fields["shadow_ws_minus_rest_bps"] == Decimal("4") / Decimal("99") * Decimal("10000")
-    assert isinstance(fields["shadow_ws_minus_rest_price"], Decimal)
-    assert fields["shadow_ws_source_age_ms"] == -10
-    assert fields["shadow_ws_minus_rest_source_time_ms"] == 25
+    assert fields["futures_live_delivery_sequence"] == 2
 
 
-def test_disabled_reader_stamps_wall_before_parse_without_raw_uuid_or_monotonic(
+def test_futures_trade_state_live_attempt_barrier_advances_on_failure():
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("33333333-3333-3333-3333-333333333333")
+        state.connection_opened(connection_id)
+        item = state.update_ws(
+            streams.parse_binance_futures_agg_trade_payload(
+                agg_trade_payload(a=10),
+                expected_symbol="BTCUSDT",
+            ),
+            raw_capture.ReceiveStamp(
+                connection_id=connection_id,
+                receive_sequence=1,
+                received_wall_ns=1_783_459_500_220_000_000,
+                received_monotonic_ns=1_100_000_000,
+            ),
+        )
+        assert item is not None
+
+        waiter = asyncio.create_task(state.wait_until_live_attempted(item.sequence))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        state.mark_live_attempted(
+            item,
+            succeeded=False,
+            attempted_ms=1_783_459_500_300,
+        )
+        assert await asyncio.wait_for(waiter, timeout=0.5) == item
+
+        fields = state.telemetry_fields(now_ms=1_783_459_500_400)
+        assert fields["futures_live_attempted_sequence"] == item.sequence
+        assert fields["futures_live_attempts_total"] == 1
+        assert fields["futures_live_successes_total"] == 0
+        assert fields["futures_live_failures_total"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_futures_trade_state_wait_for_latest_collapses_to_newest_version():
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("44444444-4444-4444-4444-444444444444")
+        state.connection_opened(connection_id)
+        for receive_sequence, trade_id, price in (
+            (1, 10, "100"),
+            (2, 11, "101"),
+        ):
+            state.update_ws(
+                streams.parse_binance_futures_agg_trade_payload(
+                    agg_trade_payload(
+                        a=trade_id,
+                        p=price,
+                        f=100 + receive_sequence,
+                        l=100 + receive_sequence,
+                        T=1_783_459_500_100 + receive_sequence,
+                    ),
+                    expected_symbol="BTCUSDT",
+                ),
+                raw_capture.ReceiveStamp(
+                    connection_id=connection_id,
+                    receive_sequence=receive_sequence,
+                    received_wall_ns=(
+                        1_783_459_500_220_000_000 + receive_sequence
+                    ),
+                    received_monotonic_ns=1_100_000_000 + receive_sequence,
+                ),
+            )
+
+        latest = await state.wait_for_latest_after(0)
+        assert latest.sequence == 2
+        assert latest.trade.price == Decimal("101")
+
+    asyncio.run(scenario())
+
+
+def test_futures_trade_state_barrier_returns_newer_attempted_version():
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("55555555-5555-5555-5555-555555555555")
+        state.connection_opened(connection_id)
+        first = state.update_ws(
+            streams.parse_binance_futures_agg_trade_payload(
+                agg_trade_payload(a=10, T=1_783_459_500_100),
+                expected_symbol="BTCUSDT",
+            ),
+            raw_capture.ReceiveStamp(
+                connection_id=connection_id,
+                receive_sequence=1,
+                received_wall_ns=1_783_459_500_120_000_000,
+                received_monotonic_ns=1_000_000_000,
+            ),
+        )
+        second = state.update_ws(
+            streams.parse_binance_futures_agg_trade_payload(
+                agg_trade_payload(a=11, p="101", T=1_783_459_500_200),
+                expected_symbol="BTCUSDT",
+            ),
+            raw_capture.ReceiveStamp(
+                connection_id=connection_id,
+                receive_sequence=2,
+                received_wall_ns=1_783_459_500_220_000_000,
+                received_monotonic_ns=1_100_000_000,
+            ),
+        )
+        assert first is not None and second is not None
+        state.mark_live_attempted(
+            second,
+            succeeded=True,
+            attempted_ms=1_783_459_500_300,
+        )
+
+        assert await state.wait_until_live_attempted(first.sequence) == second
+
+    asyncio.run(scenario())
+
+
+def test_reader_stamps_receive_clocks_before_parse_and_updates_state_without_raw(
     monkeypatch,
 ):
     events = []
     websocket = ScriptedWebSocket([json.dumps(agg_trade_payload())], events=events)
-    flow_store = RecordingFlowStore()
+    state = streams.FuturesTradeState()
     original_loads = json.loads
+    connection_id = UUID("55555555-5555-5555-5555-555555555555")
+
+    class StateCheckingFlowStore(RecordingFlowStore):
+        async def add_trade(self, trade, *, received_ms):
+            fields = state.telemetry_fields(now_ms=received_ms)
+            assert fields["futures_live_delivery_sequence"] == 1
+            assert fields["shadow_ws_price"] == trade.price
+            events.append("flow")
+            return await super().add_trade(trade, received_ms=received_ms)
+
+    flow_store = StateCheckingFlowStore()
 
     def parse_after_stamp(value):
         events.append("parse")
@@ -419,30 +559,59 @@ def test_disabled_reader_stamps_wall_before_parse_without_raw_uuid_or_monotonic(
         events.append("wall")
         return 1_783_459_500_222_000_000
 
+    def monotonic_stamp():
+        events.append("monotonic")
+        return 1_100_000_000
+
     monkeypatch.setattr(streams.json, "loads", parse_after_stamp)
     monkeypatch.setattr(streams.time, "time_ns", wall_stamp)
-    monkeypatch.setattr(
-        streams.time,
-        "monotonic_ns",
-        lambda: (_ for _ in ()).throw(AssertionError("disabled monotonic_ns")),
-    )
-    monkeypatch.setattr(
-        streams,
-        "uuid4",
-        lambda: (_ for _ in ()).throw(AssertionError("disabled uuid4")),
-    )
+    monkeypatch.setattr(streams.time, "monotonic_ns", monotonic_stamp)
+    monkeypatch.setattr(streams, "uuid4", lambda: connection_id)
 
     asyncio.run(
         run_reader_until_flow(
             monkeypatch,
             websocket=websocket,
             flow_store=flow_store,
+            trade_state=state,
         )
     )
 
     receive_index = events.index("recv")
-    assert events[receive_index : receive_index + 3] == ["recv", "wall", "parse"]
+    assert events[receive_index : receive_index + 4] == [
+        "recv",
+        "wall",
+        "monotonic",
+        "parse",
+    ]
+    assert events.index("parse") < events.index("flow")
     assert flow_store.calls[0][1] == 1_783_459_500_222
+    fields = state.telemetry_fields(now_ms=1_783_459_500_223)
+    assert fields["shadow_ws_price"] == Decimal("100.00")
+    assert fields["shadow_ws_trade_time_ms"] == 1_783_459_500_100
+    assert fields["shadow_ws_received_ms"] == 1_783_459_500_222
+
+
+def test_reader_rejects_non_current_connection_state_after_shutdown(monkeypatch):
+    state = streams.FuturesTradeState()
+    websocket = ScriptedWebSocket([json.dumps(agg_trade_payload())])
+    flow_store = RecordingFlowStore()
+    install_capture_clocks(monkeypatch)
+
+    asyncio.run(
+        run_reader_until_flow(
+            monkeypatch,
+            websocket=websocket,
+            flow_store=flow_store,
+            trade_state=state,
+        )
+    )
+
+    assert state.current_connection_id is None
+    assert state.fresh_current(
+        now_monotonic_ns=1_020_000_001,
+        stale_after_ms=10_000,
+    ) is None
 
 
 def test_raw_capture_coalesces_and_finalizes_session_on_cancellation(monkeypatch):
@@ -462,7 +631,7 @@ def test_raw_capture_coalesces_and_finalizes_session_on_cancellation(monkeypatch
             websocket=websocket,
             flow_store=flow_store,
             raw=raw,
-            shadow=streams.FuturesShadowMonitor(),
+            trade_state=streams.FuturesTradeState(),
         )
     )
 
@@ -587,6 +756,7 @@ def test_idle_timeout_seals_pending_trace_before_connection_closes(monkeypatch):
             streams.futures_agg_trade_reader_loop(
                 stream_settings(),
                 flow_store,
+                trade_state=streams.FuturesTradeState(),
                 raw_capture=raw,
             )
         )
@@ -607,6 +777,7 @@ def test_malformed_message_updates_parse_counters_and_valid_trade_still_flows(
     websocket = ScriptedWebSocket(["[]", json.dumps(agg_trade_payload())])
     flow_store = RecordingFlowStore()
     raw = RecordingRawCapture()
+    trade_state = streams.FuturesTradeState()
 
     asyncio.run(
         run_reader_until_flow(
@@ -614,6 +785,7 @@ def test_malformed_message_updates_parse_counters_and_valid_trade_still_flows(
             websocket=websocket,
             flow_store=flow_store,
             raw=raw,
+            trade_state=trade_state,
         )
     )
 
@@ -628,9 +800,15 @@ def test_malformed_message_updates_parse_counters_and_valid_trade_still_flows(
     assert closed.parse_errors_total == 1
     assert raw.counters.parse_errors_total == 1
     assert len(flow_store.calls) == 1
+    assert (
+        trade_state.telemetry_fields(1_783_459_501_000)[
+            "futures_live_delivery_sequence"
+        ]
+        == 1
+    )
 
 
-def test_raw_offer_failure_does_not_block_shadow_or_flow(monkeypatch):
+def test_raw_offer_failure_does_not_block_trade_state_or_flow(monkeypatch):
     wall_ns = [1_783_459_500_000_000_000]
     monotonic_ns = [1_000_000_000]
 
@@ -652,7 +830,7 @@ def test_raw_offer_failure_does_not_block_shadow_or_flow(monkeypatch):
     )
     flow_store = RecordingFlowStore(target_count=2)
     raw = RecordingRawCapture(fail_traces=True)
-    shadow = streams.FuturesShadowMonitor()
+    trade_state = streams.FuturesTradeState()
 
     asyncio.run(
         run_reader_until_flow(
@@ -660,12 +838,15 @@ def test_raw_offer_failure_does_not_block_shadow_or_flow(monkeypatch):
             websocket=websocket,
             flow_store=flow_store,
             raw=raw,
-            shadow=shadow,
+            trade_state=trade_state,
         )
     )
 
     assert len(flow_store.calls) == 2
-    assert shadow.telemetry_fields(1_783_459_501_000)["shadow_ws_price"] == Decimal("102")
+    assert (
+        trade_state.telemetry_fields(1_783_459_501_000)["shadow_ws_price"]
+        == Decimal("102")
+    )
     assert raw.counters.records_dropped_total == 2
 
 
@@ -677,9 +858,9 @@ def test_raw_capture_telemetry_logs_required_summary_fields(
     raw.buffer = SimpleNamespace(qsize=lambda: 0)
     raw.counters.message_received()
     raw.counters.message_accepted()
-    monitor = streams.FuturesShadowMonitor()
+    trade_state = streams.FuturesTradeState()
     connection_id = UUID("33333333-3333-3333-3333-333333333333")
-    monitor.connection_opened(connection_id)
+    trade_state.connection_opened(connection_id)
     sleep_calls = 0
 
     async def one_interval_then_cancel(_seconds):
@@ -695,7 +876,7 @@ def test_raw_capture_telemetry_logs_required_summary_fields(
         asyncio.run(
             streams.futures_raw_capture_telemetry_loop(
                 raw_capture=raw,
-                shadow_monitor=monitor,
+                trade_state=trade_state,
                 interval_seconds=60,
             )
         )
@@ -722,5 +903,11 @@ def test_raw_capture_telemetry_logs_required_summary_fields(
         "last_batch_duration_ms",
         "current_partition",
         "raw_table_bytes",
+        "futures_live_delivery_sequence",
+        "futures_live_attempted_sequence",
+        "futures_live_attempts_total",
+        "futures_live_successes_total",
+        "futures_live_failures_total",
+        "futures_live_last_attempt_ms",
     ):
         assert hasattr(summary, field_name)

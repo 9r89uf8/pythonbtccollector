@@ -60,8 +60,15 @@ class BinanceAggTrade:
         return self.last_trade_id - self.first_trade_id + 1
 
 
-class FuturesShadowMonitor:
-    """In-memory REST-versus-WebSocket diagnostics for the futures canary."""
+@dataclass(frozen=True)
+class SequencedFuturesTrade:
+    sequence: int
+    trade: BinanceAggTrade
+    stamp: ReceiveStamp
+
+
+class FuturesTradeState:
+    """Single-event-loop state for the validated futures last-price feed."""
 
     def __init__(self) -> None:
         self._current_connection_id: Optional[UUID] = None
@@ -79,16 +86,16 @@ class FuturesShadowMonitor:
         self._last_observed_monotonic_ns: Optional[int] = None
         self._latest_ws_trade: Optional[BinanceAggTrade] = None
         self._latest_ws_stamp: Optional[ReceiveStamp] = None
-        self._rest_observations_total = 0
-        self._rest_comparisons_total = 0
-        self._rest_missing_ws_total = 0
-        self._rest_price: Optional[Decimal] = None
-        self._rest_source_timestamp_ms: Optional[int] = None
-        self._rest_received_ms: Optional[int] = None
-        self._ws_minus_rest_price: Optional[Decimal] = None
-        self._ws_minus_rest_bps: Optional[Decimal] = None
-        self._max_abs_ws_minus_rest_price: Optional[Decimal] = None
-        self._max_abs_ws_minus_rest_bps: Optional[Decimal] = None
+        self._sequence = 0
+        self._latest: Optional[SequencedFuturesTrade] = None
+        self._latest_event: Optional[asyncio.Event] = None
+        self._live_attempted_sequence = 0
+        self._live_attempted_item: Optional[SequencedFuturesTrade] = None
+        self._live_attempted_event: Optional[asyncio.Event] = None
+        self._live_attempts_total = 0
+        self._live_successes_total = 0
+        self._live_failures_total = 0
+        self._last_live_attempt_ms: Optional[int] = None
 
     @property
     def current_connection_id(self) -> Optional[UUID]:
@@ -117,7 +124,11 @@ class FuturesShadowMonitor:
             and self._latest_ws_stamp.connection_id == self._current_connection_id
         )
 
-    def update_ws(self, trade: BinanceAggTrade, stamp: ReceiveStamp) -> None:
+    def update_ws(
+        self,
+        trade: BinanceAggTrade,
+        stamp: ReceiveStamp,
+    ) -> Optional[SequencedFuturesTrade]:
         if not isinstance(trade, BinanceAggTrade):
             raise TypeError("trade must be BinanceAggTrade")
         if not isinstance(stamp, ReceiveStamp):
@@ -143,71 +154,131 @@ class FuturesShadowMonitor:
             id_delta = trade.agg_trade_id - previous_trade.agg_trade_id
             if id_delta == 0:
                 self._ws_duplicate_ids_total += 1
-                return
-            if id_delta < 0:
+                return None
+            if id_delta < 0 or trade.trade_time_ms < previous_trade.trade_time_ms:
                 self._ws_regressions_total += 1
-                return
+                return None
             if id_delta > 1:
                 self._ws_id_gap_events_total += 1
                 self._ws_missing_agg_trades_total += id_delta - 1
 
         self._latest_ws_trade = trade
         self._latest_ws_stamp = stamp
-        self._update_comparison()
+        self._sequence += 1
+        item = SequencedFuturesTrade(
+            sequence=self._sequence,
+            trade=trade,
+            stamp=stamp,
+        )
+        self._latest = item
+        if self._latest_event is not None:
+            self._latest_event.set()
+        return item
 
-    def observe_rest(
+    def fresh_current(
         self,
-        price: Optional[Decimal],
-        source_timestamp_ms: Optional[int],
-        received_ms: int,
-    ) -> None:
-        if price is not None and not isinstance(price, Decimal):
-            raise TypeError("REST futures price must be Decimal or None")
-        if source_timestamp_ms is not None and (
-            isinstance(source_timestamp_ms, bool)
-            or not isinstance(source_timestamp_ms, int)
+        *,
+        now_monotonic_ns: int,
+        stale_after_ms: int,
+    ) -> Optional[SequencedFuturesTrade]:
+        item = self._latest
+        if item is None or not self.is_fresh_current_item(
+            item,
+            now_monotonic_ns=now_monotonic_ns,
+            stale_after_ms=stale_after_ms,
         ):
-            raise TypeError("REST source timestamp must be an integer or None")
-        if isinstance(received_ms, bool) or not isinstance(received_ms, int):
-            raise TypeError("REST received_ms must be an integer")
-        self._rest_observations_total += 1
-        if not self._has_current_ws_trade():
-            self._rest_missing_ws_total += 1
-        elif price is not None:
-            self._rest_comparisons_total += 1
-        self._rest_price = price
-        self._rest_source_timestamp_ms = source_timestamp_ms
-        self._rest_received_ms = received_ms
-        self._update_comparison()
+            return None
+        return item
 
-    def _update_comparison(self) -> None:
-        trade = self._latest_ws_trade
-        rest_price = self._rest_price
-        if trade is None or rest_price is None:
-            self._ws_minus_rest_price = None
-            self._ws_minus_rest_bps = None
-            return
+    def is_fresh_current_item(
+        self,
+        item: SequencedFuturesTrade,
+        *,
+        now_monotonic_ns: int,
+        stale_after_ms: int,
+    ) -> bool:
+        if not isinstance(item, SequencedFuturesTrade):
+            raise TypeError("item must be SequencedFuturesTrade")
+        if isinstance(now_monotonic_ns, bool) or not isinstance(
+            now_monotonic_ns,
+            int,
+        ):
+            raise TypeError("now_monotonic_ns must be an integer")
+        if isinstance(stale_after_ms, bool) or not isinstance(stale_after_ms, int):
+            raise TypeError("stale_after_ms must be an integer")
+        if stale_after_ms <= 0:
+            raise ValueError("stale_after_ms must be positive")
 
-        difference = trade.price - rest_price
-        self._ws_minus_rest_price = difference
-        self._ws_minus_rest_bps = (
-            None
-            if rest_price <= 0
-            else difference / rest_price * TEN_THOUSAND
-        )
-        absolute_difference = abs(difference)
-        self._max_abs_ws_minus_rest_price = (
-            absolute_difference
-            if self._max_abs_ws_minus_rest_price is None
-            else max(self._max_abs_ws_minus_rest_price, absolute_difference)
-        )
-        if self._ws_minus_rest_bps is not None:
-            absolute_bps = abs(self._ws_minus_rest_bps)
-            self._max_abs_ws_minus_rest_bps = (
-                absolute_bps
-                if self._max_abs_ws_minus_rest_bps is None
-                else max(self._max_abs_ws_minus_rest_bps, absolute_bps)
-            )
+        if (
+            self._current_connection_id is None
+            or item.stamp.connection_id != self._current_connection_id
+        ):
+            return False
+
+        received_age_ns = now_monotonic_ns - item.stamp.received_monotonic_ns
+        if received_age_ns < 0 or received_age_ns > stale_after_ms * 1_000_000:
+            return False
+        return True
+
+    async def wait_for_latest_after(
+        self,
+        sequence: int,
+    ) -> SequencedFuturesTrade:
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            raise TypeError("sequence must be an integer")
+        while True:
+            latest = self._latest
+            if latest is not None and latest.sequence > sequence:
+                return latest
+            if self._latest_event is None:
+                self._latest_event = asyncio.Event()
+            self._latest_event.clear()
+            latest = self._latest
+            if latest is not None and latest.sequence > sequence:
+                continue
+            await self._latest_event.wait()
+
+    def mark_live_attempted(
+        self,
+        item: SequencedFuturesTrade,
+        *,
+        succeeded: bool,
+        attempted_ms: int,
+    ) -> None:
+        if not isinstance(item, SequencedFuturesTrade):
+            raise TypeError("item must be SequencedFuturesTrade")
+        if not isinstance(succeeded, bool):
+            raise TypeError("succeeded must be boolean")
+        if isinstance(attempted_ms, bool) or not isinstance(attempted_ms, int):
+            raise TypeError("attempted_ms must be an integer")
+        self._live_attempts_total += 1
+        if succeeded:
+            self._live_successes_total += 1
+        else:
+            self._live_failures_total += 1
+        self._last_live_attempt_ms = attempted_ms
+        if item.sequence >= self._live_attempted_sequence:
+            self._live_attempted_sequence = item.sequence
+            self._live_attempted_item = item
+        if self._live_attempted_event is not None:
+            self._live_attempted_event.set()
+
+    async def wait_until_live_attempted(
+        self,
+        sequence: int,
+    ) -> SequencedFuturesTrade:
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            raise TypeError("sequence must be an integer")
+        while self._live_attempted_sequence < sequence:
+            if self._live_attempted_event is None:
+                self._live_attempted_event = asyncio.Event()
+            self._live_attempted_event.clear()
+            if self._live_attempted_sequence >= sequence:
+                continue
+            await self._live_attempted_event.wait()
+        if self._live_attempted_item is None:
+            raise RuntimeError("live attempt state is missing its trade")
+        return self._live_attempted_item
 
     def telemetry_fields(self, now_ms: int) -> dict:
         if isinstance(now_ms, bool) or not isinstance(now_ms, int):
@@ -229,6 +300,12 @@ class FuturesShadowMonitor:
                 else max(self._ws_max_received_age_ms, ws_received_age_ms)
             )
         return {
+            "futures_live_delivery_sequence": self._sequence,
+            "futures_live_attempted_sequence": self._live_attempted_sequence,
+            "futures_live_attempts_total": self._live_attempts_total,
+            "futures_live_successes_total": self._live_successes_total,
+            "futures_live_failures_total": self._live_failures_total,
+            "futures_live_last_attempt_ms": self._last_live_attempt_ms,
             "shadow_current_connection_id": self._current_connection_id,
             "shadow_connections_opened_total": self._connections_opened_total,
             "shadow_reconnects_total": self._reconnects_total,
@@ -261,35 +338,6 @@ class FuturesShadowMonitor:
             "shadow_ws_source_age_ms": ws_source_age_ms,
             "shadow_ws_received_ms": None if stamp is None else stamp.received_ms,
             "shadow_ws_received_age_ms": ws_received_age_ms,
-            "shadow_rest_observations_total": self._rest_observations_total,
-            "shadow_rest_comparisons_total": self._rest_comparisons_total,
-            "shadow_rest_missing_ws_total": self._rest_missing_ws_total,
-            "shadow_rest_price": self._rest_price,
-            "shadow_rest_source_timestamp_ms": self._rest_source_timestamp_ms,
-            "shadow_rest_received_ms": self._rest_received_ms,
-            "shadow_rest_source_age_ms": (
-                None
-                if self._rest_source_timestamp_ms is None
-                else now_ms - self._rest_source_timestamp_ms
-            ),
-            "shadow_rest_received_age_ms": (
-                None
-                if self._rest_received_ms is None
-                else now_ms - self._rest_received_ms
-            ),
-            "shadow_ws_minus_rest_source_time_ms": (
-                None
-                if trade is None or self._rest_source_timestamp_ms is None
-                else trade.trade_time_ms - self._rest_source_timestamp_ms
-            ),
-            "shadow_ws_minus_rest_price": self._ws_minus_rest_price,
-            "shadow_ws_minus_rest_bps": self._ws_minus_rest_bps,
-            "shadow_max_abs_ws_minus_rest_price": (
-                self._max_abs_ws_minus_rest_price
-            ),
-            "shadow_max_abs_ws_minus_rest_bps": (
-                self._max_abs_ws_minus_rest_bps
-            ),
         }
 
 
@@ -1033,7 +1081,7 @@ def _finish_feed_session(
 async def futures_raw_capture_telemetry_loop(
     *,
     raw_capture: Any,
-    shadow_monitor: FuturesShadowMonitor,
+    trade_state: FuturesTradeState,
     interval_seconds: float = 60.0,
 ) -> None:
     if interval_seconds <= 0:
@@ -1044,7 +1092,7 @@ async def futures_raw_capture_telemetry_loop(
         try:
             snapshot = raw_capture.counters.snapshot(
                 queue_depth=raw_capture.buffer.qsize(),
-                connection_id=shadow_monitor.current_connection_id,
+                connection_id=trade_state.current_connection_id,
             )
             fields = {
                 "event": "raw_capture_summary",
@@ -1069,7 +1117,7 @@ async def futures_raw_capture_telemetry_loop(
                 "connection_id": snapshot.connection_id,
             }
             fields.update(
-                shadow_monitor.telemetry_fields(now_ms=current_utc_epoch_ms())
+                trade_state.telemetry_fields(now_ms=current_utc_epoch_ms())
             )
             LOGGER.info("raw_capture_summary", extra=fields)
         except asyncio.CancelledError:
@@ -1088,8 +1136,8 @@ async def futures_agg_trade_reader_loop(
     settings: Settings,
     flow_store: AsyncFlowAggregator,
     *,
+    trade_state: FuturesTradeState,
     raw_capture: Any = None,
-    shadow_monitor: Optional[FuturesShadowMonitor] = None,
 ) -> None:
     attempt = 0
 
@@ -1116,21 +1164,8 @@ async def futures_agg_trade_reader_loop(
             ) as websocket:
                 attempt = 0
                 connected_at = time.monotonic()
-                if raw_capture is not None or shadow_monitor is not None:
-                    connection_id = uuid4()
-                if shadow_monitor is not None and connection_id is not None:
-                    try:
-                        shadow_monitor.connection_opened(connection_id)
-                    except Exception:
-                        LOGGER.exception(
-                            "binance_futures_shadow_connection_open_failed",
-                            extra={
-                                "event": (
-                                    "binance_futures_shadow_connection_open_failed"
-                                ),
-                                "connection_id": connection_id,
-                            },
-                        )
+                connection_id = uuid4()
+                trade_state.connection_opened(connection_id)
 
                 if raw_capture is not None and connection_id is not None:
                     try:
@@ -1287,16 +1322,8 @@ async def futures_agg_trade_reader_loop(
                         continue
 
                     _mark_capture_message(capture_session, "mark_accepted")
-                    if shadow_monitor is not None and stamp is not None:
-                        try:
-                            shadow_monitor.update_ws(trade, stamp)
-                        except Exception:
-                            LOGGER.exception(
-                                "binance_futures_shadow_update_failed",
-                                extra={
-                                    "event": "binance_futures_shadow_update_failed"
-                                },
-                            )
+                    if stamp is not None:
+                        trade_state.update_ws(trade, stamp)
 
                     if (
                         raw_capture is not None
@@ -1351,16 +1378,8 @@ async def futures_agg_trade_reader_loop(
                     session=capture_session,
                     close_reason=close_reason,
                 )
-            if shadow_monitor is not None and connection_id is not None:
-                try:
-                    shadow_monitor.connection_closed(connection_id)
-                except Exception:
-                    LOGGER.exception(
-                        "binance_futures_shadow_connection_close_failed",
-                        extra={
-                            "event": "binance_futures_shadow_connection_close_failed"
-                        },
-                    )
+            if connection_id is not None:
+                trade_state.connection_closed(connection_id)
 
         if reconnect_error is not None:
             attempt += 1

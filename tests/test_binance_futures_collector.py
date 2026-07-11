@@ -1,11 +1,14 @@
 import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
 import price_collector.binance_futures_collector as collector
+import price_collector.binance_futures_streams as streams
 from price_collector.live_cache import FUTURES_LIVE_KEY
+from price_collector.raw_capture import ReceiveStamp
 
 
 def open_interest_payload(**overrides):
@@ -31,14 +34,39 @@ def premium_index_payload(**overrides):
     return payload
 
 
-def ticker_payload(**overrides):
-    payload = {
-        "symbol": "BTCUSDT",
-        "price": "62075.12",
-        "time": 1_783_459_500_510,
-    }
-    payload.update(overrides)
-    return payload
+def sequenced_futures_trade(
+    *,
+    sequence=1,
+    symbol="BTCUSDT",
+    price="62075.12",
+    trade_time_ms=1_783_459_499_510,
+    event_time_ms=1_783_459_499_525,
+    received_ms=1_783_459_499_540,
+    received_monotonic_ns=1_000_000_000,
+    agg_trade_id=10,
+    connection_id=UUID("11111111-1111-1111-1111-111111111111"),
+):
+    trade = streams.BinanceAggTrade(
+        symbol=symbol,
+        agg_trade_id=agg_trade_id,
+        price=Decimal(price),
+        quantity=Decimal("0.25"),
+        first_trade_id=100,
+        last_trade_id=102,
+        trade_time_ms=trade_time_ms,
+        event_time_ms=event_time_ms,
+        buyer_is_maker=False,
+    )
+    return streams.SequencedFuturesTrade(
+        sequence=sequence,
+        trade=trade,
+        stamp=ReceiveStamp(
+            connection_id=connection_id,
+            receive_sequence=sequence,
+            received_wall_ns=received_ms * 1_000_000,
+            received_monotonic_ns=received_monotonic_ns,
+        ),
+    )
 
 
 def futures_settings():
@@ -46,15 +74,19 @@ def futures_settings():
         BINANCE_FUTURES_BASE_URL="https://fapi.binance.com",
         BINANCE_FUTURES_SYMBOL="BTCUSDT",
         BINANCE_FUTURES_STORE_RAW_JSON=False,
+        STALE_PRICE_MS=10_000,
     )
 
 
-def test_build_snapshot_uses_futures_price_time_for_sample_market_and_decimal_math():
+def test_build_snapshot_uses_premium_time_for_row_and_agg_trade_for_last_price():
+    futures_trade = sequenced_futures_trade(
+        trade_time_ms=1_783_459_499_510,
+    )
     snapshot = collector.build_binance_futures_snapshot(
         symbol="BTCUSDT",
         open_interest_payload=open_interest_payload(time=1_783_459_499_456),
         premium_index_payload=premium_index_payload(),
-        ticker_payload=ticker_payload(),
+        futures_trade=futures_trade,
         received_ms=1_783_459_500_700,
     )
 
@@ -62,6 +94,7 @@ def test_build_snapshot_uses_futures_price_time_for_sample_market_and_decimal_ma
     assert snapshot.window.market_start_ms == 1_783_459_500_000
     assert snapshot.window.market_end_ms == 1_783_459_800_000
     assert snapshot.futures_last_price == Decimal("62075.12")
+    assert snapshot.futures_last_price_time_ms == 1_783_459_499_510
     assert snapshot.mark_price == Decimal("62074.88")
     assert snapshot.index_price == Decimal("62070.19")
     assert snapshot.open_interest == Decimal("74321.123")
@@ -70,20 +103,36 @@ def test_build_snapshot_uses_futures_price_time_for_sample_market_and_decimal_ma
     assert snapshot.premium_bps == (
         Decimal("62074.88") / Decimal("62070.19") - Decimal("1")
     ) * Decimal("10000")
+    assert snapshot.raw["aggTrade"] == {
+        "source": "binance_futures_agg_trade",
+        "symbol": "BTCUSDT",
+        "agg_trade_id": 10,
+        "price": "62075.12",
+        "trade_time_ms": 1_783_459_499_510,
+        "event_time_ms": 1_783_459_499_525,
+        "connection_id": "11111111-1111-1111-1111-111111111111",
+        "receive_sequence": 1,
+        "received_ms": 1_783_459_499_540,
+    }
 
 
-def test_build_snapshot_uses_futures_price_time_when_oi_time_is_missing():
+def test_build_snapshot_without_current_trade_keeps_rest_snapshot_fields():
     snapshot = collector.build_binance_futures_snapshot(
         symbol="BTCUSDT",
         open_interest_payload=open_interest_payload(time=None),
         premium_index_payload=premium_index_payload(),
-        ticker_payload=ticker_payload(),
+        futures_trade=None,
         received_ms=1_783_459_499_999,
     )
 
     assert snapshot.open_interest_time_ms is None
     assert snapshot.sample_second_ms == 1_783_459_500_000
     assert snapshot.window.market_start_ms == 1_783_459_500_000
+    assert snapshot.futures_last_price is None
+    assert snapshot.futures_last_price_time_ms is None
+    assert snapshot.mark_price == Decimal("62074.88")
+    assert snapshot.open_interest == Decimal("74321.123")
+    assert snapshot.raw["aggTrade"] is None
 
 
 def test_build_snapshot_falls_back_to_premium_index_then_received_ms_for_row_time():
@@ -91,7 +140,7 @@ def test_build_snapshot_falls_back_to_premium_index_then_received_ms_for_row_tim
         symbol="BTCUSDT",
         open_interest_payload=open_interest_payload(time=1_783_459_499_456),
         premium_index_payload=premium_index_payload(time=1_783_459_500_500),
-        ticker_payload=ticker_payload(time=None),
+        futures_trade=sequenced_futures_trade(),
         received_ms=1_783_459_501_700,
     )
 
@@ -99,7 +148,7 @@ def test_build_snapshot_falls_back_to_premium_index_then_received_ms_for_row_tim
         symbol="BTCUSDT",
         open_interest_payload=open_interest_payload(time=1_783_459_499_456),
         premium_index_payload=premium_index_payload(time=None),
-        ticker_payload=ticker_payload(time=None),
+        futures_trade=sequenced_futures_trade(),
         received_ms=1_783_459_501_700,
     )
 
@@ -113,7 +162,16 @@ def test_build_snapshot_rejects_unexpected_symbol():
             symbol="BTCUSDT",
             open_interest_payload=open_interest_payload(symbol="ETHUSDT"),
             premium_index_payload=premium_index_payload(),
-            ticker_payload=ticker_payload(),
+            futures_trade=sequenced_futures_trade(),
+            received_ms=1_783_459_500_700,
+        )
+
+    with pytest.raises(collector.FuturesParseError, match="unexpected aggTrade symbol"):
+        collector.build_binance_futures_snapshot(
+            symbol="BTCUSDT",
+            open_interest_payload=open_interest_payload(),
+            premium_index_payload=premium_index_payload(),
+            futures_trade=sequenced_futures_trade(symbol="ETHUSDT"),
             received_ms=1_783_459_500_700,
         )
 
@@ -161,14 +219,14 @@ def test_historical_oi_summary_skips_uncompleted_bucket():
 
 def test_get_json_parses_json_numbers_as_decimal():
     class FakeResponse:
-        text = '{"price": 62075.12, "time": 1783459500510}'
+        text = '{"markPrice": 62075.12, "time": 1783459500510}'
 
         def raise_for_status(self):
             return None
 
     class FakeClient:
         async def get(self, url, params):
-            assert url == "https://fapi.binance.com/fapi/v2/ticker/price"
+            assert url == "https://fapi.binance.com/fapi/v1/premiumIndex"
             assert params == {"symbol": "BTCUSDT"}
             return FakeResponse()
 
@@ -176,29 +234,46 @@ def test_get_json_parses_json_numbers_as_decimal():
         collector.get_json(
             FakeClient(),
             "https://fapi.binance.com/",
-            "/fapi/v2/ticker/price",
+            "/fapi/v1/premiumIndex",
             {"symbol": "BTCUSDT"},
         )
     )
 
-    assert data["price"] == Decimal("62075.12")
-    assert not isinstance(data["price"], float)
+    assert data["markPrice"] == Decimal("62075.12")
+    assert not isinstance(data["markPrice"], float)
 
 
-def test_collect_once_fetches_three_endpoints_and_upserts_snapshot(monkeypatch):
+def test_collect_once_fetches_only_two_rest_endpoints_and_waits_before_upsert(
+    monkeypatch,
+):
     requests = []
-    upserts = []
+    events = []
+    futures_trade = sequenced_futures_trade()
+
+    class FakeTradeState:
+        def fresh_current(self, *, now_monotonic_ns, stale_after_ms):
+            assert now_monotonic_ns == 1_000_000_100
+            assert stale_after_ms == 10_000
+            events.append(("select", futures_trade.sequence))
+            return futures_trade
+
+        async def wait_until_live_attempted(self, sequence):
+            events.append(("redis_attempted", sequence))
+            return futures_trade
+
+        def is_fresh_current_item(self, item, **_kwargs):
+            assert item == futures_trade
+            return True
 
     async def fake_get_json(client, base_url, path, params):
         requests.append((base_url, path, params))
         return {
             "/fapi/v1/openInterest": open_interest_payload(),
             "/fapi/v1/premiumIndex": premium_index_payload(),
-            "/fapi/v2/ticker/price": ticker_payload(),
         }[path]
 
     async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
-        upserts.append(kwargs)
+        events.append(("postgres", kwargs))
 
     monkeypatch.setattr(collector, "get_json", fake_get_json)
     monkeypatch.setattr(
@@ -207,36 +282,59 @@ def test_collect_once_fetches_three_endpoints_and_upserts_snapshot(monkeypatch):
         fake_upsert_binance_futures_snapshot,
     )
     monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+    monkeypatch.setattr(collector.time, "monotonic_ns", lambda: 1_000_000_100)
 
     snapshot = asyncio.run(
         collector.collect_once(
             pool="pool",
             client="client",
             settings=futures_settings(),
+            trade_state=FakeTradeState(),
         )
     )
 
     assert {path for _base_url, path, _params in requests} == {
         "/fapi/v1/openInterest",
         "/fapi/v1/premiumIndex",
-        "/fapi/v2/ticker/price",
     }
+    assert len(requests) == 2
     assert all(params == {"symbol": "BTCUSDT"} for _base_url, _path, params in requests)
     assert snapshot.sample_second_ms == 1_783_459_500_000
-    assert upserts[0]["symbol"] == "BTCUSDT"
-    assert upserts[0]["sample_second_ms"] == 1_783_459_500_000
-    assert upserts[0]["open_interest"] == Decimal("74321.123")
-    assert upserts[0]["raw"] is None
+    assert snapshot.futures_last_price == Decimal("62075.12")
+    assert snapshot.futures_last_price_time_ms == 1_783_459_499_510
+    assert [event_name for event_name, _payload in events] == [
+        "select",
+        "redis_attempted",
+        "postgres",
+    ]
+    upsert = events[-1][1]
+    assert upsert["symbol"] == "BTCUSDT"
+    assert upsert["sample_second_ms"] == 1_783_459_500_000
+    assert upsert["futures_last_price"] == Decimal("62075.12")
+    assert upsert["futures_last_price_time_ms"] == 1_783_459_499_510
+    assert upsert["open_interest"] == Decimal("74321.123")
+    assert upsert["raw"] is None
 
 
 def test_collect_once_can_store_raw_json_when_enabled(monkeypatch):
     upserts = []
+    futures_trade = sequenced_futures_trade()
+
+    class FakeTradeState:
+        def fresh_current(self, **_kwargs):
+            return futures_trade
+
+        async def wait_until_live_attempted(self, sequence):
+            assert sequence == futures_trade.sequence
+            return futures_trade
+
+        def is_fresh_current_item(self, item, **_kwargs):
+            return item == futures_trade
 
     async def fake_get_json(client, base_url, path, params):
         return {
             "/fapi/v1/openInterest": open_interest_payload(),
             "/fapi/v1/premiumIndex": premium_index_payload(),
-            "/fapi/v2/ticker/price": ticker_payload(),
         }[path]
 
     async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
@@ -258,110 +356,92 @@ def test_collect_once_can_store_raw_json_when_enabled(monkeypatch):
             pool="pool",
             client="client",
             settings=settings,
+            trade_state=FakeTradeState(),
         )
     )
 
     assert upserts[0]["raw"]["openInterest"]["openInterest"] == "74321.123"
+    assert upserts[0]["raw"]["aggTrade"]["source"] == "binance_futures_agg_trade"
+    assert upserts[0]["raw"]["aggTrade"]["price"] == "62075.12"
+    assert "ticker" not in upserts[0]["raw"]
 
 
-def test_collect_once_writes_futures_live_cache_before_postgres(monkeypatch):
-    events = []
+def test_collect_once_uses_newer_trade_that_satisfied_live_attempt_barrier(
+    monkeypatch,
+):
+    selected = sequenced_futures_trade(
+        sequence=1,
+        agg_trade_id=10,
+        price="62075.12",
+    )
+    attempted = sequenced_futures_trade(
+        sequence=2,
+        agg_trade_id=11,
+        price="62075.13",
+        trade_time_ms=1_783_459_499_610,
+        received_ms=1_783_459_499_640,
+        received_monotonic_ns=1_100_000_000,
+    )
+    upserts = []
 
-    class FakeLiveCache:
-        async def set_price(
-            self,
-            key,
-            *,
-            value,
-            source_timestamp_ms,
-            received_ms,
-        ):
-            events.append(
-                (
-                    "redis",
-                    {
-                        "key": key,
-                        "value": value,
-                        "source_timestamp_ms": source_timestamp_ms,
-                        "received_ms": received_ms,
-                    },
-                )
-            )
+    class CoalescingTradeState:
+        def fresh_current(self, **_kwargs):
+            return selected
+
+        async def wait_until_live_attempted(self, sequence):
+            assert sequence == selected.sequence
+            return attempted
+
+        def is_fresh_current_item(self, item, **_kwargs):
+            return item == attempted
 
     async def fake_get_json(client, base_url, path, params):
         return {
             "/fapi/v1/openInterest": open_interest_payload(),
             "/fapi/v1/premiumIndex": premium_index_payload(),
-            "/fapi/v2/ticker/price": ticker_payload(),
         }[path]
 
-    async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
-        events.append(("postgres", kwargs))
+    async def fake_upsert(pool, **kwargs):
+        upserts.append(kwargs)
 
     monkeypatch.setattr(collector, "get_json", fake_get_json)
-    monkeypatch.setattr(
-        collector,
-        "upsert_binance_futures_snapshot",
-        fake_upsert_binance_futures_snapshot,
-    )
+    monkeypatch.setattr(collector, "upsert_binance_futures_snapshot", fake_upsert)
     monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
 
-    asyncio.run(
+    snapshot = asyncio.run(
         collector.collect_once(
             pool="pool",
             client="client",
             settings=futures_settings(),
-            live_cache=FakeLiveCache(),
+            trade_state=CoalescingTradeState(),
         )
     )
 
-    assert [event_name for event_name, _payload in events] == ["redis", "postgres"]
-    assert events[0][1] == {
-        "key": FUTURES_LIVE_KEY,
-        "value": Decimal("62075.12"),
-        "source_timestamp_ms": 1_783_459_500_510,
-        "received_ms": 1_783_459_500_700,
-    }
-    assert events[1][1]["sample_second_ms"] == 1_783_459_500_000
+    assert snapshot.futures_last_price == Decimal("62075.13")
+    assert snapshot.futures_last_price_time_ms == 1_783_459_499_610
+    assert upserts[0]["futures_last_price"] == Decimal("62075.13")
 
 
-def test_collect_once_observes_rest_shadow_without_changing_public_source(monkeypatch):
-    events = []
+def test_collect_once_without_fresh_trade_persists_rest_fields_without_barrier(
+    monkeypatch,
+):
+    upserts = []
 
-    class FakeShadowMonitor:
-        def observe_rest(self, **kwargs):
-            events.append(("shadow", kwargs))
+    class NoFreshTradeState:
+        def fresh_current(self, **_kwargs):
+            return None
 
-    class FakeLiveCache:
-        async def set_price(
-            self,
-            key,
-            *,
-            value,
-            source_timestamp_ms,
-            received_ms,
-        ):
-            events.append(
-                (
-                    "redis",
-                    {
-                        "key": key,
-                        "value": value,
-                        "source_timestamp_ms": source_timestamp_ms,
-                        "received_ms": received_ms,
-                    },
-                )
-            )
+        async def wait_until_live_attempted(self, _sequence):
+            pytest.fail("no-trade snapshot must not wait on the live barrier")
 
     async def fake_get_json(client, base_url, path, params):
         return {
             "/fapi/v1/openInterest": open_interest_payload(),
             "/fapi/v1/premiumIndex": premium_index_payload(),
-            "/fapi/v2/ticker/price": ticker_payload(),
         }[path]
 
     async def fake_upsert_binance_futures_snapshot(pool, **kwargs):
-        events.append(("postgres", kwargs))
+        upserts.append(kwargs)
 
     monkeypatch.setattr(collector, "get_json", fake_get_json)
     monkeypatch.setattr(
@@ -376,25 +456,411 @@ def test_collect_once_observes_rest_shadow_without_changing_public_source(monkey
             pool="pool",
             client="client",
             settings=futures_settings(),
-            live_cache=FakeLiveCache(),
-            shadow_monitor=FakeShadowMonitor(),
+            trade_state=NoFreshTradeState(),
         )
     )
 
-    assert [event_name for event_name, _payload in events] == [
-        "shadow",
-        "redis",
-        "postgres",
-    ]
-    expected_rest_value = Decimal("62075.12")
-    assert events[0][1] == {
-        "price": expected_rest_value,
-        "source_timestamp_ms": 1_783_459_500_510,
-        "received_ms": 1_783_459_500_700,
-    }
-    assert events[1][1]["value"] == expected_rest_value
-    assert events[2][1]["futures_last_price"] == expected_rest_value
-    assert snapshot.futures_last_price == expected_rest_value
+    assert snapshot.futures_last_price is None
+    assert snapshot.futures_last_price_time_ms is None
+    assert upserts[0]["futures_last_price"] is None
+    assert upserts[0]["mark_price"] == Decimal("62074.88")
+    assert upserts[0]["open_interest"] == Decimal("74321.123")
+
+
+def test_collect_once_drops_trade_that_became_invalid_during_live_attempt(
+    monkeypatch,
+):
+    futures_trade = sequenced_futures_trade()
+    upserts = []
+
+    class ReconnectedTradeState:
+        def fresh_current(self, **_kwargs):
+            return futures_trade
+
+        async def wait_until_live_attempted(self, sequence):
+            assert sequence == futures_trade.sequence
+            return futures_trade
+
+        def is_fresh_current_item(self, item, **_kwargs):
+            assert item == futures_trade
+            return False
+
+    async def fake_get_json(client, base_url, path, params):
+        return {
+            "/fapi/v1/openInterest": open_interest_payload(),
+            "/fapi/v1/premiumIndex": premium_index_payload(),
+        }[path]
+
+    async def fake_upsert(pool, **kwargs):
+        upserts.append(kwargs)
+
+    monkeypatch.setattr(collector, "get_json", fake_get_json)
+    monkeypatch.setattr(collector, "upsert_binance_futures_snapshot", fake_upsert)
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+
+    snapshot = asyncio.run(
+        collector.collect_once(
+            pool="pool",
+            client="client",
+            settings=futures_settings(),
+            trade_state=ReconnectedTradeState(),
+        )
+    )
+
+    assert snapshot.futures_last_price is None
+    assert snapshot.futures_last_price_time_ms is None
+    assert upserts[0]["futures_last_price"] is None
+
+
+def test_futures_live_worker_coalesces_to_latest_and_writes_agg_trade_times(
+    monkeypatch,
+):
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("22222222-2222-2222-2222-222222222222")
+        state.connection_opened(connection_id)
+        first = sequenced_futures_trade(
+            sequence=1,
+            agg_trade_id=10,
+            price="62075.11",
+            trade_time_ms=1_783_459_500_100,
+            received_ms=1_783_459_500_120,
+            received_monotonic_ns=1_000_000_000,
+            connection_id=connection_id,
+        )
+        latest = sequenced_futures_trade(
+            sequence=2,
+            agg_trade_id=11,
+            price="62075.12",
+            trade_time_ms=1_783_459_500_200,
+            received_ms=1_783_459_500_220,
+            received_monotonic_ns=1_100_000_000,
+            connection_id=connection_id,
+        )
+        assert state.update_ws(first.trade, first.stamp) is not None
+        latest = state.update_ws(latest.trade, latest.stamp)
+        assert latest is not None
+        writes = []
+
+        class FakeLiveCache:
+            async def set_price(self, key, **kwargs):
+                writes.append((key, kwargs))
+
+        monkeypatch.setattr(collector.time, "monotonic_ns", lambda: 1_100_000_001)
+        monkeypatch.setattr(
+            collector,
+            "current_utc_epoch_ms",
+            lambda: 1_783_459_500_300,
+        )
+        worker = asyncio.create_task(
+            collector.futures_live_worker(
+                trade_state=state,
+                live_cache=FakeLiveCache(),
+            )
+        )
+        await asyncio.wait_for(
+            state.wait_until_live_attempted(latest.sequence),
+            timeout=0.5,
+        )
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+        assert writes == [
+            (
+                FUTURES_LIVE_KEY,
+                {
+                    "value": Decimal("62075.12"),
+                    "source_timestamp_ms": 1_783_459_500_200,
+                    "received_ms": 1_783_459_500_220,
+                },
+            )
+        ]
+        fields = state.telemetry_fields(now_ms=1_783_459_500_400)
+        assert fields["futures_live_attempted_sequence"] == 2
+        assert fields["futures_live_successes_total"] == 1
+        assert fields["futures_live_failures_total"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_futures_live_worker_keeps_newest_trade_arriving_during_redis_write():
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("23232323-2323-2323-2323-232323232323")
+        state.connection_opened(connection_id)
+        first_write_started = asyncio.Event()
+        release_first_write = asyncio.Event()
+        writes = []
+
+        class BlockingLiveCache:
+            async def set_price(self, key, **kwargs):
+                writes.append((key, kwargs))
+                if len(writes) == 1:
+                    first_write_started.set()
+                    await release_first_write.wait()
+
+        worker = asyncio.create_task(
+            collector.futures_live_worker(
+                trade_state=state,
+                live_cache=BlockingLiveCache(),
+            )
+        )
+        first = sequenced_futures_trade(
+            agg_trade_id=10,
+            price="62075.10",
+            connection_id=connection_id,
+        )
+        first_item = state.update_ws(first.trade, first.stamp)
+        assert first_item is not None
+        await asyncio.wait_for(first_write_started.wait(), timeout=0.5)
+
+        second = sequenced_futures_trade(
+            agg_trade_id=11,
+            price="62075.11",
+            trade_time_ms=1_783_459_499_610,
+            received_ms=1_783_459_499_640,
+            received_monotonic_ns=1_100_000_000,
+            connection_id=connection_id,
+        )
+        third = sequenced_futures_trade(
+            agg_trade_id=12,
+            price="62075.12",
+            trade_time_ms=1_783_459_499_710,
+            received_ms=1_783_459_499_740,
+            received_monotonic_ns=1_200_000_000,
+            connection_id=connection_id,
+        )
+        assert state.update_ws(second.trade, second.stamp) is not None
+        third_item = state.update_ws(third.trade, third.stamp)
+        assert third_item is not None
+        release_first_write.set()
+        await asyncio.wait_for(
+            state.wait_until_live_attempted(third_item.sequence),
+            timeout=0.5,
+        )
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+        assert [write[1]["value"] for write in writes] == [
+            Decimal("62075.10"),
+            Decimal("62075.12"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_futures_live_worker_failure_unblocks_barrier_and_processes_next_trade(
+    monkeypatch,
+):
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("33333333-3333-3333-3333-333333333333")
+        state.connection_opened(connection_id)
+        writes = []
+
+        class FlakyLiveCache:
+            async def set_price(self, key, **kwargs):
+                writes.append((key, kwargs))
+                if len(writes) == 1:
+                    raise OSError("redis unavailable")
+
+        now_ns = [1_000_000_001]
+        monkeypatch.setattr(collector.time, "monotonic_ns", lambda: now_ns[0])
+        monkeypatch.setattr(
+            collector,
+            "current_utc_epoch_ms",
+            lambda: 1_783_459_500_300 + len(writes),
+        )
+        worker = asyncio.create_task(
+            collector.futures_live_worker(
+                trade_state=state,
+                live_cache=FlakyLiveCache(),
+            )
+        )
+
+        first = sequenced_futures_trade(
+            agg_trade_id=10,
+            received_monotonic_ns=1_000_000_000,
+            connection_id=connection_id,
+        )
+        first_item = state.update_ws(first.trade, first.stamp)
+        assert first_item is not None
+        await asyncio.wait_for(
+            state.wait_until_live_attempted(first_item.sequence),
+            timeout=0.5,
+        )
+
+        now_ns[0] = 1_100_000_001
+        second = sequenced_futures_trade(
+            agg_trade_id=11,
+            price="62075.13",
+            trade_time_ms=1_783_459_499_610,
+            received_ms=1_783_459_499_640,
+            received_monotonic_ns=1_100_000_000,
+            connection_id=connection_id,
+        )
+        second_item = state.update_ws(second.trade, second.stamp)
+        assert second_item is not None
+        await asyncio.wait_for(
+            state.wait_until_live_attempted(second_item.sequence),
+            timeout=0.5,
+        )
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+        assert len(writes) == 2
+        assert writes[-1][1]["value"] == Decimal("62075.13")
+        fields = state.telemetry_fields(now_ms=1_783_459_500_400)
+        assert fields["futures_live_attempts_total"] == 2
+        assert fields["futures_live_successes_total"] == 1
+        assert fields["futures_live_failures_total"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_rest_snapshot_failure_does_not_block_independent_ws_live_delivery(
+    monkeypatch,
+):
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("44444444-4444-4444-4444-444444444444")
+        state.connection_opened(connection_id)
+        rest_started = asyncio.Event()
+        release_rest = asyncio.Event()
+        writes = []
+
+        class FakeLiveCache:
+            async def set_price(self, key, **kwargs):
+                writes.append((key, kwargs))
+
+        async def failing_get_json(client, base_url, path, params):
+            rest_started.set()
+            await release_rest.wait()
+            raise RuntimeError(f"REST unavailable: {path}")
+
+        monkeypatch.setattr(collector, "get_json", failing_get_json)
+        monkeypatch.setattr(collector.time, "monotonic_ns", lambda: 1_000_000_001)
+        monkeypatch.setattr(
+            collector,
+            "current_utc_epoch_ms",
+            lambda: 1_783_459_500_300,
+        )
+
+        worker = asyncio.create_task(
+            collector.futures_live_worker(
+                trade_state=state,
+                live_cache=FakeLiveCache(),
+            )
+        )
+        snapshot = asyncio.create_task(
+            collector.collect_once(
+                pool="pool",
+                client="client",
+                settings=futures_settings(),
+                trade_state=state,
+            )
+        )
+        await asyncio.wait_for(rest_started.wait(), timeout=0.5)
+
+        trade = sequenced_futures_trade(connection_id=connection_id)
+        item = state.update_ws(trade.trade, trade.stamp)
+        assert item is not None
+        await asyncio.wait_for(
+            state.wait_until_live_attempted(item.sequence),
+            timeout=0.5,
+        )
+        assert writes[0][0] == FUTURES_LIVE_KEY
+        assert writes[0][1]["value"] == Decimal("62075.12")
+
+        release_rest.set()
+        with pytest.raises(RuntimeError, match="REST unavailable"):
+            await snapshot
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("redis_fails", [False, True])
+def test_collect_once_real_state_waits_for_live_attempt_before_postgres(
+    monkeypatch,
+    redis_fails,
+):
+    async def scenario():
+        state = streams.FuturesTradeState()
+        connection_id = UUID("45454545-4545-4545-4545-454545454545")
+        state.connection_opened(connection_id)
+        trade = sequenced_futures_trade(connection_id=connection_id)
+        item = state.update_ws(trade.trade, trade.stamp)
+        assert item is not None
+        redis_started = asyncio.Event()
+        release_redis = asyncio.Event()
+        postgres_written = asyncio.Event()
+
+        class ControlledLiveCache:
+            async def set_price(self, key, **kwargs):
+                redis_started.set()
+                await release_redis.wait()
+                if redis_fails:
+                    raise OSError("redis unavailable")
+
+        async def fake_get_json(client, base_url, path, params):
+            return {
+                "/fapi/v1/openInterest": open_interest_payload(),
+                "/fapi/v1/premiumIndex": premium_index_payload(),
+            }[path]
+
+        async def fake_upsert(pool, **kwargs):
+            postgres_written.set()
+
+        monkeypatch.setattr(collector, "get_json", fake_get_json)
+        monkeypatch.setattr(
+            collector,
+            "upsert_binance_futures_snapshot",
+            fake_upsert,
+        )
+        monkeypatch.setattr(collector.time, "monotonic_ns", lambda: 1_000_000_001)
+        monkeypatch.setattr(
+            collector,
+            "current_utc_epoch_ms",
+            lambda: 1_783_459_500_700,
+        )
+
+        worker = asyncio.create_task(
+            collector.futures_live_worker(
+                trade_state=state,
+                live_cache=ControlledLiveCache(),
+            )
+        )
+        await asyncio.wait_for(redis_started.wait(), timeout=0.5)
+        snapshot_task = asyncio.create_task(
+            collector.collect_once(
+                pool="pool",
+                client="client",
+                settings=futures_settings(),
+                trade_state=state,
+            )
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(postgres_written.wait(), timeout=0.05)
+
+        release_redis.set()
+        snapshot = await asyncio.wait_for(snapshot_task, timeout=0.5)
+        assert postgres_written.is_set()
+        assert snapshot.futures_last_price == Decimal("62075.12")
+        fields = state.telemetry_fields(now_ms=1_783_459_500_800)
+        assert fields["futures_live_attempted_sequence"] == item.sequence
+        assert fields["futures_live_failures_total"] == int(redis_fails)
+
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
 
 
 def test_collect_historical_oi_once_stores_only_completed_summaries(monkeypatch):
@@ -456,6 +922,7 @@ def run_settings(*, raw_enabled, streams_enabled=True):
         BINANCE_FUTURES_HIST_OI_ENABLED=False,
         BINANCE_FUTURES_STREAMS_ENABLED=streams_enabled,
         BINANCE_FUTURES_STORE_RAW_JSON=False,
+        STALE_PRICE_MS=10_000,
         RAW_FUTURES_TRACE_ENABLED=raw_enabled,
         RAW_CAPTURE_RETENTION_HOURS=72,
         RAW_CAPTURE_MAX_RELATION_MB=2048,
@@ -478,7 +945,7 @@ class FakeAsyncClient:
         return False
 
 
-def test_run_collector_rejects_raw_capture_without_futures_streams(monkeypatch):
+def test_run_collector_rejects_disabled_streams_even_without_raw_capture(monkeypatch):
     monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
     monkeypatch.setattr(
         collector,
@@ -486,10 +953,10 @@ def test_run_collector_rejects_raw_capture_without_futures_streams(monkeypatch):
         lambda _settings: pytest.fail("database must not be opened"),
     )
 
-    with pytest.raises(RuntimeError, match="requires BINANCE_FUTURES_STREAMS_ENABLED"):
+    with pytest.raises(RuntimeError, match="requires BINANCE_FUTURES_STREAMS_ENABLED=true"):
         asyncio.run(
             collector.run_collector(
-                run_settings(raw_enabled=True, streams_enabled=False)
+                run_settings(raw_enabled=False, streams_enabled=False)
             )
         )
 
@@ -526,10 +993,27 @@ def test_sigterm_handler_cancels_current_task_and_can_be_removed(monkeypatch):
     ]
 
 
-def test_run_collector_disabled_path_constructs_no_raw_resources(monkeypatch):
+def test_main_treats_collector_cancellation_as_clean_shutdown(monkeypatch):
+    settings = object()
+
+    def cancelled_run(coroutine):
+        coroutine.close()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(collector, "Settings", lambda: settings)
+    monkeypatch.setattr(collector.asyncio, "run", cancelled_run)
+
+    collector.main()
+
+
+def test_run_collector_raw_disabled_still_wires_trade_state_and_live_worker(
+    monkeypatch,
+):
     async def scenario():
-        started = asyncio.Event()
+        live_started = asyncio.Event()
         events = []
+        state = object()
+        observed = {}
 
         class FakePool:
             async def close(self):
@@ -539,22 +1023,52 @@ def test_run_collector_disabled_path_constructs_no_raw_resources(monkeypatch):
             async def close(self):
                 events.append("live_close")
 
+        live_cache = FakeLiveCache()
+
         async def fake_create_pool(database_url):
             assert database_url == "postgresql://writer@localhost/price_collector"
             return FakePool()
 
-        async def fake_snapshot_loop(**kwargs):
-            assert kwargs["shadow_monitor"] is None
-            started.set()
+        async def blocking_task(name):
             try:
                 await asyncio.Event().wait()
             finally:
-                events.append("snapshot_stopped")
+                events.append(f"{name}_stopped")
+
+        async def fake_live_worker(**kwargs):
+            observed["live"] = kwargs
+            live_started.set()
+            await blocking_task("live_worker")
+
+        async def fake_agg_reader(settings, flow_store, **kwargs):
+            observed["reader"] = kwargs
+            await blocking_task("agg")
+
+        async def fake_snapshot_loop(**kwargs):
+            observed["snapshot"] = kwargs
+            await blocking_task("snapshot")
+
+        async def fake_flow_flush_loop(**kwargs):
+            await blocking_task("flow_flush")
+
+        async def fake_book_reader(settings, book_store):
+            await blocking_task("book_reader")
+
+        async def fake_book_flush_loop(**kwargs):
+            await blocking_task("book_flush")
 
         monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
         monkeypatch.setattr(collector, "create_pool", fake_create_pool)
-        monkeypatch.setattr(collector, "create_live_cache", lambda _settings: FakeLiveCache())
+        monkeypatch.setattr(collector, "create_live_cache", lambda _settings: live_cache)
+        monkeypatch.setattr(collector, "FuturesTradeState", lambda: state)
+        monkeypatch.setattr(collector, "AsyncFlowAggregator", lambda **_kwargs: "flow")
+        monkeypatch.setattr(collector, "AsyncBookTickerAggregator", lambda **_kwargs: "book")
+        monkeypatch.setattr(collector, "futures_live_worker", fake_live_worker)
+        monkeypatch.setattr(collector, "futures_agg_trade_reader_loop", fake_agg_reader)
         monkeypatch.setattr(collector, "snapshot_loop", fake_snapshot_loop)
+        monkeypatch.setattr(collector, "futures_flow_flush_loop", fake_flow_flush_loop)
+        monkeypatch.setattr(collector, "futures_book_ticker_reader_loop", fake_book_reader)
+        monkeypatch.setattr(collector, "futures_book_flush_loop", fake_book_flush_loop)
         monkeypatch.setattr(collector.httpx, "AsyncClient", FakeAsyncClient)
         monkeypatch.setattr(collector, "_install_sigterm_cancellation", lambda: None)
         monkeypatch.setattr(
@@ -562,23 +1076,33 @@ def test_run_collector_disabled_path_constructs_no_raw_resources(monkeypatch):
             "create_raw_capture_runtime",
             lambda **_kwargs: pytest.fail("disabled capture constructed a runtime"),
         )
-        monkeypatch.setattr(
-            collector,
-            "FuturesShadowMonitor",
-            lambda: pytest.fail("disabled capture constructed a monitor"),
-        )
 
         task = asyncio.create_task(
-            collector.run_collector(
-                run_settings(raw_enabled=False, streams_enabled=False)
-            )
+            collector.run_collector(run_settings(raw_enabled=False))
         )
-        await asyncio.wait_for(started.wait(), timeout=0.5)
+        await asyncio.wait_for(live_started.wait(), timeout=0.5)
+        assert observed["live"] == {
+            "trade_state": state,
+            "live_cache": live_cache,
+        }
+        assert observed["reader"] == {
+            "trade_state": state,
+            "raw_capture": None,
+        }
+        assert observed["snapshot"]["trade_state"] is state
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert events == ["snapshot_stopped", "live_close", "pool_close"]
+        assert events[-2:] == ["live_close", "pool_close"]
+        assert {
+            "live_worker_stopped",
+            "agg_stopped",
+            "snapshot_stopped",
+            "flow_flush_stopped",
+            "book_reader_stopped",
+            "book_flush_stopped",
+        }.issubset(events)
 
     asyncio.run(scenario())
 
@@ -587,9 +1111,12 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
     async def scenario():
         events = []
         agg_started = asyncio.Event()
+        live_started = asyncio.Event()
         telemetry_started = asyncio.Event()
         runtime_kwargs = {}
         reader_kwargs = {}
+        live_kwargs = {}
+        snapshot_kwargs = {}
         telemetry_kwargs = {}
         backend_calls = []
 
@@ -608,11 +1135,11 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
             async def close(self):
                 events.append("raw_close")
 
-        class FakeMonitor:
+        class FakeState:
             pass
 
         raw_runtime = FakeRawRuntime()
-        monitor = FakeMonitor()
+        state = FakeState()
 
         async def fake_create_pool(database_url):
             assert database_url == "postgresql://writer@localhost/price_collector"
@@ -633,8 +1160,13 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
                 events.append(f"{name}_stopped")
 
         async def fake_snapshot_loop(**kwargs):
-            assert kwargs["shadow_monitor"] is monitor
+            snapshot_kwargs.update(kwargs)
             await blocking_task("snapshot")
+
+        async def fake_live_worker(**kwargs):
+            live_kwargs.update(kwargs)
+            live_started.set()
+            await blocking_task("live_worker")
 
         async def fake_agg_reader(settings, flow_store, **kwargs):
             reader_kwargs.update(kwargs)
@@ -660,9 +1192,10 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
         monkeypatch.setattr(collector, "create_live_cache", lambda _settings: FakeLiveCache())
         monkeypatch.setattr(collector, "create_raw_capture_backend", fake_create_raw_capture_backend)
         monkeypatch.setattr(collector, "create_raw_capture_runtime", fake_create_raw_capture_runtime)
-        monkeypatch.setattr(collector, "FuturesShadowMonitor", lambda: monitor)
+        monkeypatch.setattr(collector, "FuturesTradeState", lambda: state)
         monkeypatch.setattr(collector, "AsyncFlowAggregator", lambda **_kwargs: "flow")
         monkeypatch.setattr(collector, "AsyncBookTickerAggregator", lambda **_kwargs: "book")
+        monkeypatch.setattr(collector, "futures_live_worker", fake_live_worker)
         monkeypatch.setattr(collector, "snapshot_loop", fake_snapshot_loop)
         monkeypatch.setattr(collector, "futures_agg_trade_reader_loop", fake_agg_reader)
         monkeypatch.setattr(collector, "futures_raw_capture_telemetry_loop", fake_telemetry_loop)
@@ -676,6 +1209,7 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
             collector.run_collector(run_settings(raw_enabled=True))
         )
         await asyncio.wait_for(agg_started.wait(), timeout=0.5)
+        await asyncio.wait_for(live_started.wait(), timeout=0.5)
         await asyncio.wait_for(telemetry_started.wait(), timeout=0.5)
 
         assert backend_calls == []
@@ -694,12 +1228,14 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
         assert runtime_kwargs["maintenance_interval_seconds"] == 60
         assert runtime_kwargs["bucket_ms"] == 100
         assert reader_kwargs == {
+            "trade_state": state,
             "raw_capture": raw_runtime,
-            "shadow_monitor": monitor,
         }
+        assert live_kwargs["trade_state"] is state
+        assert snapshot_kwargs["trade_state"] is state
         assert telemetry_kwargs == {
             "raw_capture": raw_runtime,
-            "shadow_monitor": monitor,
+            "trade_state": state,
             "interval_seconds": 60.0,
         }
 
@@ -712,6 +1248,7 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
             events.index(f"{name}_stopped") < raw_close_index
             for name in (
                 "snapshot",
+                "live_worker",
                 "agg",
                 "telemetry",
                 "flow_flush",

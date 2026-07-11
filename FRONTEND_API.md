@@ -582,6 +582,12 @@ timestamp/age can be `null` when its source observation is absent.
 
 The ages are measured against `server_time_ms`, not against the series row's
 timestamp. `transport_lag_ms` is `received_ms - source_ms`, clamped to zero.
+For `freshness.futures_last`, `source_ms` is Binance `aggTrade.T`, while
+`received_ms` is the local observation time of the combined historical
+snapshot, not the WebSocket's pre-parse receive time. The snapshot row itself is
+keyed by the premium-index timestamp (or its local observation fallback), not by
+the trade timestamp.
+
 When `fill_display=true`, only Chainlink is carried forward, and
 `freshness.chainlink.is_carried_forward` reports whether the row uses an older
 sample. Stored data is not changed.
@@ -672,7 +678,13 @@ Added to each series row by `include_futures=true`:
 }
 ```
 
-All four values are two-decimal strings or `null`.
+All four values are two-decimal strings or `null`. `last` comes from
+`btcusdt@aggTrade.p`; `mark`, `index`, and `premium_bps` remain REST-derived.
+The collector uses `last` only when the newest accepted trade is fresh and from
+the current WebSocket connection. During startup, disconnect, or a stale-trade
+interval, `last` and its source timestamp can be `null` while the REST-derived
+fields and snapshot row remain present. There is no REST-ticker or book-derived
+fallback for `last`.
 
 ### Optional `open_interest`
 
@@ -929,10 +941,18 @@ Response:
 ```
 
 `provider_event_ms` and `time_ms` are compatibility aliases for the same value
-as `source_timestamp_ms`. If a Redis key is absent, its value, timestamps, ages,
-and alias are all `null`; the endpoint still returns HTTP `200`. The endpoint
-does not reject stale values, so the dashboard should use `source_age_ms` and
-`received_age_ms` to decide whether to display a stale indicator.
+as `source_timestamp_ms`. The futures `last` value comes from Binance
+`btcusdt@aggTrade.p`; its `source_timestamp_ms`/`time_ms` is `aggTrade.T`, and
+its `received_ms` is local wall time recorded immediately after WebSocket
+`recv()` and before parsing. This source change does not alter the response
+shape.
+
+If a Redis key is absent, its value, timestamps, ages, and alias are all `null`;
+the endpoint still returns HTTP `200`. The endpoint does not reject stale
+values. If the futures WebSocket disconnects or its current trade becomes
+stale, the collector leaves the last cached value in place and its ages keep
+growing. The dashboard should use both `source_age_ms` and `received_age_ms` to
+decide whether to display a stale indicator.
 
 Redis connection/read failures return HTTP `503` with:
 
