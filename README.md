@@ -188,7 +188,9 @@ exclusive `before_market_id` cursor for older pages. Future and observation-empt
 windows are not returned. The frontend should select a returned `market_id` and
 then request `/markets/{market_id}/data` with the desired optional datasets.
 
-See [`FRONTEND_API.md`](FRONTEND_API.md) for frontend call examples, query
+See [`LIVE_DATA.md`](LIVE_DATA.md) for the end-to-end live price pipeline,
+Redis handoff, freshness semantics, and dashboard consumption guidance. See
+[`FRONTEND_API.md`](FRONTEND_API.md) for frontend call examples, query
 parameters, complete response shapes, optional fields, and error responses.
 
 ## Repository Layout
@@ -200,6 +202,7 @@ tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
+LIVE_DATA.md           Live BTC extraction, cache, and dashboard consumption guide
 requirements.txt       Python runtime and test dependencies
 ```
 

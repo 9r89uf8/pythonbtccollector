@@ -876,6 +876,9 @@ Reads only the three live Redis keys. It does not query PostgreSQL and does not
 return historical samples, probabilities, mark/index prices, open interest,
 flow, or book data.
 
+See [`LIVE_DATA.md`](LIVE_DATA.md) for the upstream extraction paths, Redis
+handoff, freshness semantics, and recommended dashboard polling behavior.
+
 Query parameters:
 
 | Parameter | Type | Default | Effect |
