@@ -280,14 +280,20 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "DROP SCHEMA raw_
 Do not use this schema-removal rollback after capture has been enabled; it
 permanently deletes all retained high-resolution evidence.
 
-## Phase 2 Futures-Only Capture Canary
+## Phase 2 Futures-Only Accelerated Capture Canary
 
 Phase 2 wires the Binance futures `aggTrade` reader to the bounded raw-capture
 runtime. The repository and environment-example default remains disabled, so
 deploying the code does not start capture by itself. The code checkpoint is
 ready when its tests pass and it is safely deployed with the flag still
-`false`; Phase 2 is operationally complete only after the production canary has
-run continuously for 24 hours and every acceptance check below passes.
+`false`; Phase 2 is operationally complete only after the explicitly
+risk-accepted three-hour accelerated production canary has run continuously
+and every acceptance check below passes. Three hours is enough for functional,
+queue, batch, session, and short-term resource validation, but it provides less
+confidence than the original 24-hour window. Continue background monitoring
+toward at least 24 uninterrupted hours after advancing to the next phase.
+A three-hour window may not cross a six-hour raw partition boundary; Phase 4's
+deliberate partition and retention checks therefore remain mandatory.
 
 This is shadow evidence capture only. Keep Binance REST
 `/fapi/v2/ticker/price` as the Redis/API `futures.last` source, keep the existing
@@ -358,8 +364,10 @@ sudo -u postgres psql -d price_collector -c "SELECT pg_size_pretty(pg_database_s
 df -h /var/lib/postgresql
 ```
 
-Record the preceding 24-hour one-second flow and book coverage before the
-restart. These figures are the comparison baseline for the final canary query:
+Record the preceding three-hour one-second flow and book coverage before the
+restart. These figures are the like-for-like comparison baseline for the final
+accelerated-canary query. Also retain the surrounding 24-hour operational
+context when investigating unusual gaps:
 
 ```bash
 sudo -u postgres psql -d price_collector -c "
@@ -370,13 +378,13 @@ WITH datasets(dataset) AS (
     FROM binance_flow_1s
     WHERE venue = 'binance_usdm_perp'
       AND symbol = 'BTCUSDT'
-      AND sample_second_ms >= (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+      AND sample_second_ms >= (extract(epoch FROM now() - interval '3 hours') * 1000)::bigint
     UNION ALL
     SELECT 'book', sample_second_ms
     FROM binance_book_1s
     WHERE venue = 'binance_usdm_perp'
       AND symbol = 'BTCUSDT'
-      AND sample_second_ms >= (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+      AND sample_second_ms >= (extract(epoch FROM now() - interval '3 hours') * 1000)::bigint
 ), ordered AS (
     SELECT
         dataset,
@@ -390,7 +398,7 @@ SELECT
     datasets.dataset,
     count(ordered.sample_second_ms) AS rows,
     round(
-        count(ordered.sample_second_ms)::numeric / 86400 * 100,
+        count(ordered.sample_second_ms)::numeric / 10800 * 100,
         3
     ) AS second_coverage_percent,
     COALESCE(max((sample_second_ms - previous_ms) / 1000), 0) AS maximum_gap_seconds,
@@ -422,21 +430,110 @@ RAW_FUTURES_TRACE_ENABLED=true
 RAW_CHAINLINK_EVENTS_ENABLED=false
 ```
 
-Confirm it without printing secrets, then restart only the affected collector:
+Confirm it without printing secrets, then restart only the affected collector.
+Record a journal lower bound immediately before the restart and persist the
+post-restart half-open three-hour evidence window in the service state
+directory:
 
 ```bash
 sudo grep -E '^(BINANCE_FUTURES_STREAMS_ENABLED|RAW_FUTURES_TRACE_ENABLED|RAW_CHAINLINK_EVENTS_ENABLED)=' /etc/price-collector/collector.env
+
+PHASE2_CANARY_FILE=/var/lib/price-collector/phase2-canary-window.env
+phase2_epoch_ms_to_utc() {
+  local epoch_ms="$1"
+  local milliseconds
+  printf -v milliseconds '%03d' "$((epoch_ms % 1000))"
+  date -u --date="@$((epoch_ms / 1000)).${milliseconds}" '+%Y-%m-%dT%H:%M:%S.%3NZ'
+}
+
+PHASE2_JOURNAL_START_MS="$(date -u +%s%3N)"
+PHASE2_JOURNAL_START_NS="$((PHASE2_JOURNAL_START_MS * 1000000))"
+PHASE2_JOURNAL_START_UTC="$(phase2_epoch_ms_to_utc "$PHASE2_JOURNAL_START_MS")"
+
 sudo systemctl restart price-collector-binance-futures
+sudo systemctl is-active --quiet price-collector-binance-futures
+
+PHASE2_OBSERVED_START_MS="$(date -u +%s%3N)"
+PHASE2_START_MS="$((((PHASE2_OBSERVED_START_MS + 999) / 1000) * 1000))"
+PHASE2_END_MS="$((PHASE2_START_MS + 10800000))"
+PHASE2_TELEMETRY_END_MS="$((PHASE2_END_MS + 120000))"
+PHASE2_START_NS="$((PHASE2_START_MS * 1000000))"
+PHASE2_END_NS="$((PHASE2_END_MS * 1000000))"
+PHASE2_START_UTC="$(phase2_epoch_ms_to_utc "$PHASE2_START_MS")"
+PHASE2_END_UTC="$(phase2_epoch_ms_to_utc "$PHASE2_END_MS")"
+PHASE2_TELEMETRY_END_UTC="$(phase2_epoch_ms_to_utc "$PHASE2_TELEMETRY_END_MS")"
+
+{
+  printf 'PHASE2_JOURNAL_START_MS=%s\n' "$PHASE2_JOURNAL_START_MS"
+  printf 'PHASE2_JOURNAL_START_NS=%s\n' "$PHASE2_JOURNAL_START_NS"
+  printf 'PHASE2_JOURNAL_START_UTC=%s\n' "$PHASE2_JOURNAL_START_UTC"
+  printf 'PHASE2_START_MS=%s\n' "$PHASE2_START_MS"
+  printf 'PHASE2_END_MS=%s\n' "$PHASE2_END_MS"
+  printf 'PHASE2_TELEMETRY_END_MS=%s\n' "$PHASE2_TELEMETRY_END_MS"
+  printf 'PHASE2_START_NS=%s\n' "$PHASE2_START_NS"
+  printf 'PHASE2_END_NS=%s\n' "$PHASE2_END_NS"
+  printf 'PHASE2_START_UTC=%s\n' "$PHASE2_START_UTC"
+  printf 'PHASE2_END_UTC=%s\n' "$PHASE2_END_UTC"
+  printf 'PHASE2_TELEMETRY_END_UTC=%s\n' "$PHASE2_TELEMETRY_END_UTC"
+} | sudo -u pricecollector tee "$PHASE2_CANARY_FILE" >/dev/null
+sudo -u pricecollector chmod 600 "$PHASE2_CANARY_FILE"
+sudo -u pricecollector cat "$PHASE2_CANARY_FILE"
+
 sudo systemctl status price-collector-binance-futures --no-pager
 sudo systemctl show price-collector-binance-futures \
   -p ActiveEnterTimestamp -p NRestarts -p MainPID -p CPUUsageNSec -p MemoryCurrent
-sudo journalctl -u price-collector-binance-futures -n 100 --no-pager
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE2_JOURNAL_START_UTC" -n 100 --no-pager
 ```
 
-The service activation timestamp is the start of the 24-hour canary. Record the
-`systemctl show` output. An unexpected process restart resets the observation
+`PHASE2_START_MS` is the authoritative evidence-window start. The service
+activation timestamp is the process-identity baseline and should be no later
+than that start. Record the `systemctl show` output and retain
+`phase2-canary-window.env`. An unexpected process restart resets the observation
 window and the cumulative in-process counters; a normal Binance WebSocket
-reconnect does not.
+reconnect does not. Do not overwrite the window file during a valid run.
+
+If the futures-only canary was already running when the duration policy changed
+to three hours, do not restart it. Reconstruct the fixed window from the current
+process activation timestamp after confirming that this timestamp and
+`NRestarts` still match the recorded baseline:
+
+```bash
+sudo systemctl is-active --quiet price-collector-binance-futures
+sudo systemctl show price-collector-binance-futures \
+  -p ActiveEnterTimestamp -p NRestarts -p MainPID
+
+PHASE2_CANARY_FILE=/var/lib/price-collector/phase2-canary-window.env
+PHASE2_ACTIVE_UTC="$(systemctl show price-collector-binance-futures -p ActiveEnterTimestamp --value)"
+PHASE2_ACTIVE_MS="$(date -u --date="$PHASE2_ACTIVE_UTC" +%s%3N)"
+PHASE2_START_MS="$((((PHASE2_ACTIVE_MS + 999) / 1000) * 1000))"
+PHASE2_END_MS="$((PHASE2_START_MS + 10800000))"
+PHASE2_TELEMETRY_END_MS="$((PHASE2_END_MS + 120000))"
+PHASE2_JOURNAL_START_MS="$((PHASE2_START_MS - 60000))"
+PHASE2_START_NS="$((PHASE2_START_MS * 1000000))"
+PHASE2_END_NS="$((PHASE2_END_MS * 1000000))"
+PHASE2_JOURNAL_START_NS="$((PHASE2_JOURNAL_START_MS * 1000000))"
+PHASE2_START_UTC="$(date -u --date="@$((PHASE2_START_MS / 1000))" '+%Y-%m-%dT%H:%M:%SZ')"
+PHASE2_END_UTC="$(date -u --date="@$((PHASE2_END_MS / 1000))" '+%Y-%m-%dT%H:%M:%SZ')"
+PHASE2_TELEMETRY_END_UTC="$(date -u --date="@$((PHASE2_TELEMETRY_END_MS / 1000))" '+%Y-%m-%dT%H:%M:%SZ')"
+PHASE2_JOURNAL_START_UTC="$(date -u --date="@$((PHASE2_JOURNAL_START_MS / 1000))" '+%Y-%m-%dT%H:%M:%SZ')"
+
+{
+  printf 'PHASE2_JOURNAL_START_MS=%s\n' "$PHASE2_JOURNAL_START_MS"
+  printf 'PHASE2_JOURNAL_START_NS=%s\n' "$PHASE2_JOURNAL_START_NS"
+  printf 'PHASE2_JOURNAL_START_UTC=%s\n' "$PHASE2_JOURNAL_START_UTC"
+  printf 'PHASE2_START_MS=%s\n' "$PHASE2_START_MS"
+  printf 'PHASE2_END_MS=%s\n' "$PHASE2_END_MS"
+  printf 'PHASE2_TELEMETRY_END_MS=%s\n' "$PHASE2_TELEMETRY_END_MS"
+  printf 'PHASE2_START_NS=%s\n' "$PHASE2_START_NS"
+  printf 'PHASE2_END_NS=%s\n' "$PHASE2_END_NS"
+  printf 'PHASE2_START_UTC=%s\n' "$PHASE2_START_UTC"
+  printf 'PHASE2_END_UTC=%s\n' "$PHASE2_END_UTC"
+  printf 'PHASE2_TELEMETRY_END_UTC=%s\n' "$PHASE2_TELEMETRY_END_UTC"
+} | sudo -u pricecollector tee "$PHASE2_CANARY_FILE" >/dev/null
+sudo -u pricecollector chmod 600 "$PHASE2_CANARY_FILE"
+sudo -u pricecollector cat "$PHASE2_CANARY_FILE"
+```
 
 Verify that the existing public live path is still healthy and REST-derived:
 
@@ -450,13 +547,21 @@ print(json.dumps(payload["futures"]["last"], indent=2))
 redis-cli -h 127.0.0.1 GET btc:live:futures
 ```
 
-### Monitor the 24-hour run
+### Monitor the three-hour accelerated run
 
 The futures collector emits one structured `raw_capture_summary` every 60
-seconds. Do not log individual raw events. Inspect the most recent summaries:
+seconds. Do not log individual raw events. The recorded journal bound extends
+two minutes beyond the exact three-hour SQL
+evidence window so final acceptance includes at least the first cumulative
+summary emitted after the endpoint. This grace is conservative; SQL remains
+strictly bounded to `[PHASE2_START_MS, PHASE2_END_MS)`.
+
+Inspect the most recent summaries:
 
 ```bash
-sudo journalctl -u price-collector-binance-futures --since "24 hours ago" -o cat \
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE2_JOURNAL_START_UTC" --until "$PHASE2_TELEMETRY_END_UTC" -o cat \
   | grep '"event": "raw_capture_summary"' \
   | tail -n 20
 ```
@@ -465,7 +570,9 @@ Summarize the observed writer latency, queue pressure, and final counters using
 only the structured summary records:
 
 ```bash
-sudo journalctl -u price-collector-binance-futures --since "24 hours ago" -o cat \
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE2_JOURNAL_START_UTC" --until "$PHASE2_TELEMETRY_END_UTC" -o cat \
   | grep '"event": "raw_capture_summary"' \
   | python3 -c '
 import json, sys
@@ -496,6 +603,15 @@ print({
     ),
     "final_batches_failed_total": (
         int(rows[-1]["batches_failed_total"]) if rows else None
+    ),
+    "final_maintenance_runs_total": (
+        int(rows[-1]["maintenance_runs_total"]) if rows else None
+    ),
+    "final_maintenance_failures_total": (
+        int(rows[-1]["maintenance_failures_total"]) if rows else None
+    ),
+    "final_capture_suspended": (
+        bool(rows[-1]["capture_suspended"]) if rows else None
     ),
     "final_messages_received_total": (
         int(rows[-1]["messages_received_total"]) if rows else None
@@ -528,14 +644,17 @@ print({
 ```
 
 Look for capture, live-path, or telemetry failures, suspension, queue loss, or
-out-of-sequence drops. No output is expected from this command:
+out-of-sequence drops. No output is expected from this command; exact message
+matching avoids falsely matching zero-valued fields inside healthy summaries:
 
 ```bash
-sudo journalctl -u price-collector-binance-futures --since "24 hours ago" -o cat \
-  | grep -E 'raw_capture_.*(failed|dropped|suspended)|binance_futures_raw_capture_.*failed|binance_futures_(snapshot|flow_flush|book_flush)_failed'
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
+sudo journalctl -u price-collector-binance-futures \
+  --since "$PHASE2_JOURNAL_START_UTC" --until "$PHASE2_TELEMETRY_END_UTC" -o cat \
+  | grep -E '"level": "(ERROR|CRITICAL)"|"message": "(live_cache_write_failed|raw_capture_queue_oldest_dropped|raw_capture_suspended_by_storage_budget|raw_capture_shutdown_task_still_running)"'
 ```
 
-At the start, during the run, and after 24 hours, inspect service resource use.
+At the start, during the run, and after three hours, inspect service resource use.
 The final `NRestarts` and `ActiveEnterTimestamp` must both match the values
 recorded immediately after canary enablement:
 
@@ -586,6 +705,7 @@ Confirm that no connection has more than one trace row for the same active 100
 ms bucket, and that no connection has more than ten buckets in one second:
 
 ```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
 sudo -u postgres psql -d price_collector -c "
 SELECT count(*) AS duplicate_bucket_groups
 FROM (
@@ -601,8 +721,8 @@ WITH per_second AS (
         (bucket_start_ms / 1000) * 1000 AS second_ms,
         count(*) AS bucket_rows
     FROM raw_capture.binance_futures_price_trace_100ms
-    WHERE bucket_start_ms >=
-          (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+    WHERE bucket_start_ms >= ${PHASE2_START_MS}
+      AND bucket_start_ms < ${PHASE2_END_MS}
     GROUP BY connection_id, (bucket_start_ms / 1000) * 1000
 )
 SELECT
@@ -620,14 +740,14 @@ Audit the futures session lifecycle and ensure every recent trace connection
 has session metadata:
 
 ```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
 sudo -u postgres psql -d price_collector -c "
 WITH recent_sessions AS (
     SELECT *
     FROM raw_capture.feed_sessions
     WHERE source = 'binance_futures_agg_trade'
-      AND connected_wall_ns >= (
-          extract(epoch FROM now() - interval '24 hours') * 1000000000
-      )::bigint
+      AND connected_wall_ns >= ${PHASE2_JOURNAL_START_NS}
+      AND connected_wall_ns < ${PHASE2_END_NS}
 )
 SELECT
     count(*) AS session_count,
@@ -647,8 +767,8 @@ FROM recent_sessions;
 WITH recent_trace_connections AS (
     SELECT DISTINCT connection_id
     FROM raw_capture.binance_futures_price_trace_100ms
-    WHERE bucket_start_ms >=
-          (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+    WHERE bucket_start_ms >= ${PHASE2_START_MS}
+      AND bucket_start_ms < ${PHASE2_END_MS}
 )
 SELECT count(*) FILTER (WHERE sessions.connection_id IS NULL)
        AS trace_connections_without_session
@@ -670,6 +790,7 @@ Measure rows per connection and UTC hour. A complete hour for one connection
 cannot exceed 36,000 rows; inactive 100 ms buckets are intentionally absent:
 
 ```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
 sudo -u postgres psql -d price_collector -c "
 SELECT
     connection_id,
@@ -682,8 +803,8 @@ SELECT
     sum(event_count) AS agg_trade_events,
     round(count(*)::numeric / 3600, 3) AS rows_per_second
 FROM raw_capture.binance_futures_price_trace_100ms
-WHERE bucket_start_ms >=
-      (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+WHERE bucket_start_ms >= ${PHASE2_START_MS}
+  AND bucket_start_ms < ${PHASE2_END_MS}
 GROUP BY connection_id, (bucket_start_ms / 3600000) * 3600000
 ORDER BY utc_hour, connection_id;
 "
@@ -751,22 +872,29 @@ df -h /var/lib/postgresql
 
 ### Compare one-second flow and book completeness
 
-After the full 24 hours, compare the immediately preceding baseline day with
-the canary day:
+After the full three hours, compare the immediately preceding three-hour
+baseline with the accelerated-canary window:
 
 ```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
+NOW_MS="$(date -u +%s%3N)"
+if [ "$NOW_MS" -lt "$PHASE2_TELEMETRY_END_MS" ]; then
+  printf 'Phase 2 final telemetry is not complete: now=%s required_end=%s\n' \
+    "$NOW_MS" "$PHASE2_TELEMETRY_END_MS" >&2
+  exit 1
+fi
+printf 'fixed three-hour window complete: [%s, %s)\n' \
+  "$PHASE2_START_UTC" "$PHASE2_END_UTC"
+```
+
+```bash
+source <(sudo -u pricecollector cat /var/lib/price-collector/phase2-canary-window.env)
 sudo -u postgres psql -d price_collector -c "
-WITH anchor AS (
-    SELECT (extract(epoch FROM date_trunc('second', now())) * 1000)::bigint AS end_ms
-), periods AS (
-    SELECT
-        'baseline' AS period,
-        end_ms - 172800000 AS start_ms,
-        end_ms - 86400000 AS end_ms
-    FROM anchor
-    UNION ALL
-    SELECT 'canary', end_ms - 86400000, end_ms
-    FROM anchor
+WITH periods(period, start_ms, end_ms) AS (
+    VALUES
+        ('baseline', (${PHASE2_START_MS} - 10800000)::bigint,
+         ${PHASE2_START_MS}::bigint),
+        ('canary', ${PHASE2_START_MS}::bigint, ${PHASE2_END_MS}::bigint)
 ), datasets(dataset) AS (
     VALUES ('flow'), ('book')
 ), observations AS (
@@ -796,7 +924,7 @@ SELECT
     datasets.dataset,
     count(tagged.sample_second_ms) AS rows,
     round(
-        count(tagged.sample_second_ms)::numeric / 86400 * 100,
+        count(tagged.sample_second_ms)::numeric / 10800 * 100,
         3
     ) AS second_coverage_percent,
     COALESCE(max((tagged.sample_second_ms - tagged.previous_ms) / 1000), 0)
@@ -821,14 +949,15 @@ if it degrades the existing one-second paths.
 
 ### Phase 2 acceptance
 
-Phase 2 is operationally complete only when all of these are true after a
-continuous 24-hour run:
+Phase 2 is operationally complete under the accelerated rollout only when all
+of these are true after a continuous three-hour run:
 
 - The futures collector process did not unexpectedly restart; its final
   `ActiveEnterTimestamp` and `NRestarts` match the recorded starting values.
 - `records_persisted_total` increased and futures trace rows span the canary.
 - `records_dropped_total=0`, `batches_failed_total=0`, and
   `capture_suspended=false` in the final summary.
+- Raw maintenance ran at least once and `maintenance_failures_total=0`.
 - `parse_errors_total=0`, or every parse error was investigated and the affected
   interval was rejected for training; received and accepted totals were
   reviewed for unexplained loss.
@@ -846,6 +975,15 @@ continuous 24-hour run:
   reviewed; there are no unexplained gaps, duplicates, or regressions.
 - Existing flow and book completeness show no unexplained regression.
 - `btc:live:futures` and `/markets/current/live` remain healthy and REST-based.
+
+Passing these checks authorizes the accelerated move to Phase 3; it does not
+make three hours equivalent to a full-day soak. Keep the futures collector
+running and continue reviewing the same counters, resource use, database size,
+and filesystem space until it has accumulated at least 24 uninterrupted hours.
+Any later unexplained regression is still a Phase 2 failure and requires the
+same rollback and investigation. Once Chainlink capture starts, this extended
+observation is no longer futures-only, so the Chainlink-zero isolation check no
+longer applies.
 
 ### Phase 2 rollback
 
@@ -887,7 +1025,7 @@ schema in place; do not use the Phase 1 schema-removal rollback after capture
 has run. The retained evidence is bounded and may be reviewed or removed later
 with an explicit data-disposal decision.
 
-## Phase 3 Chainlink Capture Canary
+## Phase 3 Chainlink Accelerated Capture Canary
 
 Phase 3 removes Redis and PostgreSQL waits from the Polymarket RTDS receive
 loop, adds independent latest-wins live and provider-second historical workers,
@@ -895,10 +1033,20 @@ and wires every valid Chainlink tick to the private best-effort capture runtime.
 The repository and environment-example flag remains `false`; deploying the code
 does not enable Chainlink raw capture by itself.
 
+This rollout uses an explicitly risk-accepted three-hour accelerated canary.
+It validates short-term correctness, isolation, ordering, queueing, batching,
+and resource behavior, but has less confidence than a 24-hour soak for slow
+leaks, traffic variation, rare reconnects, and storage trends. Passing it
+authorizes Phase 4 while both collectors continue background monitoring toward
+at least 24 uninterrupted hours.
+A three-hour window may not cross a six-hour raw partition boundary; Phase 4's
+deliberate partition and retention checks are the required compensation.
+
 The Phase 3 code checkpoint may be deployed while the futures-only Phase 2
 canary is still running. Do **not** enable Chainlink raw capture until Phase 2
-has completed its uninterrupted 24-hour window and passed every acceptance
-check above. Enabling it earlier ends the futures-only isolation period.
+has completed its uninterrupted three-hour accelerated window and passed every
+acceptance check above. Enabling it earlier ends the futures-only isolation
+period.
 
 ### Deploy the code checkpoint disabled
 
@@ -932,8 +1080,9 @@ RAW_CHAINLINK_EVENTS_ENABLED=false
 ```
 
 If Phase 2 has not yet been enabled, `RAW_FUTURES_TRACE_ENABLED` can still be
-`false` at this code checkpoint. It must be `true` and its 24-hour acceptance
-must be complete before the Phase 3 production canary begins.
+`false` at this code checkpoint. It must be `true` and its three-hour
+accelerated acceptance must be complete before the Phase 3 production canary
+begins.
 
 Even with Chainlink raw capture disabled, the new delivery workers are active.
 Confirm that RTDS values continue advancing in Redis and normal PostgreSQL
@@ -996,9 +1145,10 @@ sudo systemctl show price-collector-binance-futures \
   -p ActiveEnterTimestamp -p NRestarts -p MainPID -p CPUUsageNSec -p MemoryCurrent
 ```
 
-Record the preceding 24-hour normal Chainlink-history coverage. RTDS need not
-publish in every UTC second, so compare the canary to this baseline rather than
-requiring 100 percent coverage:
+Record the preceding three-hour normal Chainlink-history coverage. RTDS need
+not publish in every UTC second, so compare the canary to this like-for-like
+baseline rather than requiring 100 percent coverage. Retain the surrounding
+24-hour context when investigating unusual gaps:
 
 ```bash
 sudo -u postgres psql -d price_collector -c "
@@ -1012,11 +1162,11 @@ WITH observations AS (
     WHERE p.provider_code = 'polymarket_chainlink_rtds'
       AND i.symbol = 'BTCUSD'
       AND ps.sample_second_ms >=
-          (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+          (extract(epoch FROM now() - interval '3 hours') * 1000)::bigint
 )
 SELECT
     count(*) AS rows,
-    round(count(*)::numeric / 86400 * 100, 3) AS second_coverage_percent,
+    round(count(*)::numeric / 10800 * 100, 3) AS second_coverage_percent,
     COALESCE(max((sample_second_ms - previous_ms) / 1000), 0)
         AS maximum_gap_seconds,
     count(*) FILTER (
@@ -1090,12 +1240,15 @@ PHASE3_JOURNAL_START_UTC="$(phase3_epoch_ms_to_utc "$PHASE3_JOURNAL_START_MS")"
 sudo systemctl restart price-collector-polymarket-chainlink
 sudo systemctl is-active --quiet price-collector-polymarket-chainlink
 
-PHASE3_START_MS="$(date -u +%s%3N)"
-PHASE3_END_MS="$((PHASE3_START_MS + 86400000))"
+PHASE3_OBSERVED_START_MS="$(date -u +%s%3N)"
+PHASE3_START_MS="$((((PHASE3_OBSERVED_START_MS + 999) / 1000) * 1000))"
+PHASE3_END_MS="$((PHASE3_START_MS + 10800000))"
+PHASE3_TELEMETRY_END_MS="$((PHASE3_END_MS + 120000))"
 PHASE3_START_NS="$((PHASE3_START_MS * 1000000))"
 PHASE3_END_NS="$((PHASE3_END_MS * 1000000))"
 PHASE3_START_UTC="$(phase3_epoch_ms_to_utc "$PHASE3_START_MS")"
 PHASE3_END_UTC="$(phase3_epoch_ms_to_utc "$PHASE3_END_MS")"
+PHASE3_TELEMETRY_END_UTC="$(phase3_epoch_ms_to_utc "$PHASE3_TELEMETRY_END_MS")"
 
 {
   printf 'PHASE3_JOURNAL_START_MS=%s\n' "$PHASE3_JOURNAL_START_MS"
@@ -1103,10 +1256,12 @@ PHASE3_END_UTC="$(phase3_epoch_ms_to_utc "$PHASE3_END_MS")"
   printf 'PHASE3_JOURNAL_START_UTC=%s\n' "$PHASE3_JOURNAL_START_UTC"
   printf 'PHASE3_START_MS=%s\n' "$PHASE3_START_MS"
   printf 'PHASE3_END_MS=%s\n' "$PHASE3_END_MS"
+  printf 'PHASE3_TELEMETRY_END_MS=%s\n' "$PHASE3_TELEMETRY_END_MS"
   printf 'PHASE3_START_NS=%s\n' "$PHASE3_START_NS"
   printf 'PHASE3_END_NS=%s\n' "$PHASE3_END_NS"
   printf 'PHASE3_START_UTC=%s\n' "$PHASE3_START_UTC"
   printf 'PHASE3_END_UTC=%s\n' "$PHASE3_END_UTC"
+  printf 'PHASE3_TELEMETRY_END_UTC=%s\n' "$PHASE3_TELEMETRY_END_UTC"
 } | sudo -u pricecollector tee "$PHASE3_CANARY_FILE" >/dev/null
 sudo -u pricecollector chmod 600 "$PHASE3_CANARY_FILE"
 sudo -u pricecollector cat "$PHASE3_CANARY_FILE"
@@ -1126,7 +1281,8 @@ and cumulative in-process counters; a normal RTDS WebSocket reconnect does not.
 Do not overwrite `phase3-canary-window.env` during this run. If the Chainlink
 process unexpectedly restarts, reject this window and repeat the activation
 sequence to create a fresh one. Final acceptance starts only after the current
-UTC epoch is at least `PHASE3_END_MS`; retain the file with the canary evidence.
+UTC epoch is at least `PHASE3_TELEMETRY_END_MS`; retain the file with the canary
+evidence.
 
 Verify the unchanged public path:
 
@@ -1145,12 +1301,15 @@ redis-cli -h 127.0.0.1 GET btc:live:chainlink
 The Chainlink collector emits one structured `raw_capture_summary` every 60
 seconds while capture is enabled. It includes standard raw writer counters,
 signed provider/local timing, connection health, and independent live and
-historical delivery state. Do not log individual raw ticks.
+historical delivery state. Do not log individual raw ticks. The journal bound
+extends two minutes beyond the exact three-hour SQL evidence window so final
+acceptance includes at least the first cumulative summary after the endpoint;
+SQL remains strictly bounded to `[PHASE3_START_MS, PHASE3_END_MS)`.
 
 ```bash
 source <(sudo -u pricecollector cat /var/lib/price-collector/phase3-canary-window.env)
 sudo journalctl -u price-collector-polymarket-chainlink \
-  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_END_UTC" -o cat \
+  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_TELEMETRY_END_UTC" -o cat \
   | grep '"event": "raw_capture_summary"' \
   | grep '"source": "polymarket_chainlink_rtds"' \
   | tail -n 20
@@ -1162,7 +1321,7 @@ Summarize the cumulative final state and sampled maxima:
 source <(sudo -u pricecollector cat /var/lib/price-collector/phase3-canary-window.env)
 printf 'fixed canary window: [%s, %s)\n' "$PHASE3_START_UTC" "$PHASE3_END_UTC"
 sudo journalctl -u price-collector-polymarket-chainlink \
-  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_END_UTC" -o cat \
+  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_TELEMETRY_END_UTC" -o cat \
   | grep '"event": "raw_capture_summary"' \
   | grep '"source": "polymarket_chainlink_rtds"' \
   | python3 -c '
@@ -1263,11 +1422,11 @@ reviewed through their dedicated counters instead of being automatic failures:
 ```bash
 source <(sudo -u pricecollector cat /var/lib/price-collector/phase3-canary-window.env)
 sudo journalctl -u price-collector-polymarket-chainlink \
-  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_END_UTC" -o cat \
+  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_TELEMETRY_END_UTC" -o cat \
   | grep -E '"level": "(ERROR|CRITICAL)"|"message": "(live_cache_write_failed|polymarket_chainlink_history_write_retry_scheduled|raw_capture_queue_oldest_dropped|raw_capture_suspended_by_storage_budget|raw_capture_shutdown_task_still_running)"'
 ```
 
-Check resource use at the start, during the run, and after 24 hours:
+Check resource use at the start, during the run, and after three hours:
 
 ```bash
 sudo systemctl show price-collector-polymarket-chainlink \
@@ -1277,18 +1436,19 @@ ps -p "${CHAINLINK_PID}" -o pid,etime,%cpu,%mem,rss,vsz,cmd
 ```
 
 Before running the final SQL evidence checks below, source the recorded window
-and confirm its full 24 hours have elapsed. Do not accept the canary when this
-prints `window still running`:
+and confirm both the full three hours and the two-minute telemetry grace have
+elapsed. Do not accept the canary when this prints `window still running`:
 
 ```bash
 source <(sudo -u pricecollector cat /var/lib/price-collector/phase3-canary-window.env)
 PHASE3_NOW_MS="$(date -u +%s%3N)"
-if [ "$PHASE3_NOW_MS" -lt "$PHASE3_END_MS" ]; then
-  printf 'window still running; wait until %s\n' "$PHASE3_END_UTC"
-else
-  printf 'fixed 24-hour window complete: [%s, %s)\n' \
-    "$PHASE3_START_UTC" "$PHASE3_END_UTC"
+if [ "$PHASE3_NOW_MS" -lt "$PHASE3_TELEMETRY_END_MS" ]; then
+  printf 'window still running; wait until %s\n' \
+    "$PHASE3_TELEMETRY_END_UTC" >&2
+  exit 1
 fi
+printf 'fixed three-hour window complete: [%s, %s)\n' \
+  "$PHASE3_START_UTC" "$PHASE3_END_UTC"
 ```
 
 ### Validate ordering and same-millisecond events
@@ -1602,15 +1762,15 @@ Both missing and mismatch counts must be zero. A mismatch means the refactored
 critical path did not preserve the documented latest-received provider-second
 semantics even if raw capture itself is healthy.
 
-After the full 24 hours, compare normal Chainlink history in the immediately
-preceding baseline day and canary day:
+After the full three hours, compare normal Chainlink history in the immediately
+preceding three-hour baseline and accelerated-canary window:
 
 ```bash
 source <(sudo -u pricecollector cat /var/lib/price-collector/phase3-canary-window.env)
 sudo -u postgres psql -d price_collector -c "
 WITH periods(period, start_ms, end_ms) AS (
     VALUES
-        ('baseline', (${PHASE3_START_MS} - 86400000)::bigint,
+        ('baseline', (${PHASE3_START_MS} - 10800000)::bigint,
          ${PHASE3_START_MS}::bigint),
         ('canary', ${PHASE3_START_MS}::bigint, ${PHASE3_END_MS}::bigint)
 ), observations AS (
@@ -1635,7 +1795,7 @@ WITH periods(period, start_ms, end_ms) AS (
 SELECT
     periods.period,
     count(tagged.sample_second_ms) AS rows,
-    round(count(tagged.sample_second_ms)::numeric / 86400 * 100, 3)
+    round(count(tagged.sample_second_ms)::numeric / 10800 * 100, 3)
         AS second_coverage_percent,
     COALESCE(max((tagged.sample_second_ms - tagged.previous_ms) / 1000), 0)
         AS maximum_gap_seconds,
@@ -1681,7 +1841,7 @@ WHERE application_name = 'price_collector_raw_capture';
 sudo systemctl show price-collector-binance-futures \
   -p ActiveEnterTimestamp -p NRestarts -p MainPID -p CPUUsageNSec -p MemoryCurrent
 sudo journalctl -u price-collector-binance-futures \
-  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_END_UTC" -o cat \
+  --since "$PHASE3_JOURNAL_START_UTC" --until "$PHASE3_TELEMETRY_END_UTC" -o cat \
   | grep '"event": "raw_capture_summary"' \
   | tail -n 5
 curl -fsS http://127.0.0.1:9000/markets/current/live
@@ -1727,10 +1887,11 @@ The configured relation budget is not a filesystem quota.
 
 ### Phase 3 acceptance
 
-Phase 3 is operationally complete only after an uninterrupted 24-hour
-Chainlink run in which all of these are true:
+Phase 3 is operationally complete under the accelerated rollout only after an
+uninterrupted three-hour Chainlink run in which all of these are true:
 
-- Phase 2 had already passed its separate futures-only 24-hour acceptance.
+- Phase 2 had already passed its separate futures-only three-hour accelerated
+  acceptance.
 - The Chainlink process did not unexpectedly restart; final
   `ActiveEnterTimestamp` and `NRestarts` match its enablement baseline.
 - Raw Chainlink events and delivery successes increased across the canary.
@@ -1755,6 +1916,13 @@ Chainlink run in which all of these are true:
 - The two raw pools use no more than two database connections, and CPU, memory,
   rows/hour, batch latency, relation growth, total database size, and filesystem
   free space remain acceptable.
+
+Passing these checks authorizes the accelerated move to Phase 4; it does not
+make three hours equivalent to a full-day soak. Keep both capture flags enabled
+and continue ordinary counter, restart, resource, database-size, and filesystem
+monitoring until the collectors have accumulated at least 24 uninterrupted
+hours. Any later drop, failed batch, suspension, delivery failure, restart, or
+capacity pressure remains a canary failure and triggers the rollback below.
 
 ### Phase 3 rollback
 

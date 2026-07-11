@@ -575,9 +575,13 @@ There should be no CLOB raw-capture setting in this checkpoint because the featu
 Phase 2 integrates the futures reader and adds its focused stream/collector
 tests. The repository and environment-example flag remains `False`; integration
 being merged and deployed safely is the Phase 2 code checkpoint, not completion
-of its required 24-hour production canary. Phase 3 integrates and refactors the
-Chainlink reader and adds its focused tests. Deferring those files is what makes
-Phase 1 observably inactive.
+of its required accelerated three-hour production canary. Phase 3 integrates
+and refactors the Chainlink reader and adds its focused tests. Deferring those
+files is what makes Phase 1 observably inactive. The three-hour gate deliberately
+accepts less confidence than a 24-hour canary; successful captures remain
+enabled and under background observation toward 24 uninterrupted hours after
+the rollout advances. Because three hours may not cross a six-hour partition
+boundary, Phase 4's deliberate partition and retention checks remain required.
 
 ---
 
@@ -627,7 +631,7 @@ This keeps any capture bug separate from a user-visible price-source change.
    raw rows. Empty pre-created partitions are expected and are not capture
    activity.
 
-## Phase 2 — Futures-only canary
+## Phase 2 — Futures-only accelerated canary
 
 ### Phase 2 code checkpoint
 
@@ -649,9 +653,10 @@ This keeps any capture bug separate from a user-visible price-source change.
 1. Confirm `BINANCE_FUTURES_STREAMS_ENABLED=true`, then manually enable only
    `RAW_FUTURES_TRACE_ENABLED` in the existing production environment file.
    Keep `RAW_CHAINLINK_EVENTS_ENABLED=false`.
-2. Restart only `price-collector-binance-futures` and run continuously for 24
-   hours. An unexpected collector-process restart resets the canary window; a
-   normal Binance WebSocket reconnect does not.
+2. Restart only `price-collector-binance-futures` and run continuously for three
+   hours. This is an explicitly accelerated canary with less confidence than the
+   original 24-hour window. An unexpected collector-process restart resets the
+   three-hour canary window; a normal Binance WebSocket reconnect does not.
 3. Measure actual rows/hour, bytes/hour, queue high-water, batch/database
    latency, collector CPU and memory, total database size, and filesystem free
    space.
@@ -669,8 +674,13 @@ This keeps any capture bug separate from a user-visible price-source change.
    uses no more than one connection, and the REST-backed Redis/API futures live
    value remains healthy.
 8. Compare the canary's one-second flow and book coverage and gaps with the
-   immediately preceding 24-hour baseline; investigate any degradation.
-9. Declare Phase 2 complete only after all checks pass. On failure, set
+   immediately preceding three-hour baseline, using the surrounding 24-hour
+   history as additional context when available; investigate any degradation.
+9. Declare Phase 2 operationally complete only after the full three-hour window
+   and all accelerated acceptance checks pass. Advancing to Phase 3 does not end
+   observation: leave futures capture enabled and monitor it toward at least 24
+   uninterrupted hours from activation. Treat a later regression as a canary
+   failure. On failure, set
    `RAW_FUTURES_TRACE_ENABLED=false`, restart
    `price-collector-binance-futures`, retain the populated raw schema, and
    confirm capture rows stop increasing.
@@ -702,15 +712,16 @@ This keeps any capture bug separate from a user-visible price-source change.
 ### Phase 3 operational completion
 
 1. Do not begin until the uninterrupted futures-only Phase 2 canary has passed
-   all 24-hour acceptance checks. Enabling Chainlink sooner invalidates that
-   isolation window.
+   all three-hour accelerated acceptance checks. Enabling Chainlink sooner
+   invalidates that isolation window.
 2. Keep `BINANCE_FUTURES_STREAMS_ENABLED=true` and
    `RAW_FUTURES_TRACE_ENABLED=true`, manually set only
    `RAW_CHAINLINK_EVENTS_ENABLED=true`, and restart only
    `price-collector-polymarket-chainlink` so the futures service is not reset.
-3. Run Chainlink capture continuously for 24 hours. Require zero raw drops,
-   failed batches, storage suspension, and unexplained parse errors; require a
-   queue that repeatedly returns near zero and never reaches capacity.
+3. Run Chainlink capture continuously for three hours. This explicitly
+   accelerated window provides less confidence than 24 hours. Require zero raw
+   drops, failed batches, storage suspension, and unexplained parse errors;
+   require a queue that repeatedly returns near zero and never reaches capacity.
 4. Confirm successfully persisted ticks have unique connection/sequence pairs,
    monotonic receive order, and distinct rows when two ticks share a local
    millisecond. Sequence gaps caused by counted RTDS control or malformed frames
@@ -725,7 +736,12 @@ This keeps any capture bug separate from a user-visible price-source change.
 7. Confirm futures evidence and service uptime remain unaffected, relation and
    filesystem growth are acceptable, and the two enabled collectors together
    use no more than two dedicated raw database connections.
-8. On a raw-only failure, disable only Chainlink raw capture and restart only
+8. Declare Phase 3 operationally complete only after the full three-hour window
+   and all accelerated acceptance checks pass. Advancing to Phase 4 does not end
+   observation: keep both captures enabled and monitor each collector toward at
+   least 24 uninterrupted hours from its own activation time. Treat a later
+   regression as a canary failure.
+9. On a raw-only failure, disable only Chainlink raw capture and restart only
    its service. On a delivery-refactor failure, deploy a code revert as well;
    the raw feature flag does not disable the new live and historical workers.
 

@@ -181,8 +181,14 @@ The public futures live value remains the Binance REST
 neither API response. With both raw flags `false`, no raw capture queue, task,
 session UUID, monotonic receive stamp, or extra raw database connection is
 created. A phase's deployed code is only its code checkpoint. The corresponding
-24-hour production canary and all acceptance checks in `OPERATIONS.md` must pass
-before that phase is operationally complete.
+explicitly accelerated three-hour production canary and all acceptance checks
+in `OPERATIONS.md` must pass before that phase is operationally complete. This
+short gate provides less confidence about slow leaks, reconnects, daily traffic
+variation, and sustained storage growth than a 24-hour canary. After advancing,
+leave capture enabled and continue background observation toward 24
+uninterrupted hours; a later failure still requires the documented rollback.
+Because three hours may not cross a six-hour raw partition boundary, Phase 4's
+deliberate partition and retention validation remains mandatory.
 
 Redis is not a historical store. It contains only these live keys:
 
@@ -346,22 +352,27 @@ The Phase 1 schema accepts only a 100 ms futures bucket. The relation budget
 applies only to raw-capture PostgreSQL relations; it is not a filesystem quota
 and does not include WAL, temporary files, or the rest of the database.
 
-For the Phase 2 production canary, manually set only
+For the Phase 2 accelerated three-hour production canary, manually set only
 `RAW_FUTURES_TRACE_ENABLED=true`, keep
 `RAW_CHAINLINK_EVENTS_ENABLED=false`, and keep
 `BINANCE_FUTURES_STREAMS_ENABLED=true`. Do not commit that production override
-to the example file. Follow the full 24-hour acceptance and rollback procedure
-in [`OPERATIONS.md`](OPERATIONS.md).
+to the example file. Follow the full accelerated acceptance and rollback
+procedure in [`OPERATIONS.md`](OPERATIONS.md). Passing the three-hour gate
+permits Phase 3, but leave futures capture running and continue observing the
+same health indicators until it reaches at least 24 uninterrupted hours.
 
 Prepare and deploy the Phase 3 code with Chainlink capture still `false`. Do not
 enable it until the futures-only Phase 2 canary has completed its uninterrupted
-24-hour acceptance window. The Phase 3 production canary keeps
+three-hour accelerated acceptance window. The Phase 3 accelerated three-hour
+production canary keeps
 `BINANCE_FUTURES_STREAMS_ENABLED=true` and
 `RAW_FUTURES_TRACE_ENABLED=true`, manually sets
 `RAW_CHAINLINK_EVENTS_ENABLED=true`, and restarts only
 `price-collector-polymarket-chainlink`. The two enabled collectors can then use
 at most two dedicated raw-capture database connections in total. The repository
-example remains disabled.
+example remains disabled. Passing this gate permits Phase 4 with reduced
+confidence; keep both captures enabled and continue background observation of
+each one toward 24 uninterrupted hours from its activation time.
 
 Do not commit `collector.env`, `api.env`, `droplet.env`, `.env`, or real
 credentials. These files are ignored by Git; only their examples belong in the

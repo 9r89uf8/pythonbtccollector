@@ -171,8 +171,9 @@ For this collector, `received_ms` is the local time captured at the start of the
 polling cycle. If any request in the combined cycle fails, that cycle does not
 replace the cached value; the prior value remains and becomes visibly older.
 The futures `aggTrade` WebSocket continues to feed the historical one-second
-flow table. During the opt-in Phase 2 canary, it also feeds private 100 ms OHLC
-evidence capture when `RAW_FUTURES_TRACE_ENABLED=true`. The `bookTicker`
+flow table. During the opt-in Phase 2 accelerated three-hour canary, it also
+feeds private 100 ms OHLC evidence capture when
+`RAW_FUTURES_TRACE_ENABLED=true`. The `bookTicker`
 WebSocket continues to feed the historical one-second book table. Neither
 WebSocket updates `btc:live:futures`; the public live futures value remains the
 REST ticker price.
@@ -183,6 +184,17 @@ bounded PostgreSQL writers are best-effort and are never awaited by either
 WebSocket reader; the live and one-second paths do not share their queues. Both
 capture flags remain opt-in and default to `false` even after their collector
 integrations are deployed.
+
+The rollout uses explicitly accelerated three-hour validation gates for the
+futures-only Phase 2 canary and the subsequent Chainlink Phase 3 canary. These
+short gates provide less confidence than 24 hours about slow leaks, reconnect
+behavior, daily traffic variation, and sustained storage growth. Passing a gate
+allows the next phase to start; it does not stop observation. Leave each
+successful capture enabled and continue monitoring its normal and raw paths
+toward at least 24 uninterrupted hours from that collector's activation time.
+Any later regression still invokes the phase's documented rollback. A
+three-hour window may not cross a six-hour raw partition boundary, so Phase 4's
+deliberate partition and retention validation remains mandatory.
 
 ## Redis Live Cache
 
