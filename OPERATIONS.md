@@ -2383,6 +2383,139 @@ The revert restores the accepted pre-cutover REST behavior. It does not require
 a schema change and must not restart Chainlink or disable either raw-capture
 flag unless a separate raw-capture failure justifies that action.
 
+## Shadow-Signal Phase 2 Raw Replay
+
+This is an offline, read-only analysis job. It does not run inside a collector,
+FastAPI, Redis, or systemd. It does not select the provisional primary model;
+that decision is a later shadow-signal checkpoint.
+
+Prerequisites:
+
+- both raw capture products must already contain evidence;
+- the replay uses `DATABASE_URL` from `collector.env` because `price_reader`
+  intentionally has no access to `raw_capture`;
+- only completed, ready, drop-free, integrity-reconciled session intersections
+  are scored by default; and
+- the requested `[start_ms,end_ms)` range must be no longer than 24 hours.
+
+Confirm the raw flags and row/session availability first:
+
+```bash
+sudo grep -E '^(RAW_FUTURES_TRACE_ENABLED|RAW_CHAINLINK_EVENTS_ENABLED)=' /etc/price-collector/collector.env
+sudo -u postgres psql -d price_collector -c "
+SELECT
+    (SELECT count(*) FROM raw_capture.binance_futures_price_trace_100ms) AS futures_rows,
+    (SELECT count(*) FROM raw_capture.chainlink_price_events) AS chainlink_rows,
+    (SELECT count(*) FROM raw_capture.feed_sessions
+      WHERE disconnected_wall_ns IS NOT NULL) AS completed_sessions;
+"
+```
+
+Choose a reproducible 24-hour window ending at the older of the latest
+completed futures and Chainlink session boundaries:
+
+```bash
+END_MS="$(sudo -u postgres psql -At -d price_collector -c "
+SELECT LEAST(
+    max(disconnected_wall_ns) FILTER (
+        WHERE source = 'binance_futures_agg_trade'
+    ),
+    max(disconnected_wall_ns) FILTER (
+        WHERE source = 'polymarket_chainlink_rtds'
+    )
+) / 1000000
+FROM raw_capture.feed_sessions
+WHERE disconnected_wall_ns IS NOT NULL;
+")"
+test -n "$END_MS"
+START_MS="$((END_MS - 86400000))"
+REPORT="/var/lib/price-collector/shadow-replay-${START_MS}-${END_MS}.json"
+printf 'START_MS=%s\nEND_MS=%s\nREPORT=%s\n' "$START_MS" "$END_MS" "$REPORT"
+```
+
+Run the replay with the service user's existing writer environment. The
+arguments are UTC epoch milliseconds with an inclusive start and exclusive
+end. Quantiles use a deterministic bounded sample; streaming counts, means,
+coverage, and RMSE are exact.
+
+```bash
+REPLAY_EXIT=0
+sudo -u pricecollector \
+  env START_MS="$START_MS" END_MS="$END_MS" REPORT="$REPORT" \
+  bash -c '
+    set -a
+    . /etc/price-collector/collector.env
+    set +a
+    cd /opt/price-collector
+    exec .venv/bin/python -m price_collector.shadow_signal_replay \
+      --start-ms "$START_MS" \
+      --end-ms "$END_MS" \
+      --output "$REPORT"
+  ' || REPLAY_EXIT=$?
+printf 'replay_exit=%s\n' "$REPLAY_EXIT"
+if [ -f "$REPORT" ]; then
+  sudo chmod 640 "$REPORT"
+fi
+```
+
+Exit `0` means every configured candidate produced scored forecasts on the
+same common comparison cohort. Exit `2` means the diagnostic JSON was written
+but its status is `no_eligible_segments`, `no_scored_forecasts`, or
+`partial_candidate_evidence`; do not use it for the Phase 3 model decision.
+Other nonzero exits indicate a query, integrity, partition-manifest, or
+configuration failure.
+
+Print the comparison summary without installing another tool:
+
+```bash
+sudo -u pricecollector /opt/price-collector/.venv/bin/python - "$REPORT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    report = json.load(stream)
+
+print("status:", report["status"])
+print("range:", report["range"])
+print("session exclusions:", report["data_quality"]["sessions_excluded_by_reason"])
+for candidate in report["candidates"]:
+    cohort = candidate["common_cohort"]
+    metrics = cohort["metrics"]
+    print({
+        "model": candidate["model_version"],
+        "scheduled": candidate["scheduled"],
+        "valid_generated": candidate["valid_generated"],
+        "target_eligible": candidate["target_eligible"],
+        "all_horizon_scored": candidate["scored"],
+        "common_cohort_scored": cohort["scored"],
+        "generation_coverage": candidate["generation_coverage"],
+        "median_abs_error_usd": metrics["model_median_absolute_error_usd"],
+        "baseline_median_abs_error_usd": metrics["baseline_median_absolute_error_usd"],
+        "rmse_usd": metrics["model_rmse_usd"],
+        "baseline_rmse_usd": metrics["baseline_rmse_usd"],
+        "mae_skill_vs_no_change": metrics["mae_skill_vs_no_change"],
+        "wins": metrics["wins"],
+        "ties": metrics["ties"],
+        "losses": metrics["losses"],
+    })
+PY
+```
+
+The summary deliberately reads `common_cohort.metrics`, so every candidate is
+compared on the same generation times. Positive `mae_skill_vs_no_change` means
+the candidate reduced mean absolute error against no-change on those paired
+rows. Do not select a model from directional accuracy alone. Compare error,
+baseline advantage, coverage, move-size, direction, expiry,
+raw-bucket-return RMS, and session-boundary slices across multiple
+chronological reports.
+
+Run this at least daily or preserve the derived JSON elsewhere: raw retention
+is configured for 72 hours. Phase 4 partition-boundary, retention, and storage
+budget behavior remains deliberately unproven. The replay reads in short
+time-bounded statements and aborts if the partition manifest changes; rerun the
+same range if maintenance overlaps the job. Never describe a successful replay
+as proof that Phase 4 retention risks are closed.
+
 ## Redis Spot Checks
 
 Redis is the live-card cache only. PostgreSQL remains the historical source.

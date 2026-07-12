@@ -223,6 +223,51 @@ Each value has this shape:
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
 
+### Shadow-signal design engine
+
+Shadow-signal development is separate from every live collector and from
+FastAPI. Phase 1 adds the dependency-free anchor/ratio state machine in
+`price_collector.shadow_signal`. Phase 2 adds the offline, read-only raw replay
+in `price_collector.shadow_signal_replay`.
+
+The replay:
+
+- maps each futures 100 ms row to its `close_price`,
+  `last_received_wall_ns`, and `last_trade_time_ms`;
+- consumes individual Chainlink events on their exact receive-wall timeline;
+- emulates an epoch-aligned Redis `MGET` every 100 ms and attempts forecasts
+  every 500 ms;
+- evaluates 3.0, 3.5, and 4.0-second ratio candidates against a separately
+  paired no-change baseline;
+- uses only completed, drop-free, count-reconciled futures/Chainlink session
+  intersections and resets state at every common session boundary;
+- reports coverage, censoring, median/mean error, RMSE, baseline skill,
+  direction, move-size, raw-bucket-return RMS, market-expiry, and session-edge
+  slices; and
+- keeps prices and calculations as `Decimal`, serialized as JSON strings.
+
+Each candidate's top-level metrics include all of its horizon-specific scored
+rows. Cross-model comparisons must use `candidates[].common_cohort.metrics`,
+which restricts every candidate to the same generation times where the maximum
+horizon fits and all configured models are valid.
+
+The command requires an explicit inclusive/exclusive UTC epoch-ms range and
+uses the writer `DATABASE_URL`, because the API reader cannot access
+`raw_capture`. A single report is limited to 24 hours and uses bounded
+reservoirs for quantiles; means, RMSE, counts, and coverage remain exact. Raw
+reads are split into short time chunks so the offline job does not hold a
+transaction or raw-partition locks for the duration of the replay. Operational
+bounds retain the 100 ms raw grid, require at least a 500 ms evaluation cadence,
+cap lags at 10 seconds and retained history at 30 seconds, cap each
+deterministic quantile reservoir at 50,000 values with a 10,000-value default,
+and allow at most five lag candidates under a shared candidate/sample budget.
+
+Phase 2 does not choose or configure a primary model, write PostgreSQL or
+Redis, add an API response, or run as a service. The report explicitly sets
+`selection_performed=false`. Run it while the required evidence remains inside
+raw retention, and preserve its JSON output beyond that retention window. See
+the shadow-signal replay section in `OPERATIONS.md` for the copy/paste command.
+
 ## API
 
 The FastAPI application is read-only and is started by systemd with:
@@ -280,7 +325,7 @@ parameters, complete response shapes, optional fields, and error responses.
 ## Repository Layout
 
 ```text
-price_collector/       Collectors, database access, live cache, market logic, API
+price_collector/       Collectors, API, pure shadow engine, and offline replay
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
