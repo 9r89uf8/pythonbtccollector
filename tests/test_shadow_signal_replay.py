@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+from collections import deque
 from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -631,6 +632,26 @@ def test_quantile_state_is_bounded_while_streaming_metrics_stay_exact():
     assert candidate["metrics"][
         "model_mean_absolute_error_usd"
     ] == Decimal("0")
+
+
+def test_volatility_recovers_from_decimal_subtraction_drift():
+    runtime = object.__new__(replay_module._SegmentRuntime)
+    runtime.config = replay_config(volatility_lookback_ms=2_000)
+    runtime._volatility_returns = deque(
+        [(ORIGIN_MS, Decimal("4"))]
+    )
+    runtime._volatility_square_sum = Decimal("-1E-27")
+
+    assert runtime._current_volatility(ORIGIN_MS) == Decimal("2")
+    assert runtime._volatility_square_sum == Decimal("4")
+
+    runtime._volatility_returns = deque(
+        [(ORIGIN_MS - 3_000, Decimal("4"))]
+    )
+    runtime._volatility_square_sum = Decimal("4.000000000000000000000000001")
+
+    assert runtime._current_volatility(ORIGIN_MS) is None
+    assert runtime._volatility_square_sum == Decimal("0")
 
 
 def replace_session_end(session, end_ms):

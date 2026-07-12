@@ -2585,19 +2585,8 @@ sudo -u pricecollector \
 Generate the strictly later holdout report without changing replay settings:
 
 ```bash
-sudo -u pricecollector \
-  env START_MS="$HOLDOUT_START_MS" END_MS="$HOLDOUT_END_MS" \
-      REPORT="$HOLDOUT_REPORT" \
-  bash -c '
-    set -a
-    . /etc/price-collector/collector.env
-    set +a
-    cd /opt/price-collector
-    exec .venv/bin/python -m price_collector.shadow_signal_replay \
-      --start-ms "$START_MS" \
-      --end-ms "$END_MS" \
-      --output "$REPORT"
-  '
+
+
 ```
 
 Confirm both inputs are successful schema-version-2 reports, then run the

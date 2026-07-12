@@ -1590,7 +1590,9 @@ class _SegmentRuntime:
             ) * BASIS_POINTS
             squared = return_bps * return_bps
             self._volatility_returns.append((event.received_ms, squared))
-            self._volatility_square_sum += squared
+            with localcontext() as context:
+                context.prec = 50
+                self._volatility_square_sum += squared
         self._last_futures_for_volatility = event
 
     def _current_volatility(self, now_ms: int) -> Optional[Decimal]:
@@ -1600,12 +1602,29 @@ class _SegmentRuntime:
             and self._volatility_returns[0][0] < cutoff_ms
         ):
             _received_ms, squared = self._volatility_returns.popleft()
-            self._volatility_square_sum -= squared
+            with localcontext() as context:
+                context.prec = 50
+                self._volatility_square_sum -= squared
         if not self._volatility_returns:
+            self._volatility_square_sum = Decimal("0")
             return None
-        mean_square = self._volatility_square_sum / Decimal(
-            len(self._volatility_returns)
-        )
+        if self._volatility_square_sum < 0:
+            with localcontext() as context:
+                context.prec = 50
+                self._volatility_square_sum = sum(
+                    (
+                        squared
+                        for _received_ms, squared in self._volatility_returns
+                    ),
+                    Decimal("0"),
+                )
+        if self._volatility_square_sum < 0:
+            raise ReplayDataError("volatility square sum cannot be negative")
+        with localcontext() as context:
+            context.prec = 50
+            mean_square = self._volatility_square_sum / Decimal(
+                len(self._volatility_returns)
+            )
         return _decimal_sqrt(mean_square)
 
 
