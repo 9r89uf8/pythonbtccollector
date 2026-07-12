@@ -273,17 +273,24 @@ raw retention, and preserve its JSON output beyond that retention window. See
 the shadow-signal replay section in `OPERATIONS.md` for the copy/paste command.
 
 Phase 3 accepts explicitly assigned, non-overlapping older calibration reports
-and later holdout reports. Policy `chronological_holdout_v1` ranks the three
-fixed V0 candidates only on calibration common-cohort evidence, freezes that
-winner, and either accepts it on holdout or abstains. It never reranks on the
-holdout or falls back to another model. Each report must contain at least
-10,000 common scored forecasts, at least 50% common valid coverage, and at
-least 99% maturation coverage. The winner must have positive MAE and RMSE skill
-against its paired no-change baseline and more paired wins than losses in both
-calibration and holdout. These are explicit project policy thresholds, not
+and one later holdout report. Policy `chronological_holdout_v2` ranks the three
+fixed V0 candidates only on calibration common-cohort MAE and RMSE skill,
+freezes that winner, and either accepts it on holdout or abstains. It never
+reranks on the holdout or falls back to another model. Each report must contain
+at least 10,000 common scored forecasts, at least 50% common valid coverage,
+and at least 99% maturation coverage. The winner must have positive MAE and
+RMSE skill against its paired no-change baseline in both calibration and
+holdout. Paired win/loss frequency remains a visible diagnostic but does not
+affect eligibility or ranking because overlapping 500 ms rows are
+autocorrelated. These are explicit project policy thresholds, not
 statistical-significance claims or values supplied by `engine.md`.
 
-The selector writes a deterministic artifact with report hashes, evidence
+Policy v2 supersedes v1. Any holdout inspected under v1 must be reclassified as
+calibration evidence, and v2 requires exactly one new, strictly later untouched
+holdout. The inspected v1 selection artifact remains historical and must not be
+overwritten by the v2 decision.
+
+The selector writes a deterministic schema-version-2 artifact with report hashes, evidence
 ranges, pooled metrics, common-cohort slices, gates, warnings, and either one
 provisional primary or `null`. Artifact creation is atomic and create-once; an
 identical rerun is idempotent, while different content cannot replace an

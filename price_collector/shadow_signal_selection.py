@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 
-SELECTION_SCHEMA_VERSION = 1
+SELECTION_SCHEMA_VERSION = 2
 SUPPORTED_REPLAY_SCHEMA_VERSION = 2
-SELECTION_POLICY_VERSION = "chronological_holdout_v1"
+SELECTION_POLICY_VERSION = "chronological_holdout_v2"
 COMMON_COHORT_DEFINITION = (
     "same_generated_ms_max_horizon_eligible_all_models_valid"
 )
@@ -26,7 +26,7 @@ EXPECTED_CANDIDATES = (
 EXPECTED_LAGS_MS = tuple(horizon for _version, horizon in EXPECTED_CANDIDATES)
 EXPECTED_BETA = Decimal("1")
 
-# These are project policy-v1 thresholds, not claims of statistical
+# These are project policy-v2 thresholds, not claims of statistical
 # significance and not values supplied by engine.md. Changing any one requires
 # a new policy version so a holdout cannot be tuned after its results are seen.
 MIN_COMMON_SCORED_PER_REPORT = 10_000
@@ -1043,11 +1043,29 @@ def _efficacy_gates(pool: MetricPool) -> dict[str, dict[str, Any]]:
                 and rmse_skill > MIN_RMSE_SKILL_EXCLUSIVE
             ),
         },
-        "paired_wins_exceed_losses": {
-            "observed_wins_minus_losses": pool.wins - pool.losses,
-            "threshold_exclusive": 0,
-            "passed": pool.wins > pool.losses,
-        },
+    }
+
+
+def _paired_frequency_diagnostic(pool: MetricPool) -> dict[str, Any]:
+    wins_minus_losses = pool.wins - pool.losses
+    return {
+        "hard_gate": False,
+        "affects_eligibility": False,
+        "affects_ranking": False,
+        "wins": pool.wins,
+        "ties": pool.ties,
+        "losses": pool.losses,
+        "observed_wins_minus_losses": wins_minus_losses,
+        "paired_net_win_rate": pool.paired_net_win_rate,
+        "warning": (
+            "paired_wins_do_not_exceed_losses"
+            if wins_minus_losses <= 0
+            else None
+        ),
+        "interpretation": (
+            "frequency diagnostic over autocorrelated 500 ms rows; "
+            "not an efficacy gate"
+        ),
     }
 
 
@@ -1123,20 +1141,26 @@ def _report_records(
 def _policy_payload() -> dict[str, Any]:
     return {
         "version": SELECTION_POLICY_VERSION,
+        "supersedes": "chronological_holdout_v1",
+        "revision_reason": (
+            "paired win/loss frequency is diagnostic on autocorrelated "
+            "500 ms rows; MAE and RMSE remain efficacy gates"
+        ),
+        "previously_inspected_holdouts_must_be_calibration": True,
+        "new_later_holdout_required_after_revision": True,
         "candidate_set": [version for version, _horizon in EXPECTED_CANDIDATES],
         "calibration_and_holdout_are_explicit": True,
         "ranking_source": "common_cohort_only",
         "ranking_order": [
             "higher_calibration_mae_skill_vs_no_change",
             "higher_calibration_rmse_skill_vs_no_change",
-            "higher_calibration_paired_net_win_rate",
         ],
         "exact_efficacy_tie_abstains": True,
         "holdout_reranking": False,
         "fallback_after_holdout_failure": False,
         "evidence_thresholds": {
             "minimum_calibration_reports": 1,
-            "minimum_holdout_reports": 1,
+            "required_holdout_reports": 1,
             "minimum_common_scored_per_report": (
                 MIN_COMMON_SCORED_PER_REPORT
             ),
@@ -1157,13 +1181,18 @@ def _policy_payload() -> dict[str, Any]:
                 "operator": ">",
                 "threshold": MIN_RMSE_SKILL_EXCLUSIVE,
             },
-            "paired_wins_minus_losses": {
-                "operator": ">",
-                "threshold": 0,
-            },
+        },
+        "diagnostics": {
+            "paired_win_loss_frequency": {
+                "hard_gate": False,
+                "affects_eligibility": False,
+                "affects_ranking": False,
+                "warning_when": "wins_do_not_exceed_losses",
+                "reason": "500_ms_rows_are_autocorrelated",
+            }
         },
         "threshold_provenance": (
-            "project_policy_v1_not_statistical_significance_and_not_engine_md"
+            "project_policy_v2_not_statistical_significance_and_not_engine_md"
         ),
     }
 
@@ -1201,6 +1230,10 @@ def select_provisional_primary(
     calibration_report_paths: Sequence[Path],
     holdout_report_paths: Sequence[Path],
 ) -> SelectionArtifact:
+    if len(holdout_report_paths) != 1:
+        raise SelectionInputError(
+            "policy v2 requires exactly one untouched holdout report"
+        )
     calibration = _load_role_reports(
         calibration_report_paths,
         "calibration",
@@ -1235,6 +1268,12 @@ def select_provisional_primary(
                 "holdout_slices": holdout_slices,
                 "calibration_gates": calibration_gates,
                 "holdout_gates": holdout_gates,
+                "calibration_paired_frequency": (
+                    _paired_frequency_diagnostic(calibration_pool)
+                ),
+                "holdout_paired_frequency": (
+                    _paired_frequency_diagnostic(holdout_pool)
+                ),
                 "calibration_eligible": _all_gates_pass(calibration_gates),
             }
         )
@@ -1243,15 +1282,12 @@ def select_provisional_primary(
         pool: MetricPool = item["calibration_pool"]
         mae_skill = pool.mae_skill
         rmse_skill = pool.rmse_skill
-        net_win_rate = pool.paired_net_win_rate
         return (
             not bool(item["calibration_eligible"]),
             mae_skill is None,
             -(mae_skill or Decimal("0")),
             rmse_skill is None,
             -(rmse_skill or Decimal("0")),
-            net_win_rate is None,
-            -(net_win_rate or Decimal("0")),
             int(item["horizon_ms"]),
             str(item["model_version"]),
         )
@@ -1268,8 +1304,11 @@ def select_provisional_primary(
         status = "insufficient_evidence"
         reason = "one or more reports failed common-cohort evidence gates"
     elif not eligible:
-        status = "calibration_no_baseline_improvement"
-        reason = "no calibration candidate passed every efficacy gate"
+        status = "calibration_error_gate_failed"
+        reason = (
+            "no calibration candidate passed both MAE and RMSE "
+            "improvement gates"
+        )
     else:
         first = eligible[0]
         if len(eligible) > 1:
@@ -1279,29 +1318,34 @@ def select_provisional_primary(
             first_efficacy = (
                 first_pool.mae_skill,
                 first_pool.rmse_skill,
-                first_pool.paired_net_win_rate,
             )
             second_efficacy = (
                 second_pool.mae_skill,
                 second_pool.rmse_skill,
-                second_pool.paired_net_win_rate,
             )
         else:
             first_efficacy = None
             second_efficacy = None
         if first_efficacy is not None and first_efficacy == second_efficacy:
             status = "calibration_tie"
-            reason = "the leading calibration candidates are exactly tied"
+            reason = (
+                "the leading calibration candidates are exactly tied on "
+                "MAE and RMSE skill"
+            )
         else:
             frozen_winner = first
             if _all_gates_pass(first["holdout_gates"]):
                 status = "selected"
-                reason = "the frozen calibration winner passed holdout gates"
+                reason = (
+                    "the frozen calibration winner passed positive MAE- and "
+                    "RMSE-skill holdout gates; paired wins/losses are "
+                    "diagnostic only"
+                )
             else:
                 status = "holdout_failed"
                 reason = (
-                    "the frozen calibration winner failed holdout; no fallback "
-                    "candidate was considered"
+                    "the frozen calibration winner failed MAE and/or RMSE "
+                    "holdout gates; no fallback candidate was considered"
                 )
 
     candidate_payloads: list[dict[str, Any]] = []
@@ -1325,11 +1369,17 @@ def select_provisional_primary(
                 "calibration": {
                     "metrics": calibration_pool.summary(),
                     "gates": item["calibration_gates"],
+                    "paired_frequency_diagnostic": (
+                        item["calibration_paired_frequency"]
+                    ),
                     "slices": _slice_summary(item["calibration_slices"]),
                 },
                 "holdout": {
                     "metrics": holdout_pool.summary(),
                     "gates": item["holdout_gates"],
+                    "paired_frequency_diagnostic": (
+                        item["holdout_paired_frequency"]
+                    ),
                     "slices": _slice_summary(item["holdout_slices"]),
                 },
                 "slice_warnings": warnings,
@@ -1394,6 +1444,7 @@ def select_provisional_primary(
             "It is not a market-close, settlement, probability, or execution forecast.",
             "Horizon-crossing forecasts do not claim arrival before market expiry.",
             "Per-report bounded medians are not pooled or used for selection.",
+            "Paired win/loss frequency is diagnostic because 500 ms rows are autocorrelated.",
             "Slice warnings are descriptive guardrails, not significance tests.",
             "All candidates must continue silent evaluation; do not switch dynamically.",
             "Phase 4 raw partition and retention risks remain unproven.",
@@ -1449,7 +1500,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="append",
         type=Path,
         required=True,
-        help="Later untouched Phase 2 report; repeat for additional holdout windows",
+        help="Exactly one later untouched Phase 2 report",
     )
     parser.add_argument("--output", type=Path, required=True)
     return parser

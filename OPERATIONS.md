@@ -2524,22 +2524,27 @@ winner using older calibration evidence, and tests only that frozen winner on
 later holdout evidence. It never chooses the model that happens to look best on
 the holdout and never falls back after a holdout failure.
 
-Policy `chronological_holdout_v1` requires, for every replay report:
+Policy `chronological_holdout_v2` requires, for every replay report:
 
 - at least 10,000 common-cohort scored forecasts;
 - common valid coverage of at least 50%; and
 - common maturation coverage of at least 99%.
 
 The calibration winner and the same frozen model on holdout must each have
-positive pooled MAE skill, positive pooled RMSE skill, and more paired wins
-than losses versus no-change. An exact efficacy tie abstains. Slice categories
-with fewer than 500 forecasts or no MAE improvement are surfaced as warnings,
-not treated as significance tests. These thresholds are versioned project
-policy, not values supplied by `engine.md`.
+positive pooled MAE skill and positive pooled RMSE skill versus no-change. An
+exact MAE/RMSE efficacy tie abstains. Paired win/loss frequency is diagnostic
+only: a warning appears when wins do not exceed losses, but it cannot affect
+eligibility or ranking because overlapping 500 ms rows are autocorrelated.
+Slice categories with fewer than 500 forecasts or no MAE improvement are also
+surfaced as warnings, not treated as significance tests. These thresholds are
+versioned project policy, not values supplied by `engine.md`.
 
-Generate at least one untouched 24-hour calibration report followed by a later
-24-hour holdout report. The following derives both windows from the older of
-the latest completed futures and Chainlink sessions:
+For a new evaluation, generate at least one calibration report followed by one
+strictly later untouched holdout report. When migrating from policy v1, treat
+the original v1 calibration and the already-inspected v1 holdout as two v2
+calibration reports, then collect exactly one new future holdout. Never pass a
+v1 selection artifact as replay evidence. The following derives initial
+windows from the older of the latest completed futures and Chainlink sessions:
 
 ```bash
 END_MS="$(sudo -u postgres psql -At -d price_collector -c "
@@ -2561,7 +2566,7 @@ CALIBRATION_END_MS="$HOLDOUT_START_MS"
 CALIBRATION_START_MS="$((CALIBRATION_END_MS - 86400000))"
 CALIBRATION_REPORT="/var/lib/price-collector/shadow-replay-calibration-${CALIBRATION_START_MS}-${CALIBRATION_END_MS}.json"
 HOLDOUT_REPORT="/var/lib/price-collector/shadow-replay-holdout-${HOLDOUT_START_MS}-${HOLDOUT_END_MS}.json"
-SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-${HOLDOUT_END_MS}.json"
+SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v2-${HOLDOUT_END_MS}.json"
 ```
 
 Generate the calibration report first:
@@ -2589,9 +2594,9 @@ Generate the strictly later holdout report without changing replay settings:
 
 ```
 
-Confirm both inputs are successful schema-version-2 reports, then run the
-selector. Additional older calibration or later holdout reports can be added
-by repeating their corresponding argument.
+Confirm all inputs are successful schema-version-2 reports, then run the
+selector. `--calibration-report` may repeat; policy v2 requires exactly one
+strictly later `--holdout-report`.
 
 ```bash
 sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
@@ -2620,11 +2625,47 @@ if [ -f "$SELECTION_REPORT" ]; then
 fi
 ```
 
+For a v1-to-v2 migration, assign the three replay JSON paths explicitly and
+use both inspected v1 windows as calibration. The v2 holdout must be new and
+strictly later than both:
+
+```bash
+V1_CALIBRATION_REPORT="/absolute/path/to/v1-calibration-replay.json"
+V1_INSPECTED_HOLDOUT_REPORT="/absolute/path/to/inspected-v1-holdout-replay.json"
+V2_NEW_HOLDOUT_REPORT="/absolute/path/to/new-v2-holdout-replay.json"
+V2_SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v2.json"
+
+sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
+  "$V1_CALIBRATION_REPORT" \
+  "$V1_INSPECTED_HOLDOUT_REPORT" \
+  "$V2_NEW_HOLDOUT_REPORT" <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as stream:
+        report = json.load(stream)
+    print(path, "schema=", report["schema_version"], "status=", report["status"])
+    if report["schema_version"] != 2 or report["status"] != "ok":
+        raise SystemExit(1)
+PY
+
+V2_SELECTION_EXIT=0
+sudo -u pricecollector \
+  /opt/price-collector/.venv/bin/python \
+  -m price_collector.shadow_signal_selection \
+  --calibration-report "$V1_CALIBRATION_REPORT" \
+  --calibration-report "$V1_INSPECTED_HOLDOUT_REPORT" \
+  --holdout-report "$V2_NEW_HOLDOUT_REPORT" \
+  --output "$V2_SELECTION_REPORT" || V2_SELECTION_EXIT=$?
+printf 'v2_selection_exit=%s\n' "$V2_SELECTION_EXIT"
+```
+
 Exit `0` means one frozen calibration winner passed every holdout gate. Exit
 `2` means a valid artifact was written but selection abstained because of
-insufficient evidence, no calibration improvement, an exact calibration tie,
-or holdout failure. Exit `1` means the inputs were malformed, overlapping,
-nonchronological, or incompatible.
+insufficient evidence, a calibration MAE/RMSE error-gate failure, an exact
+calibration tie, or holdout failure. Exit `1` means the inputs were malformed,
+overlapping, nonchronological, or incompatible.
 
 Inspect the immutable decision and its calibration ranking:
 
@@ -2638,6 +2679,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     selection = json.load(stream)
 
 print("status:", selection["status"])
+print("policy:", selection["policy"]["version"])
 print("decision:", selection["decision"])
 print("fingerprint:", selection["provenance"]["selection_fingerprint_sha256"])
 for candidate in selection["candidates"]:
@@ -2648,12 +2690,17 @@ for candidate in selection["candidates"]:
         "holdout_skill": candidate["holdout"]["metrics"]["mae_skill_vs_no_change"],
         "calibration_gates": candidate["calibration"]["gates"],
         "holdout_gates": candidate["holdout"]["gates"],
+        "calibration_paired_frequency": candidate["calibration"]["paired_frequency_diagnostic"],
+        "holdout_paired_frequency": candidate["holdout"]["paired_frequency_diagnostic"],
         "slice_warning_count": len(candidate["slice_warnings"]),
     })
 PY
 ```
 
-Preserve both replay inputs and the selection artifact beyond raw retention.
+Preserve every replay input and selection artifact beyond raw retention. Keep
+the v1 artifact as historical evidence; do not overwrite it. An inspected v1
+holdout is calibration-only under v2, whose validity must come from one new
+future holdout and a new schema-version-2 selection output filename.
 The selector permits an identical idempotent write but refuses to replace an
 existing artifact with different content; use a new evidence-end filename for
 a genuinely new decision checkpoint.

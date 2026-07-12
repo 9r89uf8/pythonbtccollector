@@ -216,6 +216,17 @@ def test_selects_by_normalized_calibration_skill_then_passes_holdout(tmp_path):
 
     assert artifact.status == "selected"
     assert payload["selection_performed"] is True
+    assert payload["policy"]["version"] == "chronological_holdout_v2"
+    assert payload["policy"]["supersedes"] == "chronological_holdout_v1"
+    assert payload["policy"][
+        "previously_inspected_holdouts_must_be_calibration"
+    ] is True
+    assert payload["policy"][
+        "new_later_holdout_required_after_revision"
+    ] is True
+    assert "paired_wins_minus_losses" not in payload["policy"][
+        "efficacy_gates"
+    ]
     assert payload["decision"]["frozen_calibration_winner"] == MODEL_3500
     assert payload["decision"]["provisional_primary_model"] == {
         "model_version": MODEL_3500,
@@ -374,6 +385,77 @@ def test_holdout_failure_abstains_without_falling_back(tmp_path):
     assert decision["fallback_after_holdout_failure_performed"] is False
 
 
+def test_paired_losses_are_diagnostic_and_do_not_block_selection(tmp_path):
+    calibration_metrics = default_model_metrics()
+    holdout_metrics = default_model_metrics()
+    for metrics_by_model in (calibration_metrics, holdout_metrics):
+        updated = deepcopy(metrics_by_model[MODEL_3500])
+        updated.update(
+            wins=3_000,
+            ties=1_000,
+            losses=6_000,
+            directional_correct=3_000,
+            directional_action=9_000,
+        )
+        metrics_by_model[MODEL_3500] = updated
+    calibration = write_report(
+        tmp_path / "calibration.json",
+        replay_payload(0, WINDOW_MS, model_metrics=calibration_metrics),
+    )
+    holdout = write_report(
+        tmp_path / "holdout.json",
+        replay_payload(
+            WINDOW_MS,
+            2 * WINDOW_MS,
+            model_metrics=holdout_metrics,
+        ),
+    )
+
+    artifact = select_provisional_primary(
+        calibration_report_paths=[calibration],
+        holdout_report_paths=[holdout],
+    )
+    selected = candidate_from_artifact(artifact, MODEL_3500)
+
+    assert artifact.status == "selected"
+    assert artifact.to_dict()["decision"]["provisional_primary_model"][
+        "model_version"
+    ] == MODEL_3500
+    assert set(selected["calibration"]["gates"]) == {
+        "mae_skill_positive",
+        "rmse_skill_positive",
+    }
+    diagnostic = selected["calibration"]["paired_frequency_diagnostic"]
+    assert diagnostic["hard_gate"] is False
+    assert diagnostic["affects_eligibility"] is False
+    assert diagnostic["affects_ranking"] is False
+    assert diagnostic["observed_wins_minus_losses"] == -3_000
+    assert diagnostic["warning"] == "paired_wins_do_not_exceed_losses"
+    holdout_diagnostic = selected["holdout"]["paired_frequency_diagnostic"]
+    assert holdout_diagnostic["hard_gate"] is False
+    assert holdout_diagnostic["warning"] == (
+        "paired_wins_do_not_exceed_losses"
+    )
+    assert candidate_from_artifact(artifact, MODEL_4000)[
+        "calibration_rank"
+    ] > selected["calibration_rank"]
+
+    output = tmp_path / "selected-with-paired-warning.json"
+    assert selection_module.main(
+        [
+            "--calibration-report",
+            str(calibration),
+            "--holdout-report",
+            str(holdout),
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == (
+        "selected"
+    )
+
+
 def test_insufficient_common_evidence_abstains(tmp_path):
     metrics = default_model_metrics(count=9_999)
     calibration = write_report(
@@ -423,15 +505,29 @@ def test_no_calibration_candidate_beats_baseline(tmp_path):
         holdout_report_paths=[holdout],
     )
 
-    assert artifact.status == "calibration_no_baseline_improvement"
+    assert artifact.status == "calibration_error_gate_failed"
+    assert artifact.to_dict()["decision"]["reason"] == (
+        "no calibration candidate passed both MAE and RMSE improvement gates"
+    )
     assert artifact.to_dict()["decision"]["frozen_calibration_winner"] is None
 
 
 def test_exact_calibration_efficacy_tie_abstains(tmp_path):
-    tied = metric_payload(model_mae="40", baseline_mae="100")
     metrics = default_model_metrics()
-    metrics[MODEL_3000] = deepcopy(tied)
-    metrics[MODEL_3500] = deepcopy(tied)
+    metrics[MODEL_3000] = metric_payload(
+        model_mae="40",
+        baseline_mae="100",
+        wins=7_000,
+        ties=1_000,
+        losses=2_000,
+    )
+    metrics[MODEL_3500] = metric_payload(
+        model_mae="40",
+        baseline_mae="100",
+        wins=3_000,
+        ties=1_000,
+        losses=6_000,
+    )
     calibration = write_report(
         tmp_path / "calibration.json",
         replay_payload(0, WINDOW_MS, model_metrics=metrics),
@@ -447,7 +543,61 @@ def test_exact_calibration_efficacy_tie_abstains(tmp_path):
     )
 
     assert artifact.status == "calibration_tie"
+    assert artifact.to_dict()["decision"]["reason"] == (
+        "the leading calibration candidates are exactly tied on MAE and "
+        "RMSE skill"
+    )
     assert artifact.to_dict()["decision"]["provisional_primary_model"] is None
+
+
+def test_policy_v2_uses_inspected_windows_as_calibration_only(tmp_path):
+    original_calibration = write_report(
+        tmp_path / "original-calibration.json",
+        replay_payload(0, WINDOW_MS),
+    )
+    inspected_v1_holdout = write_report(
+        tmp_path / "inspected-v1-holdout.json",
+        replay_payload(WINDOW_MS, 2 * WINDOW_MS),
+    )
+    new_future_holdout = write_report(
+        tmp_path / "new-future-holdout.json",
+        replay_payload(2 * WINDOW_MS, 3 * WINDOW_MS),
+    )
+
+    artifact = select_provisional_primary(
+        calibration_report_paths=[
+            inspected_v1_holdout,
+            original_calibration,
+        ],
+        holdout_report_paths=[new_future_holdout],
+    )
+
+    assert artifact.status == "selected"
+    assert [
+        report["role"]
+        for report in artifact.to_dict()["provenance"]["reports"]
+    ] == ["calibration", "calibration", "holdout"]
+
+
+def test_policy_v2_rejects_multiple_holdout_reports(tmp_path):
+    calibration = write_report(
+        tmp_path / "calibration.json",
+        replay_payload(0, WINDOW_MS),
+    )
+    first_holdout = write_report(
+        tmp_path / "holdout-1.json",
+        replay_payload(WINDOW_MS, 2 * WINDOW_MS),
+    )
+    second_holdout = write_report(
+        tmp_path / "holdout-2.json",
+        replay_payload(2 * WINDOW_MS, 3 * WINDOW_MS),
+    )
+
+    with pytest.raises(SelectionInputError, match="exactly one"):
+        select_provisional_primary(
+            calibration_report_paths=[calibration],
+            holdout_report_paths=[first_holdout, second_holdout],
+        )
 
 
 @pytest.mark.parametrize(
@@ -603,7 +753,7 @@ def test_artifact_is_decimal_string_json_and_atomic(tmp_path):
     write_selection_artifact(output, artifact)
     payload = json.loads(output.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["mode"] == "shadow_primary_selection"
     assert payload["decision"]["provisional_primary_model"]["beta"] == "1"
     assert list(tmp_path.glob("*.tmp")) == []
