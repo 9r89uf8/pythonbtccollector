@@ -3,6 +3,7 @@ import asyncio
 import json
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -314,6 +315,57 @@ def test_error_metrics_are_decimal_and_match_hand_calculation():
     assert metrics["baseline_median_absolute_error_bps"] == Decimal("700")
     assert metrics["mean_absolute_advantage_usd"] == Decimal("4")
     assert metrics["mae_skill_vs_no_change"] == Decimal("4") / Decimal("7")
+    assert metrics["sufficient_statistics"] == {
+        "model_absolute_error_sum_usd": Decimal("3"),
+        "baseline_absolute_error_sum_usd": Decimal("7"),
+        "model_squared_error_sum_usd2": Decimal("9"),
+        "baseline_squared_error_sum_usd2": Decimal("49"),
+        "absolute_advantage_sum_usd": Decimal("4"),
+    }
+
+
+def test_advantage_statistic_is_canonical_under_decimal_rounding():
+    aggregate = replay_module._MetricAggregate(
+        keep_medians=True,
+        sample_max=10,
+        seed=1,
+    )
+    values = (
+        (
+            Decimal("726.5243569104000901000382311"),
+            Decimal("548.0240037469730283658451020"),
+        ),
+        (
+            Decimal("1650.041671915500515412773504"),
+            Decimal("1851.461269683651937858055606"),
+        ),
+    )
+    for model_error, baseline_error in values:
+        aggregate.add(
+            SimpleNamespace(
+                model_error=model_error,
+                baseline_error=baseline_error,
+                model_error_bps=model_error,
+                baseline_error_bps=baseline_error,
+                actual_move_bps=Decimal("0"),
+                absolute_advantage=(
+                    abs(baseline_error) - abs(model_error)
+                ),
+                forecast=SimpleNamespace(predicted_move_bps=Decimal("0")),
+            ),
+            neutral_band_bps=Decimal("1"),
+        )
+
+    summary = aggregate.summary()
+    statistics = summary["sufficient_statistics"]
+
+    assert statistics["absolute_advantage_sum_usd"] == (
+        statistics["baseline_absolute_error_sum_usd"]
+        - statistics["model_absolute_error_sum_usd"]
+    )
+    assert summary["mean_absolute_advantage_usd"] == (
+        statistics["absolute_advantage_sum_usd"] / Decimal("2")
+    )
 
 
 def test_non_poll_aligned_target_uses_latest_chainlink_at_exact_target():
@@ -456,6 +508,53 @@ def test_three_candidates_use_the_same_scheduled_population():
         for cohort in common_cohorts
     } == {(8, 8, 8)}
     assert report.status == "ok"
+
+
+def test_common_cohort_slices_only_include_common_scored_outcomes():
+    events = base_events() + [
+        event(FUTURES_EVENT, ORIGIN_MS + offset_ms, "110")
+        for offset_ms in (5_500, 6_000, 6_500, 7_000)
+    ]
+    events.sort(key=lambda item: item.sort_key)
+    config = replay_config(
+        start_ms=ORIGIN_MS + 2_000,
+        end_ms=ORIGIN_MS + 7_001,
+        lags_ms=(500, 1_000, 1_500),
+        history_retention_ms=7_000,
+    )
+    sessions = [
+        replace_session_end(session, ORIGIN_MS + 8_000)
+        for session in sessions_for(events)
+    ]
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions,
+        config=config,
+    )
+
+    for candidate in report.candidate_summaries:
+        common_cohort = candidate["common_cohort"]
+        assert common_cohort["scored"] == 8
+        assert set(common_cohort["slices"]) == {
+            "actual_direction",
+            "actual_move_size",
+            "raw_bucket_return_rms_regime",
+            "market_expiry",
+            "session_boundary_proximity",
+        }
+        for dimension in common_cohort["slices"].values():
+            assert sum(
+                category["count"] for category in dimension.values()
+            ) == common_cohort["scored"]
+        for dimension in candidate["slices"].values():
+            assert sum(
+                category["count"] for category in dimension.values()
+            ) == candidate["scored"]
+
+    assert [
+        candidate["scored"] for candidate in report.candidate_summaries
+    ] == [10, 9, 8]
 
 
 def test_status_requires_evidence_for_every_candidate_and_common_cohort():
@@ -731,7 +830,7 @@ def test_report_json_serializes_decimals_as_strings_and_does_not_select_model():
     )
     payload = json.loads(encode_replay_report(report))
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["mode"] == "shadow_raw_replay"
     assert payload["selection_performed"] is False
     assert payload["configuration"]["beta"] == "1"
@@ -741,6 +840,25 @@ def test_report_json_serializes_decimals_as_strings_and_does_not_select_model():
     assert payload["candidates"][0]["common_cohort"]["metrics"][
         "baseline_mean_absolute_error_usd"
     ] == "4"
+    statistics = payload["candidates"][0]["metrics"][
+        "sufficient_statistics"
+    ]
+    assert all(isinstance(value, str) for value in statistics.values())
+    assert {
+        key: Decimal(value) for key, value in statistics.items()
+    } == {
+        "absolute_advantage_sum_usd": Decimal("20"),
+        "baseline_absolute_error_sum_usd": Decimal("20"),
+        "baseline_squared_error_sum_usd2": Decimal("200"),
+        "model_absolute_error_sum_usd": Decimal("0"),
+        "model_squared_error_sum_usd2": Decimal("0"),
+    }
+    common_slices = payload["candidates"][0]["common_cohort"]["slices"]
+    common_slice_statistic = common_slices["actual_direction"]["neutral"][
+        "sufficient_statistics"
+    ]["model_absolute_error_sum_usd"]
+    assert isinstance(common_slice_statistic, str)
+    assert Decimal(common_slice_statistic) == Decimal("0")
     assert not _contains_float(payload)
 
 
@@ -755,7 +873,7 @@ def test_report_file_write_is_atomic_and_leaves_no_temporary_file(tmp_path):
 
     write_replay_report(output, report)
 
-    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
     assert list(tmp_path.iterdir()) == [output]
 
 

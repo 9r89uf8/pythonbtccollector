@@ -228,7 +228,9 @@ Each value has this shape:
 Shadow-signal development is separate from every live collector and from
 FastAPI. Phase 1 adds the dependency-free anchor/ratio state machine in
 `price_collector.shadow_signal`. Phase 2 adds the offline, read-only raw replay
-in `price_collector.shadow_signal_replay`.
+in `price_collector.shadow_signal_replay`. Phase 3 adds the offline,
+deterministic provisional selector in
+`price_collector.shadow_signal_selection`.
 
 The replay:
 
@@ -249,7 +251,9 @@ The replay:
 Each candidate's top-level metrics include all of its horizon-specific scored
 rows. Cross-model comparisons must use `candidates[].common_cohort.metrics`,
 which restricts every candidate to the same generation times where the maximum
-horizon fits and all configured models are valid.
+horizon fits and all configured models are valid. Replay schema version 2 also
+provides exact sufficient statistics and common-cohort slices so reports can be
+pooled without averaging RMSE, skill rates, or sampled medians.
 
 The command requires an explicit inclusive/exclusive UTC epoch-ms range and
 uses the writer `DATABASE_URL`, because the API reader cannot access
@@ -267,6 +271,27 @@ Redis, add an API response, or run as a service. The report explicitly sets
 `selection_performed=false`. Run it while the required evidence remains inside
 raw retention, and preserve its JSON output beyond that retention window. See
 the shadow-signal replay section in `OPERATIONS.md` for the copy/paste command.
+
+Phase 3 accepts explicitly assigned, non-overlapping older calibration reports
+and later holdout reports. Policy `chronological_holdout_v1` ranks the three
+fixed V0 candidates only on calibration common-cohort evidence, freezes that
+winner, and either accepts it on holdout or abstains. It never reranks on the
+holdout or falls back to another model. Each report must contain at least
+10,000 common scored forecasts, at least 50% common valid coverage, and at
+least 99% maturation coverage. The winner must have positive MAE and RMSE skill
+against its paired no-change baseline and more paired wins than losses in both
+calibration and holdout. These are explicit project policy thresholds, not
+statistical-significance claims or values supplied by `engine.md`.
+
+The selector writes a deterministic artifact with report hashes, evidence
+ranges, pooled metrics, common-cohort slices, gates, warnings, and either one
+provisional primary or `null`. Artifact creation is atomic and create-once; an
+identical rerun is idempotent, while different content cannot replace an
+existing decision. No production replay reports are committed to this
+repository, so the code does not guess or hard-code a winner. The accepted
+artifact is an input to the later live-worker phase; Phase 3 itself does not
+change configuration, Redis, PostgreSQL, the API, or systemd. See the Phase 3
+selection section in `OPERATIONS.md`.
 
 ## API
 
@@ -325,7 +350,7 @@ parameters, complete response shapes, optional fields, and error responses.
 ## Repository Layout
 
 ```text
-price_collector/       Collectors, API, pure shadow engine, and offline replay
+price_collector/       Collectors, API, shadow engine, replay, and selection
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows

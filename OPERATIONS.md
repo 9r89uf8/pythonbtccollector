@@ -2516,6 +2516,164 @@ time-bounded statements and aborts if the partition manifest changes; rerun the
 same range if maintenance overlaps the job. Never describe a successful replay
 as proof that Phase 4 retention risks are closed.
 
+## Shadow-Signal Phase 3 Provisional Selection
+
+Phase 3 is an offline decision checkpoint. It does not configure or start the
+future shadow worker. It consumes replay schema-version-2 reports, freezes a
+winner using older calibration evidence, and tests only that frozen winner on
+later holdout evidence. It never chooses the model that happens to look best on
+the holdout and never falls back after a holdout failure.
+
+Policy `chronological_holdout_v1` requires, for every replay report:
+
+- at least 10,000 common-cohort scored forecasts;
+- common valid coverage of at least 50%; and
+- common maturation coverage of at least 99%.
+
+The calibration winner and the same frozen model on holdout must each have
+positive pooled MAE skill, positive pooled RMSE skill, and more paired wins
+than losses versus no-change. An exact efficacy tie abstains. Slice categories
+with fewer than 500 forecasts or no MAE improvement are surfaced as warnings,
+not treated as significance tests. These thresholds are versioned project
+policy, not values supplied by `engine.md`.
+
+Generate at least one untouched 24-hour calibration report followed by a later
+24-hour holdout report. The following derives both windows from the older of
+the latest completed futures and Chainlink sessions:
+
+```bash
+END_MS="$(sudo -u postgres psql -At -d price_collector -c "
+SELECT LEAST(
+    max(disconnected_wall_ns) FILTER (
+        WHERE source = 'binance_futures_agg_trade'
+    ),
+    max(disconnected_wall_ns) FILTER (
+        WHERE source = 'polymarket_chainlink_rtds'
+    )
+) / 1000000
+FROM raw_capture.feed_sessions
+WHERE disconnected_wall_ns IS NOT NULL;
+")"
+test -n "$END_MS"
+HOLDOUT_END_MS="$END_MS"
+HOLDOUT_START_MS="$((HOLDOUT_END_MS - 86400000))"
+CALIBRATION_END_MS="$HOLDOUT_START_MS"
+CALIBRATION_START_MS="$((CALIBRATION_END_MS - 86400000))"
+CALIBRATION_REPORT="/var/lib/price-collector/shadow-replay-calibration-${CALIBRATION_START_MS}-${CALIBRATION_END_MS}.json"
+HOLDOUT_REPORT="/var/lib/price-collector/shadow-replay-holdout-${HOLDOUT_START_MS}-${HOLDOUT_END_MS}.json"
+SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-${HOLDOUT_END_MS}.json"
+```
+
+Generate the calibration report first:
+
+```bash
+sudo -u pricecollector \
+  env START_MS="$CALIBRATION_START_MS" END_MS="$CALIBRATION_END_MS" \
+      REPORT="$CALIBRATION_REPORT" \
+  bash -c '
+    set -a
+    . /etc/price-collector/collector.env
+    set +a
+    cd /opt/price-collector
+    exec .venv/bin/python -m price_collector.shadow_signal_replay \
+      --start-ms "$START_MS" \
+      --end-ms "$END_MS" \
+      --output "$REPORT"
+  '
+```
+
+Generate the strictly later holdout report without changing replay settings:
+
+```bash
+sudo -u pricecollector \
+  env START_MS="$HOLDOUT_START_MS" END_MS="$HOLDOUT_END_MS" \
+      REPORT="$HOLDOUT_REPORT" \
+  bash -c '
+    set -a
+    . /etc/price-collector/collector.env
+    set +a
+    cd /opt/price-collector
+    exec .venv/bin/python -m price_collector.shadow_signal_replay \
+      --start-ms "$START_MS" \
+      --end-ms "$END_MS" \
+      --output "$REPORT"
+  '
+```
+
+Confirm both inputs are successful schema-version-2 reports, then run the
+selector. Additional older calibration or later holdout reports can be added
+by repeating their corresponding argument.
+
+```bash
+sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
+  "$CALIBRATION_REPORT" "$HOLDOUT_REPORT" <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as stream:
+        report = json.load(stream)
+    print(path, "schema=", report["schema_version"], "status=", report["status"])
+    if report["schema_version"] != 2 or report["status"] != "ok":
+        raise SystemExit(1)
+PY
+
+SELECTION_EXIT=0
+sudo -u pricecollector \
+  /opt/price-collector/.venv/bin/python \
+  -m price_collector.shadow_signal_selection \
+  --calibration-report "$CALIBRATION_REPORT" \
+  --holdout-report "$HOLDOUT_REPORT" \
+  --output "$SELECTION_REPORT" || SELECTION_EXIT=$?
+printf 'selection_exit=%s\n' "$SELECTION_EXIT"
+if [ -f "$SELECTION_REPORT" ]; then
+  sudo chmod 640 "$SELECTION_REPORT"
+fi
+```
+
+Exit `0` means one frozen calibration winner passed every holdout gate. Exit
+`2` means a valid artifact was written but selection abstained because of
+insufficient evidence, no calibration improvement, an exact calibration tie,
+or holdout failure. Exit `1` means the inputs were malformed, overlapping,
+nonchronological, or incompatible.
+
+Inspect the immutable decision and its calibration ranking:
+
+```bash
+sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
+  "$SELECTION_REPORT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    selection = json.load(stream)
+
+print("status:", selection["status"])
+print("decision:", selection["decision"])
+print("fingerprint:", selection["provenance"]["selection_fingerprint_sha256"])
+for candidate in selection["candidates"]:
+    print({
+        "rank": candidate["calibration_rank"],
+        "model": candidate["model_version"],
+        "calibration_skill": candidate["calibration"]["metrics"]["mae_skill_vs_no_change"],
+        "holdout_skill": candidate["holdout"]["metrics"]["mae_skill_vs_no_change"],
+        "calibration_gates": candidate["calibration"]["gates"],
+        "holdout_gates": candidate["holdout"]["gates"],
+        "slice_warning_count": len(candidate["slice_warnings"]),
+    })
+PY
+```
+
+Preserve both replay inputs and the selection artifact beyond raw retention.
+The selector permits an identical idempotent write but refuses to replace an
+existing artifact with different content; use a new evidence-end filename for
+a genuinely new decision checkpoint.
+Do not rerun the policy against the same holdout to pick a different model. If
+the frozen winner fails, revise the policy under a new version and wait for a
+new future holdout. Phase 4 will explicitly consume an accepted artifact; do
+not manually edit live configuration during Phase 3. This selection does not
+close the still-unproven raw partition, retention, or storage-budget risks.
+
 ## Redis Spot Checks
 
 Redis is the live-card cache only. PostgreSQL remains the historical source.

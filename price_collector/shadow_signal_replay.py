@@ -32,7 +32,7 @@ FUTURES_SESSION_SOURCE = "binance_futures_agg_trade"
 CHAINLINK_SESSION_SOURCE = "polymarket_chainlink_rtds"
 REPLAY_APPLICATION_NAME = "price_collector_shadow_signal_replay"
 NS_PER_MS = 1_000_000
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 MAX_REPLAY_WINDOW_MS = 24 * 60 * 60 * 1000
 DEFAULT_QUANTILE_SAMPLE_MAX = 10_000
 DEFAULT_DATABASE_CHUNK_MS = 5 * 60 * 1000
@@ -623,7 +623,6 @@ class _MetricAggregate:
         self.baseline_absolute_error_sum = Decimal("0")
         self.model_squared_error_sum = Decimal("0")
         self.baseline_squared_error_sum = Decimal("0")
-        self.advantage_sum = Decimal("0")
         self.wins = 0
         self.ties = 0
         self.losses = 0
@@ -661,7 +660,6 @@ class _MetricAggregate:
         self.baseline_squared_error_sum += (
             outcome.baseline_error * outcome.baseline_error
         )
-        self.advantage_sum += outcome.absolute_advantage
         if model_absolute_error < baseline_absolute_error:
             self.wins += 1
         elif model_absolute_error > baseline_absolute_error:
@@ -692,6 +690,10 @@ class _MetricAggregate:
             self._advantages.add(outcome.absolute_advantage)
 
     def summary(self) -> dict[str, Any]:
+        absolute_advantage_sum = (
+            self.baseline_absolute_error_sum
+            - self.model_absolute_error_sum
+        )
         model_mae = _decimal_mean(self.model_absolute_error_sum, self.count)
         baseline_mae = _decimal_mean(self.baseline_absolute_error_sum, self.count)
         model_rmse = (
@@ -714,7 +716,7 @@ class _MetricAggregate:
             "model_rmse_usd": model_rmse,
             "baseline_rmse_usd": baseline_rmse,
             "mean_absolute_advantage_usd": _decimal_mean(
-                self.advantage_sum,
+                absolute_advantage_sum,
                 self.count,
             ),
             "mae_skill_vs_no_change": mae_skill,
@@ -739,6 +741,21 @@ class _MetricAggregate:
                 self.directional_correct,
                 self.directional_action,
             ),
+            "sufficient_statistics": {
+                "model_absolute_error_sum_usd": (
+                    self.model_absolute_error_sum
+                ),
+                "baseline_absolute_error_sum_usd": (
+                    self.baseline_absolute_error_sum
+                ),
+                "model_squared_error_sum_usd2": (
+                    self.model_squared_error_sum
+                ),
+                "baseline_squared_error_sum_usd2": (
+                    self.baseline_squared_error_sum
+                ),
+                "absolute_advantage_sum_usd": absolute_advantage_sum,
+            },
         }
         if self._keep_medians:
             payload.update(
@@ -843,6 +860,9 @@ class _CandidateAccumulator:
             "market_expiry": {},
             "session_boundary_proximity": {},
         }
+        self.common_slices: dict[str, dict[str, _MetricAggregate]] = {
+            dimension: {} for dimension in self.slices
+        }
         self.coverage_slices: dict[str, dict[str, _CoverageAggregate]] = {
             "market_expiry": {},
             "session_boundary_proximity": {},
@@ -935,6 +955,26 @@ class _CandidateAccumulator:
                 outcome,
                 neutral_band_bps=self.config.neutral_band_bps,
             )
+            if outcome.forecast.common_cohort_member:
+                common_aggregate = self.common_slices[dimension].setdefault(
+                    category,
+                    _MetricAggregate(
+                        keep_medians=False,
+                        sample_max=self.config.quantile_sample_max,
+                        seed=(
+                            self.model.lag_ms
+                            + 10_000
+                            + sum(
+                                ord(character)
+                                for character in dimension + category
+                            )
+                        ),
+                    ),
+                )
+                common_aggregate.add(
+                    outcome,
+                    neutral_band_bps=self.config.neutral_band_bps,
+                )
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -981,6 +1021,13 @@ class _CandidateAccumulator:
                     self.common_valid_generated,
                 ),
                 "metrics": self.common_metrics.summary(),
+                "slices": {
+                    dimension: {
+                        category: aggregate.summary()
+                        for category, aggregate in sorted(categories.items())
+                    }
+                    for dimension, categories in self.common_slices.items()
+                },
             },
             "invalid_statuses": dict(sorted(self.invalid_statuses.items())),
             "invalid_reasons": dict(sorted(self.invalid_reasons.items())),
