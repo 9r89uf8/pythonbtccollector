@@ -2,8 +2,9 @@
 
 Production-oriented BTC market-data collection for a single-user Ubuntu 24.04
 DigitalOcean droplet. The application collects spot, oracle, futures, order-flow,
-top-of-book, and Polymarket probability data into local PostgreSQL, while Redis
-holds only the latest values needed by the live API response.
+top-of-book, and Polymarket probability data into local PostgreSQL. Redis holds
+the latest values needed by the live API response and, when explicitly enabled,
+a short-lived experimental Chainlink catch-up projection.
 
 The deployment is deliberately private:
 
@@ -22,10 +23,11 @@ DigitalOcean droplet
 │   ├── price-collector-polymarket-chainlink.service
 │   ├── price-collector-binance-futures.service
 │   ├── price-collector-polymarket-probabilities.service
+│   ├── price-collector-shadow-signal.service  Opt-in experimental worker
 │   └── price-api.service
 ├── /opt/price-collector              Git checkout and Python virtualenv
 ├── /etc/price-collector              Root-owned environment files
-├── /var/lib/price-collector          Service-user state directory
+├── /var/lib/price-collector          State and trusted decision evidence
 ├── Redis on 127.0.0.1:6379           Live-value cache only
 └── PostgreSQL database price_collector
                                       Historical source of record
@@ -211,7 +213,7 @@ Automatic future-partition creation, expired-partition removal, the configured
 72-hour retention behavior, and sustained relation-budget enforcement therefore
 remain known production risks and must not be described as validated.
 
-Redis is not a historical store. It contains only these live keys:
+Redis is not a historical store. The three source-price keys are:
 
 - `btc:live:binance_spot`
 - `btc:live:chainlink`
@@ -222,6 +224,10 @@ Each value has this shape:
 ```json
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
+
+Shadow-signal Phase 4 can also create `btc:live:chainlink_shadow`. That key is a
+typed shadow projection rather than a source price, and it expires 1.5 to 2.0
+seconds after each write. It is not returned by the API in this phase.
 
 ### Shadow-signal design engine
 
@@ -290,15 +296,49 @@ calibration evidence, and v2 requires exactly one new, strictly later untouched
 holdout. The inspected v1 selection artifact remains historical and must not be
 overwritten by the v2 decision.
 
-The selector writes a deterministic schema-version-2 artifact with report hashes, evidence
-ranges, pooled metrics, common-cohort slices, gates, warnings, and either one
-provisional primary or `null`. Artifact creation is atomic and create-once; an
-identical rerun is idempotent, while different content cannot replace an
-existing decision. No production replay reports are committed to this
-repository, so the code does not guess or hard-code a winner. The accepted
+The selector writes a deterministic schema-version-2 artifact with report
+hashes, evidence ranges, pooled metrics, common-cohort slices, gates, warnings,
+and either one provisional primary or `null`. Artifact creation is atomic and
+create-once; an identical rerun is idempotent, while different content cannot
+replace an existing decision. No production replay reports are committed to
+this repository, so the code does not guess or hard-code a winner. The accepted
 artifact is an input to the later live-worker phase; Phase 3 itself does not
 change configuration, Redis, PostgreSQL, the API, or systemd. See the Phase 3
 selection section in `OPERATIONS.md`.
+
+Shadow-signal Phase 4 adds the opt-in, standalone
+`price-collector-shadow-signal` service. Its epoch-aligned 100 ms loop reads
+`btc:live:futures` and `btc:live:chainlink` together with one Redis `MGET`,
+feeds the pure engine, and atomically refreshes
+`btc:live:chainlink_shadow` with a default 2,000 ms TTL. It instantiates all
+three fixed V0 candidates, but serializes only the provisional primary frozen
+by the accepted Phase 3 artifact. The accepted production decision currently
+selects `catchup_ratio_l3000_b100`; that model is discovered from the artifact,
+not hard-coded in the worker or its environment.
+
+The worker starts only when an accepted selection artifact and the exact replay
+report that defines its configuration have been promoted to
+`/var/lib/price-collector/shadow-decisions`. Both files must be
+`root:pricecollector` mode `0440`. The dedicated root-owned
+`/etc/price-collector/shadow-signal.env` pins both absolute paths and the full
+selection-file SHA-256. At startup the worker verifies the selection hash, the
+report hash recorded in selection provenance, the replay configuration digest,
+policy, evidence, candidate set, and frozen primary before it opens Redis. It
+does not choose a model dynamically or fall back to another candidate.
+
+Every tick replaces the cached payload. When either source is missing, stale,
+malformed, regresses, lacks anchor history, or otherwise fails validation, the
+new payload is invalid and all projection fields are `null`; a previous valid
+forecast is never carried forward. If the worker dies, the short TTL removes
+the key while the three source-price keys and producer collectors continue
+normally.
+
+This checkpoint remains Redis-only. Phase 4 adds no PostgreSQL evaluation rows,
+no matured-outcome evaluator, no API response field, and no dashboard code.
+Those remain separate build-order steps 5, 6, and 7 in `engine.md`.
+This shadow-signal phase is unrelated to the still-deferred high-resolution raw
+partition-boundary and retention validation described above, and does not
+validate those production risks.
 
 ## API
 
@@ -402,7 +442,8 @@ a live PostgreSQL instance.
 ## Configuration
 
 Pydantic settings read case-sensitive environment variables without a prefix.
-The collector services and API intentionally use separate environment files:
+The collectors, API, and experimental shadow worker intentionally use separate
+environment files:
 
 - `/etc/price-collector/collector.env`, created from
   `deployment/collector.env.example`, contains the writer database URL and
@@ -410,6 +451,31 @@ The collector services and API intentionally use separate environment files:
 - `/etc/price-collector/api.env`, created from
   `deployment/api.env.example`, contains only the reader database URL and Redis
   settings.
+- `/etc/price-collector/shadow-signal.env`, created from
+  `deployment/shadow-signal.env.example`, contains Redis and pinned shadow
+  decision settings only. It must contain neither `DATABASE_URL` nor
+  `READ_DATABASE_URL`.
+
+The shadow example remains disabled. Enabling it requires exact, distinct
+selection and replay-report paths inside the trusted decision directory plus
+the lowercase 64-character SHA-256 of the complete selection file:
+
+```text
+SHADOW_SIGNAL_ENABLED=false
+SHADOW_SIGNAL_TRUSTED_DECISION_DIR=/var/lib/price-collector/shadow-decisions
+SHADOW_SIGNAL_SELECTION_PATH=/var/lib/price-collector/shadow-decisions/primary-selection.json
+SHADOW_SIGNAL_SELECTION_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=/var/lib/price-collector/shadow-decisions/replay-configuration.json
+SHADOW_SIGNAL_POLL_MS=100
+SHADOW_SIGNAL_TTL_MS=2000
+```
+
+The poll cadence is fixed at 100 ms. The TTL is constrained to 1,500 through
+2,000 ms and defaults to 2,000 ms. Freshness, history, reference-gap, future
+skew, candidate, and beta settings come from the verified replay configuration;
+they are not independent live overrides. Follow the Phase 4 procedure in
+[`OPERATIONS.md`](OPERATIONS.md) to promote immutable evidence, replace the
+placeholder paths and hash, and only then set `SHADOW_SIGNAL_ENABLED=true`.
 
 At minimum, replace the database passwords in:
 
@@ -634,6 +700,7 @@ The expected reply is `PONG`.
 sudo install -d -o root -g pricecollector -m 750 /etc/price-collector
 sudo test -e /etc/price-collector/collector.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/collector.env.example /etc/price-collector/collector.env
 sudo test -e /etc/price-collector/api.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/api.env.example /etc/price-collector/api.env
+sudo test -e /etc/price-collector/shadow-signal.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/shadow-signal.env.example /etc/price-collector/shadow-signal.env
 
 sudo nano /etc/price-collector/collector.env
 sudo nano /etc/price-collector/api.env
@@ -642,7 +709,9 @@ sudo nano /etc/price-collector/api.env
 The guarded install commands create each file only when it does not already
 exist, so rerunning them cannot replace production secrets with example values.
 Replace `REPLACE_ME` on the first deployment. Keep writer credentials out of
-`api.env`.
+`api.env`, and keep all database credentials out of `shadow-signal.env`. Leave
+the shadow worker disabled until the Phase 4 evidence-promotion procedure has
+replaced its placeholder decision settings.
 
 ### Install systemd Units
 
@@ -651,11 +720,16 @@ sudo cp /opt/price-collector/deployment/price-collector.service /etc/systemd/sys
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.service /etc/systemd/system/price-collector-polymarket-chainlink.service
 sudo cp /opt/price-collector/deployment/price-collector-binance-futures.service /etc/systemd/system/price-collector-binance-futures.service
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-probabilities.service /etc/systemd/system/price-collector-polymarket-probabilities.service
+sudo cp /opt/price-collector/deployment/price-collector-shadow-signal.service /etc/systemd/system/price-collector-shadow-signal.service
 sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 ```
+
+The command installs the shadow unit but deliberately does not enable or start
+it. Activate that unit only after its trusted evidence and dedicated environment
+have passed the Phase 4 checks in [`OPERATIONS.md`](OPERATIONS.md).
 
 ### Verify the Deployment
 

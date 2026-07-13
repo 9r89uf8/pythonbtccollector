@@ -4,6 +4,42 @@ from pydantic import ValidationError
 from price_collector.config import Settings
 
 
+SHADOW_SIGNAL_ENV_NAMES = (
+    "SHADOW_SIGNAL_ENABLED",
+    "SHADOW_SIGNAL_TRUSTED_DECISION_DIR",
+    "SHADOW_SIGNAL_SELECTION_PATH",
+    "SHADOW_SIGNAL_SELECTION_SHA256",
+    "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH",
+    "SHADOW_SIGNAL_POLL_MS",
+    "SHADOW_SIGNAL_TTL_MS",
+)
+
+
+def clear_shadow_signal_environment(monkeypatch):
+    for name in SHADOW_SIGNAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def set_valid_shadow_signal_environment(monkeypatch):
+    values = {
+        "SHADOW_SIGNAL_ENABLED": "true",
+        "SHADOW_SIGNAL_TRUSTED_DECISION_DIR": (
+            "/var/lib/price-collector/shadow-decisions"
+        ),
+        "SHADOW_SIGNAL_SELECTION_PATH": (
+            "/var/lib/price-collector/shadow-decisions/selection.json"
+        ),
+        "SHADOW_SIGNAL_SELECTION_SHA256": "a" * 64,
+        "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH": (
+            "/var/lib/price-collector/shadow-decisions/replay.json"
+        ),
+        "SHADOW_SIGNAL_POLL_MS": "100",
+        "SHADOW_SIGNAL_TTL_MS": "2000",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+
 def test_settings_allows_api_reader_url_without_writer_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv(
@@ -172,4 +208,134 @@ def test_settings_raw_capture_batch_cannot_exceed_queue(monkeypatch):
         ValidationError,
         match="RAW_CAPTURE_BATCH_MAX_ROWS must be less than or equal to",
     ):
+        Settings()
+
+
+def test_settings_include_disabled_shadow_signal_defaults(monkeypatch):
+    clear_shadow_signal_environment(monkeypatch)
+
+    settings = Settings()
+
+    assert settings.SHADOW_SIGNAL_ENABLED is False
+    assert settings.SHADOW_SIGNAL_TRUSTED_DECISION_DIR == (
+        "/var/lib/price-collector/shadow-decisions"
+    )
+    assert settings.SHADOW_SIGNAL_SELECTION_PATH is None
+    assert settings.SHADOW_SIGNAL_SELECTION_SHA256 is None
+    assert settings.SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH is None
+    assert settings.SHADOW_SIGNAL_POLL_MS == 100
+    assert settings.SHADOW_SIGNAL_TTL_MS == 2_000
+
+
+def test_settings_accept_enabled_shadow_signal_with_trusted_files(monkeypatch):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+
+    settings = Settings()
+
+    assert settings.SHADOW_SIGNAL_ENABLED is True
+    assert settings.SHADOW_SIGNAL_SELECTION_SHA256 == "a" * 64
+    assert settings.SHADOW_SIGNAL_SELECTION_PATH.endswith("selection.json")
+    assert settings.SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH.endswith(
+        "replay.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    (
+        "SHADOW_SIGNAL_SELECTION_PATH",
+        "SHADOW_SIGNAL_SELECTION_SHA256",
+        "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH",
+    ),
+)
+def test_enabled_shadow_signal_requires_decision_inputs(
+    monkeypatch,
+    missing_name,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    monkeypatch.delenv(missing_name)
+
+    with pytest.raises(ValidationError, match=missing_name):
+        Settings()
+
+
+@pytest.mark.parametrize("invalid_sha", ("a" * 63, "A" * 64, "g" * 64))
+def test_shadow_signal_selection_sha_is_lowercase_sha256(
+    monkeypatch,
+    invalid_sha,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_SELECTION_SHA256", invalid_sha)
+
+    with pytest.raises(
+        ValidationError,
+        match="64 lowercase hexadecimal characters",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "path"),
+    (
+        ("SHADOW_SIGNAL_SELECTION_PATH", "selection.json"),
+        (
+            "SHADOW_SIGNAL_SELECTION_PATH",
+            "/var/lib/price-collector/outside.json",
+        ),
+        (
+            "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH",
+            "/var/lib/price-collector/shadow-decisions/../outside.json",
+        ),
+        (
+            "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH",
+            "/var/lib/price-collector/shadow-decisions/nested/replay.json",
+        ),
+    ),
+)
+def test_shadow_signal_files_must_be_normalized_and_trusted(
+    monkeypatch,
+    field_name,
+    path,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv(field_name, path)
+
+    with pytest.raises(ValidationError, match=field_name):
+        Settings()
+
+
+def test_shadow_signal_decision_files_must_differ(monkeypatch):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    selection_path = (
+        "/var/lib/price-collector/shadow-decisions/selection.json"
+    )
+    monkeypatch.setenv(
+        "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH",
+        selection_path,
+    )
+
+    with pytest.raises(ValidationError, match="must differ"):
+        Settings()
+
+
+@pytest.mark.parametrize("poll_ms", (99, 101))
+def test_shadow_signal_poll_cadence_is_fixed_at_100ms(monkeypatch, poll_ms):
+    clear_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_POLL_MS", str(poll_ms))
+
+    with pytest.raises(ValidationError, match="SHADOW_SIGNAL_POLL_MS"):
+        Settings()
+
+
+@pytest.mark.parametrize("ttl_ms", (1_499, 2_001))
+def test_shadow_signal_ttl_stays_in_short_expiry_range(monkeypatch, ttl_ms):
+    clear_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_TTL_MS", str(ttl_ms))
+
+    with pytest.raises(ValidationError, match="SHADOW_SIGNAL_TTL_MS"):
         Settings()

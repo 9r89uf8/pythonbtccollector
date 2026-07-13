@@ -15,6 +15,7 @@ The deployed system is:
 - A Polymarket Chainlink RTDS collector managed by systemd
 - A Binance USD-M futures, flow, and book collector managed by systemd
 - A Polymarket BTC five-minute probability collector managed by systemd
+- An opt-in standalone Chainlink catch-up shadow worker managed by systemd
 - A small read-only FastAPI API managed by systemd
 - API binding fixed to `127.0.0.1:9000`
 - Redis binding fixed to `127.0.0.1:6379`
@@ -56,6 +57,7 @@ Use these exact service names in deployment and handoff commands:
 - Polymarket Chainlink: `price-collector-polymarket-chainlink`
 - Binance futures, flow, and book: `price-collector-binance-futures`
 - Polymarket probabilities: `price-collector-polymarket-probabilities`
+- Chainlink shadow signal: `price-collector-shadow-signal`
 - Read-only API: `price-api`
 - Live cache: `redis-server`
 
@@ -65,6 +67,7 @@ The corresponding Python entry points are:
 - `python -m price_collector.polymarket_chainlink_collector`
 - `python -m price_collector.binance_futures_collector`
 - `python -m price_collector.polymarket_probability_collector`
+- `python -m price_collector.shadow_signal_collector`
 - `uvicorn price_collector.api:app --host 127.0.0.1 --port 9000 --workers 1`
 
 ## Collector Rules
@@ -139,6 +142,38 @@ The corresponding Python entry points are:
 - Phase 5 changes the public futures last-price source only; it does not close
   any of those raw-capture retention risks.
 
+### Chainlink Shadow Signal
+
+- Keep the experimental worker in the standalone
+  `price-collector-shadow-signal` service. It must never run inside FastAPI or
+  either producer collector.
+- Keep `SHADOW_SIGNAL_ENABLED=false` until Phase 3 has produced an accepted
+  selection artifact and its exact replay-configuration report has been
+  promoted into `/var/lib/price-collector/shadow-decisions`.
+- Install both decision files as `root:pricecollector` mode `0440`. Configure
+  their absolute paths and the full selection-file SHA-256 in the dedicated
+  root-owned `/etc/price-collector/shadow-signal.env` file.
+- The shadow environment is Redis-only and must contain neither
+  `DATABASE_URL` nor `READ_DATABASE_URL`.
+- Poll `btc:live:futures` and `btc:live:chainlink` together with one Redis
+  `MGET` on an epoch-aligned 100 ms cadence.
+- Treat the accepted selection artifact as authoritative. Load and validate it
+  once at startup, verify it against the replay configuration, publish only
+  its frozen provisional primary, and never switch models dynamically.
+- Keep all three provisional V0 candidates instantiated for later silent
+  evaluation, while exposing only the accepted primary in the Phase 4 Redis
+  payload.
+- Write `btc:live:chainlink_shadow` with one atomic Redis `SET` carrying a
+  1.5-to-2.0-second TTL. Every invalid observation must replace any prior valid
+  projection with null projection fields; never carry a valid forecast forward.
+- Keep every financial value as `Decimal` and every decimal JSON field as a
+  string. The payload must distinguish catch-up validity from
+  `full_horizon_before_market_end`; it is not a settlement, probability,
+  execution, or market-close forecast.
+- A Redis or model failure in the shadow service must not interrupt either
+  producer. Phase 4 does not add PostgreSQL writes or expose the shadow key
+  through `/markets/current/live`.
+
 ### Polymarket Probabilities
 
 - Discover BTC five-minute Up/Down markets through Polymarket Gamma.
@@ -156,10 +191,12 @@ The corresponding Python entry points are:
 
 - PostgreSQL remains the historical source of record; Redis is only a live
   cache.
-- Use the existing keys exactly:
+- Use the source-price keys exactly:
   - `btc:live:binance_spot`
   - `btc:live:chainlink`
   - `btc:live:futures`
+- Use `btc:live:chainlink_shadow` only for the standalone experimental shadow
+  payload, with its required short TTL. It is not a `LivePrice` value.
 - Store live prices as strings in the existing JSON shape with `value`,
   `source_timestamp_ms`, and `received_ms`.
 - `/markets/current/live` must read Redis and must not add PostgreSQL queries to
@@ -214,6 +251,9 @@ in collector-specific code.
   fast-forward-only Git pull.
 - Keep real secrets out of Git. Never overwrite an existing production env file
   with an example file during an update.
+- Keep the shadow decision directory limited to the two promoted, root-owned
+  evidence files required by the configured worker. Do not let the service user
+  write its own selection decision.
 
 ## Droplet Update Handoff — Required
 
@@ -279,9 +319,10 @@ sudo systemctl restart price-collector
 
 Again, tailor the filename and service name to the actual unit changed. If an
 environment example changed, explain the exact keys that must be reviewed or
-added manually in `/etc/price-collector/collector.env` or `api.env`; never tell
-the user to replace a production env file wholesale. Include Redis setup or a
-Redis restart only when the change actually requires it.
+added manually in `/etc/price-collector/collector.env`, `api.env`, or
+`shadow-signal.env`; never tell the user to replace a production env file
+wholesale. Include Redis setup or a Redis restart only when the change actually
+requires it.
 
 Documentation-only and test-only changes do not require droplet commands unless
 they change the documented production procedure. Collector changes never omit
@@ -301,6 +342,8 @@ Add or update focused tests for each checkpoint. Relevant coverage includes:
 - API latest, current, data, download, and live responses
 - API and Redis loopback-only deployment configuration
 - Reader/writer credential separation
+- Shadow decision trust, Redis TTL, disabled-by-default deployment, and
+  producer isolation
 
 Run the relevant tests before handoff. Run the full suite when practical:
 

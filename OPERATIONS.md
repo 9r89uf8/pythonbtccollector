@@ -2613,12 +2613,14 @@ for path in sys.argv[1:]:
 PY
 
 SELECTION_EXIT=0
-sudo -u pricecollector \
-  /opt/price-collector/.venv/bin/python \
-  -m price_collector.shadow_signal_selection \
-  --calibration-report "$CALIBRATION_REPORT" \
-  --holdout-report "$HOLDOUT_REPORT" \
-  --output "$SELECTION_REPORT" || SELECTION_EXIT=$?
+(
+  cd /opt/price-collector &&
+  sudo -u pricecollector .venv/bin/python \
+    -m price_collector.shadow_signal_selection \
+    --calibration-report "$CALIBRATION_REPORT" \
+    --holdout-report "$HOLDOUT_REPORT" \
+    --output "$SELECTION_REPORT"
+) || SELECTION_EXIT=$?
 printf 'selection_exit=%s\n' "$SELECTION_EXIT"
 if [ -f "$SELECTION_REPORT" ]; then
   sudo chmod 640 "$SELECTION_REPORT"
@@ -2651,13 +2653,15 @@ for path in sys.argv[1:]:
 PY
 
 V2_SELECTION_EXIT=0
-sudo -u pricecollector \
-  /opt/price-collector/.venv/bin/python \
-  -m price_collector.shadow_signal_selection \
-  --calibration-report "$V1_CALIBRATION_REPORT" \
-  --calibration-report "$V1_INSPECTED_HOLDOUT_REPORT" \
-  --holdout-report "$V2_NEW_HOLDOUT_REPORT" \
-  --output "$V2_SELECTION_REPORT" || V2_SELECTION_EXIT=$?
+(
+  cd /opt/price-collector &&
+  sudo -u pricecollector .venv/bin/python \
+    -m price_collector.shadow_signal_selection \
+    --calibration-report "$V1_CALIBRATION_REPORT" \
+    --calibration-report "$V1_INSPECTED_HOLDOUT_REPORT" \
+    --holdout-report "$V2_NEW_HOLDOUT_REPORT" \
+    --output "$V2_SELECTION_REPORT"
+) || V2_SELECTION_EXIT=$?
 printf 'v2_selection_exit=%s\n' "$V2_SELECTION_EXIT"
 ```
 
@@ -2709,6 +2713,344 @@ the frozen winner fails, revise the policy under a new version and wait for a
 new future holdout. Phase 4 will explicitly consume an accepted artifact; do
 not manually edit live configuration during Phase 3. This selection does not
 close the still-unproven raw partition, retention, or storage-budget risks.
+
+## Shadow-Signal Phase 4 Standalone Worker
+
+This is Phase 4 in the shadow-signal build order in `engine.md`. It is unrelated
+to the still-deferred raw-capture partition and retention validation also named
+Phase 4 elsewhere in this guide.
+
+The standalone `price-collector-shadow-signal` service reads
+`btc:live:futures` and `btc:live:chainlink` together every 100 ms, runs every
+candidate from the accepted Phase 3 decision, and publishes only its frozen
+primary to `btc:live:chainlink_shadow`. The output key has a 2-second TTL. This
+phase adds no PostgreSQL writes and does not expose the signal through the API.
+
+The replay reports and selection artifact are production evidence. Keep their
+originals in `/var/lib/price-collector`; do not copy them into the Git checkout
+or commit them. The activation steps below make immutable runtime copies in a
+root-owned decision directory.
+
+### 1. Deploy the Phase 4 code
+
+Run this only after the Phase 4 change has been pushed to GitHub:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector .venv/bin/python -m pytest \
+  tests/test_shadow_signal.py \
+  tests/test_shadow_signal_replay.py \
+  tests/test_shadow_signal_selection.py \
+  tests/test_shadow_signal_artifact.py \
+  tests/test_shadow_signal_collector.py \
+  tests/test_live_cache.py \
+  tests/test_config.py \
+  tests/test_deployment.py
+```
+
+There is no schema migration in this phase.
+
+### 2. Identify the accepted Phase 3 evidence
+
+These are the paths produced by the accepted policy-v2 migration. Change them
+only if the actual droplet filenames differ:
+
+```bash
+SOURCE_SELECTION="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v2-1783983205028.json"
+SOURCE_REPLAY_CONFIG="/var/lib/price-collector/shadow-replay-holdout-v2-1783896805028-1783983205028.json"
+
+sudo test -f "$SOURCE_SELECTION"
+sudo test -f "$SOURCE_REPLAY_CONFIG"
+sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
+  "$SOURCE_SELECTION" "$SOURCE_REPLAY_CONFIG" <<'PY'
+import hashlib
+import json
+import sys
+
+selection_path, replay_path = sys.argv[1:]
+with open(selection_path, "rb") as stream:
+    selection_raw = stream.read()
+with open(replay_path, "rb") as stream:
+    replay_raw = stream.read()
+selection = json.loads(selection_raw)
+replay = json.loads(replay_raw)
+replay_sha = hashlib.sha256(replay_raw).hexdigest()
+provenance_shas = {
+    report["sha256"] for report in selection["provenance"]["reports"]
+}
+
+assert selection["schema_version"] == 2
+assert selection["policy"]["version"] == "chronological_holdout_v2"
+assert selection["status"] == "selected"
+assert selection["selection_performed"] is True
+assert selection["decision"]["provisional_primary_model"] is not None
+assert replay["schema_version"] == 2 and replay["status"] == "ok"
+assert replay_sha in provenance_shas
+print({
+    "selection_sha256": hashlib.sha256(selection_raw).hexdigest(),
+    "replay_sha256": replay_sha,
+    "primary": selection["decision"]["provisional_primary_model"],
+})
+PY
+```
+
+Stop if any assertion fails. Do not substitute an old selection artifact, an
+abstained decision, or a replay report absent from the selection provenance.
+
+### 3. Promote immutable runtime copies
+
+The service validates both files once at startup. It requires direct,
+root-owned, non-writable files under the trusted directory:
+
+```bash
+DECISION_DIR="/var/lib/price-collector/shadow-decisions"
+SELECTION_SHA="$(sudo sha256sum "$SOURCE_SELECTION" | awk '{print $1}')"
+REPLAY_SHA="$(sudo sha256sum "$SOURCE_REPLAY_CONFIG" | awk '{print $1}')"
+EVIDENCE_END_MS="$(sudo python3 -c '
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    selection = json.load(stream)
+print(selection["decision"]["provisional_primary_model"]["evidence_end_ms"])
+' "$SOURCE_SELECTION")"
+ACTIVE_SELECTION="$DECISION_DIR/selection-${EVIDENCE_END_MS}-${SELECTION_SHA}.json"
+ACTIVE_REPLAY_CONFIG="$DECISION_DIR/replay-config-${EVIDENCE_END_MS}-${REPLAY_SHA}.json"
+
+( set -e
+  sudo install -d -o root -g pricecollector -m 0750 "$DECISION_DIR"
+
+  if sudo test -e "$ACTIVE_SELECTION"; then
+    sudo cmp -s "$SOURCE_SELECTION" "$ACTIVE_SELECTION"
+  else
+    sudo install -o root -g pricecollector -m 0440 \
+      "$SOURCE_SELECTION" "$ACTIVE_SELECTION"
+  fi
+
+  if sudo test -e "$ACTIVE_REPLAY_CONFIG"; then
+    sudo cmp -s "$SOURCE_REPLAY_CONFIG" "$ACTIVE_REPLAY_CONFIG"
+  else
+    sudo install -o root -g pricecollector -m 0440 \
+      "$SOURCE_REPLAY_CONFIG" "$ACTIVE_REPLAY_CONFIG"
+  fi
+
+  sudo chown root:pricecollector "$ACTIVE_SELECTION" "$ACTIVE_REPLAY_CONFIG"
+  sudo chmod 0440 "$ACTIVE_SELECTION" "$ACTIVE_REPLAY_CONFIG"
+
+  ENTRY_COUNT="$(sudo find "$DECISION_DIR" \
+    -mindepth 1 -maxdepth 1 -printf x | wc -c)"
+  test "$ENTRY_COUNT" -eq 2
+  sudo ls -ld "$DECISION_DIR"
+  sudo ls -l "$ACTIVE_SELECTION" "$ACTIVE_REPLAY_CONFIG"
+)
+```
+
+An existing destination must compare byte-for-byte equal. If `cmp` returns
+nonzero, or if the trusted directory contains anything except this configured
+pair, stop. Use a new evidence-specific filename for changed content; never
+overwrite an immutable decision file.
+
+### 4. Configure the dedicated Redis-only environment
+
+Create the dedicated file only if it does not already exist, then update only
+the shadow keys. Do not replace `collector.env` or `api.env`:
+
+```bash
+sudo install -d -o root -g pricecollector -m 0750 /etc/price-collector
+if ! sudo test -e /etc/price-collector/shadow-signal.env; then
+  sudo install -o root -g pricecollector -m 0640 \
+    /opt/price-collector/deployment/shadow-signal.env.example \
+    /etc/price-collector/shadow-signal.env
+fi
+
+sudo sed -i \
+  -e 's|^SHADOW_SIGNAL_ENABLED=.*|SHADOW_SIGNAL_ENABLED=true|' \
+  -e "s|^SHADOW_SIGNAL_SELECTION_PATH=.*|SHADOW_SIGNAL_SELECTION_PATH=$ACTIVE_SELECTION|" \
+  -e "s|^SHADOW_SIGNAL_SELECTION_SHA256=.*|SHADOW_SIGNAL_SELECTION_SHA256=$SELECTION_SHA|" \
+  -e "s|^SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=.*|SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=$ACTIVE_REPLAY_CONFIG|" \
+  -e 's|^SHADOW_SIGNAL_POLL_MS=.*|SHADOW_SIGNAL_POLL_MS=100|' \
+  -e 's|^SHADOW_SIGNAL_TTL_MS=.*|SHADOW_SIGNAL_TTL_MS=2000|' \
+  /etc/price-collector/shadow-signal.env
+sudo chown root:pricecollector /etc/price-collector/shadow-signal.env
+sudo chmod 0640 /etc/price-collector/shadow-signal.env
+
+sudo grep -E \
+  '^(SHADOW_SIGNAL_|REDIS_|APP_ENV|LOG_LEVEL)' \
+  /etc/price-collector/shadow-signal.env
+if sudo grep -Eq '^(DATABASE_URL|READ_DATABASE_URL)=' \
+  /etc/price-collector/shadow-signal.env; then
+  echo 'STOP: database credentials do not belong in shadow-signal.env.'
+  false
+fi
+```
+
+The primary model and replay-derived staleness/reference settings are not
+environment overrides. The worker obtains them from the accepted artifacts so
+they cannot drift from Phase 3.
+
+### 5. Run the fail-closed activation preflight
+
+```bash
+sudo -u pricecollector bash <<'BASH'
+set -euo pipefail
+set -a
+. /etc/price-collector/shadow-signal.env
+set +a
+cd /opt/price-collector
+.venv/bin/python - <<'PY'
+from pathlib import Path
+
+from price_collector.config import Settings
+from price_collector.shadow_signal_artifact import load_activated_selection
+
+settings = Settings()
+assert settings.SHADOW_SIGNAL_ENABLED is True
+activated = load_activated_selection(
+    Path(settings.SHADOW_SIGNAL_SELECTION_PATH),
+    settings.SHADOW_SIGNAL_SELECTION_SHA256,
+    Path(settings.SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH),
+    trusted_directory=Path(settings.SHADOW_SIGNAL_TRUSTED_DECISION_DIR),
+)
+assert activated.poll_ms == settings.SHADOW_SIGNAL_POLL_MS
+print({
+    "policy": activated.policy_version,
+    "selection_sha256": activated.selection_artifact_sha256,
+    "fingerprint": activated.selection_fingerprint_sha256,
+    "evidence_end_ms": activated.evidence_end_ms,
+    "primary": activated.primary_model.version,
+    "candidate_models": [model.version for model in activated.models],
+    "poll_ms": activated.poll_ms,
+    "futures_stale_ms": activated.futures_stale_ms,
+    "chainlink_stale_ms": activated.chainlink_stale_ms,
+    "reference_max_gap_ms": activated.reference_max_gap_ms,
+    "history_retention_ms": activated.history_retention_ms,
+})
+PY
+BASH
+```
+
+Do not install or start the service if this command fails.
+
+### 6. Install and start the isolated service
+
+```bash
+sudo cp \
+  /opt/price-collector/deployment/price-collector-shadow-signal.service \
+  /etc/systemd/system/price-collector-shadow-signal.service
+sudo systemctl daemon-reload
+sudo systemctl enable price-collector-shadow-signal
+sudo systemctl restart price-collector-shadow-signal
+sudo systemctl status price-collector-shadow-signal --no-pager
+sudo journalctl -u price-collector-shadow-signal -n 100 --no-pager
+```
+
+No Redis restart is required. Startup is expected to pass through
+`warming_up_futures_history` and `waiting_for_new_chainlink_anchor` before the
+next fresh Chainlink event can produce a valid projection.
+
+### 7. Verify publication and the frozen primary
+
+Wait up to 30 seconds for a valid signal:
+
+```bash
+ACTIVE_SELECTION="$(sudo sed -n \
+  's/^SHADOW_SIGNAL_SELECTION_PATH=//p' \
+  /etc/price-collector/shadow-signal.env)"
+SELECTION_SHA="$(sudo sed -n \
+  's/^SHADOW_SIGNAL_SELECTION_SHA256=//p' \
+  /etc/price-collector/shadow-signal.env)"
+SHADOW_KEY="btc:live:chainlink_shadow"
+for attempt in $(seq 1 60); do
+  VALID="$(redis-cli --raw GET "$SHADOW_KEY" | python3 -c '
+import json
+import sys
+raw = sys.stdin.read().strip()
+print(int(bool(raw) and json.loads(raw)["valid"]))
+')"
+  if [ "$VALID" -eq 1 ]; then
+    break
+  fi
+  sleep 0.5
+done
+test "${VALID:-0}" -eq 1
+
+redis-cli --raw GET "$SHADOW_KEY" | python3 -c '
+import hashlib
+import json
+import sys
+
+selection_path, expected_sha = sys.argv[1:]
+signal = json.load(sys.stdin)
+with open(selection_path, "rb") as stream:
+    selection_raw = stream.read()
+selection = json.loads(selection_raw)
+primary = selection["decision"]["provisional_primary_model"]
+
+assert hashlib.sha256(selection_raw).hexdigest() == expected_sha
+assert signal["selection_artifact_sha256"] == expected_sha
+assert signal["model_version"] == primary["model_version"]
+assert signal["horizon_ms"] == primary["horizon_ms"]
+assert signal["beta"] == primary["beta"]
+assert signal["selection_evidence_end_ms"] == primary["evidence_end_ms"]
+print({
+    "valid": signal["valid"],
+    "status": signal["status"],
+    "state": signal["state"],
+    "model": signal["model_version"],
+    "projected_chainlink": signal["projected_chainlink"],
+    "pending_move_bps": signal["pending_move_bps"],
+    "full_horizon_before_market_end": signal["full_horizon_before_market_end"],
+})
+' "$ACTIVE_SELECTION" "$SELECTION_SHA"
+
+PTTL="$(redis-cli --raw PTTL "$SHADOW_KEY")"
+printf 'shadow_pttl_ms=%s\n' "$PTTL"
+test "$PTTL" -gt 0
+test "$PTTL" -le 2000
+```
+
+Also confirm the public API still has no shadow field in this phase:
+
+```bash
+curl -fsS http://127.0.0.1:9000/healthz
+curl -fsS http://127.0.0.1:9000/markets/current/live
+```
+
+### 8. Prove worker-death expiry
+
+This bounded test stops only the experimental worker. The three source-price
+keys must remain present while the shadow key expires:
+
+```bash
+sudo systemctl stop price-collector-shadow-signal
+sleep 3
+test "$(redis-cli --raw EXISTS btc:live:chainlink_shadow)" -eq 0
+test "$(redis-cli --raw EXISTS \
+  btc:live:binance_spot \
+  btc:live:chainlink \
+  btc:live:futures)" -eq 3
+redis-cli --raw MGET \
+  btc:live:binance_spot \
+  btc:live:chainlink \
+  btc:live:futures
+sudo systemctl start price-collector-shadow-signal
+sudo systemctl status price-collector-shadow-signal --no-pager
+```
+
+### Roll back Phase 4 publication
+
+Rollback does not touch either producer, Redis, PostgreSQL, or the evidence
+files:
+
+```bash
+sudo systemctl disable --now price-collector-shadow-signal
+sleep 3
+redis-cli --raw EXISTS btc:live:chainlink_shadow
+```
+
+The final command must print `0`. Leave the immutable evidence and dedicated
+environment in place for diagnosis or a later restart.
 
 ## Redis Spot Checks
 

@@ -94,6 +94,58 @@ def test_binance_futures_collector_service_execs_futures_module():
     assert "--host 0.0.0.0" not in service
 
 
+def test_shadow_signal_env_is_disabled_and_contains_no_database_credentials():
+    lines = (
+        ROOT / "deployment" / "shadow-signal.env.example"
+    ).read_text().splitlines()
+
+    assert "SHADOW_SIGNAL_ENABLED=false" in lines
+    assert "REDIS_HOST=127.0.0.1" in lines
+    assert "REDIS_PORT=6379" in lines
+    assert "SHADOW_SIGNAL_POLL_MS=100" in lines
+    assert "SHADOW_SIGNAL_TTL_MS=2000" in lines
+    assert (
+        "SHADOW_SIGNAL_TRUSTED_DECISION_DIR="
+        "/var/lib/price-collector/shadow-decisions"
+    ) in lines
+    assert any(line.startswith("SHADOW_SIGNAL_SELECTION_PATH=") for line in lines)
+    assert any(
+        line.startswith("SHADOW_SIGNAL_SELECTION_SHA256=") for line in lines
+    )
+    assert any(
+        line.startswith("SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=")
+        for line in lines
+    )
+    assert not any(line.startswith("DATABASE_URL=") for line in lines)
+    assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
+
+
+def test_shadow_signal_service_is_isolated_and_ordered_after_producers():
+    service = (
+        ROOT / "deployment" / "price-collector-shadow-signal.service"
+    ).read_text()
+
+    assert "EnvironmentFile=/etc/price-collector/shadow-signal.env" in service
+    assert (
+        "ExecStart=/opt/price-collector/.venv/bin/python "
+        "-m price_collector.shadow_signal_collector"
+    ) in service
+    assert "redis-server.service" in service
+    assert "price-collector-binance-futures.service" in service
+    assert "price-collector-polymarket-chainlink.service" in service
+    assert "postgresql.service" not in service
+    assert "Restart=on-failure" in service
+    assert "StartLimitIntervalSec=60" in service
+    assert "StartLimitBurst=3" in service
+    assert "NoNewPrivileges=true" in service
+    assert "PrivateDevices=true" in service
+    assert "PrivateTmp=true" in service
+    assert "ProtectSystem=strict" in service
+    assert "ProtectHome=true" in service
+    assert "CapabilityBoundingSet=\n" in service
+    assert "ReadWritePaths=" not in service
+
+
 def test_collector_services_depend_on_local_redis_service():
     for filename in (
         "price-collector.service",

@@ -25,6 +25,24 @@ PostgreSQL, or Redis directly. It reads one read-only HTTP endpoint. The API
 retrieves all three cached values with one Redis `MGET` and performs no
 PostgreSQL query on this request path.
 
+Shadow-signal Phase 4 adds a separate, opt-in Redis-only branch. The standalone
+`price-collector-shadow-signal` worker reads only the Futures and Chainlink
+source keys together every 100 ms and writes a short-lived experimental result:
+
+```text
+[btc:live:futures] ----\
+                        +-- MGET every 100 ms --> ShadowSignalEngine
+[btc:live:chainlink] --/                              |
+                                                       +-- atomic SET with TTL
+                                                             |
+                                                             +--> [btc:live:chainlink_shadow]
+                                                                  1.5–2.0 seconds
+```
+
+That result does not feed FastAPI or the dashboard in Phase 4, and the worker
+does not write PostgreSQL. A worker failure therefore cannot interrupt either
+producer or the three-price live endpoint.
+
 There are three live price sources, even though two of them are operated by
 Binance:
 
@@ -227,7 +245,7 @@ Phase 5 source cutover does not validate them.
 
 ## Redis Live Cache
 
-Redis is bound to `127.0.0.1:6379` and uses these exact keys:
+Redis is bound to `127.0.0.1:6379`. The three source-price keys are:
 
 ```text
 btc:live:binance_spot
@@ -254,6 +272,53 @@ Each key contains a compact JSON object:
 The keys are written with plain Redis `SET` operations and have no application
 TTL. A Redis write failure is logged, but it does not change the price's numeric
 type or prevent the collector from continuing its historical PostgreSQL write.
+
+### Experimental Shadow-Signal Phase 4 Key
+
+The opt-in worker writes one additional key:
+
+```text
+btc:live:chainlink_shadow
+```
+
+This is not a fourth source price and does not use the `LivePrice` shape. It is
+a typed `LiveShadowSignal` payload whose decimal values remain JSON strings.
+The payload identifies the frozen selection and model, input and anchor
+timestamps, source ages, market window, catch-up horizon, and whether the full
+horizon fits before the market ends. It describes only an experimental
+Chainlink catch-up projection; it is not a settlement, probability, execution,
+or market-close forecast.
+
+The worker runs on epoch-aligned 100 ms boundaries and obtains Futures and
+Chainlink with one `MGET`. It keeps the three provisional candidates
+(`catchup_ratio_l3000_b100`, `catchup_ratio_l3500_b100`, and
+`catchup_ratio_l4000_b100`) instantiated, but publishes only the provisional
+primary frozen by the accepted Phase 3 selection artifact. The currently
+accepted production artifact selects `catchup_ratio_l3000_b100`; the worker
+discovers that value from the artifact and never dynamically reranks or falls
+back to another candidate.
+
+Before opening Redis, the service validates two immutable files inside
+`/var/lib/price-collector/shadow-decisions`: the accepted selection and the
+exact replay report containing its runtime configuration. Both must be
+`root:pricecollector` mode `0440`. The dedicated root-owned
+`/etc/price-collector/shadow-signal.env` supplies their absolute paths and the
+complete selection-file SHA-256. Startup also verifies the replay report hash
+against selection provenance and verifies its configuration digest, policy,
+candidate set, evidence, and primary. The shadow environment contains no
+database URL.
+
+Each observation is written atomically with Redis `SET` and a 1.5-to-2.0-second
+TTL; the configured default is 2,000 ms. Invalid observations still overwrite
+the key, setting `valid=false` and every projection and anchor-dependent field
+to `null`. Missing, malformed, stale, regressing, or insufficient-history input
+therefore cannot leave a previous valid forecast visible. If the process stops,
+the TTL removes the key without deleting or changing any source-price key.
+
+Shadow-signal Phase 4 deliberately has no matured-outcome evaluator, PostgreSQL
+shadow table, API response field, or dashboard integration. Those are later,
+independent steps in the shadow-signal build order. This does not validate the
+separately deferred high-resolution partition-boundary and retention rollout.
 
 ## Dashboard Live Endpoint
 
@@ -429,6 +494,7 @@ from another machine.
 
 `GET /markets/current/live` does **not** return:
 
+- The experimental `btc:live:chainlink_shadow` payload
 - Polymarket Up/Down probabilities or resolution data
 - Futures mark price, index price, premium, or funding data
 - Open interest or open-interest notional
@@ -459,5 +525,12 @@ For the complete frontend API contract and all historical response shapes, see
   — required futures WebSocket parsing, validated latest-trade state, flow, and
   book aggregation
 - [`price_collector/live_cache.py`](price_collector/live_cache.py) — Redis keys,
-  serialization, freshness ages, and live response construction
+  source-price and shadow serialization, atomic shadow TTL writes, freshness
+  ages, and live response construction
+- [`price_collector/shadow_signal.py`](price_collector/shadow_signal.py) — pure
+  catch-up models, history, anchors, and validity state
+- [`price_collector/shadow_signal_artifact.py`](price_collector/shadow_signal_artifact.py)
+  — trusted Phase 3 selection and replay-configuration validation
+- [`price_collector/shadow_signal_collector.py`](price_collector/shadow_signal_collector.py)
+  — standalone epoch-aligned 100 ms Redis worker
 - [`price_collector/api.py`](price_collector/api.py) — FastAPI route

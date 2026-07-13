@@ -1,12 +1,21 @@
 import asyncio
+import json
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
+
+import pytest
 
 from price_collector.live_cache import (
     BINANCE_SPOT_LIVE_KEY,
     CHAINLINK_LIVE_KEY,
+    CHAINLINK_SHADOW_LIVE_KEY,
     FUTURES_LIVE_KEY,
     LiveCache,
+    LiveCachePayloadError,
+    LiveShadowSignal,
     build_current_live_payload,
+    decode_shadow_signal,
+    encode_shadow_signal,
 )
 from price_collector.market import MarketWindow
 
@@ -15,8 +24,11 @@ class FakeRedis:
     def __init__(self):
         self.data = {}
         self.mget_calls = []
+        self.set_calls = []
+        self.delete_calls = []
 
-    async def set(self, key, value):
+    async def set(self, key, value, **options):
+        self.set_calls.append((key, value, options))
         self.data[key] = value
 
     async def get(self, key):
@@ -25,6 +37,78 @@ class FakeRedis:
     async def mget(self, keys):
         self.mget_calls.append(list(keys))
         return [self.data.get(key) for key in keys]
+
+    async def delete(self, key):
+        self.delete_calls.append(key)
+        self.data.pop(key, None)
+
+
+def valid_shadow_signal(**overrides):
+    values = {
+        "schema_version": 1,
+        "mode": "shadow",
+        "selection_schema_version": 2,
+        "selection_policy_version": "chronological_holdout_v2",
+        "selection_fingerprint_sha256": "a" * 64,
+        "selection_artifact_sha256": "b" * 64,
+        "selection_evidence_end_ms": 1_783_400_000_000,
+        "model_version": "catchup_ratio_l3500_b100",
+        "beta": Decimal("1"),
+        "generated_ms": 1_783_459_495_125,
+        "valid": True,
+        "status": "valid",
+        "invalid_reasons": (),
+        "state": "anchored",
+        "horizon_ms": 3_500,
+        "estimated_lag_ms": 3_500,
+        "current_chainlink": Decimal("100.00"),
+        "projected_chainlink": Decimal("101.00"),
+        "pending_move": Decimal("1.00"),
+        "pending_move_bps": Decimal("100"),
+        "direction": "up",
+        "futures_now": Decimal("101.00"),
+        "futures_reference": Decimal("100.00"),
+        "chainlink_now_source_timestamp_ms": 1_783_459_495_000,
+        "chainlink_now_received_ms": 1_783_459_495_070,
+        "anchor_chainlink_source_timestamp_ms": 1_783_459_495_000,
+        "anchor_chainlink_received_ms": 1_783_459_495_070,
+        "futures_now_source_timestamp_ms": 1_783_459_495_000,
+        "futures_now_received_ms": 1_783_459_495_102,
+        "futures_reference_source_timestamp_ms": 1_783_459_491_500,
+        "futures_reference_received_ms": 1_783_459_491_550,
+        "futures_reference_target_ms": 1_783_459_491_570,
+        "futures_reference_gap_ms": 20,
+        "futures_received_age_ms": 23,
+        "chainlink_received_age_ms": 55,
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "ms_to_market_end": 4_875,
+        "full_horizon_before_market_end": True,
+    }
+    values.update(overrides)
+    return LiveShadowSignal(**values)
+
+
+def invalid_shadow_signal(**overrides):
+    values = {
+        "valid": False,
+        "status": "futures_stale",
+        "invalid_reasons": ("futures_stale",),
+        "projected_chainlink": None,
+        "pending_move": None,
+        "pending_move_bps": None,
+        "direction": None,
+        "futures_reference": None,
+        "anchor_chainlink_source_timestamp_ms": None,
+        "anchor_chainlink_received_ms": None,
+        "futures_reference_source_timestamp_ms": None,
+        "futures_reference_received_ms": None,
+        "futures_reference_target_ms": None,
+        "futures_reference_gap_ms": None,
+    }
+    values.update(overrides)
+    return replace(valid_shadow_signal(), **values)
 
 
 def test_live_cache_set_price_stores_requested_json_shape():
@@ -43,6 +127,182 @@ def test_live_cache_set_price_stores_requested_json_shape():
     assert redis.data[BINANCE_SPOT_LIVE_KEY] == (
         '{"value":"62067.89000000","source_timestamp_ms":123,"received_ms":456}'
     )
+
+
+def test_shadow_signal_round_trip_is_typed_and_uses_decimal_strings():
+    signal = valid_shadow_signal()
+
+    encoded = encode_shadow_signal(signal)
+    payload = json.loads(encoded)
+
+    assert decode_shadow_signal(encoded) == signal
+    assert payload["schema_version"] == 1
+    assert payload["mode"] == "shadow"
+    assert payload["selection_fingerprint_sha256"] == "a" * 64
+    assert payload["selection_artifact_sha256"] == "b" * 64
+    assert payload["model_version"] == "catchup_ratio_l3500_b100"
+    for field_name in (
+        "beta",
+        "current_chainlink",
+        "projected_chainlink",
+        "pending_move",
+        "pending_move_bps",
+        "futures_now",
+        "futures_reference",
+    ):
+        assert isinstance(payload[field_name], str)
+    assert payload["current_chainlink"] == "100.00"
+    assert payload["pending_move_bps"] == "100"
+    assert decode_shadow_signal(None) is None
+
+    with pytest.raises(FrozenInstanceError):
+        signal.status = "futures_stale"
+
+
+def test_invalid_shadow_signal_nulls_projection_and_anchor_but_keeps_inputs():
+    signal = invalid_shadow_signal()
+
+    payload = json.loads(encode_shadow_signal(signal))
+
+    assert decode_shadow_signal(json.dumps(payload)) == signal
+    assert payload["valid"] is False
+    assert payload["status"] == "futures_stale"
+    assert payload["invalid_reasons"] == ["futures_stale"]
+    for field_name in (
+        "projected_chainlink",
+        "pending_move",
+        "pending_move_bps",
+        "direction",
+        "futures_reference",
+        "anchor_chainlink_source_timestamp_ms",
+        "anchor_chainlink_received_ms",
+        "futures_reference_source_timestamp_ms",
+        "futures_reference_received_ms",
+        "futures_reference_target_ms",
+        "futures_reference_gap_ms",
+    ):
+        assert payload[field_name] is None
+    assert payload["current_chainlink"] == "100.00"
+    assert payload["chainlink_now_received_ms"] == 1_783_459_495_070
+    assert payload["futures_now"] == "101.00"
+    assert payload["futures_received_age_ms"] == 23
+
+
+@pytest.mark.parametrize(
+    ("mutator", "message"),
+    [
+        (lambda item: item.update(schema_version=2), "schema_version"),
+        (lambda item: item.update(mode="live"), "mode must be shadow"),
+        (lambda item: item.update(beta=1), "decimal string"),
+        (lambda item: item.update(valid="true"), "valid must be a boolean"),
+        (
+            lambda item: item.update(selection_artifact_sha256="A" * 64),
+            "lowercase SHA-256",
+        ),
+        (
+            lambda item: item.update(projected_chainlink="102"),
+            "pending_move is inconsistent",
+        ),
+        (
+            lambda item: item.update(futures_received_age_ms=24),
+            "received age is inconsistent",
+        ),
+        (
+            lambda item: item.update(ms_to_market_end=4_874),
+            "ms_to_market_end is inconsistent",
+        ),
+    ],
+)
+def test_shadow_signal_decoder_rejects_inconsistent_payloads(mutator, message):
+    payload = json.loads(encode_shadow_signal(valid_shadow_signal()))
+    mutator(payload)
+
+    with pytest.raises(LiveCachePayloadError, match=message):
+        decode_shadow_signal(json.dumps(payload))
+
+
+def test_shadow_signal_decoder_rejects_missing_extra_duplicate_and_float_fields():
+    encoded = encode_shadow_signal(valid_shadow_signal())
+    payload = json.loads(encoded)
+
+    missing = dict(payload)
+    missing.pop("status")
+    extra = dict(payload, unexpected=True)
+    duplicate = '{"schema_version":1,' + encoded[1:]
+    numeric_decimal = encoded.replace('"beta":"1"', '"beta":1.0')
+
+    for raw in (
+        json.dumps(missing),
+        json.dumps(extra),
+        duplicate,
+        numeric_decimal,
+    ):
+        with pytest.raises(LiveCachePayloadError):
+            decode_shadow_signal(raw)
+
+
+def test_live_cache_shadow_methods_use_fixed_key_and_atomic_ttl():
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    signal = valid_shadow_signal()
+
+    async def run():
+        await cache.set_shadow_signal(signal, 2_000)
+        stored = await cache.get_shadow_signal()
+        await cache.delete_shadow_signal()
+        return stored
+
+    stored = asyncio.run(run())
+
+    assert stored == signal
+    assert redis.set_calls[-1] == (
+        CHAINLINK_SHADOW_LIVE_KEY,
+        encode_shadow_signal(signal),
+        {"px": 2_000},
+    )
+    assert redis.delete_calls == [CHAINLINK_SHADOW_LIVE_KEY]
+    assert CHAINLINK_SHADOW_LIVE_KEY not in redis.data
+
+
+@pytest.mark.parametrize("ttl_ms", [0, -1])
+def test_shadow_signal_ttl_must_be_positive(ttl_ms):
+    cache = LiveCache(redis_client=FakeRedis())
+
+    with pytest.raises(ValueError, match="ttl_ms must be positive"):
+        asyncio.run(cache.set_shadow_signal(valid_shadow_signal(), ttl_ms))
+
+
+@pytest.mark.parametrize("ttl_ms", [True, "2000", Decimal("2000")])
+def test_shadow_signal_ttl_must_be_an_integer(ttl_ms):
+    cache = LiveCache(redis_client=FakeRedis())
+
+    with pytest.raises(TypeError, match="ttl_ms must be an integer"):
+        asyncio.run(cache.set_shadow_signal(valid_shadow_signal(), ttl_ms))
+
+
+def test_get_prices_independent_isolates_malformed_live_price_payloads():
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+
+    async def run():
+        await cache.set_price(
+            FUTURES_LIVE_KEY,
+            value=Decimal("101.25"),
+            source_timestamp_ms=123,
+            received_ms=456,
+        )
+        redis.data[CHAINLINK_LIVE_KEY] = '{"value":12}'
+        return await cache.get_prices_independent(
+            [FUTURES_LIVE_KEY, CHAINLINK_LIVE_KEY, BINANCE_SPOT_LIVE_KEY]
+        )
+
+    prices, errors = asyncio.run(run())
+
+    assert prices[FUTURES_LIVE_KEY].value == "101.25"
+    assert prices[CHAINLINK_LIVE_KEY] is None
+    assert prices[BINANCE_SPOT_LIVE_KEY] is None
+    assert set(errors) == {CHAINLINK_LIVE_KEY}
+    assert isinstance(errors[CHAINLINK_LIVE_KEY], LiveCachePayloadError)
 
 
 def test_build_current_live_payload_calculates_freshness_ages():
