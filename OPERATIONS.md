@@ -3013,7 +3013,10 @@ test "$PTTL" -gt 0
 test "$PTTL" -le 2000
 ```
 
-Also confirm the public API still has no shadow field in this phase:
+At the historical Phase 4 checkpoint, the public API still had no shadow
+field. A deployment that has since completed shadow-signal Phase 6 will instead
+return the optional signal at `signals.chainlink_catchup`; that later API field
+does not change this Phase 4 Redis-publication check:
 
 ```bash
 curl -fsS http://127.0.0.1:9000/healthz
@@ -3074,6 +3077,28 @@ If an already-enabled worker reports
 the dedicated `check17` recovery section in that migration guide. It preserves
 the Phase 4 Redis signal and existing evaluation rows while replacing the
 divide-first projection constraint before the writer is re-enabled.
+
+## Shadow-Signal Phase 6 Live API Exposure
+
+This is step 6 of the shadow-signal build order in `engine.md`. It extends the
+existing Redis-only `GET /markets/current/live` response with
+`signals.chainlink_catchup`; it does not add a route, PostgreSQL query, API
+writer credential, dashboard code, schema migration, environment setting, or
+systemd dependency on the optional shadow worker.
+
+Use the ordered deployment, isolation test, rollback, and acceptance procedure
+in [`SHADOW_SIGNAL_PHASE6_MIGRATION.md`](SHADOW_SIGNAL_PHASE6_MIGRATION.md).
+Because `price_collector/live_cache.py` is shared, that procedure restarts the
+three source-price services, then `price-collector-shadow-signal`, and finally
+`price-api`. It does not restart the Polymarket probability collector, Redis,
+or PostgreSQL.
+
+A well-formed signal is returned as an object whether `valid` is true or false.
+An expired, absent, or malformed experimental signal is isolated as
+`"chainlink_catchup": null` while the three source prices still return with
+HTTP 200. A Redis read failure or malformed source-price payload retains the
+existing HTTP 503 behavior. Phase 7 dashboard work remains outside this
+repository and is not part of this rollout.
 
 ## Redis Spot Checks
 

@@ -11,6 +11,7 @@ def test_price_api_service_binds_to_loopback_only():
     assert "--host 127.0.0.1" in service
     assert "--host 0.0.0.0" not in service
     assert "redis-server.service" in service
+    assert "price-collector-shadow-signal.service" not in service
 
 
 def test_api_env_example_contains_reader_credentials_only():
@@ -55,6 +56,7 @@ def test_api_env_example_has_no_raw_capture_or_writer_settings():
     lines = (ROOT / "deployment" / "api.env.example").read_text().splitlines()
 
     assert not any(line.startswith("RAW_") for line in lines)
+    assert not any(line.startswith("SHADOW_SIGNAL_") for line in lines)
     assert not any(line.startswith("DATABASE_URL=") for line in lines)
 
 

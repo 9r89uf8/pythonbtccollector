@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+import price_collector.live_cache as live_cache_module
 from price_collector.live_cache import (
     BINANCE_SPOT_LIVE_KEY,
     CHAINLINK_LIVE_KEY,
@@ -16,6 +17,7 @@ from price_collector.live_cache import (
     build_current_live_payload,
     decode_shadow_signal,
     encode_shadow_signal,
+    serialize_shadow_signal,
 )
 from price_collector.market import MarketWindow
 
@@ -342,7 +344,12 @@ def test_build_current_live_payload_calculates_freshness_ages():
     payload = asyncio.run(run())
 
     assert redis.mget_calls == [
-        [BINANCE_SPOT_LIVE_KEY, CHAINLINK_LIVE_KEY, FUTURES_LIVE_KEY]
+        [
+            BINANCE_SPOT_LIVE_KEY,
+            CHAINLINK_LIVE_KEY,
+            FUTURES_LIVE_KEY,
+            CHAINLINK_SHADOW_LIVE_KEY,
+        ]
     ]
     assert payload["prices"]["binance_spot"]["value"] == "62067.89"
     assert payload["prices"]["binance_spot"]["source_age_ms"] == 123
@@ -352,3 +359,309 @@ def test_build_current_live_payload_calculates_freshness_ages():
     assert payload["futures"]["last"]["source_age_ms"] == 173
     assert payload["futures"]["last"]["received_age_ms"] == 33
     assert payload["futures"]["last"]["time_ms"] == 1_783_459_249_950
+    assert payload["signals"] == {"chainlink_catchup": None}
+
+
+def test_build_current_live_payload_serializes_shadow_in_same_mget():
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    signal = valid_shadow_signal()
+    window = MarketWindow(
+        market_id=5_944_864,
+        market_start_ms=1_783_459_200_000,
+        market_end_ms=1_783_459_500_000,
+    )
+
+    async def run():
+        await cache.set_shadow_signal(signal, 2_000)
+        return await build_current_live_payload(
+            cache,
+            window=window,
+            server_time_ms=1_783_459_495_200,
+        )
+
+    payload = asyncio.run(run())
+    serialized = payload["signals"]["chainlink_catchup"]
+
+    assert redis.mget_calls == [
+        [
+            BINANCE_SPOT_LIVE_KEY,
+            CHAINLINK_LIVE_KEY,
+            FUTURES_LIVE_KEY,
+            CHAINLINK_SHADOW_LIVE_KEY,
+        ]
+    ]
+    assert set(serialized) == {
+        *signal.__dataclass_fields__,
+        "signal_age_ms",
+    }
+    assert serialized["signal_age_ms"] == 75
+    assert serialized["invalid_reasons"] == []
+    for field_name in (
+        "beta",
+        "current_chainlink",
+        "projected_chainlink",
+        "pending_move",
+        "pending_move_bps",
+        "futures_now",
+        "futures_reference",
+    ):
+        assert isinstance(serialized[field_name], str)
+
+
+def test_shadow_api_serialization_keeps_invalid_signal_and_clamps_age():
+    serialized = serialize_shadow_signal(
+        invalid_shadow_signal(),
+        server_time_ms=0,
+    )
+
+    assert serialized["signal_age_ms"] == 0
+    assert serialized["valid"] is False
+    assert serialized["status"] == "futures_stale"
+    assert serialized["invalid_reasons"] == ["futures_stale"]
+    assert serialized["projected_chainlink"] is None
+    assert serialized["pending_move"] is None
+
+
+def test_malformed_shadow_is_logged_and_does_not_hide_prices(caplog):
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    window = MarketWindow(
+        market_id=5_944_864,
+        market_start_ms=1_783_459_200_000,
+        market_end_ms=1_783_459_500_000,
+    )
+
+    async def run():
+        await cache.set_price(
+            BINANCE_SPOT_LIVE_KEY,
+            value=Decimal("62067.89"),
+            source_timestamp_ms=1_783_459_495_000,
+            received_ms=1_783_459_495_050,
+        )
+        redis.data[CHAINLINK_SHADOW_LIVE_KEY] = "{not-json"
+        return await build_current_live_payload(
+            cache,
+            window=window,
+            server_time_ms=1_783_459_495_200,
+        )
+
+    payload = asyncio.run(run())
+
+    assert payload["prices"]["binance_spot"]["value"] == "62067.89"
+    assert payload["signals"]["chainlink_catchup"] is None
+    assert "shadow_signal_live_cache_payload_invalid" in caplog.text
+    assert "{not-json" not in caplog.text
+
+
+def test_shadow_with_unencodable_text_is_isolated_from_prices(caplog):
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    payload = json.loads(encode_shadow_signal(valid_shadow_signal()))
+    payload["model_version"] = "\ud800"
+    redis.data[BINANCE_SPOT_LIVE_KEY] = (
+        '{"value":"62067.89","source_timestamp_ms":1783459495000,'
+        '"received_ms":1783459495050}'
+    )
+    redis.data[CHAINLINK_SHADOW_LIVE_KEY] = json.dumps(payload)
+
+    prices, shadow_signal = asyncio.run(
+        cache.get_prices_and_shadow_signal(
+            [
+                BINANCE_SPOT_LIVE_KEY,
+                CHAINLINK_LIVE_KEY,
+                FUTURES_LIVE_KEY,
+            ]
+        )
+    )
+
+    assert prices[BINANCE_SPOT_LIVE_KEY].value == "62067.89"
+    assert shadow_signal is None
+    assert "shadow_signal_live_cache_payload_invalid" in caplog.text
+    assert "\\ud800" not in caplog.text
+
+
+def test_non_utf8_shadow_bytes_are_isolated_per_mget_slot(caplog):
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    redis.data[BINANCE_SPOT_LIVE_KEY] = (
+        b'{"value":"62067.89","source_timestamp_ms":1783459495000,'
+        b'"received_ms":1783459495050}'
+    )
+    redis.data[CHAINLINK_SHADOW_LIVE_KEY] = b"\xff"
+
+    prices, shadow_signal = asyncio.run(
+        cache.get_prices_and_shadow_signal(
+            [
+                BINANCE_SPOT_LIVE_KEY,
+                CHAINLINK_LIVE_KEY,
+                FUTURES_LIVE_KEY,
+            ]
+        )
+    )
+
+    assert prices[BINANCE_SPOT_LIVE_KEY].value == "62067.89"
+    assert shadow_signal is None
+    assert "shadow_signal_live_cache_payload_invalid" in caplog.text
+
+
+def test_shadow_payload_field_names_are_not_copied_to_logs(caplog):
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    redis.data[CHAINLINK_SHADOW_LIVE_KEY] = '{"secret-shadow-field":1}'
+
+    _prices, shadow_signal = asyncio.run(
+        cache.get_prices_and_shadow_signal(
+            [
+                BINANCE_SPOT_LIVE_KEY,
+                CHAINLINK_LIVE_KEY,
+                FUTURES_LIVE_KEY,
+            ]
+        )
+    )
+
+    assert shadow_signal is None
+    assert "shadow_signal_live_cache_payload_invalid" in caplog.text
+    assert "secret-shadow-field" not in caplog.text
+
+
+def test_malformed_actual_price_still_fails_with_valid_shadow():
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    redis.data[BINANCE_SPOT_LIVE_KEY] = '{"value":12}'
+    redis.data[CHAINLINK_SHADOW_LIVE_KEY] = encode_shadow_signal(
+        valid_shadow_signal()
+    )
+
+    with pytest.raises(LiveCachePayloadError, match="value must be a string"):
+        asyncio.run(
+            cache.get_prices_and_shadow_signal(
+                [
+                    BINANCE_SPOT_LIVE_KEY,
+                    CHAINLINK_LIVE_KEY,
+                    FUTURES_LIVE_KEY,
+                ]
+            )
+        )
+
+
+def test_non_utf8_actual_price_still_fails_closed():
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    redis.data[BINANCE_SPOT_LIVE_KEY] = b"\xff"
+    redis.data[CHAINLINK_SHADOW_LIVE_KEY] = encode_shadow_signal(
+        valid_shadow_signal()
+    )
+
+    with pytest.raises(LiveCachePayloadError, match="not valid UTF-8"):
+        asyncio.run(
+            cache.get_prices_and_shadow_signal(
+                [
+                    BINANCE_SPOT_LIVE_KEY,
+                    CHAINLINK_LIVE_KEY,
+                    FUTURES_LIVE_KEY,
+                ]
+            )
+        )
+
+
+def test_default_redis_client_keeps_bytes_for_per_slot_decoding(monkeypatch):
+    captured = {}
+    redis_client = FakeRedis()
+
+    def fake_redis(**kwargs):
+        captured.update(kwargs)
+        return redis_client
+
+    monkeypatch.setattr(live_cache_module.redis, "Redis", fake_redis)
+
+    cache = LiveCache()
+
+    assert cache.redis is redis_client
+    assert captured["decode_responses"] is False
+
+
+def test_live_snapshot_rejects_short_mget_response():
+    class ShortRedis(FakeRedis):
+        async def mget(self, keys):
+            values = await super().mget(keys)
+            return values[:-1]
+
+    cache = LiveCache(redis_client=ShortRedis())
+
+    with pytest.raises(LiveCachePayloadError, match="unexpected value count"):
+        asyncio.run(
+            cache.get_prices_and_shadow_signal(
+                [
+                    BINANCE_SPOT_LIVE_KEY,
+                    CHAINLINK_LIVE_KEY,
+                    FUTURES_LIVE_KEY,
+                ]
+            )
+        )
+
+
+def test_live_snapshot_propagates_redis_read_failure():
+    class FailingRedis(FakeRedis):
+        async def mget(self, keys):
+            raise OSError("redis unavailable")
+
+    cache = LiveCache(redis_client=FailingRedis())
+
+    with pytest.raises(OSError, match="redis unavailable"):
+        asyncio.run(
+            cache.get_prices_and_shadow_signal(
+                [
+                    BINANCE_SPOT_LIVE_KEY,
+                    CHAINLINK_LIVE_KEY,
+                    FUTURES_LIVE_KEY,
+                ]
+            )
+        )
+
+
+def test_shadow_decoder_normalizes_size_depth_and_integer_limits():
+    encoded = encode_shadow_signal(valid_shadow_signal())
+    oversized = "x" * 65_537
+    deeply_nested = "[" * 2_000 + "0" + "]" * 2_000
+    huge_integer = encoded.replace(
+        '"generated_ms":1783459495125',
+        '"generated_ms":999999999999999999999999999999999999',
+    )
+
+    for raw in (oversized, deeply_nested, huge_integer):
+        with pytest.raises(LiveCachePayloadError):
+            decode_shadow_signal(raw)
+
+
+def test_shadow_contract_rejects_oversized_strings_and_misaligned_market():
+    payload = json.loads(encode_shadow_signal(valid_shadow_signal()))
+    payload["model_version"] = "x" * 257
+    with pytest.raises(LiveCachePayloadError, match="model_version is too long"):
+        decode_shadow_signal(json.dumps(payload))
+
+    payload = json.loads(encode_shadow_signal(invalid_shadow_signal()))
+    payload["invalid_reasons"] = ["\ud800"]
+    with pytest.raises(LiveCachePayloadError, match="valid Unicode"):
+        decode_shadow_signal(json.dumps(payload))
+
+    with pytest.raises(LiveCachePayloadError, match="must align"):
+        replace(
+            valid_shadow_signal(),
+            market_start_ms=1_783_459_200_001,
+            market_end_ms=1_783_459_500_001,
+        )
+
+
+def test_shadow_contract_clamps_input_age_after_local_clock_regression():
+    signal = valid_shadow_signal()
+
+    clock_regression = replace(
+        signal,
+        futures_now_received_ms=signal.generated_ms + 1,
+        futures_received_age_ms=0,
+    )
+
+    assert decode_shadow_signal(encode_shadow_signal(clock_regression)) == (
+        clock_regression
+    )

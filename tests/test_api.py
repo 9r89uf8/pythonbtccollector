@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -8,8 +9,11 @@ import price_collector.api as api
 from price_collector.live_cache import (
     BINANCE_SPOT_LIVE_KEY,
     CHAINLINK_LIVE_KEY,
+    CHAINLINK_SHADOW_LIVE_KEY,
     FUTURES_LIVE_KEY,
+    LiveCachePayloadError,
     LivePrice,
+    LiveShadowSignal,
 )
 
 
@@ -30,12 +34,19 @@ class FakeLiveCache:
     def __init__(self) -> None:
         self.closed = False
         self.prices = {}
+        self.shadow_signal = None
+        self.read_error = None
         self.requested_keys = []
 
-    async def get_prices(self, keys):
+    async def get_prices_and_shadow_signal(self, keys):
+        if self.read_error is not None:
+            raise self.read_error
         key_list = list(keys)
-        self.requested_keys.append(key_list)
-        return {key: self.prices.get(key) for key in key_list}
+        self.requested_keys.append([*key_list, CHAINLINK_SHADOW_LIVE_KEY])
+        return (
+            {key: self.prices.get(key) for key in key_list},
+            self.shadow_signal,
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -68,6 +79,53 @@ def client(monkeypatch):
 
 def utc_dt(year, month, day, hour, minute, second):
     return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+
+
+def live_shadow_signal(**overrides):
+    values = {
+        "schema_version": 1,
+        "mode": "shadow",
+        "selection_schema_version": 2,
+        "selection_policy_version": "chronological_holdout_v2",
+        "selection_fingerprint_sha256": "a" * 64,
+        "selection_artifact_sha256": "b" * 64,
+        "selection_evidence_end_ms": 1_783_400_000_000,
+        "model_version": "catchup_ratio_l3000_b100",
+        "beta": Decimal("1"),
+        "generated_ms": 1_783_459_250_100,
+        "valid": True,
+        "status": "valid",
+        "invalid_reasons": (),
+        "state": "anchored",
+        "horizon_ms": 3_000,
+        "estimated_lag_ms": 3_000,
+        "current_chainlink": Decimal("62000"),
+        "projected_chainlink": Decimal("62001"),
+        "pending_move": Decimal("1"),
+        "pending_move_bps": Decimal("0.1612903225806451612903225806"),
+        "direction": "up",
+        "futures_now": Decimal("62101"),
+        "futures_reference": Decimal("62100"),
+        "chainlink_now_source_timestamp_ms": 1_783_459_250_000,
+        "chainlink_now_received_ms": 1_783_459_250_070,
+        "anchor_chainlink_source_timestamp_ms": 1_783_459_250_000,
+        "anchor_chainlink_received_ms": 1_783_459_250_070,
+        "futures_now_source_timestamp_ms": 1_783_459_250_050,
+        "futures_now_received_ms": 1_783_459_250_090,
+        "futures_reference_source_timestamp_ms": 1_783_459_247_000,
+        "futures_reference_received_ms": 1_783_459_247_050,
+        "futures_reference_target_ms": 1_783_459_247_070,
+        "futures_reference_gap_ms": 20,
+        "futures_received_age_ms": 10,
+        "chainlink_received_age_ms": 30,
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "ms_to_market_end": 249_900,
+        "full_horizon_before_market_end": True,
+    }
+    values.update(overrides)
+    return LiveShadowSignal(**values)
 
 
 def test_healthz_success(client):
@@ -930,9 +988,90 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
     assert body["futures"]["last"]["source_age_ms"] == 123
     assert body["futures"]["last"]["received_age_ms"] == 73
     assert body["futures"]["last"]["time_ms"] == 1_783_459_250_000
+    assert body["signals"] == {"chainlink_catchup": None}
     assert client.fake_live_cache.requested_keys == [
-        [BINANCE_SPOT_LIVE_KEY, CHAINLINK_LIVE_KEY, FUTURES_LIVE_KEY]
+        [
+            BINANCE_SPOT_LIVE_KEY,
+            CHAINLINK_LIVE_KEY,
+            FUTURES_LIVE_KEY,
+            CHAINLINK_SHADOW_LIVE_KEY,
+        ]
     ]
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_live_returns_full_shadow_signal(client, monkeypatch):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+    client.fake_live_cache.shadow_signal = live_shadow_signal()
+
+    response = client.get("/markets/current/live")
+
+    assert response.status_code == 200
+    signal = response.json()["signals"]["chainlink_catchup"]
+    assert signal["schema_version"] == 1
+    assert signal["mode"] == "shadow"
+    assert signal["model_version"] == "catchup_ratio_l3000_b100"
+    assert signal["signal_age_ms"] == 23
+    assert signal["valid"] is True
+    assert signal["invalid_reasons"] == []
+    assert signal["pending_move"] == "1"
+    assert signal["pending_move_bps"] == (
+        "0.1612903225806451612903225806"
+    )
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_live_returns_well_formed_invalid_signal(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+    client.fake_live_cache.shadow_signal = replace(
+        live_shadow_signal(),
+        valid=False,
+        status="futures_stale",
+        invalid_reasons=("futures_stale",),
+        projected_chainlink=None,
+        pending_move=None,
+        pending_move_bps=None,
+        direction=None,
+        futures_reference=None,
+        anchor_chainlink_source_timestamp_ms=None,
+        anchor_chainlink_received_ms=None,
+        futures_reference_source_timestamp_ms=None,
+        futures_reference_received_ms=None,
+        futures_reference_target_ms=None,
+        futures_reference_gap_ms=None,
+    )
+
+    response = client.get("/markets/current/live")
+
+    assert response.status_code == 200
+    signal = response.json()["signals"]["chainlink_catchup"]
+    assert signal["valid"] is False
+    assert signal["status"] == "futures_stale"
+    assert signal["invalid_reasons"] == ["futures_stale"]
+    assert signal["projected_chainlink"] is None
+
+
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    (
+        (OSError("redis unavailable"), "live cache unavailable"),
+        (LiveCachePayloadError("bad price"), "live cache payload invalid"),
+    ),
+)
+def test_markets_current_live_preserves_cache_error_status(
+    client,
+    error,
+    detail,
+):
+    client.fake_live_cache.read_error = error
+
+    response = client.get("/markets/current/live")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": detail}
     assert client.fake_pool.acquire_calls == 0
 
 

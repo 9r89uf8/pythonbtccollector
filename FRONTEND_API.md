@@ -94,7 +94,7 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/{market_id}/data` | Full series for one market | PostgreSQL |
 | `GET` | `/markets/current/download` | Download current market JSON | PostgreSQL |
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
-| `GET` | `/markets/current/live` | Lowest-latency current prices | Redis only |
+| `GET` | `/markets/current/live` | Lowest-latency current prices and experimental Chainlink catch-up signal | Redis only |
 
 ## Health
 
@@ -880,13 +880,14 @@ window.location.assign(url);
 The download routes return HTTP `404` with the requested market ID in `detail`
 when the market window does not exist.
 
-## Current Live Prices
+## Current Live Prices and Shadow Signal
 
 ### `GET /markets/current/live`
 
-Reads only the three live Redis keys. It does not query PostgreSQL and does not
-return historical samples, probabilities, mark/index prices, open interest,
-flow, or book data.
+Reads `btc:live:binance_spot`, `btc:live:chainlink`, `btc:live:futures`, and
+`btc:live:chainlink_shadow` with one Redis `MGET`. It does not query PostgreSQL
+and does not return historical samples, probabilities, mark/index prices, open
+interest, flow, book data, or persisted shadow evaluations.
 
 See [`LIVE_DATA.md`](LIVE_DATA.md) for the upstream extraction paths, Redis
 handoff, freshness semantics, and recommended dashboard polling behavior.
@@ -905,36 +906,81 @@ Response:
 
 ```json
 {
-  "server_time_ms": 1783459250123,
-  "market_id": 5944864,
-  "market_start_ms": 1783459200000,
-  "market_end_ms": 1783459500000,
+  "server_time_ms": 1783988794075,
+  "market_id": 5946629,
+  "market_start_ms": 1783988700000,
+  "market_end_ms": 1783989000000,
   "prices": {
     "binance_spot": {
-      "value": "62067.89",
-      "source_timestamp_ms": 1783459249900,
-      "received_ms": 1783459249950,
-      "source_age_ms": 223,
-      "received_age_ms": 173,
-      "provider_event_ms": 1783459249900
+      "value": "62310.12",
+      "source_timestamp_ms": 1783988793900,
+      "received_ms": 1783988793950,
+      "source_age_ms": 175,
+      "received_age_ms": 125,
+      "provider_event_ms": 1783988793900
     },
     "chainlink": {
-      "value": "62037.05",
-      "source_timestamp_ms": 1783459247000,
-      "received_ms": 1783459247100,
-      "source_age_ms": 3123,
-      "received_age_ms": 3023,
-      "provider_event_ms": 1783459247000
+      "value": "62290.21096323273",
+      "source_timestamp_ms": 1783988792000,
+      "received_ms": 1783988793346,
+      "source_age_ms": 2075,
+      "received_age_ms": 729,
+      "provider_event_ms": 1783988792000
     }
   },
   "futures": {
     "last": {
-      "value": "62099.10",
-      "source_timestamp_ms": 1783459250000,
-      "received_ms": 1783459250050,
-      "source_age_ms": 123,
-      "received_age_ms": 73,
-      "time_ms": 1783459250000
+      "value": "62331.80",
+      "source_timestamp_ms": 1783988793451,
+      "received_ms": 1783988793638,
+      "source_age_ms": 624,
+      "received_age_ms": 437,
+      "time_ms": 1783988793451
+    }
+  },
+  "signals": {
+    "chainlink_catchup": {
+      "schema_version": 1,
+      "mode": "shadow",
+      "selection_schema_version": 2,
+      "selection_policy_version": "chronological_holdout_v2",
+      "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
+      "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
+      "selection_evidence_end_ms": 1783983205028,
+      "model_version": "catchup_ratio_l3000_b100",
+      "beta": "1",
+      "generated_ms": 1783988794005,
+      "valid": true,
+      "status": "valid",
+      "invalid_reasons": [],
+      "state": "anchored",
+      "horizon_ms": 3000,
+      "estimated_lag_ms": 3000,
+      "current_chainlink": "62290.21096323273",
+      "projected_chainlink": "62292.00981418305598931493660",
+      "pending_move": "1.79885095032598931493660",
+      "pending_move_bps": "0.2887854965506176800898399415",
+      "direction": "up",
+      "futures_now": "62331.80",
+      "futures_reference": "62330.00",
+      "chainlink_now_source_timestamp_ms": 1783988792000,
+      "chainlink_now_received_ms": 1783988793346,
+      "anchor_chainlink_source_timestamp_ms": 1783988792000,
+      "anchor_chainlink_received_ms": 1783988793346,
+      "futures_now_source_timestamp_ms": 1783988793451,
+      "futures_now_received_ms": 1783988793638,
+      "futures_reference_source_timestamp_ms": 1783988789826,
+      "futures_reference_received_ms": 1783988790015,
+      "futures_reference_target_ms": 1783988790346,
+      "futures_reference_gap_ms": 331,
+      "futures_received_age_ms": 367,
+      "chainlink_received_age_ms": 659,
+      "market_id": 5946629,
+      "market_start_ms": 1783988700000,
+      "market_end_ms": 1783989000000,
+      "ms_to_market_end": 205995,
+      "full_horizon_before_market_end": true,
+      "signal_age_ms": 70
     }
   }
 }
@@ -945,7 +991,40 @@ as `source_timestamp_ms`. The futures `last` value comes from Binance
 `btcusdt@aggTrade.p`; its `source_timestamp_ms`/`time_ms` is `aggTrade.T`, and
 its `received_ms` is local wall time recorded immediately after WebSocket
 `recv()` and before parsing. This source change does not alter the response
-shape.
+shape. The source-price objects and compatibility aliases are unchanged by the
+additional `signals` object.
+
+`signals.chainlink_catchup` is either the complete typed shadow payload shown
+above or `null`. The API calculates its only API-specific field as:
+
+```text
+signal_age_ms = max(0, server_time_ms - generated_ms)
+```
+
+This object is an experimental projected Chainlink catch-up, not a probability,
+settlement, execution, or market-close forecast.
+
+`beta`, `current_chainlink`, `projected_chainlink`, `pending_move`,
+`pending_move_bps`, `futures_now`, and `futures_reference` are fixed-point JSON
+strings, or `null` where the typed shadow contract permits it. Do not parse
+them with binary floating-point. Timestamps, ages, horizons, and market IDs are
+JSON integers. `invalid_reasons` is an array of strings.
+
+The top-level market window is calculated by the API for `server_time_ms`. The
+nested `market_id`, `market_start_ms`, `market_end_ms`, `ms_to_market_end`, and
+`full_horizon_before_market_end` were fixed by the shadow worker at
+`generated_ms`. Around a five-minute boundary, a still-live signal can
+therefore contain the preceding window briefly; consumers must not overwrite
+the nested generation-time context with the top-level current window.
+
+A well-formed signal with `valid: false` is still returned as an object. Its
+non-`valid` `status` and non-empty `invalid_reasons` explain why it cannot be
+used, while projection and anchor fields are `null`; current input fields can
+still be present for diagnostics. Consumers should display its status rather
+than reuse a previous valid projection. If the shadow worker is disabled or
+stops, the short Redis TTL expires and `signals.chainlink_catchup` becomes
+`null`. A missing shadow key is normal and the endpoint still returns HTTP
+`200`.
 
 If a Redis key is absent, its value, timestamps, ages, and alias are all `null`;
 the endpoint still returns HTTP `200`. The endpoint does not reject stale
@@ -960,11 +1039,19 @@ Redis connection/read failures return HTTP `503` with:
 { "detail": "live cache unavailable" }
 ```
 
-Malformed cached JSON returns HTTP `503` with:
+Malformed JSON in any of the three source-price keys still returns HTTP `503`
+with:
 
 ```json
 { "detail": "live cache payload invalid" }
 ```
+
+A malformed `btc:live:chainlink_shadow` payload is isolated from the three
+actual prices. The API logs the shadow decode error, returns HTTP `200`, and
+sets `signals.chainlink_catchup` to `null`. It does not expose the malformed
+raw value or turn an experimental model-payload problem into an outage of the
+actual live-price response. A Redis connection or `MGET` failure still returns
+the unchanged `503 live cache unavailable` response.
 
 ## Common Errors
 
@@ -981,7 +1068,7 @@ Expected statuses are:
 | `404` | The requested source or market has no stored data |
 | `405` | The route was called with a method other than `GET` |
 | `422` | A typed path/query value is invalid, such as a non-integer market ID or a discovery `limit` outside `1..50` |
-| `503` | `/markets/current/live` cannot read valid Redis data, or `/healthz` cannot query PostgreSQL |
+| `503` | `/markets/current/live` cannot read Redis or one of its three actual source-price payloads is malformed, or `/healthz` cannot query PostgreSQL |
 
 The exact `detail` text is useful for logs but should not be treated as a stable
 frontend enum. Use the HTTP status and the endpoint context.

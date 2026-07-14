@@ -227,7 +227,9 @@ Each value has this shape:
 
 Shadow-signal Phases 4 and 5 can also create `btc:live:chainlink_shadow`. That key is a
 typed shadow projection rather than a source price, and it expires 1.5 to 2.0
-seconds after each write. It is not returned by the API in either phase.
+seconds after each write. Those phases deliberately kept it out of the API.
+Phase 6 reads it alongside the three source-price keys and exposes it only as
+the optional nested `signals.chainlink_catchup` object.
 
 ### Shadow-signal design engine
 
@@ -379,12 +381,28 @@ before the separate 72-hour raw-capture retention removes that join evidence.
 
 The evaluation table is internal: `price_writer` receives only `SELECT`,
 `INSERT`, and retention `DELETE`, while `price_reader` and `PUBLIC` are
-explicitly revoked. Phase 5 adds no API response and no dashboard code; those
-remain shadow-signal build-order steps 6 and 7 in `engine.md`. This
-shadow-signal Phase 5 is distinct from the Binance futures-collector Phase 5
-source cutover and from the still-deferred high-resolution raw-capture Phase 4
-partition and 72-hour-retention validation. It does not validate either
-rollout.
+explicitly revoked. Phase 5 deliberately added no API response or dashboard
+code. It is distinct from the Binance futures-collector Phase 5 source cutover
+and from the still-deferred high-resolution raw-capture Phase 4 partition and
+72-hour-retention validation; it does not validate either rollout.
+
+Shadow-signal Phase 6 adds a Redis-only serialization path to the existing
+`GET /markets/current/live` endpoint. The route obtains the three source-price
+keys and `btc:live:chainlink_shadow` with one four-key `MGET`. It decodes the
+shadow value independently with its dedicated typed decoder, never as a
+`LivePrice`, and returns it under `signals.chainlink_catchup`. A present,
+well-formed signal is returned as an object, including a request-time
+`signal_age_ms = max(0, server_time_ms - generated_ms)`; a missing, expired, or
+malformed shadow value produces `null` in that slot. A malformed shadow value is
+logged but cannot turn otherwise readable actual prices into an HTTP `503`.
+
+FastAPI remains a read-only serializer in Phase 6. The live route performs no
+PostgreSQL query, does not expose `shadow_signal_evaluations`, and neither runs
+nor imports model execution or model state. The shadow worker remains isolated
+in its standalone service. Phase 6 is backend-only; dashboard integration is
+reserved for Phase 7 in a different repository. Deploy and verify this API
+addition with
+[`SHADOW_SIGNAL_PHASE6_MIGRATION.md`](SHADOW_SIGNAL_PHASE6_MIGRATION.md).
 
 ## API
 
@@ -411,8 +429,9 @@ Current routes:
 
 The data and download routes accept optional `include_probabilities`,
 `include_futures`, `include_oi`, `include_flow`, `include_book`, `fill_display`,
-and `max_carry_forward_ms` query parameters. `/markets/current/live` reads Redis;
-the historical and aggregate routes read PostgreSQL.
+and `max_carry_forward_ms` query parameters. `/markets/current/live` reads the
+three source prices plus the optional shadow signal from Redis with one four-key
+`MGET`; the historical and aggregate routes read PostgreSQL.
 
 The data and download responses use schema version `2` and always include
 `market.chainlink_resolution` and `market.resolution`, independently of the
@@ -449,6 +468,7 @@ tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
 SHADOW_SIGNAL_PHASE5_MIGRATION.md  Matured-evaluation rollout and rollback
+SHADOW_SIGNAL_PHASE6_MIGRATION.md  Redis-only live API rollout and rollback
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 LIVE_DATA.md           Live BTC extraction, cache, and dashboard consumption guide
 requirements.txt       Python runtime and test dependencies

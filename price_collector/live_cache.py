@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
@@ -11,6 +12,9 @@ from redis.exceptions import RedisError
 from price_collector.market import MarketWindow
 
 
+LOGGER = logging.getLogger("price_collector.live_cache")
+
+
 BINANCE_SPOT_LIVE_KEY = "btc:live:binance_spot"
 CHAINLINK_LIVE_KEY = "btc:live:chainlink"
 FUTURES_LIVE_KEY = "btc:live:futures"
@@ -18,6 +22,12 @@ CHAINLINK_SHADOW_LIVE_KEY = "btc:live:chainlink_shadow"
 
 SHADOW_SIGNAL_SCHEMA_VERSION = 1
 SHADOW_SIGNAL_MODE = "shadow"
+SHADOW_PAYLOAD_ERROR_LOG_EVERY = 100
+SHADOW_SIGNAL_MAX_PAYLOAD_CHARS = 65_536
+SHADOW_SIGNAL_MAX_STRING_CHARS = 256
+SHADOW_SIGNAL_MAX_DECIMAL_CHARS = 128
+SHADOW_SIGNAL_MAX_INVALID_REASONS = 32
+SHADOW_SIGNAL_MAX_WIRE_INT = 9_223_372_036_854_775_807
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _DECIMAL_PATTERN = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
@@ -98,6 +108,8 @@ def _strict_int(value: Any, field_name: str, *, minimum: int = 0) -> int:
         raise LiveCachePayloadError(f"{field_name} must be an integer")
     if value < minimum:
         raise LiveCachePayloadError(f"{field_name} must be at least {minimum}")
+    if value > SHADOW_SIGNAL_MAX_WIRE_INT:
+        raise LiveCachePayloadError(f"{field_name} exceeds signed BIGINT")
     return value
 
 
@@ -108,8 +120,16 @@ def _optional_strict_int(value: Any, field_name: str) -> Optional[int]:
 
 
 def _required_string(value: Any, field_name: str) -> str:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         raise LiveCachePayloadError(f"{field_name} must be a non-empty string")
+    if len(value) > SHADOW_SIGNAL_MAX_STRING_CHARS:
+        raise LiveCachePayloadError(f"{field_name} is too long")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise LiveCachePayloadError(
+            f"{field_name} must contain valid Unicode"
+        ) from exc
     return value
 
 
@@ -127,7 +147,11 @@ def _decimal_from_json(
 ) -> Optional[Decimal]:
     if value is None and optional:
         return None
-    if not isinstance(value, str) or _DECIMAL_PATTERN.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or len(value) > SHADOW_SIGNAL_MAX_DECIMAL_CHARS
+        or _DECIMAL_PATTERN.fullmatch(value) is None
+    ):
         raise LiveCachePayloadError(
             f"{field_name} must be a fixed-point decimal string"
         )
@@ -226,13 +250,14 @@ def _validate_shadow_signal(signal: LiveShadowSignal) -> None:
     valid = _required_bool(signal.valid, "valid")
     status = _required_string(signal.status, "status")
     _required_string(signal.state, "state")
-    if not isinstance(signal.invalid_reasons, tuple) or any(
-        not isinstance(reason, str) or not reason
-        for reason in signal.invalid_reasons
+    if not isinstance(signal.invalid_reasons, tuple) or (
+        len(signal.invalid_reasons) > SHADOW_SIGNAL_MAX_INVALID_REASONS
     ):
         raise LiveCachePayloadError(
             "invalid_reasons must be a tuple of non-empty strings"
         )
+    for reason in signal.invalid_reasons:
+        _required_string(reason, "invalid_reasons item")
     if len(set(signal.invalid_reasons)) != len(signal.invalid_reasons):
         raise LiveCachePayloadError("invalid_reasons must not contain duplicates")
 
@@ -387,6 +412,8 @@ def _validate_shadow_signal(signal: LiveShadowSignal) -> None:
     )
     if market_end_ms - market_start_ms != 300_000:
         raise LiveCachePayloadError("market window must be five minutes")
+    if market_start_ms % 300_000 != 0:
+        raise LiveCachePayloadError("market_start_ms must align to five minutes")
     if market_id != market_start_ms // 300_000:
         raise LiveCachePayloadError("market_id is inconsistent")
     if not market_start_ms <= generated_ms < market_end_ms:
@@ -403,7 +430,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for key, value in pairs:
         if key in payload:
-            raise LiveCachePayloadError(f"duplicate shadow signal field: {key}")
+            raise LiveCachePayloadError("shadow signal contains a duplicate field")
         payload[key] = value
     return payload
 
@@ -416,6 +443,16 @@ def _reject_json_float(raw_value: str) -> None:
 
 def _reject_json_constant(raw_value: str) -> None:
     raise LiveCachePayloadError(f"non-finite JSON value is forbidden: {raw_value}")
+
+
+def _bounded_json_int(raw_value: str) -> int:
+    digits = raw_value[1:] if raw_value.startswith("-") else raw_value
+    if len(digits) > 19:
+        raise LiveCachePayloadError("JSON integer exceeds signed BIGINT")
+    parsed = int(raw_value)
+    if abs(parsed) > SHADOW_SIGNAL_MAX_WIRE_INT:
+        raise LiveCachePayloadError("JSON integer exceeds signed BIGINT")
+    return parsed
 
 
 def _optional_int(value: Any, field_name: str) -> Optional[int]:
@@ -438,6 +475,21 @@ def _required_int(value: Any, field_name: str) -> int:
     return parsed
 
 
+def _redis_payload_text(raw: Any, field_name: str) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, bytes):
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LiveCachePayloadError(
+                f"{field_name} is not valid UTF-8"
+            ) from exc
+    raise LiveCachePayloadError(f"{field_name} must be a string")
+
+
 def encode_live_price(
     *,
     value: Decimal,
@@ -454,12 +506,13 @@ def encode_live_price(
     )
 
 
-def decode_live_price(raw: Optional[str]) -> Optional[LivePrice]:
-    if raw is None:
+def decode_live_price(raw: Any) -> Optional[LivePrice]:
+    text = _redis_payload_text(raw, "live cache payload")
+    if text is None:
         return None
 
     try:
-        payload = json.loads(raw)
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise LiveCachePayloadError("live cache payload is not valid JSON") from exc
 
@@ -469,6 +522,12 @@ def decode_live_price(raw: Optional[str]) -> Optional[LivePrice]:
     value = payload.get("value")
     if not isinstance(value, str):
         raise LiveCachePayloadError("live cache value must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise LiveCachePayloadError(
+            "live cache value must contain valid Unicode"
+        ) from exc
 
     return LivePrice(
         value=value,
@@ -480,90 +539,110 @@ def decode_live_price(raw: Optional[str]) -> Optional[LivePrice]:
     )
 
 
-def encode_shadow_signal(signal: LiveShadowSignal) -> str:
+def _shadow_signal_payload(signal: LiveShadowSignal) -> dict[str, Any]:
     if not isinstance(signal, LiveShadowSignal):
         raise TypeError("signal must be LiveShadowSignal")
     _validate_shadow_signal(signal)
+    return {
+        "schema_version": signal.schema_version,
+        "mode": signal.mode,
+        "selection_schema_version": signal.selection_schema_version,
+        "selection_policy_version": signal.selection_policy_version,
+        "selection_fingerprint_sha256": (
+            signal.selection_fingerprint_sha256
+        ),
+        "selection_artifact_sha256": signal.selection_artifact_sha256,
+        "selection_evidence_end_ms": signal.selection_evidence_end_ms,
+        "model_version": signal.model_version,
+        "beta": _decimal_to_json(signal.beta),
+        "generated_ms": signal.generated_ms,
+        "valid": signal.valid,
+        "status": signal.status,
+        "invalid_reasons": list(signal.invalid_reasons),
+        "state": signal.state,
+        "horizon_ms": signal.horizon_ms,
+        "estimated_lag_ms": signal.estimated_lag_ms,
+        "current_chainlink": _decimal_to_json(signal.current_chainlink),
+        "projected_chainlink": _decimal_to_json(
+            signal.projected_chainlink
+        ),
+        "pending_move": _decimal_to_json(signal.pending_move),
+        "pending_move_bps": _decimal_to_json(signal.pending_move_bps),
+        "direction": signal.direction,
+        "futures_now": _decimal_to_json(signal.futures_now),
+        "futures_reference": _decimal_to_json(signal.futures_reference),
+        "chainlink_now_source_timestamp_ms": (
+            signal.chainlink_now_source_timestamp_ms
+        ),
+        "chainlink_now_received_ms": signal.chainlink_now_received_ms,
+        "anchor_chainlink_source_timestamp_ms": (
+            signal.anchor_chainlink_source_timestamp_ms
+        ),
+        "anchor_chainlink_received_ms": (
+            signal.anchor_chainlink_received_ms
+        ),
+        "futures_now_source_timestamp_ms": (
+            signal.futures_now_source_timestamp_ms
+        ),
+        "futures_now_received_ms": signal.futures_now_received_ms,
+        "futures_reference_source_timestamp_ms": (
+            signal.futures_reference_source_timestamp_ms
+        ),
+        "futures_reference_received_ms": (
+            signal.futures_reference_received_ms
+        ),
+        "futures_reference_target_ms": (
+            signal.futures_reference_target_ms
+        ),
+        "futures_reference_gap_ms": signal.futures_reference_gap_ms,
+        "futures_received_age_ms": signal.futures_received_age_ms,
+        "chainlink_received_age_ms": signal.chainlink_received_age_ms,
+        "market_id": signal.market_id,
+        "market_start_ms": signal.market_start_ms,
+        "market_end_ms": signal.market_end_ms,
+        "ms_to_market_end": signal.ms_to_market_end,
+        "full_horizon_before_market_end": (
+            signal.full_horizon_before_market_end
+        ),
+    }
+
+
+def encode_shadow_signal(signal: LiveShadowSignal) -> str:
     return json.dumps(
-        {
-            "schema_version": signal.schema_version,
-            "mode": signal.mode,
-            "selection_schema_version": signal.selection_schema_version,
-            "selection_policy_version": signal.selection_policy_version,
-            "selection_fingerprint_sha256": (
-                signal.selection_fingerprint_sha256
-            ),
-            "selection_artifact_sha256": signal.selection_artifact_sha256,
-            "selection_evidence_end_ms": signal.selection_evidence_end_ms,
-            "model_version": signal.model_version,
-            "beta": _decimal_to_json(signal.beta),
-            "generated_ms": signal.generated_ms,
-            "valid": signal.valid,
-            "status": signal.status,
-            "invalid_reasons": list(signal.invalid_reasons),
-            "state": signal.state,
-            "horizon_ms": signal.horizon_ms,
-            "estimated_lag_ms": signal.estimated_lag_ms,
-            "current_chainlink": _decimal_to_json(signal.current_chainlink),
-            "projected_chainlink": _decimal_to_json(
-                signal.projected_chainlink
-            ),
-            "pending_move": _decimal_to_json(signal.pending_move),
-            "pending_move_bps": _decimal_to_json(signal.pending_move_bps),
-            "direction": signal.direction,
-            "futures_now": _decimal_to_json(signal.futures_now),
-            "futures_reference": _decimal_to_json(signal.futures_reference),
-            "chainlink_now_source_timestamp_ms": (
-                signal.chainlink_now_source_timestamp_ms
-            ),
-            "chainlink_now_received_ms": signal.chainlink_now_received_ms,
-            "anchor_chainlink_source_timestamp_ms": (
-                signal.anchor_chainlink_source_timestamp_ms
-            ),
-            "anchor_chainlink_received_ms": (
-                signal.anchor_chainlink_received_ms
-            ),
-            "futures_now_source_timestamp_ms": (
-                signal.futures_now_source_timestamp_ms
-            ),
-            "futures_now_received_ms": signal.futures_now_received_ms,
-            "futures_reference_source_timestamp_ms": (
-                signal.futures_reference_source_timestamp_ms
-            ),
-            "futures_reference_received_ms": (
-                signal.futures_reference_received_ms
-            ),
-            "futures_reference_target_ms": (
-                signal.futures_reference_target_ms
-            ),
-            "futures_reference_gap_ms": signal.futures_reference_gap_ms,
-            "futures_received_age_ms": signal.futures_received_age_ms,
-            "chainlink_received_age_ms": signal.chainlink_received_age_ms,
-            "market_id": signal.market_id,
-            "market_start_ms": signal.market_start_ms,
-            "market_end_ms": signal.market_end_ms,
-            "ms_to_market_end": signal.ms_to_market_end,
-            "full_horizon_before_market_end": (
-                signal.full_horizon_before_market_end
-            ),
-        },
+        _shadow_signal_payload(signal),
         separators=(",", ":"),
     )
 
 
-def decode_shadow_signal(raw: Optional[str]) -> Optional[LiveShadowSignal]:
-    if raw is None:
+def serialize_shadow_signal(
+    signal: Optional[LiveShadowSignal],
+    *,
+    server_time_ms: int,
+) -> Optional[dict[str, Any]]:
+    if signal is None:
         return None
-    if not isinstance(raw, str):
-        raise LiveCachePayloadError("shadow signal payload must be a string")
+    payload = _shadow_signal_payload(signal)
+    payload["signal_age_ms"] = age_ms(server_time_ms, signal.generated_ms)
+    return payload
+
+
+def decode_shadow_signal(raw: Any) -> Optional[LiveShadowSignal]:
+    text = _redis_payload_text(raw, "shadow signal payload")
+    if text is None:
+        return None
+    if len(text) > SHADOW_SIGNAL_MAX_PAYLOAD_CHARS:
+        raise LiveCachePayloadError("shadow signal payload is too large")
     try:
         payload = json.loads(
-            raw,
+            text,
             object_pairs_hook=_unique_object,
+            parse_int=_bounded_json_int,
             parse_float=_reject_json_float,
             parse_constant=_reject_json_constant,
         )
-    except json.JSONDecodeError as exc:
+    except LiveCachePayloadError:
+        raise
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise LiveCachePayloadError(
             "shadow signal payload is not valid JSON"
         ) from exc
@@ -572,11 +651,7 @@ def decode_shadow_signal(raw: Optional[str]) -> Optional[LiveShadowSignal]:
 
     fields = set(payload)
     if fields != _SHADOW_SIGNAL_FIELDS:
-        missing = sorted(_SHADOW_SIGNAL_FIELDS - fields)
-        extra = sorted(fields - _SHADOW_SIGNAL_FIELDS)
-        raise LiveCachePayloadError(
-            f"shadow signal fields differ; missing={missing}, extra={extra}"
-        )
+        raise LiveCachePayloadError("shadow signal fields differ from its schema")
 
     invalid_reasons = payload["invalid_reasons"]
     if not isinstance(invalid_reasons, list):
@@ -771,10 +846,11 @@ class LiveCache:
             host=host,
             port=port,
             db=db,
-            decode_responses=True,
+            decode_responses=False,
             socket_connect_timeout=socket_timeout,
             socket_timeout=socket_timeout,
         )
+        self._shadow_payload_errors_total = 0
 
     async def set_price(
         self,
@@ -822,6 +898,47 @@ class LiveCache:
                 prices[key] = None
                 errors[key] = exc
         return prices, errors
+
+    async def get_prices_and_shadow_signal(
+        self,
+        keys: Iterable[str],
+    ) -> tuple[
+        dict[str, Optional[LivePrice]],
+        Optional[LiveShadowSignal],
+    ]:
+        key_list = list(keys)
+        if CHAINLINK_SHADOW_LIVE_KEY in key_list:
+            raise ValueError("shadow signal key must not be a price key")
+        redis_keys = [*key_list, CHAINLINK_SHADOW_LIVE_KEY]
+        raw_values = await self.redis.mget(redis_keys)
+        if len(raw_values) != len(redis_keys):
+            raise LiveCachePayloadError(
+                "live cache MGET returned an unexpected value count"
+            )
+        prices = {
+            key: decode_live_price(raw_value)
+            for key, raw_value in zip(key_list, raw_values[:-1])
+        }
+        try:
+            shadow_signal = decode_shadow_signal(raw_values[-1])
+        except LiveCachePayloadError:
+            self._shadow_payload_errors_total += 1
+            occurrence = self._shadow_payload_errors_total
+            if (
+                occurrence == 1
+                or occurrence % SHADOW_PAYLOAD_ERROR_LOG_EVERY == 0
+            ):
+                LOGGER.warning(
+                    "shadow_signal_live_cache_payload_invalid",
+                    extra={
+                        "event": "shadow_signal_live_cache_payload_invalid",
+                        "redis_key": CHAINLINK_SHADOW_LIVE_KEY,
+                        "error_category": "decode_or_validation_failed",
+                        "occurrence": occurrence,
+                    },
+                )
+            shadow_signal = None
+        return prices, shadow_signal
 
     async def set_shadow_signal(
         self,
@@ -874,7 +991,7 @@ async def build_current_live_payload(
     window: MarketWindow,
     server_time_ms: int,
 ) -> dict[str, Any]:
-    cached = await live_cache.get_prices(
+    cached, shadow_signal = await live_cache.get_prices_and_shadow_signal(
         [
             BINANCE_SPOT_LIVE_KEY,
             CHAINLINK_LIVE_KEY,
@@ -904,6 +1021,12 @@ async def build_current_live_payload(
                 cached.get(FUTURES_LIVE_KEY),
                 server_time_ms=server_time_ms,
                 legacy_source_field="time_ms",
+            ),
+        },
+        "signals": {
+            "chainlink_catchup": serialize_shadow_signal(
+                shadow_signal,
+                server_time_ms=server_time_ms,
             ),
         },
     }

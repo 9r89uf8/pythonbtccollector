@@ -1,8 +1,9 @@
 # Live BTC Data Pipeline
 
 This document explains how the application obtains the three latest BTC prices,
-places them in the live cache, and exposes them to a dashboard through
-`GET /markets/current/live`.
+places them in the live cache, and exposes them through
+`GET /markets/current/live`. The same response can include one optional,
+short-lived Chainlink catch-up signal; that signal is not a fourth price source.
 
 The endpoint is deliberately a latest-value endpoint. PostgreSQL remains the
 historical source of record, while Redis holds only the most recently received
@@ -13,19 +14,19 @@ value from each live price source.
 ```text
 Binance Spot WebSocket ───────────────┐
                                       │
-Polymarket RTDS (Chainlink BTC/USD) ──┼─> Redis ─> FastAPI live endpoint ─> Dashboard
+Polymarket RTDS (Chainlink BTC/USD) ──┼─> Redis ─> one four-key MGET ─> FastAPI
                                       │      │
 Binance USD-M Futures aggTrade WS ────┘      └─ latest values only
 
 Each collector ─────────────────────────> PostgreSQL historical tables
 ```
 
-For its live values, the dashboard does not connect to Binance, Polymarket,
-PostgreSQL, or Redis directly. It reads one read-only HTTP endpoint. The API
-retrieves all three cached values with one Redis `MGET` and performs no
+Consumers do not connect to Binance, Polymarket, PostgreSQL, or Redis directly.
+They read one read-only HTTP endpoint. The API retrieves the three cached source
+prices and the optional shadow value with one Redis `MGET` and performs no
 PostgreSQL query on this request path.
 
-Shadow-signal Phases 4 and 5 add a separate, opt-in branch. The standalone
+Shadow-signal Phases 4 and 5 added a separate, opt-in branch. The standalone
 `price-collector-shadow-signal` worker reads only the Futures and Chainlink
 source keys together every 100 ms and writes a short-lived experimental result.
 When Phase 5 evaluation is separately enabled, those observations also feed a
@@ -51,10 +52,13 @@ noncritical outcome path:
                                                           bounded PostgreSQL writer
 ```
 
-Neither result feeds FastAPI or the dashboard yet. PostgreSQL work runs behind
-a bounded nonblocking queue, so a database outage, retry, or dropped evaluation
-cannot interrupt the Redis signal, either producer, or the three-price live
-endpoint.
+Phases 4 and 5 deliberately kept both outputs out of FastAPI. Phase 6 now
+serializes only the short-lived Redis signal as the optional nested
+`signals.chainlink_catchup` field. Persisted evaluations remain internal and
+unexposed. PostgreSQL work runs behind a bounded nonblocking queue, so a
+database outage, retry, or dropped evaluation cannot interrupt the Redis
+signal, either producer, or the live endpoint. Phase 6 contains no dashboard
+implementation; that remains Phase 7 work in a different repository.
 
 There are three live price sources, even though two of them are operated by
 Binance:
@@ -67,8 +71,8 @@ Binance:
 
 All prices are parsed and calculated as Python `Decimal` values. They are
 serialized as JSON strings so a binary floating-point conversion does not occur
-between collection and the dashboard. Phase 5 changes the futures upstream
-source and delivery path without changing the live API response shape.
+between collection and an API consumer. The Phase 6 `signals` addition leaves
+the existing `prices` and `futures` shapes unchanged.
 
 ## 1. Binance Spot
 
@@ -286,7 +290,7 @@ The keys are written with plain Redis `SET` operations and have no application
 TTL. A Redis write failure is logged, but it does not change the price's numeric
 type or prevent the collector from continuing its historical PostgreSQL write.
 
-### Experimental Shadow-Signal Phases 4–5
+### Experimental Shadow-Signal Phases 4–6
 
 The opt-in worker writes one additional key:
 
@@ -365,12 +369,31 @@ the evaluation rows. A reconnect slice must join by receive time to
 `raw_capture.feed_sessions`; materialize it before the separate 72-hour raw
 retention removes the required session evidence.
 
-The table and writer are internal evidence only. Phase 5 adds no API response
-field or dashboard integration; those remain shadow-signal build-order steps 6
-and 7. It is also unrelated to, and does not validate, the separately deferred
-high-resolution raw-capture Phase 4 partition and 72-hour-retention rollout.
+The table and writer are internal evidence only. Phase 5 deliberately added no
+API response field or dashboard integration. It is also unrelated to, and does
+not validate, the separately deferred high-resolution raw-capture Phase 4
+partition and 72-hour-retention rollout.
 
-## Dashboard Live Endpoint
+Phase 6 adds the shadow key to the live endpoint's existing Redis read. The API
+requests `btc:live:binance_spot`, `btc:live:chainlink`, `btc:live:futures`, and
+`btc:live:chainlink_shadow` together in one four-key `MGET`; it does not perform
+a separate shadow `GET`. The three source-price slots retain their existing
+`LivePrice` decoder and response shape. The shadow slot uses its own strict
+typed decoder and is returned at `signals.chainlink_catchup`, never forced into
+a price field.
+
+A missing or expired shadow key is normal and serializes as
+`signals.chainlink_catchup: null`. A malformed shadow payload is logged without
+its raw contents and is isolated to that same `null` slot; it does not suppress
+otherwise readable actual prices. A well-formed `valid=false` signal remains a
+useful typed diagnostic and is returned as an object. The API adds only
+`signal_age_ms = max(0, server_time_ms - generated_ms)` to the cached payload.
+
+FastAPI does not query PostgreSQL, read `shadow_signal_evaluations`, import or
+run the model, or hold model state. Phase 6 is a Redis-only backend exposure;
+dashboard implementation remains Phase 7 work in a different repository.
+
+## Redis-Only Live Endpoint
 
 ### Request
 
@@ -392,36 +415,81 @@ performs no carry-forward, filtering, or staleness rejection.
 
 ```json
 {
-  "server_time_ms": 1783459250123,
-  "market_id": 5944864,
-  "market_start_ms": 1783459200000,
-  "market_end_ms": 1783459500000,
+  "server_time_ms": 1783988794075,
+  "market_id": 5946629,
+  "market_start_ms": 1783988700000,
+  "market_end_ms": 1783989000000,
   "prices": {
     "binance_spot": {
-      "value": "62067.89",
-      "source_timestamp_ms": 1783459249900,
-      "received_ms": 1783459249950,
-      "source_age_ms": 223,
-      "received_age_ms": 173,
-      "provider_event_ms": 1783459249900
+      "value": "62310.12",
+      "source_timestamp_ms": 1783988793900,
+      "received_ms": 1783988793950,
+      "source_age_ms": 175,
+      "received_age_ms": 125,
+      "provider_event_ms": 1783988793900
     },
     "chainlink": {
-      "value": "62037.05",
-      "source_timestamp_ms": 1783459247000,
-      "received_ms": 1783459247100,
-      "source_age_ms": 3123,
-      "received_age_ms": 3023,
-      "provider_event_ms": 1783459247000
+      "value": "62290.21096323273",
+      "source_timestamp_ms": 1783988792000,
+      "received_ms": 1783988793346,
+      "source_age_ms": 2075,
+      "received_age_ms": 729,
+      "provider_event_ms": 1783988792000
     }
   },
   "futures": {
     "last": {
-      "value": "62099.10",
-      "source_timestamp_ms": 1783459250000,
-      "received_ms": 1783459250050,
-      "source_age_ms": 123,
-      "received_age_ms": 73,
-      "time_ms": 1783459250000
+      "value": "62331.80",
+      "source_timestamp_ms": 1783988793451,
+      "received_ms": 1783988793638,
+      "source_age_ms": 624,
+      "received_age_ms": 437,
+      "time_ms": 1783988793451
+    }
+  },
+  "signals": {
+    "chainlink_catchup": {
+      "schema_version": 1,
+      "mode": "shadow",
+      "selection_schema_version": 2,
+      "selection_policy_version": "chronological_holdout_v2",
+      "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
+      "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
+      "selection_evidence_end_ms": 1783983205028,
+      "model_version": "catchup_ratio_l3000_b100",
+      "beta": "1",
+      "generated_ms": 1783988794005,
+      "valid": true,
+      "status": "valid",
+      "invalid_reasons": [],
+      "state": "anchored",
+      "horizon_ms": 3000,
+      "estimated_lag_ms": 3000,
+      "current_chainlink": "62290.21096323273",
+      "projected_chainlink": "62292.00981418305598931493660",
+      "pending_move": "1.79885095032598931493660",
+      "pending_move_bps": "0.2887854965506176800898399415",
+      "direction": "up",
+      "futures_now": "62331.80",
+      "futures_reference": "62330.00",
+      "chainlink_now_source_timestamp_ms": 1783988792000,
+      "chainlink_now_received_ms": 1783988793346,
+      "anchor_chainlink_source_timestamp_ms": 1783988792000,
+      "anchor_chainlink_received_ms": 1783988793346,
+      "futures_now_source_timestamp_ms": 1783988793451,
+      "futures_now_received_ms": 1783988793638,
+      "futures_reference_source_timestamp_ms": 1783988789826,
+      "futures_reference_received_ms": 1783988790015,
+      "futures_reference_target_ms": 1783988790346,
+      "futures_reference_gap_ms": 331,
+      "futures_received_age_ms": 367,
+      "chainlink_received_age_ms": 659,
+      "market_id": 5946629,
+      "market_start_ms": 1783988700000,
+      "market_end_ms": 1783989000000,
+      "ms_to_market_end": 205995,
+      "full_horizon_before_market_end": true,
+      "signal_age_ms": 70
     }
   }
 }
@@ -444,6 +512,8 @@ market context a dashboard needs:
 | `received_age_ms` | `server_time_ms - received_ms`, clamped to zero |
 | `provider_event_ms` | Compatibility alias for Spot and Chainlink `source_timestamp_ms` |
 | `time_ms` | Compatibility alias for Futures `source_timestamp_ms` |
+| `signals.chainlink_catchup` | Complete typed shadow payload, or `null` when unavailable or malformed |
+| `signal_age_ms` | `server_time_ms - generated_ms`, clamped to zero |
 
 The market fields are calculated from API server time when the request arrives;
 they are not stored in the Redis values. Windows are half-open five-minute UTC
@@ -454,6 +524,16 @@ The age fields have different diagnostic value:
 - `source_age_ms` shows how old the upstream provider says the value is.
 - `received_age_ms` shows how long it has been since the collector handled the
   value.
+- `signal_age_ms` shows how long it has been since the worker generated the
+  nested catch-up signal.
+
+The source-price objects and their compatibility aliases are unchanged by the
+additional `signals` object. Shadow decimal fields such as `beta`,
+`current_chainlink`, `projected_chainlink`, `pending_move`,
+`pending_move_bps`, `futures_now`, and `futures_reference` are strings or
+`null`; do not parse them with binary floating-point. A signal's nested market
+window is generation-time context and can briefly differ from the top-level
+request-time market window around a five-minute boundary.
 
 The endpoint does not emit an `is_stale` flag. The dashboard must choose
 source-appropriate freshness thresholds and derive its own fresh, stale, and
@@ -469,12 +549,24 @@ unavailable states.
 - A valid newly written futures value has both `aggTrade.T` and its pre-parse
   receive time. During a disconnect or stale interval the old Redis value is
   retained and its ages grow; it is not replaced with a `null` snapshot value.
+- A missing or expired shadow key returns
+  `signals.chainlink_catchup: null`. A well-formed `valid=false` shadow signal
+  is returned as an object so its `status` and `invalid_reasons` remain visible;
+  consumers must not reuse a preceding valid projection.
+- A malformed shadow payload is logged without its raw contents and returns
+  `signals.chainlink_catchup: null`. The endpoint remains HTTP `200` when the
+  three actual cached payloads are readable.
 - A Redis connection, read, or timeout failure returns HTTP `503` with
   `{"detail":"live cache unavailable"}`.
-- An invalid cached payload returns HTTP `503` with
+- An invalid payload in one of the three actual source-price keys returns HTTP
+  `503` with
   `{"detail":"live cache payload invalid"}`.
 
-## Recommended Dashboard Consumption
+## Recommended Future Dashboard Consumption
+
+Phase 6 implements only the backend response contract. No dashboard code or
+assets are included in this repository; a separate dashboard repository can
+consume this endpoint during Phase 7.
 
 The live API is an HTTP polling endpoint, not a WebSocket or Server-Sent Events
 feed. Although the futures Redis value is updated from the WebSocket rather
@@ -544,7 +636,7 @@ from another machine.
 
 `GET /markets/current/live` does **not** return:
 
-- The experimental `btc:live:chainlink_shadow` payload
+- Persisted `shadow_signal_evaluations`, candidate rankings, or replay reports
 - Polymarket Up/Down probabilities or resolution data
 - Futures mark price, index price, premium, or funding data
 - Open interest or open-interest notional
@@ -575,8 +667,8 @@ For the complete frontend API contract and all historical response shapes, see
   — required futures WebSocket parsing, validated latest-trade state, flow, and
   book aggregation
 - [`price_collector/live_cache.py`](price_collector/live_cache.py) — Redis keys,
-  source-price and shadow serialization, atomic shadow TTL writes, freshness
-  ages, and live response construction
+  four-key live reads, independent source-price and shadow decoding, atomic
+  shadow TTL writes, freshness ages, and live response construction
 - [`price_collector/shadow_signal.py`](price_collector/shadow_signal.py) — pure
   catch-up models, history, anchors, and validity state
 - [`price_collector/shadow_signal_artifact.py`](price_collector/shadow_signal_artifact.py)

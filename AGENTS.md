@@ -201,9 +201,25 @@ The corresponding Python entry points are:
   `full_horizon_before_market_end`; it is not a settlement, probability,
   execution, or market-close forecast.
 - A Redis or model failure in the shadow service must not interrupt either
-  producer. Phase 5 adds internal PostgreSQL evaluation rows only; it still
-  does not expose the shadow key or evaluations through
-  `/markets/current/live`, and it adds no dashboard code.
+  producer. Phase 5 added internal PostgreSQL evaluation rows only and
+  deliberately exposed neither the shadow key nor evaluations through the API.
+- Phase 6 exposes only the accepted primary's cached payload through the
+  existing `/markets/current/live` response at
+  `signals.chainlink_catchup`. FastAPI must remain a serializer: it must not
+  import or run the shadow engine, hold model state, query PostgreSQL on this
+  route, or expose persisted evaluation rows.
+- Read the three source-price keys and `btc:live:chainlink_shadow` with one
+  four-key Redis `MGET`; do not issue a second `GET` for the shadow value.
+  Decode the shadow value independently with its dedicated strict decoder,
+  never as a `LivePrice`.
+- Return a well-formed shadow payload even when `valid=false`, and add
+  `signal_age_ms = max(0, server_time_ms - generated_ms)`. A missing, expired,
+  or malformed shadow value sets `signals.chainlink_catchup` to `null`. Log a
+  malformed shadow payload without including its raw contents and without
+  failing the three actual price fields. Existing Redis transport and malformed
+  source-price failure behavior remains unchanged.
+- Phase 6 adds backend exposure only. Do not add dashboard code or assets here;
+  dashboard integration belongs to Phase 7 in its separate repository.
 
 ### Polymarket Probabilities
 
@@ -230,8 +246,16 @@ The corresponding Python entry points are:
   payload, with its required short TTL. It is not a `LivePrice` value.
 - Store live prices as strings in the existing JSON shape with `value`,
   `source_timestamp_ms`, and `received_ms`.
-- `/markets/current/live` must read Redis and must not add PostgreSQL queries to
-  its request path.
+- `/markets/current/live` must read the three source-price keys and the shadow
+  key together in one Redis `MGET`. Its `signals.chainlink_catchup` field is the
+  decoded shadow object plus `signal_age_ms`, or `null` when the key is absent,
+  expired, or malformed.
+- Keep the shadow decoder and failure boundary separate from source-price
+  decoding. Shadow decimal fields remain JSON strings. A malformed actual
+  source-price payload retains the existing endpoint error behavior, while a
+  malformed shadow payload cannot suppress readable actual prices.
+- `/markets/current/live` must not add PostgreSQL queries, evaluation-table
+  reads, or model execution to its request path.
 - A Redis write failure may be logged without corrupting the historical sample
   or changing numeric types.
 
@@ -381,6 +405,9 @@ Add or update focused tests for each checkpoint. Relevant coverage includes:
   producer isolation
 - Shadow 500 ms scheduling, horizon-specific causal maturation, invalid-attempt
   coverage, idempotent evaluation persistence, and database-outage isolation
+- Shadow live-API four-key `MGET`, backward-compatible source-price fields,
+  strict decoder isolation, missing/malformed shadow behavior, and clamped
+  `signal_age_ms`
 
 Run the relevant tests before handoff. Run the full suite when practical:
 
