@@ -425,6 +425,7 @@ def test_trusted_directory_requires_both_files_as_direct_regular_children(tmp_pa
             digest,
             replay_path,
             trusted_directory=outside,
+            enforce_posix_permissions=False,
         )
 
 
