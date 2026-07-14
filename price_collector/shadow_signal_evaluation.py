@@ -37,6 +37,7 @@ from price_collector.shadow_signal import (
 
 LOGGER = logging.getLogger("price_collector.shadow_signal_evaluation")
 QUEUE_DROP_LOG_EVERY = 100
+REJECTION_LOG_EVERY = 100
 FORECAST_INPUT_AFTER_GENERATED = "forecast_input_after_generated"
 
 
@@ -202,6 +203,67 @@ class ShadowEvaluationRecord:
         if self.direction not in (None, "up", "down", "flat"):
             raise ValueError("direction is invalid")
 
+        projection_values = (
+            self.projected_chainlink,
+            self.pending_move,
+            self.pending_move_bps,
+            self.direction,
+        )
+        if not self.valid:
+            if any(value is not None for value in projection_values):
+                raise ValueError(
+                    "invalid evaluation must not contain projection output"
+                )
+        else:
+            required_valid_values = (
+                self.chainlink_at_forecast,
+                self.futures_now,
+                self.futures_reference,
+                self.futures_reference_target_ms,
+                self.futures_reference_gap_ms,
+                *projection_values,
+            )
+            if any(value is None for value in required_valid_values):
+                raise ValueError(
+                    "valid evaluation requires complete projection inputs and output"
+                )
+
+            assert self.chainlink_at_forecast is not None
+            assert self.futures_now is not None
+            assert self.futures_reference is not None
+            assert self.projected_chainlink is not None
+            assert self.pending_move is not None
+            assert self.pending_move_bps is not None
+            assert self.direction is not None
+            for value, field_name in (
+                (self.chainlink_at_forecast, "chainlink_at_forecast"),
+                (self.futures_now, "futures_now"),
+                (self.futures_reference, "futures_reference"),
+                (self.projected_chainlink, "projected_chainlink"),
+            ):
+                if value <= 0:
+                    raise ValueError(f"{field_name} must be positive")
+
+            expected_pending_move = (
+                self.projected_chainlink - self.chainlink_at_forecast
+            )
+            if self.pending_move != expected_pending_move:
+                raise ValueError("pending_move is inconsistent")
+            expected_pending_move_bps = (
+                self.pending_move / self.chainlink_at_forecast * Decimal("10000")
+            )
+            if self.pending_move_bps != expected_pending_move_bps:
+                raise ValueError("pending_move_bps is inconsistent")
+            expected_direction = (
+                "up"
+                if self.pending_move > 0
+                else "down"
+                if self.pending_move < 0
+                else "flat"
+            )
+            if self.direction != expected_direction:
+                raise ValueError("direction is inconsistent with pending_move")
+
         actual_values = (
             self.actual_chainlink,
             self.actual_chainlink_received_ms,
@@ -234,6 +296,19 @@ class ShadowEvaluationRecord:
         )
         if self.baseline_error != expected_baseline_error:
             raise ValueError("baseline_error is inconsistent")
+
+
+@dataclass(frozen=True)
+class ShadowEvaluationWriteResult:
+    persisted_count: int
+    rejected_count: int
+    deferred_records: tuple[Any, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int(self.persisted_count, "persisted_count")
+        _require_non_negative_int(self.rejected_count, "rejected_count")
+        if not isinstance(self.deferred_records, tuple):
+            raise TypeError("deferred_records must be a tuple")
 
 
 @dataclass(frozen=True)
@@ -619,7 +694,7 @@ class ShadowEvaluationBackend(Protocol):
     async def write_evaluations(
         self,
         records: Sequence[ShadowEvaluationRecord],
-    ) -> None:
+    ) -> ShadowEvaluationWriteResult:
         ...
 
     async def delete_expired(
@@ -658,6 +733,8 @@ class ShadowEvaluationCounters:
     records_enqueued_total: int = 0
     records_persisted_total: int = 0
     records_dropped_total: int = 0
+    records_rejected_total: int = 0
+    records_deferred_total: int = 0
     batches_succeeded_total: int = 0
     batches_failed_total: int = 0
     backend_creation_failures_total: int = 0
@@ -901,6 +978,12 @@ class ShadowEvaluationWriterRuntime:
                     self.counters.records_persisted_total
                 ),
                 "records_dropped_total": self.counters.records_dropped_total,
+                "records_rejected_total": (
+                    self.counters.records_rejected_total
+                ),
+                "records_deferred_total": (
+                    self.counters.records_deferred_total
+                ),
                 "batches_succeeded_total": (
                     self.counters.batches_succeeded_total
                 ),
@@ -996,7 +1079,27 @@ class ShadowEvaluationWriterRuntime:
         self.counters.last_batch_rows = len(batch)
         try:
             backend = await self._ensure_backend()
-            await backend.write_evaluations(batch)
+            write_result = await backend.write_evaluations(batch)
+            if not isinstance(write_result, ShadowEvaluationWriteResult):
+                raise RuntimeError(
+                    "shadow evaluation backend returned an invalid result"
+                )
+            persisted = write_result.persisted_count
+            rejected = write_result.rejected_count
+            deferred = write_result.deferred_records
+            if persisted + rejected + len(deferred) != len(batch):
+                raise RuntimeError(
+                    "shadow evaluation backend result does not account "
+                    "for the complete batch"
+                )
+            if not all(
+                isinstance(record, ShadowEvaluationRecord)
+                for record in deferred
+            ):
+                raise RuntimeError(
+                    "shadow evaluation backend returned an invalid "
+                    "deferred record"
+                )
         except asyncio.CancelledError:
             self.counters.records_dropped_total += len(batch)
             raise
@@ -1021,7 +1124,34 @@ class ShadowEvaluationWriterRuntime:
             return
         self._retry_not_before = None
         self.counters.batches_succeeded_total += 1
-        self.counters.records_persisted_total += len(batch)
+        previous_rejected_total = self.counters.records_rejected_total
+        self.counters.records_persisted_total += persisted
+        self.counters.records_rejected_total += rejected
+        self.counters.records_deferred_total += len(deferred)
+        self.counters.records_dropped_total += rejected
+        if rejected and (
+            previous_rejected_total == 0
+            or (
+                self.counters.records_rejected_total // REJECTION_LOG_EVERY
+                > previous_rejected_total // REJECTION_LOG_EVERY
+            )
+        ):
+            LOGGER.error(
+                "shadow_evaluation_batch_records_rejected",
+                extra={
+                    "event": "shadow_evaluation_batch_records_rejected",
+                    "batch_rows": len(batch),
+                    "records_persisted": persisted,
+                    "records_rejected": rejected,
+                    "records_deferred": len(deferred),
+                    "records_rejected_total": (
+                        self.counters.records_rejected_total
+                    ),
+                    "queue_depth": len(self._buffer),
+                },
+            )
+        if deferred:
+            self._requeue_deferred_records(deferred)
         await self._maybe_cleanup(backend)
 
     def _requeue_failed_batch(
@@ -1037,6 +1167,20 @@ class ShadowEvaluationWriterRuntime:
             self._record_queue_overflow(
                 dropped,
                 reason="failed_batch_requeue_overflow",
+            )
+        if self._available is not None and self._buffer:
+            self._available.set()
+
+    def _requeue_deferred_records(
+        self,
+        records: Sequence[ShadowEvaluationRecord],
+    ) -> None:
+        self._buffer.extendleft(reversed(records))
+        while len(self._buffer) > self._queue_max_records:
+            dropped = self._buffer.popleft()
+            self._record_queue_overflow(
+                dropped,
+                reason="deferred_record_requeue_overflow",
             )
         if self._available is not None and self._buffer:
             self._available.set()

@@ -19,6 +19,11 @@ remains the event-complete authority for model selection and sub-poll timing.
 The commands preserve the existing selection path, replay-configuration path,
 selection hash, and database password. Stop on any failed assertion.
 
+If the journal already reports a violation of
+`shadow_signal_evaluations_check17`, stop the normal rollout and use
+**Recover from the Phase 5 `check17` writer failure** at the end of this guide.
+Do not leave the failing writer enabled while its retry queue grows.
+
 ## 1. Pull the code, install dependencies, and run focused tests
 
 ```bash
@@ -29,6 +34,7 @@ sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 sudo -u pricecollector .venv/bin/python -m pytest \
   tests/test_shadow_signal_evaluation.py \
   tests/test_shadow_signal_evaluation_db.py \
+  tests/test_shadow_signal_schema_hotfix.py \
   tests/test_shadow_signal_collector.py \
   tests/test_db.py \
   tests/test_config.py \
@@ -503,12 +509,21 @@ sudo journalctl \
 hundredth queue overflow. `shadow_evaluation_batch_failed`,
 `shadow_evaluation_cleanup_failed`, and
 `shadow_evaluation_backend_close_failed` concern evidence coverage and require
-investigation; failed batches are requeued and retried until bounded capacity
-requires shedding old evidence. `shadow_signal_evaluation_observation_gap`
+investigation; transient failed batches are requeued and retried until bounded
+capacity requires shedding old evidence. A deterministic PostgreSQL integrity
+or data violation is bisected inside one transaction instead: the worker logs
+`shadow_evaluation_record_rejected` and
+`shadow_evaluation_batch_records_rejected`, drops the rejected evidence, and
+continues. Isolation is capped at eight rejected rows per batch so a
+schema-wide fault cannot produce unbounded database calls; if the cap is hit,
+the remaining unprobed rows are deferred back to the bounded queue and
+`shadow_evaluation_rejection_isolation_limit_reached` is logged. Any rejection
+event requires investigation.
+`shadow_signal_evaluation_observation_gap`
 means outstanding targets across a polling gap were deliberately left without
 an actual. `shadow_signal_evaluation_writer_closed` prints the final persisted,
-dropped, failure, cleanup, and active-batch counters. None of these conditions
-may stop `btc:live:chainlink_shadow` from refreshing.
+rejected, deferred, dropped, failure, cleanup, and active-batch counters. None
+of these conditions may stop `btc:live:chainlink_shadow` from refreshing.
 Do not stop PostgreSQL deliberately to test this isolation because the other
 collectors also use it.
 
@@ -600,3 +615,375 @@ Leave the table in place. Dropping it is unnecessary and would destroy the
 evidence already collected. Re-enable Phase 5 by repeating steps 4 through 11
 after the cause has been corrected; step 4 restores the writer URL without
 changing the trusted decision settings.
+
+## Recover from the Phase 5 `check17` writer failure
+
+Use this recovery only when an already-enabled Phase 5 worker repeatedly logs
+`shadow_evaluation_batch_failed` with
+`shadow_signal_evaluations_check17`. The original projection constraint can
+reject a correctly rounded `pending_move_bps` value because PostgreSQL applies
+numeric division before multiplication. The corrected constraint computes
+`pending_move * 10000 / chainlink_at_forecast`. It is mathematically
+equivalent to the model calculation but avoids PostgreSQL rounding the
+divide-first intermediate at a shorter scale.
+
+Do not weaken the constraint, drop the table, delete existing evidence, or
+stop PostgreSQL. The recovery keeps the Phase 4 Redis projection running while
+Phase 5 persistence is disabled and repaired.
+
+### Recovery 1. Disable evaluations and remove the unused writer credential
+
+This atomic edit preserves every Phase 4 setting, trusted artifact path, and
+artifact hash. It does not print the database URL.
+
+```bash
+set -euo pipefail
+sudo python3 - <<'PY'
+from pathlib import Path
+import grp
+import os
+import tempfile
+
+path = Path('/etc/price-collector/shadow-signal.env')
+if not path.is_file():
+    raise SystemExit('STOP: shadow-signal.env does not exist')
+
+output = []
+enabled_written = False
+for line in path.read_text().splitlines():
+    key = line.partition('=')[0]
+    if key == 'DATABASE_URL':
+        continue
+    if key == 'SHADOW_SIGNAL_EVALUATION_ENABLED':
+        if not enabled_written:
+            output.append('SHADOW_SIGNAL_EVALUATION_ENABLED=false')
+            enabled_written = True
+        continue
+    output.append(line)
+if not enabled_written:
+    output.append('SHADOW_SIGNAL_EVALUATION_ENABLED=false')
+
+fd, temporary_name = tempfile.mkstemp(
+    prefix='.shadow-signal.env.',
+    dir=path.parent,
+    text=True,
+)
+try:
+    with os.fdopen(fd, 'w') as temporary:
+        temporary.write('\n'.join(output) + '\n')
+        temporary.flush()
+        os.fsync(temporary.fileno())
+    os.chown(temporary_name, 0, grp.getgrnam('pricecollector').gr_gid)
+    os.chmod(temporary_name, 0o640)
+    os.replace(temporary_name, path)
+finally:
+    if os.path.exists(temporary_name):
+        os.unlink(temporary_name)
+PY
+
+sudo test "$(stat -c '%U:%G %a' /etc/price-collector/shadow-signal.env)" \
+  = 'root:pricecollector 640'
+sudo grep -q '^SHADOW_SIGNAL_EVALUATION_ENABLED=false$' \
+  /etc/price-collector/shadow-signal.env
+if sudo grep -q '^DATABASE_URL=' \
+  /etc/price-collector/shadow-signal.env; then
+  echo 'STOP: DATABASE_URL remains in shadow-signal.env'
+  exit 1
+fi
+
+sudo systemctl restart price-collector-shadow-signal
+sudo systemctl is-active price-collector-shadow-signal
+```
+
+Confirm that evaluation rows stop advancing while the Phase 4 Redis key stays
+fresh and expiring:
+
+```bash
+set -euo pipefail
+BEFORE="$(sudo -u postgres psql -At -d price_collector -c \
+  'SELECT coalesce(max(generated_ms), 0) FROM shadow_signal_evaluations;')"
+REDIS_VERIFY_AFTER_MS="$(date +%s%3N)"
+sleep 10
+AFTER="$(sudo -u postgres psql -At -d price_collector -c \
+  'SELECT coalesce(max(generated_ms), 0) FROM shadow_signal_evaluations;')"
+printf 'evaluation_max_before=%s\nevaluation_max_after=%s\n' \
+  "$BEFORE" "$AFTER"
+test "$BEFORE" = "$AFTER"
+
+SHADOW_JSON="$(redis-cli -h 127.0.0.1 -p 6379 --raw \
+  GET btc:live:chainlink_shadow)"
+test -n "$SHADOW_JSON"
+python3 - "$SHADOW_JSON" "$REDIS_VERIFY_AFTER_MS" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload['schema_version'] == 1
+assert payload['mode'] == 'shadow'
+assert payload['generated_ms'] >= int(sys.argv[2])
+print({
+    'generated_ms': payload['generated_ms'],
+    'model_version': payload['model_version'],
+    'valid': payload['valid'],
+})
+PY
+
+SHADOW_PTTL="$(redis-cli -h 127.0.0.1 -p 6379 \
+  PTTL btc:live:chainlink_shadow)"
+printf 'shadow_pttl_ms=%s\n' "$SHADOW_PTTL"
+test "$SHADOW_PTTL" -gt 0
+test "$SHADOW_PTTL" -le 2000
+```
+
+### Recovery 2. Pull and test the corrected release while disabled
+
+Run this only after the correction has been pushed to GitHub:
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector .venv/bin/python -m pytest \
+  tests/test_shadow_signal_evaluation.py \
+  tests/test_shadow_signal_evaluation_db.py \
+  tests/test_shadow_signal_schema_hotfix.py \
+  tests/test_shadow_signal_collector.py \
+  tests/test_db.py \
+  tests/test_config.py \
+  tests/test_deployment.py \
+  -q
+sudo grep -q \
+  'shadow_signal_evaluations_projection_consistency_check' \
+  /opt/price-collector/schema.sql
+```
+
+Do not re-enable evaluations yet.
+
+### Recovery 3. Apply the corrected schema while evaluations are disabled
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+sudo grep -q '^SHADOW_SIGNAL_EVALUATION_ENABLED=false$' \
+  /etc/price-collector/shadow-signal.env
+sudo -u postgres psql \
+  -v ON_ERROR_STOP=1 \
+  -d price_collector \
+  -f /opt/price-collector/schema.sql
+```
+
+The schema migration conditionally replaces the original autogenerated
+projection check. It is safe to repeat and does not rewrite evaluation rows.
+
+### Recovery 4. Verify the deployed projection constraint semantically
+
+The old autogenerated name must be absent. The replacement must exist, be
+validated, multiply before dividing, and retain the complete projection
+validity rules.
+
+```bash
+sudo -u postgres psql \
+  -X \
+  -v ON_ERROR_STOP=1 \
+  -P pager=off \
+  -d price_collector <<'SQL'
+DO $$
+DECLARE
+    constraint_validated boolean;
+    constraint_definition text;
+    normalized_definition text;
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'public.shadow_signal_evaluations'::regclass
+          AND conname = 'shadow_signal_evaluations_check17'
+    ) THEN
+        RAISE EXCEPTION 'old check17 constraint is still installed';
+    END IF;
+
+    SELECT convalidated, pg_get_constraintdef(oid, true)
+    INTO constraint_validated, constraint_definition
+    FROM pg_constraint
+    WHERE conrelid = 'public.shadow_signal_evaluations'::regclass
+      AND conname =
+        'shadow_signal_evaluations_projection_consistency_check';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'projection consistency constraint is missing';
+    END IF;
+    IF NOT constraint_validated THEN
+        RAISE EXCEPTION 'projection consistency constraint is not validated';
+    END IF;
+
+    normalized_definition := regexp_replace(
+        constraint_definition,
+        '[[:space:]()]',
+        '',
+        'g'
+    );
+    IF normalized_definition NOT LIKE
+       '%pending_move*10000%/chainlink_at_forecast%'
+       OR normalized_definition LIKE
+       '%pending_move/chainlink_at_forecast%*10000%' THEN
+        RAISE EXCEPTION
+            'projection constraint does not multiply before dividing';
+    END IF;
+    IF constraint_definition NOT LIKE '%pending_move_bps%'
+       OR constraint_definition NOT LIKE '%direction%'
+       OR constraint_definition NOT LIKE '%projected_chainlink%' THEN
+        RAISE EXCEPTION
+            'projection constraint is missing required validity rules';
+    END IF;
+END
+$$;
+
+SELECT
+    conname,
+    convalidated,
+    pg_get_constraintdef(oid, true) AS definition
+FROM pg_constraint
+WHERE conrelid = 'public.shadow_signal_evaluations'::regclass
+  AND conname =
+    'shadow_signal_evaluations_projection_consistency_check';
+SQL
+```
+
+Stop if the block raises any exception.
+
+### Recovery 5. Re-enable with the existing guarded configuration steps
+
+Repeat **step 4** exactly to restore the writer URL without printing it and to
+set `SHADOW_SIGNAL_EVALUATION_ENABLED=true`. Then run **step 5**. Do not copy an
+example environment file over the production file.
+
+### Recovery 6. Restart and verify Redis, table flow, and the bounded queue
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+sudo cp \
+  deployment/price-collector-shadow-signal.service \
+  /etc/systemd/system/price-collector-shadow-signal.service
+sudo systemctl daemon-reload
+
+sudo systemctl restart price-collector-shadow-signal
+sudo systemctl is-active price-collector-shadow-signal
+RECOVERY_INVOCATION_ID="$(sudo systemctl show \
+  price-collector-shadow-signal \
+  --property=InvocationID \
+  --value)"
+test -n "$RECOVERY_INVOCATION_ID"
+RECOVERY_VERIFY_AFTER_MS="$(date +%s%3N)"
+
+MODEL_COUNT=0
+for ATTEMPT in $(seq 1 120); do
+  MODEL_COUNT="$(sudo -u postgres psql -At -d price_collector -c "
+    SELECT count(DISTINCT model_version)
+    FROM shadow_signal_evaluations
+    WHERE generated_ms >= $RECOVERY_VERIFY_AFTER_MS;
+  ")"
+  if [ "$MODEL_COUNT" -eq 3 ]; then
+    break
+  fi
+  sleep 0.5
+done
+test "$MODEL_COUNT" -eq 3
+
+sudo -u postgres psql \
+  -v ON_ERROR_STOP=1 \
+  -v verify_after_ms="$RECOVERY_VERIFY_AFTER_MS" \
+  -d price_collector <<'SQL'
+SELECT
+    model_version,
+    count(*) AS rows,
+    min(generated_ms) AS first_generated_ms,
+    max(generated_ms) AS last_generated_ms
+FROM shadow_signal_evaluations
+WHERE generated_ms >= :'verify_after_ms'::bigint
+GROUP BY model_version
+ORDER BY model_version;
+SQL
+
+EVALUATION_START_LOG="$(
+  sudo journalctl \
+    -u price-collector-shadow-signal \
+    _SYSTEMD_INVOCATION_ID="$RECOVERY_INVOCATION_ID" \
+    -o cat \
+    --no-pager |
+  grep -F 'shadow_signal_evaluation_started' |
+  tail -n 1
+)"
+python3 - "$EVALUATION_START_LOG" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload['event'] == 'shadow_signal_evaluation_started'
+assert payload['cadence_ms'] == 500
+assert payload['queue_max_records'] == 5000
+assert payload['batch_max_rows'] == 500
+print({
+    'cadence_ms': payload['cadence_ms'],
+    'queue_max_records': payload['queue_max_records'],
+    'batch_max_rows': payload['batch_max_rows'],
+})
+PY
+
+sudo grep -q '^SHADOW_SIGNAL_EVALUATION_QUEUE_MAX=5000$' \
+  /etc/price-collector/shadow-signal.env
+RECOVERY_ERRORS="$(
+  sudo journalctl \
+    -u price-collector-shadow-signal \
+    _SYSTEMD_INVOCATION_ID="$RECOVERY_INVOCATION_ID" \
+    -n 500 \
+    --no-pager |
+  awk '
+    /shadow_evaluation_batch_failed/ ||
+    /shadow_evaluation_record_rejected/ ||
+    /shadow_evaluation_batch_records_rejected/ ||
+    /shadow_evaluation_rejection_isolation_limit_reached/ ||
+    /shadow_signal_evaluation_queue_drop/ { failures += 1 }
+    END { print failures + 0 }
+  '
+)"
+printf 'post_recovery_writer_errors=%s\n' "$RECOVERY_ERRORS"
+test "$RECOVERY_ERRORS" -eq 0
+
+SHADOW_JSON="$(redis-cli -h 127.0.0.1 -p 6379 --raw \
+  GET btc:live:chainlink_shadow)"
+test -n "$SHADOW_JSON"
+python3 - "$SHADOW_JSON" "$RECOVERY_VERIFY_AFTER_MS" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload['schema_version'] == 1
+assert payload['mode'] == 'shadow'
+assert payload['generated_ms'] >= int(sys.argv[2])
+print({
+    'generated_ms': payload['generated_ms'],
+    'model_version': payload['model_version'],
+    'valid': payload['valid'],
+})
+PY
+
+SHADOW_PTTL="$(redis-cli -h 127.0.0.1 -p 6379 \
+  PTTL btc:live:chainlink_shadow)"
+printf 'shadow_pttl_ms=%s\n' "$SHADOW_PTTL"
+test "$SHADOW_PTTL" -gt 0
+test "$SHADOW_PTTL" -le 2000
+
+sudo systemctl status price-collector-shadow-signal --no-pager
+sudo journalctl \
+  -u price-collector-shadow-signal \
+  _SYSTEMD_INVOCATION_ID="$RECOVERY_INVOCATION_ID" \
+  -n 250 \
+  --no-pager
+```
+
+Three model rows, the logged 5000-row queue and 500-row batch bounds,
+`post_recovery_writer_errors=0`, a positive Redis TTL no greater than 2000 ms,
+and a fresh Redis `generated_ms` are required. After this recovery passes,
+continue with steps 9 through 11 for the full Phase 5 acceptance checks.

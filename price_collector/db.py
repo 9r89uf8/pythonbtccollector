@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -8,6 +9,12 @@ from typing import Any, Mapping, Optional, Sequence
 import asyncpg
 
 from price_collector.market import MarketWindow
+from price_collector.shadow_signal_evaluation import (
+    ShadowEvaluationWriteResult,
+)
+
+
+LOGGER = logging.getLogger("price_collector.db")
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -17,6 +24,8 @@ RAW_CAPTURE_MAINTENANCE_LOCK_ID = 0x5241574341505455
 RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS = 5
 SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS = 5
 SHADOW_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS = 5
+SHADOW_EVALUATION_REJECTION_ISOLATION_LIMIT = 8
+SHADOW_EVALUATION_REJECTION_LOG_EVERY = 100
 
 RAW_FUTURES_TRACE_COLUMNS = (
     "bucket_start_ms",
@@ -819,6 +828,13 @@ async def insert_shadow_signal_evaluations(
     )
 
 
+@dataclass
+class _ShadowEvaluationIsolationState:
+    remaining_rejections: int
+    isolated_rejections: list[tuple[Any, Exception]]
+    deferred_records: list[Any]
+
+
 class AsyncpgShadowEvaluationBackend:
     """Single-pool persistence boundary used by the bounded async writer."""
 
@@ -835,19 +851,145 @@ class AsyncpgShadowEvaluationBackend:
             connect_timeout_seconds,
             "connect_timeout_seconds",
         )
+        self._permanent_rejections_total = 0
+        self._isolation_limit_events_total = 0
 
-    async def write_evaluations(self, records: Sequence[Any]) -> None:
-        rows = [shadow_signal_evaluation_row(record) for record in records]
+    async def _write_rows_isolating_permanent_errors(
+        self,
+        connection: asyncpg.Connection,
+        records: Sequence[Any],
+        rows: Sequence[tuple[Any, ...]],
+        state: _ShadowEvaluationIsolationState,
+    ) -> int:
+        if state.remaining_rejections == 0:
+            state.deferred_records.extend(records)
+            return 0
+        try:
+            async with connection.transaction():
+                await insert_shadow_signal_evaluations(connection, rows)
+        except (
+            asyncpg.IntegrityConstraintViolationError,
+            asyncpg.DataError,
+        ) as error:
+            if len(rows) > 1:
+                midpoint = len(rows) // 2
+                left = await self._write_rows_isolating_permanent_errors(
+                    connection,
+                    records[:midpoint],
+                    rows[:midpoint],
+                    state,
+                )
+                right = await self._write_rows_isolating_permanent_errors(
+                    connection,
+                    records[midpoint:],
+                    rows[midpoint:],
+                    state,
+                )
+                return left + right
+
+            record = records[0]
+            state.remaining_rejections -= 1
+            state.isolated_rejections.append((record, error))
+            return 0
+        return len(rows)
+
+    def _log_permanent_rejections(
+        self,
+        state: _ShadowEvaluationIsolationState,
+    ) -> None:
+        for record, error in state.isolated_rejections:
+            self._permanent_rejections_total += 1
+            occurrence = self._permanent_rejections_total
+            if (
+                occurrence != 1
+                and occurrence % SHADOW_EVALUATION_REJECTION_LOG_EVERY != 0
+            ):
+                continue
+            LOGGER.error(
+                "shadow_evaluation_record_rejected",
+                extra={
+                    "event": "shadow_evaluation_record_rejected",
+                    "model_version": getattr(record, "model_version", None),
+                    "generated_ms": getattr(record, "generated_ms", None),
+                    "horizon_ms": getattr(record, "horizon_ms", None),
+                    "valid": getattr(record, "valid", None),
+                    "status": getattr(record, "status", None),
+                    "postgres_sqlstate": getattr(error, "sqlstate", None),
+                    "postgres_constraint": getattr(
+                        error,
+                        "constraint_name",
+                        None,
+                    ),
+                    "postgres_error_type": type(error).__name__,
+                    "permanent_rejections_total": occurrence,
+                },
+            )
+
+        if state.deferred_records:
+            self._isolation_limit_events_total += 1
+            occurrence = self._isolation_limit_events_total
+            if (
+                occurrence == 1
+                or occurrence % SHADOW_EVALUATION_REJECTION_LOG_EVERY == 0
+            ):
+                LOGGER.error(
+                    "shadow_evaluation_rejection_isolation_limit_reached",
+                    extra={
+                        "event": (
+                            "shadow_evaluation_rejection_isolation_limit_reached"
+                        ),
+                        "isolation_limit": (
+                            SHADOW_EVALUATION_REJECTION_ISOLATION_LIMIT
+                        ),
+                        "records_deferred": len(state.deferred_records),
+                        "permanent_rejections_total": (
+                            self._permanent_rejections_total
+                        ),
+                        "isolation_limit_events_total": occurrence,
+                    },
+                )
+
+    async def write_evaluations(
+        self,
+        records: Sequence[Any],
+    ) -> ShadowEvaluationWriteResult:
+        record_batch = tuple(records)
+        rows = [
+            shadow_signal_evaluation_row(record)
+            for record in record_batch
+        ]
         if not rows:
-            return
+            return ShadowEvaluationWriteResult(0, 0)
         async with self._pool.acquire(
             timeout=self._connect_timeout_seconds
         ) as connection:
-            await insert_shadow_signal_evaluations(connection, rows)
+            state = _ShadowEvaluationIsolationState(
+                remaining_rejections=(
+                    SHADOW_EVALUATION_REJECTION_ISOLATION_LIMIT
+                ),
+                isolated_rejections=[],
+                deferred_records=[],
+            )
+            async with connection.transaction():
+                persisted = await self._write_rows_isolating_permanent_errors(
+                    connection,
+                    record_batch,
+                    rows,
+                    state,
+                )
+        self._log_permanent_rejections(state)
+        return ShadowEvaluationWriteResult(
+            persisted_count=persisted,
+            rejected_count=len(state.isolated_rejections),
+            deferred_records=tuple(state.deferred_records),
+        )
 
-    async def write(self, records: Sequence[Any]) -> None:
+    async def write(
+        self,
+        records: Sequence[Any],
+    ) -> ShadowEvaluationWriteResult:
         """Compatibility alias for generic bounded batch writers."""
-        await self.write_evaluations(records)
+        return await self.write_evaluations(records)
 
     async def delete_expired(
         self,

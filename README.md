@@ -356,12 +356,19 @@ Matured attempts enter a bounded nonblocking queue and are batch-inserted into
 work never runs on the 100 ms publication path. If the queue fills during an
 outage, its oldest queued row is dropped rather than blocking; a rate-limited
 warning is emitted on the first and every hundredth drop, and Redis signal
-generation continues. Failed batches are requeued ahead of newer rows and
-retried safely because inserts are idempotent on
+generation continues. Transiently failed batches are requeued ahead of newer
+rows and retried safely because inserts are idempotent on
 `(model_version, generated_ms, horizon_ms)`, and the default derived-evidence
-retention is seven days. Invalid attempts are stored to preserve an honest
-coverage denominator. For valid attempts with an actual, signed
-`forecast_error` is `projected_chainlink - actual_chainlink` and signed
+retention is seven days. A deterministic PostgreSQL integrity or data error is
+isolated inside one transaction and rejected instead of poisoning the retry
+queue. Isolation is capped at eight rejected rows per batch; rejection and cap
+events are rate-limited, and unprobed rows beyond the cap return to the bounded
+queue instead of being mislabeled as rejected. These events remain
+evidence-coverage failures that require investigation. Invalid model attempts
+that satisfy the storage contract are
+stored to preserve an honest coverage denominator. For valid attempts with an
+actual, signed `forecast_error` is
+`projected_chainlink - actual_chainlink` and signed
 `baseline_error` is the no-change result
 `chainlink_at_forecast - actual_chainlink`.
 

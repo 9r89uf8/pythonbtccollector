@@ -3069,6 +3069,12 @@ Use the schema-first, copy/paste rollout and independent rollback in
 schema, installed the writer URL without replacing trusted artifact settings,
 and verified the exact table grants.
 
+If an already-enabled worker reports
+`shadow_signal_evaluations_check17`, disable evaluations immediately and use
+the dedicated `check17` recovery section in that migration guide. It preserves
+the Phase 4 Redis signal and existing evaluation rows while replacing the
+divide-first projection constraint before the writer is re-enabled.
+
 ## Redis Spot Checks
 
 Redis is the live-card cache only. PostgreSQL remains the historical source.

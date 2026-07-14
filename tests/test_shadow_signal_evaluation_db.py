@@ -88,6 +88,19 @@ class FakePool:
         self.closed = True
 
 
+class FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class FakeTransactionalConnection:
+    def transaction(self):
+        return FakeTransaction()
+
+
 def test_shadow_evaluation_pool_is_lazy_single_connection_and_tunable(
     monkeypatch,
 ):
@@ -215,7 +228,7 @@ def test_shadow_evaluation_row_rejects_float_financial_values():
 
 
 def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
-    class FakeConnection:
+    class FakeConnection(FakeTransactionalConnection):
         def __init__(self):
             self.calls = []
 
@@ -230,7 +243,7 @@ def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
     )
     record = evaluation_record()
 
-    asyncio.run(backend.write_evaluations([record]))
+    result = asyncio.run(backend.write_evaluations([record]))
 
     assert pool.acquire_calls == [{"timeout": 2}]
     assert len(connection.calls) == 1
@@ -241,19 +254,249 @@ def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
         in query
     )
     assert rows == [db.shadow_signal_evaluation_row(record)]
+    assert result.persisted_count == 1
+    assert result.rejected_count == 0
+    assert result.deferred_records == ()
 
 
 def test_shadow_evaluation_backend_skips_empty_batches_without_db_access():
     pool = FakePool(None)
     backend = db.AsyncpgShadowEvaluationBackend(pool)
 
-    asyncio.run(backend.write_evaluations([]))
+    result = asyncio.run(backend.write_evaluations([]))
 
     assert pool.acquire_calls == []
+    assert result.persisted_count == 0
+    assert result.rejected_count == 0
+    assert result.deferred_records == ()
+
+
+@pytest.mark.parametrize(
+    "error_class_name",
+    ("IntegrityConstraintViolationError", "DataError"),
+)
+def test_shadow_evaluation_backend_isolates_permanently_rejected_row(
+    monkeypatch,
+    caplog,
+    error_class_name,
+):
+    generated_index = db.SHADOW_SIGNAL_EVALUATION_COLUMNS.index(
+        "generated_ms"
+    )
+    poison_generated_ms = 20_000
+
+    class PermanentCheckViolation(Exception):
+        sqlstate = "23514"
+        constraint_name = (
+            "shadow_signal_evaluations_projection_consistency_check"
+        )
+
+    class FakeConnection(FakeTransactionalConnection):
+        def __init__(self):
+            self.calls = []
+            self.persisted_generated_ms = []
+
+        async def executemany(self, query, rows):
+            generated_values = [row[generated_index] for row in rows]
+            self.calls.append(generated_values)
+            if poison_generated_ms in generated_values:
+                raise PermanentCheckViolation("projection check failed")
+            self.persisted_generated_ms.extend(generated_values)
+
+    monkeypatch.setattr(
+        db.asyncpg,
+        error_class_name,
+        PermanentCheckViolation,
+    )
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    records = [
+        evaluation_record(generated_ms=10_000),
+        evaluation_record(generated_ms=20_000),
+        evaluation_record(generated_ms=30_000),
+    ]
+
+    result = asyncio.run(backend.write_evaluations(records))
+
+    assert result.persisted_count == 2
+    assert result.rejected_count == 1
+    assert result.deferred_records == ()
+    assert connection.persisted_generated_ms == [10_000, 30_000]
+    assert connection.calls == [
+        [10_000, 20_000, 30_000],
+        [10_000],
+        [20_000, 30_000],
+        [20_000],
+        [30_000],
+    ]
+    assert "shadow_evaluation_record_rejected" in caplog.text
+
+
+def test_shadow_evaluation_backend_bounds_all_poison_isolation(
+    monkeypatch,
+    caplog,
+):
+    class PermanentCheckViolation(Exception):
+        sqlstate = "23514"
+        constraint_name = (
+            "shadow_signal_evaluations_projection_consistency_check"
+        )
+
+    class FakeConnection(FakeTransactionalConnection):
+        def __init__(self):
+            self.calls = 0
+
+        async def executemany(self, query, rows):
+            self.calls += 1
+            raise PermanentCheckViolation("projection check failed")
+
+    monkeypatch.setattr(
+        db.asyncpg,
+        "IntegrityConstraintViolationError",
+        PermanentCheckViolation,
+    )
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    records = [
+        evaluation_record(generated_ms=index)
+        for index in range(500)
+    ]
+
+    result = asyncio.run(backend.write_evaluations(records))
+
+    events = [getattr(record, "event", None) for record in caplog.records]
+    assert result.persisted_count == 0
+    assert result.rejected_count == 8
+    assert len(result.deferred_records) == 492
+    assert connection.calls < 40
+    assert events.count("shadow_evaluation_record_rejected") == 1
+    assert events.count(
+        "shadow_evaluation_rejection_isolation_limit_reached"
+    ) == 1
+    assert backend._permanent_rejections_total == 8
+
+
+def test_shadow_evaluation_backend_defers_unprobed_good_rows(
+    monkeypatch,
+):
+    generated_index = db.SHADOW_SIGNAL_EVALUATION_COLUMNS.index(
+        "generated_ms"
+    )
+    poison_values = set(range(8))
+
+    class PermanentCheckViolation(Exception):
+        pass
+
+    class FakeConnection(FakeTransactionalConnection):
+        def __init__(self):
+            self.persisted_generated_ms = []
+
+        async def executemany(self, query, rows):
+            generated_values = [row[generated_index] for row in rows]
+            if poison_values.intersection(generated_values):
+                raise PermanentCheckViolation("poison row")
+            self.persisted_generated_ms.extend(generated_values)
+
+    monkeypatch.setattr(
+        db.asyncpg,
+        "IntegrityConstraintViolationError",
+        PermanentCheckViolation,
+    )
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    records = [evaluation_record(generated_ms=index) for index in range(16)]
+
+    first = asyncio.run(backend.write_evaluations(records))
+    second = asyncio.run(
+        backend.write_evaluations(first.deferred_records)
+    )
+
+    assert first.persisted_count == 0
+    assert first.rejected_count == 8
+    assert [
+        record.generated_ms for record in first.deferred_records
+    ] == list(range(8, 16))
+    assert second.persisted_count == 8
+    assert second.rejected_count == 0
+    assert second.deferred_records == ()
+    assert connection.persisted_generated_ms == list(range(8, 16))
+
+
+@pytest.mark.parametrize(
+    ("terminal_error", "message"),
+    (
+        (RuntimeError("connection lost"), "connection lost"),
+        (asyncio.CancelledError(), None),
+    ),
+)
+def test_shadow_evaluation_isolation_rolls_back_before_terminal_error(
+    monkeypatch,
+    terminal_error,
+    message,
+):
+    generated_index = db.SHADOW_SIGNAL_EVALUATION_COLUMNS.index(
+        "generated_ms"
+    )
+
+    class PermanentCheckViolation(Exception):
+        pass
+
+    class Transaction:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            self.connection.frames.append([])
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            staged = self.connection.frames.pop()
+            if exc_type is None:
+                if self.connection.frames:
+                    self.connection.frames[-1].extend(staged)
+                else:
+                    self.connection.committed.extend(staged)
+            return False
+
+    class FakeConnection:
+        def __init__(self):
+            self.frames = []
+            self.committed = []
+
+        def transaction(self):
+            return Transaction(self)
+
+        async def executemany(self, query, rows):
+            generated_values = [row[generated_index] for row in rows]
+            if 20_000 in generated_values:
+                raise PermanentCheckViolation("poison row")
+            if 30_000 in generated_values:
+                raise terminal_error
+            self.frames[-1].extend(generated_values)
+
+    monkeypatch.setattr(
+        db.asyncpg,
+        "IntegrityConstraintViolationError",
+        PermanentCheckViolation,
+    )
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    records = [
+        evaluation_record(generated_ms=10_000),
+        evaluation_record(generated_ms=20_000),
+        evaluation_record(generated_ms=30_000),
+    ]
+
+    with pytest.raises(type(terminal_error), match=message):
+        asyncio.run(backend.write_evaluations(records))
+
+    assert connection.frames == []
+    assert connection.committed == []
+    assert backend._permanent_rejections_total == 0
 
 
 def test_shadow_evaluation_backend_does_not_retry_ambiguous_insert_failure():
-    class FakeConnection:
+    class FakeConnection(FakeTransactionalConnection):
         def __init__(self):
             self.calls = 0
 
@@ -266,6 +509,28 @@ def test_shadow_evaluation_backend_does_not_retry_ambiguous_insert_failure():
 
     with pytest.raises(RuntimeError, match="ambiguous insert failure"):
         asyncio.run(backend.write_evaluations([evaluation_record()]))
+
+    assert connection.calls == 1
+
+
+def test_shadow_evaluation_backend_does_not_bisect_transient_batch_failure():
+    class FakeConnection(FakeTransactionalConnection):
+        def __init__(self):
+            self.calls = 0
+
+        async def executemany(self, query, rows):
+            self.calls += 1
+            raise RuntimeError("database unavailable")
+
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        asyncio.run(
+            backend.write_evaluations(
+                [evaluation_record(), evaluation_record()]
+            )
+        )
 
     assert connection.calls == 1
 

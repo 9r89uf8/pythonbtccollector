@@ -609,7 +609,7 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
             )
         )
     ),
-    CHECK (
+    CONSTRAINT shadow_signal_evaluations_projection_consistency_check CHECK (
         (
             NOT valid
             AND projected_chainlink IS NULL
@@ -638,7 +638,7 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
             ) <= 0.000000000000000002
             AND abs(
                 pending_move_bps
-                - (pending_move / chainlink_at_forecast * 10000)
+                - (pending_move * 10000 / chainlink_at_forecast)
             ) <= 0.000000000000000010
             AND (
                 (pending_move > 0 AND direction = 'up')
@@ -647,7 +647,7 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
             )
         )
     ),
-    CHECK (
+    CONSTRAINT shadow_signal_evaluations_forecast_error_consistency_check CHECK (
         (
             (projected_chainlink IS NULL OR actual_chainlink IS NULL)
             AND forecast_error IS NULL
@@ -662,7 +662,7 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
             ) <= 0.000000000000000002
         )
     ),
-    CHECK (
+    CONSTRAINT shadow_signal_evaluations_baseline_error_consistency_check CHECK (
         (
             (chainlink_at_forecast IS NULL OR actual_chainlink IS NULL)
             AND baseline_error IS NULL
@@ -678,6 +678,89 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
         )
     )
 );
+
+-- Phase 5 initially shipped the projection consistency check without a name.
+-- PostgreSQL named that deployed constraint shadow_signal_evaluations_check17.
+-- Guard on the semantic replacement name first so a repeated schema run does
+-- not drop or recreate the corrected constraint. The definition predicates
+-- ensure that only the deployed projection check is removed by its old name.
+DO $$
+BEGIN
+    IF to_regclass('public.shadow_signal_evaluations') IS NOT NULL
+       AND NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = to_regclass(
+                'public.shadow_signal_evaluations'
+            )
+              AND conname =
+                'shadow_signal_evaluations_projection_consistency_check'
+       ) THEN
+        IF EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = to_regclass(
+                'public.shadow_signal_evaluations'
+            )
+              AND conname = 'shadow_signal_evaluations_check17'
+              AND pg_get_constraintdef(oid) LIKE '%pending_move_bps%'
+              AND pg_get_constraintdef(oid) LIKE '%direction%'
+        ) THEN
+            ALTER TABLE public.shadow_signal_evaluations
+                DROP CONSTRAINT shadow_signal_evaluations_check17;
+        END IF;
+
+        ALTER TABLE public.shadow_signal_evaluations
+            ADD CONSTRAINT
+                shadow_signal_evaluations_projection_consistency_check
+            CHECK (
+                (
+                    NOT valid
+                    AND projected_chainlink IS NULL
+                    AND pending_move IS NULL
+                    AND pending_move_bps IS NULL
+                    AND direction IS NULL
+                )
+                OR (
+                    valid
+                    AND chainlink_at_forecast IS NOT NULL
+                    AND futures_now IS NOT NULL
+                    AND futures_reference IS NOT NULL
+                    AND futures_reference_target_ms IS NOT NULL
+                    AND futures_reference_gap_ms IS NOT NULL
+                    AND projected_chainlink IS NOT NULL
+                    AND projected_chainlink > 0
+                    AND projected_chainlink <> 'NaN'::NUMERIC
+                    AND pending_move IS NOT NULL
+                    AND pending_move <> 'NaN'::NUMERIC
+                    AND pending_move_bps IS NOT NULL
+                    AND pending_move_bps <> 'NaN'::NUMERIC
+                    AND direction IS NOT NULL
+                    AND direction IN ('up', 'down', 'flat')
+                    AND abs(
+                        pending_move
+                        - (
+                            projected_chainlink
+                            - chainlink_at_forecast
+                        )
+                    ) <= 0.000000000000000002
+                    AND abs(
+                        pending_move_bps
+                        - (
+                            pending_move * 10000
+                            / chainlink_at_forecast
+                        )
+                    ) <= 0.000000000000000010
+                    AND (
+                        (pending_move > 0 AND direction = 'up')
+                        OR (pending_move < 0 AND direction = 'down')
+                        OR (pending_move = 0 AND direction = 'flat')
+                    )
+                )
+            );
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_generated_idx
     ON shadow_signal_evaluations (generated_ms);

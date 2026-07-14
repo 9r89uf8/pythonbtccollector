@@ -20,6 +20,7 @@ from price_collector.shadow_signal_evaluation import (
     FORECAST_INPUT_AFTER_GENERATED,
     ShadowEvaluationProvenance,
     ShadowEvaluationScheduler,
+    ShadowEvaluationWriteResult,
     ShadowEvaluationWriterRuntime,
 )
 
@@ -142,6 +143,125 @@ def scheduler(
         cadence_ms=cadence_ms,
         max_observation_gap_ms=max_observation_gap_ms,
     )
+
+
+def matured_evaluation_record(*, invalid=False):
+    (candidate,) = models(300)
+    evaluator = scheduler((candidate,))
+    forecast_chainlink = price("100", 0, 0)
+    evaluator.observe(
+        observation(
+            0,
+            (candidate,),
+            chainlink=forecast_chainlink,
+            invalid_versions=(candidate.version,) if invalid else (),
+        ),
+        chainlink=None,
+    )
+    matured = evaluator.observe(
+        observation(301, (candidate,), chainlink=price("101", 301, 300)),
+        chainlink=price("101", 301, 300),
+    )
+    return next(record for record in matured if record.generated_ms == 0)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "chainlink_at_forecast",
+        "futures_now",
+        "futures_reference",
+        "futures_reference_target_ms",
+        "futures_reference_gap_ms",
+        "projected_chainlink",
+        "pending_move",
+        "pending_move_bps",
+        "direction",
+    ),
+)
+def test_valid_evaluation_requires_complete_projection_contract(field_name):
+    record = matured_evaluation_record()
+
+    with pytest.raises(
+        ValueError,
+        match="valid evaluation requires complete projection inputs and output",
+    ):
+        replace(record, **{field_name: None})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("projected_chainlink", Decimal("100.5")),
+        ("pending_move", Decimal("0.5")),
+        ("pending_move_bps", Decimal("50")),
+        ("direction", "up"),
+    ),
+)
+def test_invalid_evaluation_rejects_any_projection_output(field_name, value):
+    record = matured_evaluation_record(invalid=True)
+
+    with pytest.raises(
+        ValueError,
+        match="invalid evaluation must not contain projection output",
+    ):
+        replace(record, **{field_name: value})
+
+
+def test_invalid_evaluation_preserves_legitimately_partial_input_tuples():
+    record = matured_evaluation_record(invalid=True)
+
+    partial = replace(
+        record,
+        futures_now=None,
+        futures_now_source_timestamp_ms=None,
+        futures_now_received_ms=None,
+        futures_reference=None,
+        futures_reference_source_timestamp_ms=None,
+        futures_reference_received_ms=None,
+        futures_reference_gap_ms=None,
+    )
+
+    assert partial.valid is False
+    assert partial.chainlink_at_forecast == Decimal("100")
+    assert partial.futures_reference_target_ms == 0
+    assert partial.futures_reference_gap_ms is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"pending_move": Decimal("0.4")}, "pending_move is inconsistent"),
+        (
+            {"pending_move_bps": Decimal("49")},
+            "pending_move_bps is inconsistent",
+        ),
+        ({"direction": "down"}, "direction is inconsistent with pending_move"),
+    ),
+)
+def test_valid_evaluation_rejects_inconsistent_projection_math(
+    overrides,
+    message,
+):
+    record = matured_evaluation_record()
+
+    with pytest.raises(ValueError, match=message):
+        replace(record, **overrides)
+
+
+def test_valid_evaluation_accepts_exact_flat_projection_contract():
+    record = matured_evaluation_record()
+
+    flat = replace(
+        record,
+        projected_chainlink=record.chainlink_at_forecast,
+        pending_move=Decimal("0"),
+        pending_move_bps=Decimal("0"),
+        direction="flat",
+    )
+
+    assert flat.pending_move == Decimal("0")
+    assert flat.direction == "flat"
 
 
 def test_cadence_schedules_once_per_entered_bucket_without_backfill():
@@ -469,10 +589,18 @@ def mature_record(*, generated_ms=0):
 
 
 class Backend:
-    def __init__(self, *, fail=False, hang=False, cleanup_error=False):
+    def __init__(
+        self,
+        *,
+        fail=False,
+        hang=False,
+        cleanup_error=False,
+        persisted_count=None,
+    ):
         self.fail = fail
         self.hang = hang
         self.cleanup_error = cleanup_error
+        self.persisted_count = persisted_count
         self.batches = []
         self.cleanup_calls = []
         self.closed = False
@@ -485,6 +613,15 @@ class Backend:
         if self.fail:
             raise RuntimeError("write failed")
         self.batches.append(list(records))
+        persisted = (
+            len(records)
+            if self.persisted_count is None
+            else self.persisted_count
+        )
+        return ShadowEvaluationWriteResult(
+            persisted_count=persisted,
+            rejected_count=len(records) - persisted,
+        )
 
     async def delete_expired(self, *, cutoff_generated_ms, limit):
         self.cleanup_calls.append((cutoff_generated_ms, limit))
@@ -562,6 +699,111 @@ def test_writer_batches_records_and_flushes_partial_batch():
         assert backend.batches[1] == records[3:]
         assert runtime.counters.batches_succeeded_total == 2
         assert backend.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_writer_counts_permanently_rejected_records_without_requeueing():
+    async def scenario():
+        backend = Backend(persisted_count=2)
+        runtime = writer(lambda: backend, batch_max_rows=3, flush_ms=5)
+        runtime.start()
+        records = [
+            mature_record(generated_ms=index * 1_000)
+            for index in range(3)
+        ]
+        for record in records:
+            runtime.offer_nowait(record)
+
+        await wait_until(lambda: runtime.counters.batches_succeeded_total == 1)
+        await runtime.close()
+
+        assert runtime.counters.records_persisted_total == 2
+        assert runtime.counters.records_rejected_total == 1
+        assert runtime.counters.records_dropped_total == 1
+        assert runtime.counters.batches_failed_total == 0
+        assert runtime.queue_depth == 0
+        assert backend.batches == [records]
+
+    asyncio.run(scenario())
+
+
+def test_writer_requeues_only_deferred_records():
+    class DeferredOnceBackend(Backend):
+        async def write_evaluations(self, records):
+            self.entered.set()
+            self.batches.append(list(records))
+            if len(self.batches) == 1:
+                return ShadowEvaluationWriteResult(
+                    persisted_count=0,
+                    rejected_count=0,
+                    deferred_records=tuple(records),
+                )
+            return ShadowEvaluationWriteResult(
+                persisted_count=len(records),
+                rejected_count=0,
+            )
+
+    async def scenario():
+        backend = DeferredOnceBackend()
+        runtime = writer(
+            lambda: backend,
+            batch_max_rows=1,
+            flush_ms=2,
+        )
+        runtime.start()
+        record = mature_record()
+        runtime.offer_nowait(record)
+
+        await wait_until(lambda: runtime.counters.records_persisted_total == 1)
+        await runtime.close()
+
+        assert backend.batches == [[record], [record]]
+        assert runtime.counters.records_deferred_total == 1
+        assert runtime.counters.records_rejected_total == 0
+        assert runtime.counters.records_dropped_total == 0
+        assert runtime.counters.batches_succeeded_total == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "invalid_result",
+    (
+        None,
+        True,
+        -1,
+        2,
+        ShadowEvaluationWriteResult(0, 0),
+        ShadowEvaluationWriteResult(2, 0),
+        ShadowEvaluationWriteResult(0, 0, ("not-a-record",)),
+    ),
+)
+def test_writer_retries_invalid_backend_results(invalid_result):
+    class InvalidCountBackend(Backend):
+        async def write_evaluations(self, records):
+            self.entered.set()
+            self.batches.append(list(records))
+            return invalid_result
+
+    async def scenario():
+        backend = InvalidCountBackend()
+        runtime = writer(
+            lambda: backend,
+            batch_max_rows=1,
+            flush_ms=2,
+            retry_ms=50,
+        )
+        runtime.start()
+        runtime.offer_nowait(mature_record())
+
+        await wait_until(lambda: runtime.counters.batches_failed_total == 1)
+        assert runtime.counters.records_persisted_total == 0
+        assert runtime.counters.records_rejected_total == 0
+        assert runtime.queue_depth == 1
+        await runtime.close()
+
+        assert runtime.counters.records_dropped_total == 1
 
     asyncio.run(scenario())
 
