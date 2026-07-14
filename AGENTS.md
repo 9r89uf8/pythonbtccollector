@@ -153,16 +153,46 @@ The corresponding Python entry points are:
 - Install both decision files as `root:pricecollector` mode `0440`. Configure
   their absolute paths and the full selection-file SHA-256 in the dedicated
   root-owned `/etc/price-collector/shadow-signal.env` file.
-- The shadow environment is Redis-only and must contain neither
-  `DATABASE_URL` nor `READ_DATABASE_URL`.
+- Keep matured evaluation persistence independently opt-in with
+  `SHADOW_SIGNAL_EVALUATION_ENABLED=false` by default. When it is enabled, the
+  dedicated shadow environment contains the writer `DATABASE_URL`; it must
+  never contain `READ_DATABASE_URL`.
 - Poll `btc:live:futures` and `btc:live:chainlink` together with one Redis
   `MGET` on an epoch-aligned 100 ms cadence.
 - Treat the accepted selection artifact as authoritative. Load and validate it
   once at startup, verify it against the replay configuration, publish only
   its frozen provisional primary, and never switch models dynamically.
-- Keep all three provisional V0 candidates instantiated for later silent
-  evaluation, while exposing only the accepted primary in the Phase 4 Redis
-  payload.
+- Keep all three provisional V0 candidates instantiated for silent evaluation,
+  while exposing only the accepted primary in the Redis payload.
+- Schedule every candidate attempt, including invalid attempts, once when the
+  worker enters an epoch-aligned 500 ms bucket. Do not backfill skipped buckets.
+  Mature each attempt at its own horizon against the newest observed Chainlink
+  value whose `received_ms` is less than or equal to the target; an observation
+  received after the target must never leak into the outcome.
+- Stamp `generated_ms` immediately after the Redis `MGET`, when both inputs are
+  locally available. Fail an evaluation closed if an input is newer than that
+  stamp. If successful observations are separated by more than two configured
+  poll intervals, invalidate outstanding actuals across that gap rather than
+  pretending the latest-value cache preserves overwritten states.
+- The live evaluator is exact over cache states returned to its successful
+  100 ms observations. Redis is latest-value-only, so an intermediate state
+  overwritten entirely between polls is not reconstructable; keep raw replay
+  as the event-complete authority for model selection and fine-grained timing.
+- Send matured rows through a separate bounded, nonblocking batch writer. A
+  database outage, retry, full queue, dropped evaluation row, retention pass,
+  or shutdown timeout must not delay or terminate the 100 ms Redis publication
+  path. Queue overflow drops the oldest queued persistence item rather than
+  blocking the live loop, with a rate-limited warning on the first and every
+  hundredth drop.
+- Requeue idempotent failed batches ahead of newer rows and retry them after the
+  configured delay. Discard records only when bounded capacity is exceeded or
+  bounded shutdown cannot drain them; log loss counters at shutdown.
+- Store signed `forecast_error` as `projected_chainlink - actual_chainlink` and
+  signed `baseline_error` as `chainlink_at_forecast - actual_chainlink`. Keep
+  the evaluation table idempotent on
+  `(model_version, generated_ms, horizon_ms)` and retain seven days by default.
+  Size each bounded retention deletion to outpace five candidates at the
+  configured evaluation and cleanup cadences.
 - Write `btc:live:chainlink_shadow` with one atomic Redis `SET` carrying a
   1.5-to-2.0-second TTL. Every invalid observation must replace any prior valid
   projection with null projection fields; never carry a valid forecast forward.
@@ -171,8 +201,9 @@ The corresponding Python entry points are:
   `full_horizon_before_market_end`; it is not a settlement, probability,
   execution, or market-close forecast.
 - A Redis or model failure in the shadow service must not interrupt either
-  producer. Phase 4 does not add PostgreSQL writes or expose the shadow key
-  through `/markets/current/live`.
+  producer. Phase 5 adds internal PostgreSQL evaluation rows only; it still
+  does not expose the shadow key or evaluations through
+  `/markets/current/live`, and it adds no dashboard code.
 
 ### Polymarket Probabilities
 
@@ -221,6 +252,10 @@ The corresponding Python entry points are:
 - Collectors use `DATABASE_URL` with the writer role.
 - The API uses `READ_DATABASE_URL` with the reader role and must not receive the
   writer password.
+- `shadow_signal_evaluations` is internal evidence: grant the writer only
+  `SELECT`, `INSERT`, and bounded-retention `DELETE`; explicitly revoke the API
+  reader and `PUBLIC`. Preserve its primary key on
+  `(model_version, generated_ms, horizon_ms)`.
 
 ## Market Window Rule
 
@@ -344,6 +379,8 @@ Add or update focused tests for each checkpoint. Relevant coverage includes:
 - Reader/writer credential separation
 - Shadow decision trust, Redis TTL, disabled-by-default deployment, and
   producer isolation
+- Shadow 500 ms scheduling, horizon-specific causal maturation, invalid-attempt
+  coverage, idempotent evaluation persistence, and database-outage isolation
 
 Run the relevant tests before handoff. Run the full suite when practical:
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=Experimental Chainlink catch-up shadow-signal worker
-After=network-online.target redis-server.service price-collector-binance-futures.service price-collector-polymarket-chainlink.service
+After=network-online.target postgresql.service redis-server.service price-collector-binance-futures.service price-collector-polymarket-chainlink.service
 Wants=network-online.target redis-server.service
 StartLimitIntervalSec=60
 StartLimitBurst=3

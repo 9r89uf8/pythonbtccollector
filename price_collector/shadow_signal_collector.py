@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Standalone 100 ms Redis worker for the provisional Chainlink signal."""
+"""Standalone live publisher and noncritical shadow-evaluation worker."""
 
 import asyncio
 import json
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from price_collector.config import Settings
+from price_collector.db import create_shadow_evaluation_backend
 from price_collector.live_cache import (
     CHAINLINK_LIVE_KEY,
     FUTURES_LIVE_KEY,
@@ -33,16 +34,24 @@ from price_collector.shadow_signal_artifact import (
     ActivatedShadowSelection,
     load_activated_selection,
 )
+from price_collector.shadow_signal_evaluation import (
+    ShadowEvaluationProvenance,
+    ShadowEvaluationScheduler,
+    ShadowEvaluationWriterRuntime,
+)
 
 
 LOGGER = logging.getLogger("price_collector.shadow_signal_collector")
 
 NowMs = Callable[[], int]
 Sleep = Callable[[float], Awaitable[None]]
+EvaluationBackendFactory = Callable[[], Any]
+EvaluationSchedulerFactory = Callable[..., ShadowEvaluationScheduler]
+EvaluationWriterFactory = Callable[..., ShadowEvaluationWriterRuntime]
 
 
 class _JsonLogFormatter(logging.Formatter):
-    """Keep the Redis-only worker independent from collector/DB imports."""
+    """Emit standalone shadow-worker logs as structured JSON."""
 
     _standard_attrs = set(
         vars(logging.LogRecord("", 0, "", 0, "", (), None))
@@ -214,6 +223,8 @@ class ShadowSignalWorker:
         live_cache: LiveCache,
         activated: ActivatedShadowSelection,
         ttl_ms: int,
+        evaluation_scheduler: Optional[ShadowEvaluationScheduler] = None,
+        evaluation_writer: Optional[ShadowEvaluationWriterRuntime] = None,
         now_ms: NowMs = current_utc_epoch_ms,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
@@ -221,9 +232,16 @@ class ShadowSignalWorker:
             raise TypeError("ttl_ms must be an integer")
         if ttl_ms <= activated.poll_ms:
             raise ValueError("ttl_ms must exceed the poll interval")
+        if (evaluation_scheduler is None) != (evaluation_writer is None):
+            raise ValueError(
+                "evaluation_scheduler and evaluation_writer must be provided "
+                "together"
+            )
         self.live_cache = live_cache
         self.activated = activated
         self.ttl_ms = ttl_ms
+        self.evaluation_scheduler = evaluation_scheduler
+        self.evaluation_writer = evaluation_writer
         self.now_ms = now_ms
         self.sleep = sleep
         self.engine = ShadowSignalEngine(
@@ -237,7 +255,6 @@ class ShadowSignalWorker:
         self._last_logged_state: Optional[tuple[bool, str, str]] = None
 
     async def run_once(self, *, now_ms: Optional[int] = None) -> Optional[LiveShadowSignal]:
-        generated_ms = self.now_ms() if now_ms is None else now_ms
         try:
             prices, payload_errors = await self.live_cache.get_prices_independent(
                 [FUTURES_LIVE_KEY, CHAINLINK_LIVE_KEY]
@@ -248,6 +265,11 @@ class ShadowSignalWorker:
                 extra={"event": "shadow_signal_cache_read_failed"},
             )
             return None
+
+        # A forecast cannot exist before its Redis inputs are available. Stamp
+        # immediately after MGET so target_ms is based on causal availability,
+        # not on the time just before an awaited network operation.
+        generated_ms = self.now_ms() if now_ms is None else now_ms
 
         for key, error in payload_errors.items():
             LOGGER.warning(
@@ -294,7 +316,48 @@ class ShadowSignalWorker:
                 "shadow_signal_cache_write_failed",
                 extra={"event": "shadow_signal_cache_write_failed"},
             )
+        self._evaluate_noncritical(
+            observation=observation,
+            chainlink=observed[CHAINLINK_LIVE_KEY],
+        )
         return payload
+
+    def _evaluate_noncritical(
+        self,
+        *,
+        observation: EngineObservation,
+        chainlink: Optional[ObservedPrice],
+    ) -> None:
+        scheduler = self.evaluation_scheduler
+        writer = self.evaluation_writer
+        if scheduler is None or writer is None:
+            return
+        try:
+            prior_gap_count = scheduler.observation_gap_count
+            matured = scheduler.observe(
+                observation,
+                chainlink=chainlink,
+            )
+            if scheduler.observation_gap_count != prior_gap_count:
+                LOGGER.warning(
+                    "shadow_signal_evaluation_observation_gap",
+                    extra={
+                        "event": "shadow_signal_evaluation_observation_gap",
+                        "generated_ms": observation.generated_ms,
+                        "observation_gap_count": (
+                            scheduler.observation_gap_count
+                        ),
+                    },
+                )
+            for record in matured:
+                writer.offer_nowait(record)
+        except Exception:
+            # Evaluation is deliberately subordinate to the expiring Redis
+            # publication. A scheduler or queue defect must not kill that path.
+            LOGGER.exception(
+                "shadow_signal_evaluation_tick_failed",
+                extra={"event": "shadow_signal_evaluation_tick_failed"},
+            )
 
     def _log_state_transition(self, payload: LiveShadowSignal) -> None:
         state = (payload.valid, payload.status, payload.state)
@@ -328,6 +391,11 @@ async def run_collector(
     settings: Settings,
     *,
     live_cache_factory: Callable[[Any], LiveCache] = create_live_cache,
+    evaluation_backend_factory: Optional[EvaluationBackendFactory] = None,
+    evaluation_scheduler_factory: Optional[
+        EvaluationSchedulerFactory
+    ] = None,
+    evaluation_writer_factory: Optional[EvaluationWriterFactory] = None,
     max_iterations: Optional[int] = None,
 ) -> None:
     setup_logging(settings.LOG_LEVEL)
@@ -350,6 +418,9 @@ async def run_collector(
         raise RuntimeError(
             "configured shadow poll interval does not match replay evidence"
         )
+    evaluation_enabled = bool(
+        getattr(settings, "SHADOW_SIGNAL_EVALUATION_ENABLED", False)
+    )
 
     LOGGER.info(
         "shadow_signal_starting",
@@ -372,18 +443,121 @@ async def run_collector(
                 activated.selection_fingerprint_sha256
             ),
             "selection_evidence_end_ms": activated.evidence_end_ms,
+            "evaluation_enabled": evaluation_enabled,
         },
     )
 
     live_cache = live_cache_factory(settings)
+    evaluation_writer: Optional[ShadowEvaluationWriterRuntime] = None
     try:
+        evaluation_scheduler: Optional[ShadowEvaluationScheduler] = None
+        if evaluation_enabled:
+            scheduler_factory = (
+                evaluation_scheduler_factory or ShadowEvaluationScheduler
+            )
+            writer_factory = (
+                evaluation_writer_factory or ShadowEvaluationWriterRuntime
+            )
+            if evaluation_backend_factory is None:
+                database_url = settings.DATABASE_URL
+
+                async def evaluation_backend_factory() -> Any:
+                    return await create_shadow_evaluation_backend(
+                        database_url,
+                        connect_timeout_seconds=(
+                            settings.SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
+                        ),
+                        command_timeout_seconds=(
+                            settings.SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS
+                        ),
+                    )
+
+            evaluation_scheduler = scheduler_factory(
+                models=activated.models,
+                provenance=ShadowEvaluationProvenance(
+                    selection_schema_version=(
+                        activated.selection_schema_version
+                    ),
+                    policy_version=activated.policy_version,
+                    selection_fingerprint_sha256=(
+                        activated.selection_fingerprint_sha256
+                    ),
+                    selection_artifact_sha256=(
+                        activated.selection_artifact_sha256
+                    ),
+                    evidence_end_ms=activated.evidence_end_ms,
+                ),
+                cadence_ms=(
+                    settings.SHADOW_SIGNAL_EVALUATION_INTERVAL_MS
+                ),
+                max_observation_gap_ms=activated.poll_ms * 2,
+            )
+            evaluation_writer = writer_factory(
+                backend_factory=evaluation_backend_factory,
+                queue_max_records=(
+                    settings.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX
+                ),
+                batch_max_rows=(
+                    settings.SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS
+                ),
+                flush_ms=settings.SHADOW_SIGNAL_EVALUATION_FLUSH_MS,
+                retry_ms=settings.SHADOW_SIGNAL_EVALUATION_RETRY_MS,
+                shutdown_timeout_ms=int(
+                    settings.SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS
+                    * 1_000
+                ),
+                retention_ms=(
+                    settings.SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS
+                    * 60
+                    * 60
+                    * 1_000
+                ),
+                cleanup_interval_ms=(
+                    settings.SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS
+                    * 1_000
+                ),
+                cleanup_batch_rows=(
+                    settings.SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS
+                ),
+            )
+            evaluation_writer.start()
+            LOGGER.info(
+                "shadow_signal_evaluation_started",
+                extra={
+                    "event": "shadow_signal_evaluation_started",
+                    "cadence_ms": (
+                        settings.SHADOW_SIGNAL_EVALUATION_INTERVAL_MS
+                    ),
+                    "queue_max_records": (
+                        settings.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX
+                    ),
+                    "batch_max_rows": (
+                        settings.SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS
+                    ),
+                    "retention_hours": (
+                        settings.SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS
+                    ),
+                },
+            )
         worker = ShadowSignalWorker(
             live_cache=live_cache,
             activated=activated,
             ttl_ms=settings.SHADOW_SIGNAL_TTL_MS,
+            evaluation_scheduler=evaluation_scheduler,
+            evaluation_writer=evaluation_writer,
         )
         await worker.run(max_iterations=max_iterations)
     finally:
+        if evaluation_writer is not None:
+            try:
+                await evaluation_writer.close()
+            except Exception:
+                LOGGER.exception(
+                    "shadow_signal_evaluation_shutdown_failed",
+                    extra={
+                        "event": "shadow_signal_evaluation_shutdown_failed"
+                    },
+                )
         await live_cache.close()
 
 

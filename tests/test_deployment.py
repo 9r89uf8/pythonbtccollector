@@ -94,7 +94,7 @@ def test_binance_futures_collector_service_execs_futures_module():
     assert "--host 0.0.0.0" not in service
 
 
-def test_shadow_signal_env_is_disabled_and_contains_no_database_credentials():
+def test_shadow_signal_env_is_disabled_and_has_phase5_controls_without_secrets():
     lines = (
         ROOT / "deployment" / "shadow-signal.env.example"
     ).read_text().splitlines()
@@ -104,6 +104,18 @@ def test_shadow_signal_env_is_disabled_and_contains_no_database_credentials():
     assert "REDIS_PORT=6379" in lines
     assert "SHADOW_SIGNAL_POLL_MS=100" in lines
     assert "SHADOW_SIGNAL_TTL_MS=2000" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_ENABLED=false" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_INTERVAL_MS=500" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_QUEUE_MAX=5000" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS=500" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_FLUSH_MS=1000" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_RETRY_MS=5000" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=5" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=5" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS=168" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS=300" in lines
+    assert "SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS=5000" in lines
     assert (
         "SHADOW_SIGNAL_TRUSTED_DECISION_DIR="
         "/var/lib/price-collector/shadow-decisions"
@@ -133,7 +145,7 @@ def test_shadow_signal_service_is_isolated_and_ordered_after_producers():
     assert "redis-server.service" in service
     assert "price-collector-binance-futures.service" in service
     assert "price-collector-polymarket-chainlink.service" in service
-    assert "postgresql.service" not in service
+    assert "postgresql.service" in service
     assert "Restart=on-failure" in service
     assert "StartLimitIntervalSec=60" in service
     assert "StartLimitBurst=3" in service

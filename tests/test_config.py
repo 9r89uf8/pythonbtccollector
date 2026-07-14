@@ -12,6 +12,18 @@ SHADOW_SIGNAL_ENV_NAMES = (
     "SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH",
     "SHADOW_SIGNAL_POLL_MS",
     "SHADOW_SIGNAL_TTL_MS",
+    "SHADOW_SIGNAL_EVALUATION_ENABLED",
+    "SHADOW_SIGNAL_EVALUATION_INTERVAL_MS",
+    "SHADOW_SIGNAL_EVALUATION_QUEUE_MAX",
+    "SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS",
+    "SHADOW_SIGNAL_EVALUATION_FLUSH_MS",
+    "SHADOW_SIGNAL_EVALUATION_RETRY_MS",
+    "SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS",
+    "SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS",
+    "SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS",
+    "SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS",
+    "SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS",
+    "SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS",
 )
 
 
@@ -225,6 +237,24 @@ def test_settings_include_disabled_shadow_signal_defaults(monkeypatch):
     assert settings.SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH is None
     assert settings.SHADOW_SIGNAL_POLL_MS == 100
     assert settings.SHADOW_SIGNAL_TTL_MS == 2_000
+    assert settings.SHADOW_SIGNAL_EVALUATION_ENABLED is False
+    assert settings.SHADOW_SIGNAL_EVALUATION_INTERVAL_MS == 500
+    assert settings.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX == 5_000
+    assert settings.SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS == 500
+    assert settings.SHADOW_SIGNAL_EVALUATION_FLUSH_MS == 1_000
+    assert settings.SHADOW_SIGNAL_EVALUATION_RETRY_MS == 5_000
+    assert (
+        settings.SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS == 10.0
+    )
+    assert (
+        settings.SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS == 5.0
+    )
+    assert (
+        settings.SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS == 5.0
+    )
+    assert settings.SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS == 168
+    assert settings.SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS == 300
+    assert settings.SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS == 5_000
 
 
 def test_settings_accept_enabled_shadow_signal_with_trusted_files(monkeypatch):
@@ -258,6 +288,21 @@ def test_enabled_shadow_signal_requires_decision_inputs(
     monkeypatch.delenv(missing_name)
 
     with pytest.raises(ValidationError, match=missing_name):
+        Settings()
+
+
+def test_enabled_shadow_signal_rejects_api_reader_credentials(monkeypatch):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv(
+        "READ_DATABASE_URL",
+        "postgresql://price_reader:secret@127.0.0.1/price_collector",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="must not receive READ_DATABASE_URL",
+    ):
         Settings()
 
 
@@ -339,3 +384,111 @@ def test_shadow_signal_ttl_stays_in_short_expiry_range(monkeypatch, ttl_ms):
 
     with pytest.raises(ValidationError, match="SHADOW_SIGNAL_TTL_MS"):
         Settings()
+
+
+@pytest.mark.parametrize("interval_ms", (499, 501))
+def test_shadow_signal_evaluation_cadence_is_fixed_at_500ms(
+    monkeypatch,
+    interval_ms,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv(
+        "SHADOW_SIGNAL_EVALUATION_INTERVAL_MS",
+        str(interval_ms),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="SHADOW_SIGNAL_EVALUATION_INTERVAL_MS",
+    ):
+        Settings()
+
+
+def test_shadow_signal_evaluation_batch_cannot_exceed_queue(monkeypatch):
+    clear_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_QUEUE_MAX", "100")
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS", "101")
+
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS must be less than "
+            "or equal to SHADOW_SIGNAL_EVALUATION_QUEUE_MAX"
+        ),
+    ):
+        Settings()
+
+
+def test_shadow_signal_retention_batch_covers_worst_case_candidate_rate(
+    monkeypatch,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv(
+        "SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS",
+        "1000",
+    )
+    monkeypatch.setenv(
+        "SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS",
+        "9999",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS must cover five "
+            "candidates"
+        ),
+    ):
+        Settings()
+
+
+def test_enabled_shadow_signal_evaluation_requires_shadow_worker(monkeypatch):
+    clear_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_ENABLED", "true")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://price_writer:secret@127.0.0.1:5432/price_collector",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="requires SHADOW_SIGNAL_ENABLED=true",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize("database_url", (None, "", "   "))
+def test_enabled_shadow_signal_evaluation_requires_writer_url(
+    monkeypatch,
+    database_url,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_ENABLED", "true")
+    if database_url is None:
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("DATABASE_URL", database_url)
+
+    with pytest.raises(ValidationError, match="requires DATABASE_URL"):
+        Settings()
+
+
+def test_enabled_shadow_signal_evaluation_accepts_bounded_writer_settings(
+    monkeypatch,
+):
+    clear_shadow_signal_environment(monkeypatch)
+    set_valid_shadow_signal_environment(monkeypatch)
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_ENABLED", "true")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://price_writer:secret@127.0.0.1:5432/price_collector",
+    )
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_QUEUE_MAX", "800")
+    monkeypatch.setenv("SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS", "200")
+
+    settings = Settings()
+
+    assert settings.SHADOW_SIGNAL_EVALUATION_ENABLED is True
+    assert settings.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX == 800
+    assert settings.SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS == 200

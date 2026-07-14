@@ -25,23 +25,36 @@ PostgreSQL, or Redis directly. It reads one read-only HTTP endpoint. The API
 retrieves all three cached values with one Redis `MGET` and performs no
 PostgreSQL query on this request path.
 
-Shadow-signal Phase 4 adds a separate, opt-in Redis-only branch. The standalone
+Shadow-signal Phases 4 and 5 add a separate, opt-in branch. The standalone
 `price-collector-shadow-signal` worker reads only the Futures and Chainlink
-source keys together every 100 ms and writes a short-lived experimental result:
+source keys together every 100 ms and writes a short-lived experimental result.
+When Phase 5 evaluation is separately enabled, those observations also feed a
+noncritical outcome path:
 
 ```text
 [btc:live:futures] ----\
                         +-- MGET every 100 ms --> ShadowSignalEngine
 [btc:live:chainlink] --/                              |
-                                                       +-- atomic SET with TTL
-                                                             |
-                                                             +--> [btc:live:chainlink_shadow]
-                                                                  1.5–2.0 seconds
+                                      +----------------+----------------+
+                                      |                                 |
+                                      v                                 v
+                          atomic SET with TTL               every entered 500 ms bucket
+                                      |                     schedule all candidates
+                                      v                                 |
+                    [btc:live:chainlink_shadow]                         v
+                         1.5–2.0 seconds                    horizon-specific pending heap
+                                                                        |
+                                                                        v
+                                                           causal Chainlink outcome
+                                                                        |
+                                                                        v
+                                                          bounded PostgreSQL writer
 ```
 
-That result does not feed FastAPI or the dashboard in Phase 4, and the worker
-does not write PostgreSQL. A worker failure therefore cannot interrupt either
-producer or the three-price live endpoint.
+Neither result feeds FastAPI or the dashboard yet. PostgreSQL work runs behind
+a bounded nonblocking queue, so a database outage, retry, or dropped evaluation
+cannot interrupt the Redis signal, either producer, or the three-price live
+endpoint.
 
 There are three live price sources, even though two of them are operated by
 Binance:
@@ -273,7 +286,7 @@ The keys are written with plain Redis `SET` operations and have no application
 TTL. A Redis write failure is logged, but it does not change the price's numeric
 type or prevent the collector from continuing its historical PostgreSQL write.
 
-### Experimental Shadow-Signal Phase 4 Key
+### Experimental Shadow-Signal Phases 4–5
 
 The opt-in worker writes one additional key:
 
@@ -305,8 +318,9 @@ exact replay report containing its runtime configuration. Both must be
 `/etc/price-collector/shadow-signal.env` supplies their absolute paths and the
 complete selection-file SHA-256. Startup also verifies the replay report hash
 against selection provenance and verifies its configuration digest, policy,
-candidate set, evidence, and primary. The shadow environment contains no
-database URL.
+candidate set, evidence, and primary. The shadow environment contains the
+writer `DATABASE_URL` only when matured evaluation is enabled. It never
+contains the API's `READ_DATABASE_URL`.
 
 Each observation is written atomically with Redis `SET` and a 1.5-to-2.0-second
 TTL; the configured default is 2,000 ms. Invalid observations still overwrite
@@ -315,10 +329,46 @@ to `null`. Missing, malformed, stale, regressing, or insufficient-history input
 therefore cannot leave a previous valid forecast visible. If the process stops,
 the TTL removes the key without deleting or changing any source-price key.
 
-Shadow-signal Phase 4 deliberately has no matured-outcome evaluator, PostgreSQL
-shadow table, API response field, or dashboard integration. Those are later,
-independent steps in the shadow-signal build order. This does not validate the
-separately deferred high-resolution partition-boundary and retention rollout.
+Phase 5 schedules all three candidates once when the worker enters an
+epoch-aligned 500 ms bucket. It does not synthesize forecasts for buckets missed
+during a pause. Valid and invalid attempts are both retained so coverage cannot
+be inflated by discarding failures. Each candidate matures independently at
+`target_ms = generated_ms + horizon_ms`. The causal outcome is the newest
+Chainlink observation actually known by that target, which requires
+`actual_chainlink_received_ms <= target_ms`; a later observation visible at the
+maturation tick is excluded.
+
+The forecast clock is stamped after the input `MGET`. Any input received after
+that stamp makes the evaluation invalid, and an observation gap longer than two
+poll intervals invalidates outstanding outcomes across the gap. Causality is
+therefore exact for cache states returned by successful worker polls. Redis is
+still a latest-value cache: a Chainlink state created and overwritten entirely
+between two polls cannot be reconstructed here, so raw replay remains the
+event-complete authority for model selection and sub-poll timing analysis.
+
+Matured attempts are enqueued without awaiting PostgreSQL. The bounded writer
+batches idempotent inserts into `shadow_signal_evaluations`; its unique key is
+`(model_version, generated_ms, horizon_ms)`. When its queue is full, it drops
+the oldest queued row and emits a rate-limited warning on the first and every
+hundredth drop. Failed idempotent batches are requeued ahead of newer rows and
+retried on that background path; the queue sheds its oldest evidence only after
+bounded capacity is exhausted.
+The default retention is seven days; every 300 seconds the writer may
+delete up to 5,000 expired rows, enough for a conservative five-candidate
+capacity envelope at a 500 ms cadence. For valid rows with a causal actual,
+`forecast_error` is the signed
+`projected_chainlink - actual_chainlink`, while `baseline_error` is the signed
+no-change error `chainlink_at_forecast - actual_chainlink`.
+
+Move-size, direction, expiry, and sampled-volatility slices are derivable from
+the evaluation rows. A reconnect slice must join by receive time to
+`raw_capture.feed_sessions`; materialize it before the separate 72-hour raw
+retention removes the required session evidence.
+
+The table and writer are internal evidence only. Phase 5 adds no API response
+field or dashboard integration; those remain shadow-signal build-order steps 6
+and 7. It is also unrelated to, and does not validate, the separately deferred
+high-resolution raw-capture Phase 4 partition and 72-hour-retention rollout.
 
 ## Dashboard Live Endpoint
 
@@ -532,5 +582,9 @@ For the complete frontend API contract and all historical response shapes, see
 - [`price_collector/shadow_signal_artifact.py`](price_collector/shadow_signal_artifact.py)
   — trusted Phase 3 selection and replay-configuration validation
 - [`price_collector/shadow_signal_collector.py`](price_collector/shadow_signal_collector.py)
-  — standalone epoch-aligned 100 ms Redis worker
+  — standalone epoch-aligned 100 ms Redis worker and Phase 5 integration
+- [`price_collector/shadow_signal_evaluation.py`](price_collector/shadow_signal_evaluation.py)
+  — 500 ms scheduler, causal horizon maturation, and bounded async writer
+- [`price_collector/db.py`](price_collector/db.py) — idempotent matured-evaluation
+  batches and bounded retention deletion
 - [`price_collector/api.py`](price_collector/api.py) — FastAPI route

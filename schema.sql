@@ -417,6 +417,278 @@ CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
 CREATE INDEX IF NOT EXISTS binance_futures_oi_5m_effective_market_idx
     ON binance_futures_oi_5m_summaries (effective_market_id);
 
+-- Matured shadow forecasts are internal model evidence. They are written by
+-- the standalone shadow worker and are deliberately unavailable to the API
+-- reader until a later read-only reporting contract is designed.
+CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
+    selection_schema_version INTEGER NOT NULL,
+    selection_policy_version TEXT NOT NULL,
+    selection_fingerprint_sha256 TEXT NOT NULL,
+    selection_artifact_sha256 TEXT NOT NULL,
+    selection_evidence_end_ms BIGINT NOT NULL,
+
+    model_version TEXT NOT NULL,
+    beta NUMERIC(38, 18) NOT NULL,
+
+    generated_ms BIGINT NOT NULL,
+    target_ms BIGINT NOT NULL,
+    matured_ms BIGINT NOT NULL,
+    horizon_ms BIGINT NOT NULL,
+
+    valid BOOLEAN NOT NULL,
+    status TEXT NOT NULL,
+    invalid_reasons TEXT[] NOT NULL,
+    state TEXT NOT NULL,
+
+    market_id BIGINT NOT NULL,
+    market_start_ms BIGINT NOT NULL,
+    market_end_ms BIGINT NOT NULL,
+    ms_to_market_end BIGINT NOT NULL,
+    full_horizon_before_market_end BOOLEAN NOT NULL,
+
+    chainlink_at_forecast NUMERIC(38, 18),
+    chainlink_at_forecast_source_timestamp_ms BIGINT,
+    chainlink_at_forecast_received_ms BIGINT,
+
+    projected_chainlink NUMERIC(38, 18),
+    pending_move NUMERIC(38, 18),
+    pending_move_bps NUMERIC(38, 18),
+    direction TEXT,
+
+    futures_now NUMERIC(38, 18),
+    futures_now_source_timestamp_ms BIGINT,
+    futures_now_received_ms BIGINT,
+
+    futures_reference NUMERIC(38, 18),
+    futures_reference_source_timestamp_ms BIGINT,
+    futures_reference_received_ms BIGINT,
+    futures_reference_target_ms BIGINT,
+    futures_reference_gap_ms BIGINT,
+
+    futures_received_age_ms BIGINT,
+    chainlink_received_age_ms BIGINT,
+
+    actual_chainlink NUMERIC(38, 18),
+    actual_chainlink_source_timestamp_ms BIGINT,
+    actual_chainlink_received_ms BIGINT,
+    actual_chainlink_age_at_target_ms BIGINT,
+
+    forecast_error NUMERIC(38, 18),
+    baseline_error NUMERIC(38, 18),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (model_version, generated_ms, horizon_ms),
+
+    CHECK (selection_schema_version > 0),
+    CHECK (btrim(selection_policy_version) <> ''),
+    CHECK (selection_fingerprint_sha256 ~ '^[0-9a-f]{64}$'),
+    CHECK (selection_artifact_sha256 ~ '^[0-9a-f]{64}$'),
+    CHECK (
+        selection_evidence_end_ms >= 0
+        AND selection_evidence_end_ms <= generated_ms
+    ),
+    CHECK (btrim(model_version) <> ''),
+    CHECK (beta >= 0 AND beta <> 'NaN'::NUMERIC),
+    CHECK (generated_ms >= 0),
+    CHECK (horizon_ms > 0),
+    CHECK (target_ms = generated_ms + horizon_ms),
+    CHECK (matured_ms >= target_ms),
+    CHECK (btrim(status) <> ''),
+    CHECK (valid = (status = 'valid')),
+    CHECK (array_position(invalid_reasons, NULL) IS NULL),
+    CHECK (
+        (valid AND cardinality(invalid_reasons) = 0)
+        OR (NOT valid AND cardinality(invalid_reasons) > 0)
+    ),
+    CHECK (btrim(state) <> ''),
+    CHECK (market_id >= 0),
+    CHECK (market_start_ms = market_id * 300000),
+    CHECK (market_end_ms = market_start_ms + 300000),
+    CHECK (
+        generated_ms >= market_start_ms
+        AND generated_ms < market_end_ms
+    ),
+    CHECK (ms_to_market_end = market_end_ms - generated_ms),
+    CHECK (full_horizon_before_market_end = (target_ms <= market_end_ms)),
+    CHECK (
+        (
+            chainlink_at_forecast IS NULL
+            AND chainlink_at_forecast_source_timestamp_ms IS NULL
+            AND chainlink_at_forecast_received_ms IS NULL
+        )
+        OR (
+            chainlink_at_forecast IS NOT NULL
+            AND chainlink_at_forecast > 0
+            AND chainlink_at_forecast <> 'NaN'::NUMERIC
+            AND chainlink_at_forecast_received_ms IS NOT NULL
+            AND chainlink_at_forecast_received_ms >= 0
+            AND (
+                chainlink_at_forecast_source_timestamp_ms IS NULL
+                OR chainlink_at_forecast_source_timestamp_ms >= 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            futures_now IS NULL
+            AND futures_now_source_timestamp_ms IS NULL
+            AND futures_now_received_ms IS NULL
+        )
+        OR (
+            futures_now IS NOT NULL
+            AND futures_now > 0
+            AND futures_now <> 'NaN'::NUMERIC
+            AND futures_now_received_ms IS NOT NULL
+            AND futures_now_received_ms >= 0
+            AND (
+                futures_now_source_timestamp_ms IS NULL
+                OR futures_now_source_timestamp_ms >= 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            futures_reference IS NULL
+            AND futures_reference_source_timestamp_ms IS NULL
+            AND futures_reference_received_ms IS NULL
+        )
+        OR (
+            futures_reference IS NOT NULL
+            AND futures_reference > 0
+            AND futures_reference <> 'NaN'::NUMERIC
+            AND futures_reference_received_ms IS NOT NULL
+            AND futures_reference_received_ms >= 0
+            AND (
+                futures_reference_source_timestamp_ms IS NULL
+                OR futures_reference_source_timestamp_ms >= 0
+            )
+        )
+    ),
+    CHECK (
+        futures_reference_target_ms IS NULL
+        OR futures_reference_target_ms >= 0
+    ),
+    CHECK (
+        futures_reference_gap_ms IS NULL
+        OR (
+            futures_reference_target_ms IS NOT NULL
+            AND futures_reference_gap_ms >= 0
+        )
+    ),
+    CHECK (futures_received_age_ms IS NULL OR futures_received_age_ms >= 0),
+    CHECK (chainlink_received_age_ms IS NULL OR chainlink_received_age_ms >= 0),
+    CHECK (
+        NOT valid
+        OR chainlink_at_forecast_received_ms <= generated_ms
+    ),
+    CHECK (
+        NOT valid
+        OR futures_now_received_ms <= generated_ms
+    ),
+    CHECK (
+        (
+            actual_chainlink IS NULL
+            AND actual_chainlink_source_timestamp_ms IS NULL
+            AND actual_chainlink_received_ms IS NULL
+            AND actual_chainlink_age_at_target_ms IS NULL
+        )
+        OR (
+            actual_chainlink IS NOT NULL
+            AND actual_chainlink > 0
+            AND actual_chainlink <> 'NaN'::NUMERIC
+            AND actual_chainlink_received_ms IS NOT NULL
+            AND actual_chainlink_received_ms >= 0
+            AND actual_chainlink_received_ms <= target_ms
+            AND actual_chainlink_age_at_target_ms IS NOT NULL
+            AND actual_chainlink_age_at_target_ms
+                = target_ms - actual_chainlink_received_ms
+            AND (
+                actual_chainlink_source_timestamp_ms IS NULL
+                OR actual_chainlink_source_timestamp_ms >= 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            NOT valid
+            AND projected_chainlink IS NULL
+            AND pending_move IS NULL
+            AND pending_move_bps IS NULL
+            AND direction IS NULL
+        )
+        OR (
+            valid
+            AND chainlink_at_forecast IS NOT NULL
+            AND futures_now IS NOT NULL
+            AND futures_reference IS NOT NULL
+            AND futures_reference_target_ms IS NOT NULL
+            AND futures_reference_gap_ms IS NOT NULL
+            AND projected_chainlink IS NOT NULL
+            AND projected_chainlink > 0
+            AND projected_chainlink <> 'NaN'::NUMERIC
+            AND pending_move IS NOT NULL
+            AND pending_move <> 'NaN'::NUMERIC
+            AND pending_move_bps IS NOT NULL
+            AND pending_move_bps <> 'NaN'::NUMERIC
+            AND direction IS NOT NULL
+            AND direction IN ('up', 'down', 'flat')
+            AND abs(
+                pending_move - (projected_chainlink - chainlink_at_forecast)
+            ) <= 0.000000000000000002
+            AND abs(
+                pending_move_bps
+                - (pending_move / chainlink_at_forecast * 10000)
+            ) <= 0.000000000000000010
+            AND (
+                (pending_move > 0 AND direction = 'up')
+                OR (pending_move < 0 AND direction = 'down')
+                OR (pending_move = 0 AND direction = 'flat')
+            )
+        )
+    ),
+    CHECK (
+        (
+            (projected_chainlink IS NULL OR actual_chainlink IS NULL)
+            AND forecast_error IS NULL
+        )
+        OR (
+            projected_chainlink IS NOT NULL
+            AND actual_chainlink IS NOT NULL
+            AND forecast_error IS NOT NULL
+            AND forecast_error <> 'NaN'::NUMERIC
+            AND abs(
+                forecast_error - (projected_chainlink - actual_chainlink)
+            ) <= 0.000000000000000002
+        )
+    ),
+    CHECK (
+        (
+            (chainlink_at_forecast IS NULL OR actual_chainlink IS NULL)
+            AND baseline_error IS NULL
+        )
+        OR (
+            chainlink_at_forecast IS NOT NULL
+            AND actual_chainlink IS NOT NULL
+            AND baseline_error IS NOT NULL
+            AND baseline_error <> 'NaN'::NUMERIC
+            AND abs(
+                baseline_error - (chainlink_at_forecast - actual_chainlink)
+            ) <= 0.000000000000000002
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_generated_idx
+    ON shadow_signal_evaluations (generated_ms);
+
+CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_market_model_idx
+    ON shadow_signal_evaluations (market_id, model_version, generated_ms);
+
+REVOKE ALL ON TABLE shadow_signal_evaluations
+    FROM PUBLIC, price_reader, price_writer;
+GRANT SELECT, INSERT, DELETE ON TABLE shadow_signal_evaluations TO price_writer;
+
 -- High-resolution evidence is isolated from the public application schema.
 -- The writer may manage partitions only inside this schema; the API reader is
 -- intentionally not granted access.

@@ -225,9 +225,9 @@ Each value has this shape:
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
 
-Shadow-signal Phase 4 can also create `btc:live:chainlink_shadow`. That key is a
+Shadow-signal Phases 4 and 5 can also create `btc:live:chainlink_shadow`. That key is a
 typed shadow projection rather than a source price, and it expires 1.5 to 2.0
-seconds after each write. It is not returned by the API in this phase.
+seconds after each write. It is not returned by the API in either phase.
 
 ### Shadow-signal design engine
 
@@ -333,12 +333,51 @@ forecast is never carried forward. If the worker dies, the short TTL removes
 the key while the three source-price keys and producer collectors continue
 normally.
 
-This checkpoint remains Redis-only. Phase 4 adds no PostgreSQL evaluation rows,
-no matured-outcome evaluator, no API response field, and no dashboard code.
-Those remain separate build-order steps 5, 6, and 7 in `engine.md`.
-This shadow-signal phase is unrelated to the still-deferred high-resolution raw
-partition-boundary and retention validation described above, and does not
-validate those production risks.
+Shadow-signal Phase 5 retains that live contract and adds independently opt-in
+matured evaluations. Once per entered epoch-aligned 500 ms bucket, the worker
+schedules every configured candidate attempt, including invalid attempts. It
+does not backfill buckets missed while paused. Each candidate matures at its own
+`target_ms = generated_ms + horizon_ms` against the newest Chainlink
+observation whose `received_ms` is no later than the target. A Chainlink update
+received after the target is excluded even if it is visible by the maturation
+tick.
+
+`generated_ms` is captured immediately after the Redis `MGET`, so it represents
+when the forecast inputs are locally available. A future-dated input is stored
+as an invalid evaluation rather than scored. A gap longer than two 100 ms poll
+intervals also invalidates outstanding actuals across the gap. This live target
+is exact over cache states returned by successful worker observations; because
+Redis retains only the latest value, a state created and overwritten entirely
+between polls cannot be reconstructed. The raw replay remains the event-complete
+authority for selection and fine-grained receive-time analysis.
+
+Matured attempts enter a bounded nonblocking queue and are batch-inserted into
+`shadow_signal_evaluations`. Database connection, retry, retention, and shutdown
+work never runs on the 100 ms publication path. If the queue fills during an
+outage, its oldest queued row is dropped rather than blocking; a rate-limited
+warning is emitted on the first and every hundredth drop, and Redis signal
+generation continues. Failed batches are requeued ahead of newer rows and
+retried safely because inserts are idempotent on
+`(model_version, generated_ms, horizon_ms)`, and the default derived-evidence
+retention is seven days. Invalid attempts are stored to preserve an honest
+coverage denominator. For valid attempts with an actual, signed
+`forecast_error` is `projected_chainlink - actual_chainlink` and signed
+`baseline_error` is the no-change result
+`chainlink_at_forecast - actual_chainlink`.
+
+Move-size, direction, expiry, and sampled-volatility slices can be derived from
+these rows. Reconnect slices require a receive-time join to
+`raw_capture.feed_sessions`; materialize any longer-lived reconnect report
+before the separate 72-hour raw-capture retention removes that join evidence.
+
+The evaluation table is internal: `price_writer` receives only `SELECT`,
+`INSERT`, and retention `DELETE`, while `price_reader` and `PUBLIC` are
+explicitly revoked. Phase 5 adds no API response and no dashboard code; those
+remain shadow-signal build-order steps 6 and 7 in `engine.md`. This
+shadow-signal Phase 5 is distinct from the Binance futures-collector Phase 5
+source cutover and from the still-deferred high-resolution raw-capture Phase 4
+partition and 72-hour-retention validation. It does not validate either
+rollout.
 
 ## API
 
@@ -402,6 +441,7 @@ deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
+SHADOW_SIGNAL_PHASE5_MIGRATION.md  Matured-evaluation rollout and rollback
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 LIVE_DATA.md           Live BTC extraction, cache, and dashboard consumption guide
 requirements.txt       Python runtime and test dependencies
@@ -452,8 +492,10 @@ environment files:
   `deployment/api.env.example`, contains only the reader database URL and Redis
   settings.
 - `/etc/price-collector/shadow-signal.env`, created from
-  `deployment/shadow-signal.env.example`, contains Redis and pinned shadow
-  decision settings only. It must contain neither `DATABASE_URL` nor
+  `deployment/shadow-signal.env.example`, contains Redis, pinned shadow
+  decision settings, and disabled evaluation controls. The default example has
+  no database credential. The Phase 5 migration adds `DATABASE_URL` only while
+  matured evaluation is enabled; this file must never contain
   `READ_DATABASE_URL`.
 
 The shadow example remains disabled. Enabling it requires exact, distinct
@@ -468,6 +510,18 @@ SHADOW_SIGNAL_SELECTION_SHA256=0000000000000000000000000000000000000000000000000
 SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=/var/lib/price-collector/shadow-decisions/replay-configuration.json
 SHADOW_SIGNAL_POLL_MS=100
 SHADOW_SIGNAL_TTL_MS=2000
+SHADOW_SIGNAL_EVALUATION_ENABLED=false
+SHADOW_SIGNAL_EVALUATION_INTERVAL_MS=500
+SHADOW_SIGNAL_EVALUATION_QUEUE_MAX=5000
+SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS=500
+SHADOW_SIGNAL_EVALUATION_FLUSH_MS=1000
+SHADOW_SIGNAL_EVALUATION_RETRY_MS=5000
+SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10
+SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=5
+SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=5
+SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS=168
+SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS=300
+SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS=5000
 ```
 
 The poll cadence is fixed at 100 ms. The TTL is constrained to 1,500 through
@@ -476,6 +530,9 @@ skew, candidate, and beta settings come from the verified replay configuration;
 they are not independent live overrides. Follow the Phase 4 procedure in
 [`OPERATIONS.md`](OPERATIONS.md) to promote immutable evidence, replace the
 placeholder paths and hash, and only then set `SHADOW_SIGNAL_ENABLED=true`.
+Keep `SHADOW_SIGNAL_EVALUATION_ENABLED=false` until the Phase 5 schema and
+writer URL have been installed using
+[`SHADOW_SIGNAL_PHASE5_MIGRATION.md`](SHADOW_SIGNAL_PHASE5_MIGRATION.md).
 
 At minimum, replace the database passwords in:
 
@@ -672,6 +729,11 @@ GRANT USAGE, SELECT ON SEQUENCES TO price_writer;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
 GRANT SELECT ON TABLES TO price_reader;
+
+REVOKE ALL ON TABLE shadow_signal_evaluations
+FROM PUBLIC, price_reader, price_writer;
+GRANT SELECT, INSERT, DELETE ON TABLE shadow_signal_evaluations
+TO price_writer;
 \q
 ```
 
@@ -679,6 +741,8 @@ GRANT SELECT ON TABLES TO price_reader;
 grant `price_reader` or `PUBLIC` access to it. Its narrowly scoped
 `price_writer` ownership and `CREATE` permission are for raw partition
 maintenance only and do not grant DDL access in `public`.
+The explicit shadow-evaluation revoke must remain after the broad first-install
+grants so the API reader cannot access internal model evidence.
 
 ### Configure Redis
 
@@ -709,9 +773,12 @@ sudo nano /etc/price-collector/api.env
 The guarded install commands create each file only when it does not already
 exist, so rerunning them cannot replace production secrets with example values.
 Replace `REPLACE_ME` on the first deployment. Keep writer credentials out of
-`api.env`, and keep all database credentials out of `shadow-signal.env`. Leave
-the shadow worker disabled until the Phase 4 evidence-promotion procedure has
-replaced its placeholder decision settings.
+`api.env`, and keep all database credentials out of `shadow-signal.env` until
+the Phase 5 migration copies in the existing writer `DATABASE_URL`. Never put
+`READ_DATABASE_URL` in the shadow file. Leave the shadow worker disabled until
+the Phase 4 evidence-promotion procedure has replaced its placeholder decision
+settings, and leave evaluations disabled until the Phase 5 schema has been
+applied.
 
 ### Install systemd Units
 
@@ -729,7 +796,9 @@ sudo systemctl enable --now price-collector price-collector-polymarket-chainlink
 
 The command installs the shadow unit but deliberately does not enable or start
 it. Activate that unit only after its trusted evidence and dedicated environment
-have passed the Phase 4 checks in [`OPERATIONS.md`](OPERATIONS.md).
+have passed the Phase 4 checks in [`OPERATIONS.md`](OPERATIONS.md). Enable its
+PostgreSQL evaluations separately with
+[`SHADOW_SIGNAL_PHASE5_MIGRATION.md`](SHADOW_SIGNAL_PHASE5_MIGRATION.md).
 
 ### Verify the Deployment
 

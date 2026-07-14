@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from math import isfinite
 from typing import Any, Mapping, Optional, Sequence
 
 import asyncpg
@@ -14,6 +15,8 @@ RAW_CAPTURE_SCHEMA = "raw_capture"
 RAW_CAPTURE_PARTITION_WIDTH_MS = 6 * 60 * 60 * 1000
 RAW_CAPTURE_MAINTENANCE_LOCK_ID = 0x5241574341505455
 RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS = 5
+SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS = 5
+SHADOW_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS = 5
 
 RAW_FUTURES_TRACE_COLUMNS = (
     "bucket_start_ms",
@@ -44,6 +47,60 @@ RAW_CHAINLINK_EVENT_COLUMNS = (
     "provider_message_ms",
     "price",
 )
+
+SHADOW_SIGNAL_EVALUATION_COLUMNS = (
+    "selection_schema_version",
+    "selection_policy_version",
+    "selection_fingerprint_sha256",
+    "selection_artifact_sha256",
+    "selection_evidence_end_ms",
+    "model_version",
+    "beta",
+    "generated_ms",
+    "target_ms",
+    "matured_ms",
+    "horizon_ms",
+    "valid",
+    "status",
+    "invalid_reasons",
+    "state",
+    "market_id",
+    "market_start_ms",
+    "market_end_ms",
+    "ms_to_market_end",
+    "full_horizon_before_market_end",
+    "chainlink_at_forecast",
+    "chainlink_at_forecast_source_timestamp_ms",
+    "chainlink_at_forecast_received_ms",
+    "projected_chainlink",
+    "pending_move",
+    "pending_move_bps",
+    "direction",
+    "futures_now",
+    "futures_now_source_timestamp_ms",
+    "futures_now_received_ms",
+    "futures_reference",
+    "futures_reference_source_timestamp_ms",
+    "futures_reference_received_ms",
+    "futures_reference_target_ms",
+    "futures_reference_gap_ms",
+    "futures_received_age_ms",
+    "chainlink_received_age_ms",
+    "actual_chainlink",
+    "actual_chainlink_source_timestamp_ms",
+    "actual_chainlink_received_ms",
+    "actual_chainlink_age_at_target_ms",
+    "forecast_error",
+    "baseline_error",
+)
+
+SHADOW_SIGNAL_EVALUATION_INSERT_SQL = f"""
+    INSERT INTO shadow_signal_evaluations (
+        {", ".join(SHADOW_SIGNAL_EVALUATION_COLUMNS)}
+    )
+    VALUES ({", ".join(f"${index}" for index in range(1, len(SHADOW_SIGNAL_EVALUATION_COLUMNS) + 1))})
+    ON CONFLICT (model_version, generated_ms, horizon_ms) DO NOTHING
+"""
 
 
 @dataclass(frozen=True)
@@ -162,6 +219,45 @@ async def create_raw_capture_pool(database_url: str) -> asyncpg.Pool:
         timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS,
         command_timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS,
         server_settings={"application_name": "price_collector_raw_capture"},
+    )
+
+
+def _validated_database_timeout(value: float, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be a number")
+    if value <= 0 or (isinstance(value, float) and not isfinite(value)):
+        raise ValueError(f"{field_name} must be positive and finite")
+    return value
+
+
+async def create_shadow_evaluation_pool(
+    database_url: str,
+    *,
+    connect_timeout_seconds: float = (
+        SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
+    ),
+    command_timeout_seconds: float = (
+        SHADOW_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS
+    ),
+) -> asyncpg.Pool:
+    """Create the lazy single-connection pool for noncritical evaluations."""
+    connect_timeout_seconds = _validated_database_timeout(
+        connect_timeout_seconds,
+        "connect_timeout_seconds",
+    )
+    command_timeout_seconds = _validated_database_timeout(
+        command_timeout_seconds,
+        "command_timeout_seconds",
+    )
+    return await asyncpg.create_pool(
+        database_url,
+        min_size=0,
+        max_size=1,
+        timeout=connect_timeout_seconds,
+        command_timeout=command_timeout_seconds,
+        server_settings={
+            "application_name": "price_collector_shadow_evaluation"
+        },
     )
 
 
@@ -641,6 +737,185 @@ async def create_raw_capture_backend(
         pool,
         retention_hours=retention_hours,
         max_relation_mb=max_relation_mb,
+    )
+
+
+def shadow_signal_evaluation_row(record: Any) -> tuple[Any, ...]:
+    """Map a typed matured evaluation to the fixed PostgreSQL row contract."""
+    decimal_fields = (
+        "beta",
+        "chainlink_at_forecast",
+        "projected_chainlink",
+        "pending_move",
+        "pending_move_bps",
+        "futures_now",
+        "futures_reference",
+        "actual_chainlink",
+        "forecast_error",
+        "baseline_error",
+    )
+    for field_name in decimal_fields:
+        value = getattr(record, field_name)
+        if value is not None and not isinstance(value, Decimal):
+            raise TypeError(f"{field_name} must be Decimal or None")
+
+    return (
+        record.selection_schema_version,
+        record.selection_policy_version,
+        record.selection_fingerprint_sha256,
+        record.selection_artifact_sha256,
+        record.selection_evidence_end_ms,
+        record.model_version,
+        record.beta,
+        record.generated_ms,
+        record.target_ms,
+        record.matured_ms,
+        record.horizon_ms,
+        record.valid,
+        record.status,
+        tuple(record.invalid_reasons),
+        record.state,
+        record.market_id,
+        record.market_start_ms,
+        record.market_end_ms,
+        record.ms_to_market_end,
+        record.full_horizon_before_market_end,
+        record.chainlink_at_forecast,
+        record.chainlink_at_forecast_source_timestamp_ms,
+        record.chainlink_at_forecast_received_ms,
+        record.projected_chainlink,
+        record.pending_move,
+        record.pending_move_bps,
+        record.direction,
+        record.futures_now,
+        record.futures_now_source_timestamp_ms,
+        record.futures_now_received_ms,
+        record.futures_reference,
+        record.futures_reference_source_timestamp_ms,
+        record.futures_reference_received_ms,
+        record.futures_reference_target_ms,
+        record.futures_reference_gap_ms,
+        record.futures_received_age_ms,
+        record.chainlink_received_age_ms,
+        record.actual_chainlink,
+        record.actual_chainlink_source_timestamp_ms,
+        record.actual_chainlink_received_ms,
+        record.actual_chainlink_age_at_target_ms,
+        record.forecast_error,
+        record.baseline_error,
+    )
+
+
+async def insert_shadow_signal_evaluations(
+    connection: asyncpg.Connection,
+    rows: Sequence[tuple[Any, ...]],
+) -> None:
+    """Insert one batch idempotently without retrying ambiguous failures."""
+    if not rows:
+        return
+    await connection.executemany(
+        SHADOW_SIGNAL_EVALUATION_INSERT_SQL,
+        rows,
+    )
+
+
+class AsyncpgShadowEvaluationBackend:
+    """Single-pool persistence boundary used by the bounded async writer."""
+
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        *,
+        connect_timeout_seconds: float = (
+            SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
+        ),
+    ) -> None:
+        self._pool = pool
+        self._connect_timeout_seconds = _validated_database_timeout(
+            connect_timeout_seconds,
+            "connect_timeout_seconds",
+        )
+
+    async def write_evaluations(self, records: Sequence[Any]) -> None:
+        rows = [shadow_signal_evaluation_row(record) for record in records]
+        if not rows:
+            return
+        async with self._pool.acquire(
+            timeout=self._connect_timeout_seconds
+        ) as connection:
+            await insert_shadow_signal_evaluations(connection, rows)
+
+    async def write(self, records: Sequence[Any]) -> None:
+        """Compatibility alias for generic bounded batch writers."""
+        await self.write_evaluations(records)
+
+    async def delete_expired(
+        self,
+        *,
+        cutoff_generated_ms: int,
+        limit: int = 10_000,
+    ) -> int:
+        if (
+            isinstance(cutoff_generated_ms, bool)
+            or not isinstance(cutoff_generated_ms, int)
+        ):
+            raise TypeError("cutoff_generated_ms must be an integer")
+        if cutoff_generated_ms < 0:
+            raise ValueError("cutoff_generated_ms must be non-negative")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+
+        async with self._pool.acquire(
+            timeout=self._connect_timeout_seconds
+        ) as connection:
+            status = await connection.execute(
+                """
+                WITH expired AS (
+                    SELECT ctid
+                    FROM shadow_signal_evaluations
+                    WHERE generated_ms < $1
+                    ORDER BY generated_ms
+                    LIMIT $2
+                )
+                DELETE FROM shadow_signal_evaluations AS evaluations
+                USING expired
+                WHERE evaluations.ctid = expired.ctid
+                """,
+                cutoff_generated_ms,
+                limit,
+            )
+
+        command, separator, count = status.partition(" ")
+        if command != "DELETE" or not separator or not count.isdigit():
+            raise RuntimeError(
+                f"unexpected shadow evaluation delete status: {status!r}"
+            )
+        return int(count)
+
+    async def close(self) -> None:
+        await self._pool.close()
+
+
+async def create_shadow_evaluation_backend(
+    database_url: str,
+    *,
+    connect_timeout_seconds: float = (
+        SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
+    ),
+    command_timeout_seconds: float = (
+        SHADOW_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS
+    ),
+) -> AsyncpgShadowEvaluationBackend:
+    pool = await create_shadow_evaluation_pool(
+        database_url,
+        connect_timeout_seconds=connect_timeout_seconds,
+        command_timeout_seconds=command_timeout_seconds,
+    )
+    return AsyncpgShadowEvaluationBackend(
+        pool,
+        connect_timeout_seconds=connect_timeout_seconds,
     )
 
 

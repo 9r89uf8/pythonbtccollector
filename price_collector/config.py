@@ -93,6 +93,61 @@ class Settings(BaseSettings):
     SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH: Optional[str] = None
     SHADOW_SIGNAL_POLL_MS: int = Field(default=100, ge=100, le=100)
     SHADOW_SIGNAL_TTL_MS: int = Field(default=2_000, ge=1_500, le=2_000)
+    SHADOW_SIGNAL_EVALUATION_ENABLED: bool = False
+    SHADOW_SIGNAL_EVALUATION_INTERVAL_MS: int = Field(
+        default=500,
+        ge=500,
+        le=500,
+    )
+    SHADOW_SIGNAL_EVALUATION_QUEUE_MAX: int = Field(
+        default=5_000,
+        gt=0,
+        le=100_000,
+    )
+    SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS: int = Field(
+        default=500,
+        gt=0,
+        le=10_000,
+    )
+    SHADOW_SIGNAL_EVALUATION_FLUSH_MS: int = Field(
+        default=1_000,
+        ge=100,
+        le=60_000,
+    )
+    SHADOW_SIGNAL_EVALUATION_RETRY_MS: int = Field(
+        default=5_000,
+        ge=100,
+        le=300_000,
+    )
+    SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=60.0,
+    )
+    SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS: float = Field(
+        default=5.0,
+        gt=0.0,
+        le=60.0,
+    )
+    SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS: float = Field(
+        default=5.0,
+        gt=0.0,
+        le=60.0,
+    )
+    SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS: int = Field(
+        default=168,
+        ge=24,
+    )
+    SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS: int = Field(
+        default=300,
+        ge=60,
+        le=86_400,
+    )
+    SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS: int = Field(
+        default=5_000,
+        gt=0,
+        le=100_000,
+    )
 
     DATABASE_URL: Optional[str] = None
     READ_DATABASE_URL: Optional[str] = None
@@ -163,6 +218,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "enabled shadow signal requires " + ", ".join(missing)
                 )
+            if self.READ_DATABASE_URL is not None:
+                raise ValueError(
+                    "enabled shadow signal must not receive READ_DATABASE_URL"
+                )
 
         selection_path = normalized_paths.get("SHADOW_SIGNAL_SELECTION_PATH")
         replay_path = normalized_paths.get(
@@ -177,4 +236,44 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SHADOW_SIGNAL_TTL_MS must exceed SHADOW_SIGNAL_POLL_MS"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_shadow_signal_evaluation_settings(self) -> "Settings":
+        if (
+            self.SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS
+            > self.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX
+        ):
+            raise ValueError(
+                "SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS must be less than "
+                "or equal to SHADOW_SIGNAL_EVALUATION_QUEUE_MAX"
+            )
+        maximum_candidates = 5
+        buckets_per_retention_check = (
+            self.SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS * 1_000
+            + self.SHADOW_SIGNAL_EVALUATION_INTERVAL_MS
+            - 1
+        ) // self.SHADOW_SIGNAL_EVALUATION_INTERVAL_MS
+        minimum_retention_batch_rows = (
+            buckets_per_retention_check * maximum_candidates
+        )
+        if (
+            self.SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS
+            < minimum_retention_batch_rows
+        ):
+            raise ValueError(
+                "SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS must cover "
+                "five candidates at the configured evaluation and retention "
+                "check cadences"
+            )
+        if self.SHADOW_SIGNAL_EVALUATION_ENABLED:
+            if not self.SHADOW_SIGNAL_ENABLED:
+                raise ValueError(
+                    "SHADOW_SIGNAL_EVALUATION_ENABLED requires "
+                    "SHADOW_SIGNAL_ENABLED=true"
+                )
+            if self.DATABASE_URL is None or not self.DATABASE_URL.strip():
+                raise ValueError(
+                    "SHADOW_SIGNAL_EVALUATION_ENABLED requires DATABASE_URL"
+                )
         return self

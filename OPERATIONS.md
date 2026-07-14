@@ -2720,6 +2720,9 @@ This is Phase 4 in the shadow-signal build order in `engine.md`. It is unrelated
 to the still-deferred raw-capture partition and retention validation also named
 Phase 4 elsewhere in this guide.
 
+For a standalone, step-by-step migration checklist, use
+[`SHADOW_SIGNAL_PHASE4_MIGRATION.md`](SHADOW_SIGNAL_PHASE4_MIGRATION.md).
+
 The standalone `price-collector-shadow-signal` service reads
 `btc:live:futures` and `btc:live:chainlink` together every 100 ms, runs every
 candidate from the accepted Phase 3 decision, and publishes only its frozen
@@ -3051,6 +3054,20 @@ redis-cli --raw EXISTS btc:live:chainlink_shadow
 
 The final command must print `0`. Leave the immutable evidence and dedicated
 environment in place for diagnosis or a later restart.
+
+## Shadow-Signal Phase 5 Matured Evaluations
+
+This is step 5 of the shadow-signal build order in `engine.md`, not the Binance
+futures source-cutover phase with the same number. It adds the internal
+`shadow_signal_evaluations` table and a bounded, nonblocking writer to the
+existing standalone shadow worker. It does not add an API field or dashboard
+code.
+
+Use the schema-first, copy/paste rollout and independent rollback in
+[`SHADOW_SIGNAL_PHASE5_MIGRATION.md`](SHADOW_SIGNAL_PHASE5_MIGRATION.md). Keep
+`SHADOW_SIGNAL_EVALUATION_ENABLED=false` until that procedure has applied the
+schema, installed the writer URL without replacing trusted artifact settings,
+and verified the exact table grants.
 
 ## Redis Spot Checks
 

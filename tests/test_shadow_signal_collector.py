@@ -41,18 +41,21 @@ MODELS = (
 
 
 class FakeRedis:
-    def __init__(self, *, mget_error=None, set_error=None):
+    def __init__(self, *, mget_error=None, set_error=None, on_mget=None):
         self.data = {}
         self.mget_calls = []
         self.set_calls = []
         self.mget_error = mget_error
         self.set_error = set_error
+        self.on_mget = on_mget
         self.closed = False
 
     async def mget(self, keys):
         self.mget_calls.append(list(keys))
         if self.mget_error is not None:
             raise self.mget_error
+        if self.on_mget is not None:
+            self.on_mget()
         return [self.data.get(key) for key in keys]
 
     async def set(self, key, value, **options):
@@ -164,6 +167,16 @@ def test_each_tick_uses_one_ordered_mget_and_one_atomic_ttl_set():
     assert decode_shadow_signal(encoded) == payload
     assert payload.valid is False
     assert payload.projected_chainlink is None
+
+
+def test_generated_time_is_stamped_after_redis_inputs_are_available():
+    clock = [BASE_MS]
+    redis = FakeRedis(on_mget=lambda: clock.__setitem__(0, BASE_MS + 7))
+    worker, _ = make_worker(redis=redis, now_ms=lambda: clock[0])
+
+    payload = asyncio.run(worker.run_once())
+
+    assert payload.generated_ms == BASE_MS + 7
 
 
 def test_worker_warms_then_publishes_valid_and_overwrites_it_when_stale():
@@ -526,4 +539,200 @@ def test_enabled_collector_loads_decision_once_then_closes_cache(monkeypatch):
     )
     assert load_calls[0][1]["expected_selection_sha256"] == "c" * 64
     assert factory_calls == [settings]
+    assert redis.closed is True
+
+
+class FakeEvaluationScheduler:
+    def __init__(self, *, matured=(), error=None, redis=None, **configuration):
+        self.matured = tuple(matured)
+        self.error = error
+        self.redis = redis
+        self.configuration = configuration
+        self.calls = []
+        self.observation_gap_count = 0
+
+    def observe(self, observation, *, chainlink):
+        self.calls.append(
+            {
+                "observation": observation,
+                "chainlink": chainlink,
+                "redis_writes_before_evaluation": (
+                    None if self.redis is None else len(self.redis.set_calls)
+                ),
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.matured
+
+
+class FakeEvaluationWriter:
+    def __init__(self, **configuration):
+        self.configuration = configuration
+        self.records = []
+        self.started = 0
+        self.closed = 0
+
+    def start(self):
+        self.started += 1
+
+    def offer_nowait(self, record):
+        self.records.append(record)
+
+    async def close(self):
+        self.closed += 1
+
+
+def test_worker_enqueues_matured_evaluations_after_live_publication():
+    redis = FakeRedis()
+    records = (object(), object(), object())
+    scheduler = FakeEvaluationScheduler(matured=records, redis=redis)
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+    set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
+    set_price(redis, CHAINLINK_LIVE_KEY, "50000", received_ms=BASE_MS)
+
+    payload = run_once(worker, BASE_MS)
+
+    assert payload is not None
+    assert scheduler.calls[0]["observation"].generated_ms == BASE_MS
+    assert scheduler.calls[0]["chainlink"].value == Decimal("50000")
+    assert scheduler.calls[0]["redis_writes_before_evaluation"] == 1
+    assert writer.records == list(records)
+
+
+def test_evaluation_failure_does_not_interrupt_live_publication():
+    redis = FakeRedis()
+    scheduler = FakeEvaluationScheduler(
+        error=RuntimeError("evaluation defect"),
+    )
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+
+    payload = run_once(worker, BASE_MS)
+
+    assert payload is not None
+    assert len(redis.set_calls) == 1
+    assert writer.records == []
+
+
+def test_worker_requires_scheduler_and_writer_as_one_optional_pair():
+    redis = FakeRedis()
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        collector.ShadowSignalWorker(
+            live_cache=LiveCache(redis_client=redis),
+            activated=activated_selection(),
+            ttl_ms=2_000,
+            evaluation_scheduler=FakeEvaluationScheduler(),
+        )
+
+
+def test_enabled_evaluation_runtime_is_wired_and_closed(monkeypatch):
+    settings = SimpleNamespace(
+        LOG_LEVEL="INFO",
+        APP_ENV="production",
+        SHADOW_SIGNAL_ENABLED=True,
+        SHADOW_SIGNAL_SELECTION_PATH="/trusted/selection.json",
+        SHADOW_SIGNAL_SELECTION_SHA256="c" * 64,
+        SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH="/trusted/replay.json",
+        SHADOW_SIGNAL_TRUSTED_DECISION_DIR="/trusted",
+        SHADOW_SIGNAL_POLL_MS=100,
+        SHADOW_SIGNAL_TTL_MS=2_000,
+        SHADOW_SIGNAL_EVALUATION_ENABLED=True,
+        SHADOW_SIGNAL_EVALUATION_INTERVAL_MS=500,
+        SHADOW_SIGNAL_EVALUATION_QUEUE_MAX=5_000,
+        SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS=500,
+        SHADOW_SIGNAL_EVALUATION_FLUSH_MS=1_000,
+        SHADOW_SIGNAL_EVALUATION_RETRY_MS=5_000,
+        SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10.0,
+        SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=4.0,
+        SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=3.0,
+        SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS=168,
+        SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS=300,
+        SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS=5_000,
+        DATABASE_URL=(
+            "postgresql://price_writer:secret@127.0.0.1/price_collector"
+        ),
+    )
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    schedulers = []
+    writers = []
+    backend_calls = []
+
+    def scheduler_factory(**configuration):
+        scheduler = FakeEvaluationScheduler(**configuration)
+        schedulers.append(scheduler)
+        return scheduler
+
+    def writer_factory(**configuration):
+        writer = FakeEvaluationWriter(**configuration)
+        writers.append(writer)
+        return writer
+
+    async def backend_factory(database_url, **configuration):
+        backend_calls.append((database_url, configuration))
+        return object()
+
+    monkeypatch.setattr(collector, "setup_logging", lambda level: None)
+    monkeypatch.setattr(
+        collector,
+        "load_activated_selection",
+        lambda *args, **kwargs: activated_selection(),
+    )
+    monkeypatch.setattr(
+        collector,
+        "create_shadow_evaluation_backend",
+        backend_factory,
+    )
+
+    asyncio.run(
+        collector.run_collector(
+            settings,
+            live_cache_factory=lambda _settings: cache,
+            evaluation_scheduler_factory=scheduler_factory,
+            evaluation_writer_factory=writer_factory,
+            max_iterations=0,
+        )
+    )
+
+    assert len(schedulers) == 1
+    assert schedulers[0].configuration["cadence_ms"] == 500
+    assert schedulers[0].configuration["max_observation_gap_ms"] == 200
+    provenance = schedulers[0].configuration["provenance"]
+    assert provenance.policy_version == "chronological_holdout_v2"
+    assert provenance.selection_artifact_sha256 == "b" * 64
+    assert len(writers) == 1
+    writer = writers[0]
+    assert writer.started == 1
+    assert writer.closed == 1
+    assert writer.configuration["queue_max_records"] == 5_000
+    assert writer.configuration["batch_max_rows"] == 500
+    assert writer.configuration["retry_ms"] == 5_000
+    assert writer.configuration["retention_ms"] == 604_800_000
+    assert writer.configuration["cleanup_interval_ms"] == 300_000
+    assert writer.configuration["cleanup_batch_rows"] == 5_000
+    asyncio.run(writer.configuration["backend_factory"]())
+    assert backend_calls == [
+        (
+            settings.DATABASE_URL,
+            {
+                "connect_timeout_seconds": 4.0,
+                "command_timeout_seconds": 3.0,
+            },
+        )
+    ]
     assert redis.closed is True
