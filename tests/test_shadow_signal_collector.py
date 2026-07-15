@@ -100,7 +100,16 @@ def make_worker(*, redis=None, primary_index=0, now_ms=None, sleep=None):
     return collector.ShadowSignalWorker(**arguments), redis
 
 
-def set_price(redis, key, value, *, received_ms, source_timestamp_ms=None):
+def set_price(
+    redis,
+    key,
+    value,
+    *,
+    received_ms,
+    source_timestamp_ms=None,
+    publisher_epoch=None,
+    accepted_event_sequence=None,
+):
     redis.data[key] = encode_live_price(
         value=Decimal(value),
         source_timestamp_ms=(
@@ -109,6 +118,8 @@ def set_price(redis, key, value, *, received_ms, source_timestamp_ms=None):
             else source_timestamp_ms
         ),
         received_ms=received_ms,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=accepted_event_sequence,
     )
 
 
@@ -550,6 +561,10 @@ class FakeEvaluationScheduler:
         self.configuration = configuration
         self.calls = []
         self.observation_gap_count = 0
+        self.chainlink_sequence_gap_count = 0
+        self.chainlink_sequence_regression_count = 0
+        self.chainlink_publisher_epoch_change_count = 0
+        self.chainlink_sequence_metadata_loss_count = 0
 
     def observe(self, observation, *, chainlink):
         self.calls.append(
@@ -579,6 +594,9 @@ class FakeEvaluationWriter:
     def offer_nowait(self, record):
         self.records.append(record)
 
+    def offer_cohort_nowait(self, records):
+        self.records.extend(records)
+
     async def close(self):
         self.closed += 1
 
@@ -596,15 +614,52 @@ def test_worker_enqueues_matured_evaluations_after_live_publication():
         evaluation_writer=writer,
     )
     set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
-    set_price(redis, CHAINLINK_LIVE_KEY, "50000", received_ms=BASE_MS)
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    set_price(
+        redis,
+        CHAINLINK_LIVE_KEY,
+        "50000",
+        received_ms=BASE_MS,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=17,
+    )
 
     payload = run_once(worker, BASE_MS)
 
     assert payload is not None
     assert scheduler.calls[0]["observation"].generated_ms == BASE_MS
     assert scheduler.calls[0]["chainlink"].value == Decimal("50000")
+    assert scheduler.calls[0]["chainlink"].publisher_epoch == publisher_epoch
+    assert scheduler.calls[0]["chainlink"].accepted_event_sequence == 17
     assert scheduler.calls[0]["redis_writes_before_evaluation"] == 1
     assert writer.records == list(records)
+
+
+def test_worker_logs_sequence_discontinuity_counter_without_payload(caplog):
+    class SequenceGapScheduler(FakeEvaluationScheduler):
+        def observe(self, observation, *, chainlink):
+            matured = super().observe(observation, chainlink=chainlink)
+            self.chainlink_sequence_gap_count += 1
+            return matured
+
+    redis = FakeRedis()
+    scheduler = SequenceGapScheduler()
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+    set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
+    set_price(redis, CHAINLINK_LIVE_KEY, "54321.98765", received_ms=BASE_MS)
+
+    caplog.set_level("WARNING", logger=collector.LOGGER.name)
+    run_once(worker, BASE_MS)
+
+    assert "shadow_signal_evaluation_chainlink_sequence_gap" in caplog.text
+    assert "54321.98765" not in caplog.text
 
 
 def test_evaluation_failure_does_not_interrupt_live_publication():

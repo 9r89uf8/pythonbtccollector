@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException
 from typing import Deque, Optional, Sequence
+from uuid import UUID
 
 from price_collector.market import MarketWindow, market_for_sample_second
 
@@ -58,6 +59,8 @@ class ObservedPrice:
     value: Decimal
     source_timestamp_ms: Optional[int]
     received_ms: int
+    publisher_epoch: Optional[str] = None
+    accepted_event_sequence: Optional[int] = None
 
     def __post_init__(self) -> None:
         _require_price(self.value, "value")
@@ -67,6 +70,27 @@ class ObservedPrice:
                 "source_timestamp_ms",
             )
         _require_non_negative_int(self.received_ms, "received_ms")
+        metadata_present = (
+            self.publisher_epoch is not None,
+            self.accepted_event_sequence is not None,
+        )
+        if metadata_present[0] != metadata_present[1]:
+            raise ValueError(
+                "publisher_epoch and accepted_event_sequence must be provided together"
+            )
+        if self.publisher_epoch is not None:
+            if not isinstance(self.publisher_epoch, str):
+                raise TypeError("publisher_epoch must be a string")
+            try:
+                parsed_epoch = UUID(self.publisher_epoch)
+            except (ValueError, AttributeError) as exc:
+                raise ValueError("publisher_epoch must be a canonical UUID") from exc
+            if str(parsed_epoch) != self.publisher_epoch:
+                raise ValueError("publisher_epoch must be a canonical UUID")
+            _require_positive_int(
+                self.accepted_event_sequence,
+                "accepted_event_sequence",
+            )
 
     @property
     def identity(self) -> tuple[Optional[int], int, Decimal]:

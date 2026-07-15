@@ -29,7 +29,10 @@ CONFIGURATION = {
     "chainlink_stale_ms": 5_000,
     "reference_max_gap_ms": 250,
     "history_retention_ms": 10_000,
-    "max_future_skew_ms": 250,
+    "max_future_skew_ms": 0,
+    "futures_availability_delay_ms": 0,
+    "chainlink_availability_delay_ms": 0,
+    "evaluation_phase_offset_ms": 0,
     "neutral_band_bps": "1",
     "move_size_thresholds_bps": ["1", "3"],
     "volatility_thresholds_bps": ["0.5", "1.5"],
@@ -45,6 +48,76 @@ CONFIGURATION = {
 }
 
 
+def decimal_rate(numerator, denominator):
+    if denominator == 0:
+        return None
+    with localcontext() as context:
+        context.prec = 50
+        return str(Decimal(numerator) / Decimal(denominator))
+
+
+def directional_payload(matrix):
+    cells = {
+        (actual, predicted): matrix[f"actual_{actual}"][
+            f"predicted_{predicted}"
+        ]
+        for actual in ("up", "neutral", "down")
+        for predicted in ("up", "neutral", "down")
+    }
+    count = sum(cells.values())
+    correct_actions = cells[("up", "up")] + cells[("down", "down")]
+    three_class_correct = correct_actions + cells[("neutral", "neutral")]
+    predicted_actions = sum(
+        cells[(actual, predicted)]
+        for actual in ("up", "neutral", "down")
+        for predicted in ("up", "down")
+    )
+    actual_moves = sum(
+        cells[(actual, predicted)]
+        for actual in ("up", "down")
+        for predicted in ("up", "neutral", "down")
+    )
+    actual_neutral = sum(
+        cells[("neutral", predicted)]
+        for predicted in ("up", "neutral", "down")
+    )
+    false_actions_on_neutral = (
+        cells[("neutral", "up")] + cells[("neutral", "down")]
+    )
+    opposite_direction_actions = (
+        cells[("up", "down")] + cells[("down", "up")]
+    )
+    return {
+        "confusion_matrix": deepcopy(matrix),
+        "counts": {
+            "three_class_correct": three_class_correct,
+            "predicted_actions": predicted_actions,
+            "actual_moves": actual_moves,
+            "actual_neutral": actual_neutral,
+            "correct_actions": correct_actions,
+            "false_actions_on_neutral": false_actions_on_neutral,
+            "opposite_direction_actions": opposite_direction_actions,
+        },
+        "rates": {
+            "three_class_accuracy": decimal_rate(three_class_correct, count),
+            "action_precision": decimal_rate(correct_actions, predicted_actions),
+            "move_recall": decimal_rate(correct_actions, actual_moves),
+            "false_action_rate_on_neutral": decimal_rate(
+                false_actions_on_neutral,
+                actual_neutral,
+            ),
+            "opposite_direction_rate_on_actual_moves": decimal_rate(
+                opposite_direction_actions,
+                actual_moves,
+            ),
+            "predicted_action_frequency": decimal_rate(
+                predicted_actions,
+                count,
+            ),
+        },
+    }
+
+
 def metric_payload(
     *,
     count=10_000,
@@ -55,6 +128,7 @@ def metric_payload(
     wins=None,
     ties=None,
     losses=None,
+    directional_matrix=None,
 ):
     model_mae = Decimal(model_mae)
     baseline_mae = Decimal(baseline_mae)
@@ -66,6 +140,24 @@ def metric_payload(
         ties = count // 10
     if losses is None:
         losses = count - wins - ties
+    if directional_matrix is None:
+        directional_matrix = {
+            "actual_up": {
+                "predicted_up": wins,
+                "predicted_neutral": ties,
+                "predicted_down": losses,
+            },
+            "actual_neutral": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+            "actual_down": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+        }
     count_decimal = Decimal(count)
     model_sum = model_mae * count_decimal
     baseline_sum = baseline_mae * count_decimal
@@ -85,9 +177,7 @@ def metric_payload(
         "wins": wins,
         "ties": ties,
         "losses": losses,
-        "directional_eligible": count,
-        "directional_correct": wins,
-        "directional_action": wins + losses,
+        "directional": directional_payload(directional_matrix),
         "sufficient_statistics": {
             "model_absolute_error_sum_usd": str(model_sum),
             "baseline_absolute_error_sum_usd": str(baseline_sum),
@@ -157,7 +247,7 @@ def replay_payload(start_ms, end_ms, *, model_metrics=None):
         for version, horizon in EXPECTED_CANDIDATES
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": "shadow_raw_replay",
         "status": "ok",
         "selection_performed": False,
@@ -216,8 +306,8 @@ def test_selects_by_normalized_calibration_skill_then_passes_holdout(tmp_path):
 
     assert artifact.status == "selected"
     assert payload["selection_performed"] is True
-    assert payload["policy"]["version"] == "chronological_holdout_v2"
-    assert payload["policy"]["supersedes"] == "chronological_holdout_v1"
+    assert payload["policy"]["version"] == "chronological_holdout_v3"
+    assert payload["policy"]["supersedes"] == "chronological_holdout_v2"
     assert payload["policy"][
         "previously_inspected_holdouts_must_be_calibration"
     ] is True
@@ -348,6 +438,101 @@ def test_pools_sufficient_statistics_instead_of_averaging_report_rates(tmp_path)
         )
 
 
+def test_pools_directional_confusion_cells_and_recomputes_rates(tmp_path):
+    first_metrics = default_model_metrics(count=10_000)
+    first_metrics[MODEL_3500] = metric_payload(
+        count=10_000,
+        model_mae="10",
+        baseline_mae="20",
+        directional_matrix={
+            "actual_up": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+            "actual_neutral": {
+                "predicted_up": 10_000,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+            "actual_down": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+        },
+    )
+    second_metrics = default_model_metrics(count=20_000)
+    second_metrics[MODEL_3500] = metric_payload(
+        count=20_000,
+        model_mae="30",
+        baseline_mae="40",
+        directional_matrix={
+            "actual_up": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+            "actual_neutral": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 0,
+            },
+            "actual_down": {
+                "predicted_up": 0,
+                "predicted_neutral": 0,
+                "predicted_down": 20_000,
+            },
+        },
+    )
+    first = write_report(
+        tmp_path / "calibration-1.json",
+        replay_payload(0, WINDOW_MS, model_metrics=first_metrics),
+    )
+    second = write_report(
+        tmp_path / "calibration-2.json",
+        replay_payload(
+            WINDOW_MS,
+            3 * WINDOW_MS,
+            model_metrics=second_metrics,
+        ),
+    )
+    holdout = write_report(
+        tmp_path / "holdout.json",
+        replay_payload(3 * WINDOW_MS, 4 * WINDOW_MS),
+    )
+
+    artifact = select_provisional_primary(
+        calibration_report_paths=[first, second],
+        holdout_report_paths=[holdout],
+    )
+    directional = candidate_from_artifact(artifact, MODEL_3500)["calibration"][
+        "metrics"
+    ]["directional"]
+
+    assert directional["confusion_matrix"]["actual_neutral"][
+        "predicted_up"
+    ] == 10_000
+    assert directional["confusion_matrix"]["actual_down"][
+        "predicted_down"
+    ] == 20_000
+    assert directional["counts"]["predicted_actions"] == 30_000
+    with localcontext() as context:
+        context.prec = 50
+        assert directional["rates"]["three_class_accuracy"] == (
+            Decimal("2") / Decimal("3")
+        )
+        assert directional["rates"]["action_precision"] == (
+            Decimal("2") / Decimal("3")
+        )
+    assert directional["rates"]["move_recall"] == Decimal("1")
+    assert directional["rates"]["false_action_rate_on_neutral"] == Decimal("1")
+    assert "directional_accuracy" not in candidate_from_artifact(
+        artifact,
+        MODEL_3500,
+    )["calibration"]["metrics"]
+
+
 def test_holdout_failure_abstains_without_falling_back(tmp_path):
     calibration = write_report(
         tmp_path / "calibration.json",
@@ -394,8 +579,6 @@ def test_paired_losses_are_diagnostic_and_do_not_block_selection(tmp_path):
             wins=3_000,
             ties=1_000,
             losses=6_000,
-            directional_correct=3_000,
-            directional_action=9_000,
         )
         metrics_by_model[MODEL_3500] = updated
     calibration = write_report(
@@ -550,13 +733,13 @@ def test_exact_calibration_efficacy_tie_abstains(tmp_path):
     assert artifact.to_dict()["decision"]["provisional_primary_model"] is None
 
 
-def test_policy_v2_uses_inspected_windows_as_calibration_only(tmp_path):
+def test_policy_v3_uses_inspected_windows_as_calibration_only(tmp_path):
     original_calibration = write_report(
         tmp_path / "original-calibration.json",
         replay_payload(0, WINDOW_MS),
     )
-    inspected_v1_holdout = write_report(
-        tmp_path / "inspected-v1-holdout.json",
+    inspected_v2_holdout = write_report(
+        tmp_path / "inspected-v2-holdout.json",
         replay_payload(WINDOW_MS, 2 * WINDOW_MS),
     )
     new_future_holdout = write_report(
@@ -566,7 +749,7 @@ def test_policy_v2_uses_inspected_windows_as_calibration_only(tmp_path):
 
     artifact = select_provisional_primary(
         calibration_report_paths=[
-            inspected_v1_holdout,
+            inspected_v2_holdout,
             original_calibration,
         ],
         holdout_report_paths=[new_future_holdout],
@@ -579,7 +762,7 @@ def test_policy_v2_uses_inspected_windows_as_calibration_only(tmp_path):
     ] == ["calibration", "calibration", "holdout"]
 
 
-def test_policy_v2_rejects_multiple_holdout_reports(tmp_path):
+def test_policy_v3_rejects_multiple_holdout_reports(tmp_path):
     calibration = write_report(
         tmp_path / "calibration.json",
         replay_payload(0, WINDOW_MS),
@@ -634,6 +817,21 @@ def test_policy_v2_rejects_multiple_holdout_reports(tmp_path):
         lambda payload: payload["candidates"][0]["common_cohort"][
             "metrics"
         ].update(model_mean_absolute_error_usd="999"),
+        lambda payload: payload["candidates"][0]["common_cohort"]["metrics"][
+            "directional"
+        ]["confusion_matrix"].pop("actual_down"),
+        lambda payload: payload["candidates"][0]["common_cohort"]["metrics"][
+            "directional"
+        ]["confusion_matrix"]["actual_up"].update(predicted_up=-1),
+        lambda payload: payload["candidates"][0]["common_cohort"]["metrics"][
+            "directional"
+        ]["confusion_matrix"]["actual_up"].update(predicted_up=True),
+        lambda payload: payload["candidates"][0]["common_cohort"]["metrics"][
+            "directional"
+        ]["counts"].update(predicted_actions=0),
+        lambda payload: payload["candidates"][0]["common_cohort"]["metrics"][
+            "directional"
+        ]["rates"].update(action_precision="0"),
         lambda payload: payload["candidates"][0].update(scheduled=True),
     ],
 )
@@ -691,10 +889,68 @@ def test_rejects_configuration_changes_between_roles(tmp_path):
         )
 
 
+def test_policy_v3_accepts_frozen_timing_sensitivity_configuration(tmp_path):
+    calibration_payload = replay_payload(0, WINDOW_MS)
+    holdout_payload = replay_payload(WINDOW_MS, 2 * WINDOW_MS)
+    for payload in (calibration_payload, holdout_payload):
+        payload["configuration"].update(
+            futures_availability_delay_ms=25,
+            chainlink_availability_delay_ms=50,
+            evaluation_phase_offset_ms=100,
+        )
+    calibration = write_report(
+        tmp_path / "calibration.json",
+        calibration_payload,
+    )
+    holdout = write_report(tmp_path / "holdout.json", holdout_payload)
+
+    artifact = select_provisional_primary(
+        calibration_report_paths=[calibration],
+        holdout_report_paths=[holdout],
+    )
+
+    assert artifact.status == "selected"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("max_future_skew_ms", 1, "must equal policy-v3 zero"),
+        ("futures_availability_delay_ms", -1, "must be at least 0"),
+        ("chainlink_availability_delay_ms", -1, "must be at least 0"),
+        ("evaluation_phase_offset_ms", -1, "must be at least 0"),
+        ("evaluation_phase_offset_ms", 50, "multiple of poll_ms"),
+        ("evaluation_phase_offset_ms", 500, "less than evaluation_interval_ms"),
+    ],
+)
+def test_policy_v3_rejects_invalid_timing_configuration(
+    tmp_path,
+    field_name,
+    value,
+    message,
+):
+    invalid_payload = replay_payload(0, WINDOW_MS)
+    invalid_payload["configuration"][field_name] = value
+    calibration = write_report(
+        tmp_path / "calibration.json",
+        invalid_payload,
+    )
+    holdout = write_report(
+        tmp_path / "holdout.json",
+        replay_payload(WINDOW_MS, 2 * WINDOW_MS),
+    )
+
+    with pytest.raises(SelectionInputError, match=message):
+        select_provisional_primary(
+            calibration_report_paths=[calibration],
+            holdout_report_paths=[holdout],
+        )
+
+
 def test_rejects_duplicate_keys_and_json_floats(tmp_path):
     duplicate = tmp_path / "duplicate.json"
     duplicate.write_text(
-        '{"schema_version":2,"schema_version":2}',
+        '{"schema_version":3,"schema_version":3}',
         encoding="utf-8",
     )
     float_report = tmp_path / "float.json"
@@ -753,7 +1009,7 @@ def test_artifact_is_decimal_string_json_and_atomic(tmp_path):
     write_selection_artifact(output, artifact)
     payload = json.loads(output.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["mode"] == "shadow_primary_selection"
     assert payload["decision"]["provisional_primary_model"]["beta"] == "1"
     assert list(tmp_path.glob("*.tmp")) == []

@@ -311,6 +311,92 @@ class ShadowEvaluationWriteResult:
             raise TypeError("deferred_records must be a tuple")
 
 
+@dataclass(frozen=True, order=True)
+class ShadowEvaluationCohortIdentity:
+    """Existing persisted provenance plus generation time for one cohort."""
+
+    selection_schema_version: int
+    selection_policy_version: str
+    selection_fingerprint_sha256: str
+    selection_artifact_sha256: str
+    selection_evidence_end_ms: int
+    generated_ms: int
+
+
+def shadow_evaluation_cohort_identity(
+    record: ShadowEvaluationRecord,
+) -> ShadowEvaluationCohortIdentity:
+    if not isinstance(record, ShadowEvaluationRecord):
+        raise TypeError("cohort members must be ShadowEvaluationRecord values")
+    return ShadowEvaluationCohortIdentity(
+        selection_schema_version=record.selection_schema_version,
+        selection_policy_version=record.selection_policy_version,
+        selection_fingerprint_sha256=(
+            record.selection_fingerprint_sha256
+        ),
+        selection_artifact_sha256=record.selection_artifact_sha256,
+        selection_evidence_end_ms=record.selection_evidence_end_ms,
+        generated_ms=record.generated_ms,
+    )
+
+
+@dataclass(frozen=True)
+class ShadowEvaluationCohort:
+    """A complete, indivisible candidate set for one generation instant."""
+
+    records: tuple[ShadowEvaluationRecord, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.records, tuple) or not self.records:
+            raise ValueError("evaluation cohort must contain records")
+        identities = {
+            shadow_evaluation_cohort_identity(record)
+            for record in self.records
+        }
+        if len(identities) != 1:
+            raise ValueError(
+                "evaluation cohort records must share provenance and generated_ms"
+            )
+        versions = tuple(record.model_version for record in self.records)
+        if len(set(versions)) != len(versions):
+            raise ValueError("evaluation cohort model versions must be unique")
+        generation_markets = {
+            (
+                record.market_id,
+                record.market_start_ms,
+                record.market_end_ms,
+                record.ms_to_market_end,
+            )
+            for record in self.records
+        }
+        if len(generation_markets) != 1:
+            raise ValueError(
+                "evaluation cohort records must share generation-market fields"
+            )
+
+    @property
+    def identity(self) -> ShadowEvaluationCohortIdentity:
+        return shadow_evaluation_cohort_identity(self.records[0])
+
+    @property
+    def model_versions(self) -> tuple[str, ...]:
+        return tuple(record.model_version for record in self.records)
+
+    @property
+    def row_count(self) -> int:
+        return len(self.records)
+
+    def require_model_versions(
+        self,
+        expected_model_versions: Sequence[str],
+    ) -> None:
+        expected = tuple(expected_model_versions)
+        if self.model_versions != expected:
+            raise ValueError(
+                "evaluation cohort model set or order does not match writer models"
+            )
+
+
 @dataclass(frozen=True)
 class _PendingEvaluation:
     sequence: int
@@ -358,6 +444,10 @@ class ShadowEvaluationScheduler:
         self.max_observation_gap_ms = max_observation_gap_ms
         self._models_by_version = {model.version: model for model in self.models}
         self._pending: list[tuple[int, int, _PendingEvaluation]] = []
+        self._matured_by_generated: dict[
+            int,
+            dict[str, ShadowEvaluationRecord],
+        ] = {}
         self._sequence = 0
         self._last_scheduled_bucket: Optional[int] = None
         self._last_observation_ms: Optional[int] = None
@@ -370,9 +460,18 @@ class ShadowEvaluationScheduler:
             tuple[Optional[int], int, Decimal]
         ] = None
         self._chainlink_received_watermark: Optional[int] = None
+        self._last_chainlink_publisher_epoch: Optional[str] = None
+        self._last_chainlink_accepted_event_sequence: Optional[int] = None
         self._history_epoch = 0
         self._regression_count = 0
         self._observation_gap_count = 0
+        self._chainlink_sequence_gap_count = 0
+        self._chainlink_sequence_regression_count = 0
+        self._chainlink_publisher_epoch_change_count = 0
+        self._chainlink_sequence_metadata_loss_count = 0
+        self._chainlink_sequence_metadata_lost = False
+        self._chainlink_sequence_ever_established = False
+        self._chainlink_startup_legacy_observed = False
 
     @property
     def pending_count(self) -> int:
@@ -389,6 +488,22 @@ class ShadowEvaluationScheduler:
     @property
     def observation_gap_count(self) -> int:
         return self._observation_gap_count
+
+    @property
+    def chainlink_sequence_gap_count(self) -> int:
+        return self._chainlink_sequence_gap_count
+
+    @property
+    def chainlink_sequence_regression_count(self) -> int:
+        return self._chainlink_sequence_regression_count
+
+    @property
+    def chainlink_publisher_epoch_change_count(self) -> int:
+        return self._chainlink_publisher_epoch_change_count
+
+    @property
+    def chainlink_sequence_metadata_loss_count(self) -> int:
+        return self._chainlink_sequence_metadata_loss_count
 
     def observe(
         self,
@@ -409,34 +524,117 @@ class ShadowEvaluationScheduler:
             # outcome epoch as well so pre-reset forecasts can never mature
             # against post-reset observations.  Keep the cadence watermark to
             # avoid emitting a second cohort for an already-entered bucket.
-            self._history_epoch += 1
+            self._reset_outcome_history()
             self._regression_count += 1
-            self._chainlink_history.clear()
-            self._seen_chainlink_identities.clear()
-            self._last_observed_chainlink_identity = None
             self._last_observation_ms = observation.generated_ms
             return ()
+        sequence_continuity_available = (
+            chainlink is not None
+            and chainlink.publisher_epoch is not None
+            and self._last_chainlink_publisher_epoch is not None
+        )
+        sequence_discontinuity = self._observe_chainlink_delivery_sequence(
+            chainlink
+        )
         if (
             previous_observation_ms is not None
             and self.max_observation_gap_ms is not None
             and observation.generated_ms - previous_observation_ms
             > self.max_observation_gap_ms
+            and not sequence_continuity_available
+            and not sequence_discontinuity
         ):
             # A latest-value cache cannot reconstruct values overwritten while
             # it was not observed. Invalidate outstanding outcome history and
             # restart it from the newly acquired cache state.
-            self._history_epoch += 1
+            self._reset_outcome_history()
             self._observation_gap_count += 1
-            self._chainlink_history.clear()
-            self._seen_chainlink_identities.clear()
-            self._last_observed_chainlink_identity = None
         self._last_observation_ms = observation.generated_ms
 
-        self._ingest_chainlink(chainlink)
+        self._ingest_chainlink(
+            None if self._chainlink_sequence_metadata_lost else chainlink
+        )
         self._schedule_current_bucket(observation)
         matured = self._mature(observation.generated_ms)
         self._prune_history(observation.generated_ms)
         return matured
+
+    def _reset_outcome_history(
+        self,
+        *,
+        reset_received_watermark: bool = False,
+    ) -> None:
+        self._history_epoch += 1
+        self._chainlink_history.clear()
+        self._seen_chainlink_identities.clear()
+        self._last_observed_chainlink_identity = None
+        if reset_received_watermark:
+            self._chainlink_received_watermark = None
+
+    def _observe_chainlink_delivery_sequence(
+        self,
+        chainlink: Optional[ObservedPrice],
+    ) -> bool:
+        if chainlink is None:
+            return False
+        if chainlink.publisher_epoch is None:
+            if not self._chainlink_sequence_ever_established:
+                self._chainlink_startup_legacy_observed = True
+                return False
+            if not self._chainlink_sequence_metadata_lost:
+                self._chainlink_sequence_metadata_loss_count += 1
+                self._reset_outcome_history(reset_received_watermark=True)
+            self._chainlink_sequence_metadata_lost = True
+            self._last_chainlink_publisher_epoch = None
+            self._last_chainlink_accepted_event_sequence = None
+            return True
+        publisher_epoch = chainlink.publisher_epoch
+        sequence = chainlink.accepted_event_sequence
+        assert sequence is not None
+
+        previous_epoch = self._last_chainlink_publisher_epoch
+        previous_sequence = self._last_chainlink_accepted_event_sequence
+        if previous_epoch is None:
+            recovered_from_metadata_loss = self._chainlink_sequence_metadata_lost
+            transitioned_from_startup_legacy = (
+                self._chainlink_startup_legacy_observed
+            )
+            if recovered_from_metadata_loss or transitioned_from_startup_legacy:
+                # No sequence can prove what happened before continuity became
+                # available. Start a fresh outcome epoch at this sequenced
+                # value before scoring resumes.
+                self._reset_outcome_history(reset_received_watermark=True)
+            self._chainlink_sequence_metadata_lost = False
+            self._chainlink_sequence_ever_established = True
+            self._chainlink_startup_legacy_observed = False
+            self._last_chainlink_publisher_epoch = publisher_epoch
+            self._last_chainlink_accepted_event_sequence = sequence
+            return (
+                recovered_from_metadata_loss
+                or transitioned_from_startup_legacy
+            )
+
+        discontinuity = False
+        if publisher_epoch != previous_epoch:
+            self._chainlink_publisher_epoch_change_count += 1
+            discontinuity = True
+        else:
+            assert previous_sequence is not None
+            if sequence < previous_sequence:
+                self._chainlink_sequence_regression_count += 1
+                discontinuity = True
+            elif sequence > previous_sequence + 1:
+                self._chainlink_sequence_gap_count += 1
+                discontinuity = True
+
+        if discontinuity:
+            # The current Redis value is trustworthy as a new starting point,
+            # but outstanding forecasts must not use history that crossed a
+            # proven overwrite, producer restart, or sequence regression.
+            self._reset_outcome_history(reset_received_watermark=True)
+        self._last_chainlink_publisher_epoch = publisher_epoch
+        self._last_chainlink_accepted_event_sequence = sequence
+        return discontinuity
 
     def _ingest_chainlink(self, chainlink: Optional[ObservedPrice]) -> None:
         if chainlink is None:
@@ -544,7 +742,32 @@ class ShadowEvaluationScheduler:
         while self._pending and self._pending[0][0] <= matured_ms:
             _target_ms, _sequence, pending = heapq.heappop(self._pending)
             actual = self._actual_for(pending)
-            records.append(self._record(pending, actual=actual, matured_ms=matured_ms))
+            record = self._record(
+                pending,
+                actual=actual,
+                matured_ms=matured_ms,
+            )
+            cohort_records = self._matured_by_generated.setdefault(
+                record.generated_ms,
+                {},
+            )
+            if record.model_version in cohort_records:
+                raise RuntimeError("evaluation cohort contains a duplicate model")
+            cohort_records[record.model_version] = record
+            if len(cohort_records) != len(self.models):
+                continue
+
+            cohort = ShadowEvaluationCohort(
+                tuple(
+                    cohort_records[model.version]
+                    for model in self.models
+                )
+            )
+            cohort.require_model_versions(
+                tuple(model.version for model in self.models)
+            )
+            records.extend(cohort.records)
+            del self._matured_by_generated[record.generated_ms]
         return tuple(records)
 
     def _actual_for(
@@ -724,7 +947,9 @@ class ShadowEvaluationOfferResult:
     accepted: bool
     dropped_oldest: bool
     dropped_record: Optional[ShadowEvaluationRecord]
+    dropped_records: tuple[ShadowEvaluationRecord, ...]
     queue_depth: int
+    queue_cohort_depth: int
 
 
 @dataclass
@@ -735,6 +960,12 @@ class ShadowEvaluationCounters:
     records_dropped_total: int = 0
     records_rejected_total: int = 0
     records_deferred_total: int = 0
+    cohorts_offered_total: int = 0
+    cohorts_enqueued_total: int = 0
+    cohorts_persisted_total: int = 0
+    cohorts_dropped_total: int = 0
+    cohorts_rejected_total: int = 0
+    cohorts_deferred_total: int = 0
     batches_succeeded_total: int = 0
     batches_failed_total: int = 0
     backend_creation_failures_total: int = 0
@@ -742,6 +973,7 @@ class ShadowEvaluationCounters:
     cleanup_failures_total: int = 0
     records_deleted_total: int = 0
     queue_high_water: int = 0
+    queue_cohort_high_water: int = 0
     last_batch_rows: int = 0
 
 
@@ -761,6 +993,7 @@ class ShadowEvaluationWriterRuntime:
         self,
         *,
         backend_factory: ShadowEvaluationBackendFactory,
+        candidate_model_versions: Sequence[str],
         queue_max_records: int,
         batch_max_rows: int,
         flush_ms: int,
@@ -774,6 +1007,20 @@ class ShadowEvaluationWriterRuntime:
     ) -> None:
         if not callable(backend_factory):
             raise TypeError("backend_factory must be callable")
+        self._candidate_model_versions = tuple(candidate_model_versions)
+        if not self._candidate_model_versions:
+            raise ValueError("candidate_model_versions must not be empty")
+        if not all(
+            isinstance(version, str) and version.strip()
+            for version in self._candidate_model_versions
+        ):
+            raise TypeError(
+                "candidate_model_versions must contain non-empty strings"
+            )
+        if len(set(self._candidate_model_versions)) != len(
+            self._candidate_model_versions
+        ):
+            raise ValueError("candidate_model_versions must be unique")
         for value, field_name in (
             (queue_max_records, "queue_max_records"),
             (batch_max_rows, "batch_max_rows"),
@@ -786,8 +1033,21 @@ class ShadowEvaluationWriterRuntime:
             _require_positive_int(value, field_name)
         if batch_max_rows > queue_max_records:
             raise ValueError("batch_max_rows cannot exceed queue capacity")
+        candidate_count = len(self._candidate_model_versions)
+        if queue_max_records < candidate_count:
+            raise ValueError(
+                "queue capacity must fit one complete evaluation cohort"
+            )
+        if batch_max_rows < candidate_count:
+            raise ValueError(
+                "batch_max_rows must fit one complete evaluation cohort"
+            )
         if retention_ms is not None:
             _require_positive_int(retention_ms, "retention_ms")
+            if cleanup_batch_rows < candidate_count:
+                raise ValueError(
+                    "cleanup_batch_rows must fit one complete evaluation cohort"
+                )
         if not callable(now_ms):
             raise TypeError("now_ms must be callable")
 
@@ -805,10 +1065,11 @@ class ShadowEvaluationWriterRuntime:
         self._now_ms = now_ms
         self._next_cleanup_ms: Optional[int] = None
         self._retry_not_before: Optional[float] = None
-        self._buffer: Deque[ShadowEvaluationRecord] = deque()
+        self._buffer: Deque[ShadowEvaluationCohort] = deque()
+        self._buffered_rows = 0
         self._available: Optional[asyncio.Event] = None
         self._writer_task: Optional["asyncio.Task[None]"] = None
-        self._active_batch: Optional[list[ShadowEvaluationRecord]] = None
+        self._active_batch: Optional[list[ShadowEvaluationCohort]] = None
         self._queue_overflow_drops = 0
         self._accepting_offers = True
         self._stop_requested = False
@@ -821,6 +1082,10 @@ class ShadowEvaluationWriterRuntime:
 
     @property
     def queue_depth(self) -> int:
+        return self._buffered_rows
+
+    @property
+    def queue_cohort_depth(self) -> int:
         return len(self._buffer)
 
     def start(self) -> "asyncio.Task[None]":
@@ -838,57 +1103,89 @@ class ShadowEvaluationWriterRuntime:
         self,
         record: ShadowEvaluationRecord,
     ) -> ShadowEvaluationOfferResult:
-        if not isinstance(record, ShadowEvaluationRecord):
-            raise TypeError("writer only accepts ShadowEvaluationRecord values")
-        self.counters.records_offered_total += 1
+        """Compatibility entry point for a configured one-model cohort."""
+
+        return self.offer_cohort_nowait((record,))
+
+    def offer_cohort_nowait(
+        self,
+        records: Sequence[ShadowEvaluationRecord],
+    ) -> ShadowEvaluationOfferResult:
+        cohort = ShadowEvaluationCohort(tuple(records))
+        cohort.require_model_versions(self._candidate_model_versions)
+        offered_count = cohort.row_count
+        self.counters.records_offered_total += offered_count
+        self.counters.cohorts_offered_total += 1
         if not self._accepting_offers:
-            self.counters.records_dropped_total += 1
+            self.counters.records_dropped_total += offered_count
+            self.counters.cohorts_dropped_total += 1
             self._log_queue_drop(
                 reason="writer_closed",
-                dropped_record=None,
+                dropped_cohort=cohort,
                 occurrence=self.counters.records_dropped_total,
             )
             return ShadowEvaluationOfferResult(
                 accepted=False,
                 dropped_oldest=False,
                 dropped_record=None,
-                queue_depth=len(self._buffer),
+                dropped_records=(),
+                queue_depth=self._buffered_rows,
+                queue_cohort_depth=len(self._buffer),
             )
 
-        dropped: Optional[ShadowEvaluationRecord] = None
-        if len(self._buffer) >= self._queue_max_records:
+        dropped_cohorts: list[ShadowEvaluationCohort] = []
+        while (
+            self._buffer
+            and self._buffered_rows + cohort.row_count
+            > self._queue_max_records
+        ):
             dropped = self._buffer.popleft()
-        self._buffer.append(record)
-        if dropped is not None:
+            self._buffered_rows -= dropped.row_count
+            dropped_cohorts.append(dropped)
             self._record_queue_overflow(
                 dropped,
                 reason="queue_full_drop_oldest",
             )
-        self.counters.records_enqueued_total += 1
+        self._buffer.append(cohort)
+        self._buffered_rows += cohort.row_count
+        self.counters.records_enqueued_total += offered_count
+        self.counters.cohorts_enqueued_total += 1
         self.counters.queue_high_water = max(
             self.counters.queue_high_water,
+            self._buffered_rows,
+        )
+        self.counters.queue_cohort_high_water = max(
+            self.counters.queue_cohort_high_water,
             len(self._buffer),
         )
         if self._available is not None:
             self._available.set()
+        dropped_records = tuple(
+            record
+            for dropped_cohort in dropped_cohorts
+            for record in dropped_cohort.records
+        )
         return ShadowEvaluationOfferResult(
             accepted=True,
-            dropped_oldest=dropped is not None,
-            dropped_record=dropped,
-            queue_depth=len(self._buffer),
+            dropped_oldest=bool(dropped_cohorts),
+            dropped_record=(dropped_records[0] if dropped_records else None),
+            dropped_records=dropped_records,
+            queue_depth=self._buffered_rows,
+            queue_cohort_depth=len(self._buffer),
         )
 
     def _record_queue_overflow(
         self,
-        dropped_record: ShadowEvaluationRecord,
+        dropped_cohort: ShadowEvaluationCohort,
         *,
         reason: str,
     ) -> None:
-        self.counters.records_dropped_total += 1
+        self.counters.records_dropped_total += dropped_cohort.row_count
+        self.counters.cohorts_dropped_total += 1
         self._queue_overflow_drops += 1
         self._log_queue_drop(
             reason=reason,
-            dropped_record=dropped_record,
+            dropped_cohort=dropped_cohort,
             occurrence=self._queue_overflow_drops,
         )
 
@@ -896,7 +1193,7 @@ class ShadowEvaluationWriterRuntime:
         self,
         *,
         reason: str,
-        dropped_record: Optional[ShadowEvaluationRecord],
+        dropped_cohort: Optional[ShadowEvaluationCohort],
         occurrence: int,
     ) -> None:
         if occurrence != 1 and occurrence % QUEUE_DROP_LOG_EVERY != 0:
@@ -910,16 +1207,19 @@ class ShadowEvaluationWriterRuntime:
                     self.counters.records_dropped_total
                 ),
                 "queue_overflow_drops_total": self._queue_overflow_drops,
-                "queue_depth": len(self._buffer),
+                "queue_overflow_cohorts_total": self._queue_overflow_drops,
+                "cohorts_dropped_total": self.counters.cohorts_dropped_total,
+                "queue_depth": self._buffered_rows,
+                "queue_cohort_depth": len(self._buffer),
                 "queue_max_records": self._queue_max_records,
-                "dropped_model_version": (
-                    dropped_record.model_version
-                    if dropped_record is not None
+                "dropped_model_versions": (
+                    dropped_cohort.model_versions
+                    if dropped_cohort is not None
                     else None
                 ),
                 "dropped_generated_ms": (
-                    dropped_record.generated_ms
-                    if dropped_record is not None
+                    dropped_cohort.identity.generated_ms
+                    if dropped_cohort is not None
                     else None
                 ),
             },
@@ -960,9 +1260,12 @@ class ShadowEvaluationWriterRuntime:
     def _discard_remaining_once(self) -> None:
         if self._shutdown_accounted:
             return
-        dropped = len(self._buffer)
+        dropped = self._buffered_rows
+        dropped_cohorts = len(self._buffer)
         self._buffer.clear()
+        self._buffered_rows = 0
         self.counters.records_dropped_total += dropped
+        self.counters.cohorts_dropped_total += dropped_cohorts
         self._shutdown_accounted = True
 
     def _log_shutdown_summary(self) -> None:
@@ -984,6 +1287,20 @@ class ShadowEvaluationWriterRuntime:
                 "records_deferred_total": (
                     self.counters.records_deferred_total
                 ),
+                "cohorts_offered_total": self.counters.cohorts_offered_total,
+                "cohorts_enqueued_total": (
+                    self.counters.cohorts_enqueued_total
+                ),
+                "cohorts_persisted_total": (
+                    self.counters.cohorts_persisted_total
+                ),
+                "cohorts_dropped_total": self.counters.cohorts_dropped_total,
+                "cohorts_rejected_total": (
+                    self.counters.cohorts_rejected_total
+                ),
+                "cohorts_deferred_total": (
+                    self.counters.cohorts_deferred_total
+                ),
                 "batches_succeeded_total": (
                     self.counters.batches_succeeded_total
                 ),
@@ -995,10 +1312,21 @@ class ShadowEvaluationWriterRuntime:
                     self.counters.cleanup_failures_total
                 ),
                 "records_deleted_total": self.counters.records_deleted_total,
+                "queue_high_water": self.counters.queue_high_water,
+                "queue_cohort_high_water": (
+                    self.counters.queue_cohort_high_water
+                ),
+                "queue_depth": self._buffered_rows,
+                "queue_cohort_depth": len(self._buffer),
                 "active_batch_rows": (
                     0
                     if self._active_batch is None
-                    else len(self._active_batch)
+                    else sum(
+                        cohort.row_count for cohort in self._active_batch
+                    )
+                ),
+                "active_batch_cohorts": (
+                    0 if self._active_batch is None else len(self._active_batch)
                 ),
                 "writer_task_done": (
                     self._writer_task is None or self._writer_task.done()
@@ -1037,26 +1365,41 @@ class ShadowEvaluationWriterRuntime:
             return False
         return bool(self._buffer)
 
-    async def _take_batch(self) -> list[ShadowEvaluationRecord]:
+    async def _take_batch(self) -> list[ShadowEvaluationCohort]:
         if not await self._wait_for_item(self._flush_seconds):
             return []
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._flush_seconds
-        batch: list[ShadowEvaluationRecord] = []
+        batch: list[ShadowEvaluationCohort] = []
+        batch_rows = 0
         try:
-            while len(batch) < self._batch_max_rows:
-                while self._buffer and len(batch) < self._batch_max_rows:
+            while batch_rows < self._batch_max_rows:
+                while self._buffer:
+                    next_cohort = self._buffer[0]
+                    if (
+                        batch_rows + next_cohort.row_count
+                        > self._batch_max_rows
+                    ):
+                        break
                     batch.append(self._buffer.popleft())
+                    batch_rows += next_cohort.row_count
+                    self._buffered_rows -= next_cohort.row_count
                 if (
-                    len(batch) >= self._batch_max_rows
+                    batch_rows >= self._batch_max_rows
                     or self._stop_requested
+                    or (
+                        self._buffer
+                        and batch_rows + self._buffer[0].row_count
+                        > self._batch_max_rows
+                    )
                 ):
                     break
                 remaining = deadline - loop.time()
                 if remaining <= 0 or not await self._wait_for_item(remaining):
                     break
         except asyncio.CancelledError:
-            self.counters.records_dropped_total += len(batch)
+            self.counters.records_dropped_total += batch_rows
+            self.counters.cohorts_dropped_total += len(batch)
             raise
         return batch
 
@@ -1074,12 +1417,17 @@ class ShadowEvaluationWriterRuntime:
 
     async def _write_batch(
         self,
-        batch: Sequence[ShadowEvaluationRecord],
+        batch: Sequence[ShadowEvaluationCohort],
     ) -> None:
-        self.counters.last_batch_rows = len(batch)
+        records = tuple(
+            record
+            for cohort in batch
+            for record in cohort.records
+        )
+        self.counters.last_batch_rows = len(records)
         try:
             backend = await self._ensure_backend()
-            write_result = await backend.write_evaluations(batch)
+            write_result = await backend.write_evaluations(records)
             if not isinstance(write_result, ShadowEvaluationWriteResult):
                 raise RuntimeError(
                     "shadow evaluation backend returned an invalid result"
@@ -1087,7 +1435,7 @@ class ShadowEvaluationWriterRuntime:
             persisted = write_result.persisted_count
             rejected = write_result.rejected_count
             deferred = write_result.deferred_records
-            if persisted + rejected + len(deferred) != len(batch):
+            if persisted + rejected + len(deferred) != len(records):
                 raise RuntimeError(
                     "shadow evaluation backend result does not account "
                     "for the complete batch"
@@ -1100,8 +1448,24 @@ class ShadowEvaluationWriterRuntime:
                     "shadow evaluation backend returned an invalid "
                     "deferred record"
                 )
+            candidate_count = len(self._candidate_model_versions)
+            if persisted % candidate_count or rejected % candidate_count:
+                raise RuntimeError(
+                    "shadow evaluation backend split a cohort result"
+                )
+            deferred_cohorts = self._cohorts_from_records(deferred)
+            batch_by_identity = {cohort.identity: cohort for cohort in batch}
+            if any(
+                cohort.identity not in batch_by_identity
+                or cohort.records != batch_by_identity[cohort.identity].records
+                for cohort in deferred_cohorts
+            ):
+                raise RuntimeError(
+                    "shadow evaluation backend deferred an unknown cohort"
+                )
         except asyncio.CancelledError:
-            self.counters.records_dropped_total += len(batch)
+            self.counters.records_dropped_total += len(records)
+            self.counters.cohorts_dropped_total += len(batch)
             raise
         except Exception:
             self.counters.batches_failed_total += 1
@@ -1110,8 +1474,8 @@ class ShadowEvaluationWriterRuntime:
                 "shadow_evaluation_batch_failed",
                 extra={
                     "event": "shadow_evaluation_batch_failed",
-                    "batch_rows": len(batch),
-                    "queue_depth": len(self._buffer),
+                    "batch_rows": len(records),
+                    "queue_depth": self._buffered_rows,
                     "records_dropped_total": (
                         self.counters.records_dropped_total
                     ),
@@ -1129,6 +1493,11 @@ class ShadowEvaluationWriterRuntime:
         self.counters.records_rejected_total += rejected
         self.counters.records_deferred_total += len(deferred)
         self.counters.records_dropped_total += rejected
+        candidate_count = len(self._candidate_model_versions)
+        self.counters.cohorts_persisted_total += persisted // candidate_count
+        self.counters.cohorts_rejected_total += rejected // candidate_count
+        self.counters.cohorts_deferred_total += len(deferred_cohorts)
+        self.counters.cohorts_dropped_total += rejected // candidate_count
         if rejected and (
             previous_rejected_total == 0
             or (
@@ -1140,50 +1509,94 @@ class ShadowEvaluationWriterRuntime:
                 "shadow_evaluation_batch_records_rejected",
                 extra={
                     "event": "shadow_evaluation_batch_records_rejected",
-                    "batch_rows": len(batch),
+                    "batch_rows": len(records),
                     "records_persisted": persisted,
                     "records_rejected": rejected,
                     "records_deferred": len(deferred),
+                    "cohorts_persisted": persisted // candidate_count,
+                    "cohorts_rejected": rejected // candidate_count,
+                    "cohorts_deferred": len(deferred_cohorts),
                     "records_rejected_total": (
                         self.counters.records_rejected_total
                     ),
-                    "queue_depth": len(self._buffer),
+                    "queue_depth": self._buffered_rows,
                 },
             )
-        if deferred:
-            self._requeue_deferred_records(deferred)
+        if deferred_cohorts:
+            self._requeue_deferred_cohorts(deferred_cohorts)
         await self._maybe_cleanup(backend)
 
     def _requeue_failed_batch(
         self,
-        batch: Sequence[ShadowEvaluationRecord],
+        batch: Sequence[ShadowEvaluationCohort],
     ) -> None:
         # The failed batch is older than anything currently queued. Prepending
         # it preserves order; if concurrent offers filled the queue while the
-        # write was in flight, discard only the oldest combined records.
+        # write was in flight, discard only whole oldest cohorts.
         self._buffer.extendleft(reversed(batch))
-        while len(self._buffer) > self._queue_max_records:
+        self._buffered_rows += sum(cohort.row_count for cohort in batch)
+        while self._buffered_rows > self._queue_max_records:
             dropped = self._buffer.popleft()
+            self._buffered_rows -= dropped.row_count
             self._record_queue_overflow(
                 dropped,
                 reason="failed_batch_requeue_overflow",
             )
+        self._update_queue_high_water()
         if self._available is not None and self._buffer:
             self._available.set()
 
-    def _requeue_deferred_records(
+    def _cohorts_from_records(
         self,
         records: Sequence[ShadowEvaluationRecord],
+    ) -> tuple[ShadowEvaluationCohort, ...]:
+        if not records:
+            return ()
+        grouped: dict[
+            ShadowEvaluationCohortIdentity,
+            list[ShadowEvaluationRecord],
+        ] = {}
+        order: list[ShadowEvaluationCohortIdentity] = []
+        for record in records:
+            identity = shadow_evaluation_cohort_identity(record)
+            if identity not in grouped:
+                grouped[identity] = []
+                order.append(identity)
+            grouped[identity].append(record)
+        cohorts = tuple(
+            ShadowEvaluationCohort(tuple(grouped[identity]))
+            for identity in order
+        )
+        for cohort in cohorts:
+            cohort.require_model_versions(self._candidate_model_versions)
+        return cohorts
+
+    def _requeue_deferred_cohorts(
+        self,
+        cohorts: Sequence[ShadowEvaluationCohort],
     ) -> None:
-        self._buffer.extendleft(reversed(records))
-        while len(self._buffer) > self._queue_max_records:
+        self._buffer.extendleft(reversed(cohorts))
+        self._buffered_rows += sum(cohort.row_count for cohort in cohorts)
+        while self._buffered_rows > self._queue_max_records:
             dropped = self._buffer.popleft()
+            self._buffered_rows -= dropped.row_count
             self._record_queue_overflow(
                 dropped,
-                reason="deferred_record_requeue_overflow",
+                reason="deferred_cohort_requeue_overflow",
             )
+        self._update_queue_high_water()
         if self._available is not None and self._buffer:
             self._available.set()
+
+    def _update_queue_high_water(self) -> None:
+        self.counters.queue_high_water = max(
+            self.counters.queue_high_water,
+            self._buffered_rows,
+        )
+        self.counters.queue_cohort_high_water = max(
+            self.counters.queue_cohort_high_water,
+            len(self._buffer),
+        )
 
     async def _maybe_cleanup(self, backend: ShadowEvaluationBackend) -> None:
         if self._retention_ms is None:

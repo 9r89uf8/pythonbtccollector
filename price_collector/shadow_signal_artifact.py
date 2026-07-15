@@ -20,6 +20,9 @@ SELECTION_SCHEMA_VERSION = 2
 SELECTION_MODE = "shadow_primary_selection"
 SELECTION_POLICY_VERSION = "chronological_holdout_v2"
 REPLAY_SCHEMA_VERSION = 2
+SELECTION_SCHEMA_VERSION_V3 = 3
+SELECTION_POLICY_VERSION_V3 = "chronological_holdout_v3"
+REPLAY_SCHEMA_VERSION_V3 = 3
 REPLAY_MODE = "shadow_raw_replay"
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_DECIMAL_CHARACTERS = 256
@@ -31,7 +34,7 @@ _EXPECTED_MODEL_SPECS = (
     ("catchup_ratio_l3500_b100", 3_500, Decimal("1")),
     ("catchup_ratio_l4000_b100", 4_000, Decimal("1")),
 )
-_EXPECTED_POLICY = {
+_EXPECTED_POLICY_V2 = {
     "version": SELECTION_POLICY_VERSION,
     "supersedes": "chronological_holdout_v1",
     "revision_reason": (
@@ -79,6 +82,93 @@ _EXPECTED_POLICY = {
     },
     "threshold_provenance": (
         "project_policy_v2_not_statistical_significance_and_not_engine_md"
+    ),
+}
+
+# Keep the v2 names above as compatibility aliases: the currently promoted
+# production decision is immutable v2 evidence.  V3 is a separate trust
+# profile and cannot be mixed with either half of a v2 decision pair.
+_EXPECTED_POLICY = _EXPECTED_POLICY_V2
+_EXPECTED_POLICY_V3 = {
+    "version": SELECTION_POLICY_VERSION_V3,
+    "supersedes": "chronological_holdout_v2",
+    "revision_reason": (
+        "directional diagnostics use a full three-class confusion matrix "
+        "that includes actions on neutral outcomes; MAE and RMSE remain "
+        "efficacy gates; fixed replay visibility delays and evaluation "
+        "phase are frozen sensitivity assumptions, with zero future skew"
+    ),
+    "previously_inspected_holdouts_must_be_calibration": True,
+    "new_later_holdout_required_after_revision": True,
+    "candidate_set": [version for version, _lag, _beta in _EXPECTED_MODEL_SPECS],
+    "calibration_and_holdout_are_explicit": True,
+    "ranking_source": "common_cohort_only",
+    "ranking_order": [
+        "higher_calibration_mae_skill_vs_no_change",
+        "higher_calibration_rmse_skill_vs_no_change",
+    ],
+    "exact_efficacy_tie_abstains": True,
+    "holdout_reranking": False,
+    "fallback_after_holdout_failure": False,
+    "evidence_thresholds": {
+        "minimum_calibration_reports": 1,
+        "required_holdout_reports": 1,
+        "minimum_common_scored_per_report": 10_000,
+        "minimum_common_valid_coverage": "0.50",
+        "minimum_common_maturation_coverage": "0.99",
+        "minimum_slice_scored_for_warning": 500,
+    },
+    "efficacy_gates": {
+        "mae_skill_vs_no_change": {
+            "operator": ">",
+            "threshold": "0",
+        },
+        "rmse_skill_vs_no_change": {
+            "operator": ">",
+            "threshold": "0",
+        },
+    },
+    "diagnostics": {
+        "paired_win_loss_frequency": {
+            "hard_gate": False,
+            "affects_eligibility": False,
+            "affects_ranking": False,
+            "warning_when": "wins_do_not_exceed_losses",
+            "reason": "500_ms_rows_are_autocorrelated",
+        }
+    },
+    "threshold_provenance": (
+        "project_policy_v3_not_statistical_significance_and_not_engine_md"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _ArtifactFormat:
+    selection_schema_version: int
+    selection_policy_version: str
+    replay_schema_version: int
+    expected_policy: Mapping[str, Any]
+    require_zero_future_skew: bool
+    require_visibility_assumptions: bool
+
+
+_ARTIFACT_FORMATS = {
+    SELECTION_SCHEMA_VERSION: _ArtifactFormat(
+        selection_schema_version=SELECTION_SCHEMA_VERSION,
+        selection_policy_version=SELECTION_POLICY_VERSION,
+        replay_schema_version=REPLAY_SCHEMA_VERSION,
+        expected_policy=_EXPECTED_POLICY_V2,
+        require_zero_future_skew=False,
+        require_visibility_assumptions=False,
+    ),
+    SELECTION_SCHEMA_VERSION_V3: _ArtifactFormat(
+        selection_schema_version=SELECTION_SCHEMA_VERSION_V3,
+        selection_policy_version=SELECTION_POLICY_VERSION_V3,
+        replay_schema_version=REPLAY_SCHEMA_VERSION_V3,
+        expected_policy=_EXPECTED_POLICY_V3,
+        require_zero_future_skew=True,
+        require_visibility_assumptions=True,
     ),
 }
 
@@ -589,10 +679,15 @@ def _validate_candidate_evidence(
 def _validate_selection_candidates(
     value: Any,
     primary_payload: Mapping[str, Any],
+    *,
+    artifact_format: _ArtifactFormat,
 ) -> tuple[tuple[CatchupModel, ...], CatchupModel]:
     candidates = _as_list(value, "selection.candidates")
     if len(candidates) != len(_EXPECTED_MODEL_SPECS):
-        raise _fail("selection.candidates is not the policy-v2 candidate set")
+        raise _fail(
+            "selection.candidates is not the "
+            f"{artifact_format.selection_policy_version} candidate set"
+        )
     expected_by_version = {
         version: (lag_ms, beta)
         for version, lag_ms, beta in _EXPECTED_MODEL_SPECS
@@ -690,6 +785,7 @@ def _validate_selection_candidates(
 def _validate_selection(
     payload: Mapping[str, Any],
 ) -> tuple[
+    _ArtifactFormat,
     tuple[CatchupModel, ...],
     CatchupModel,
     int,
@@ -715,7 +811,12 @@ def _validate_selection(
         ),
         "selection",
     )
-    if _as_int(payload["schema_version"], "selection.schema_version") != 2:
+    selection_schema_version = _as_int(
+        payload["schema_version"],
+        "selection.schema_version",
+    )
+    artifact_format = _ARTIFACT_FORMATS.get(selection_schema_version)
+    if artifact_format is None:
         raise _fail("selection.schema_version is unsupported")
     if payload["mode"] != SELECTION_MODE or payload["status"] != "selected":
         raise _fail("selection artifact is not an accepted primary selection")
@@ -735,7 +836,11 @@ def _validate_selection(
         "latest_chainlink_value_known_at_generated_ms_plus_horizon_ms"
     ):
         raise _fail("selection.prediction_target is unsupported")
-    _require_value(payload["policy"], _EXPECTED_POLICY, "selection.policy")
+    _require_value(
+        payload["policy"],
+        artifact_format.expected_policy,
+        "selection.policy",
+    )
 
     configuration_sha256, fingerprint_sha256, reports = _validate_provenance(
         payload["provenance"]
@@ -803,7 +908,9 @@ def _validate_selection(
     if evidence_end_ms != reports[-1].end_ms:
         raise _fail("primary evidence_end_ms differs from the holdout end")
     models, primary = _validate_selection_candidates(
-        payload["candidates"], primary_payload
+        payload["candidates"],
+        primary_payload,
+        artifact_format=artifact_format,
     )
     limitations = _as_list(payload["limitations"], "selection.limitations")
     if not limitations or not all(
@@ -811,6 +918,7 @@ def _validate_selection(
     ):
         raise _fail("selection.limitations must contain non-empty strings")
     return (
+        artifact_format,
         models,
         primary,
         evidence_end_ms,
@@ -823,12 +931,16 @@ def _validate_selection(
 def _validate_replay_configuration(
     payload: Mapping[str, Any],
     *,
+    artifact_format: _ArtifactFormat,
     replay_sha256: str,
     configuration_sha256: str,
     provenance_reports: Sequence[_ProvenanceReport],
     selection_models: Sequence[CatchupModel],
 ) -> _RuntimeConfiguration:
-    if _as_int(payload.get("schema_version"), "replay.schema_version") != 2:
+    if (
+        _as_int(payload.get("schema_version"), "replay.schema_version")
+        != artifact_format.replay_schema_version
+    ):
         raise _fail("replay.schema_version is unsupported")
     if payload.get("mode") != REPLAY_MODE or payload.get("status") != "ok":
         raise _fail("replay configuration report is not successful raw replay")
@@ -864,13 +976,20 @@ def _validate_replay_configuration(
         configuration.get("poll_ms"), "replay.configuration.poll_ms", minimum=1
     )
     if poll_ms != 100:
-        raise _fail("replay.configuration.poll_ms must equal policy-v2 100 ms")
-    if _as_int(
+        raise _fail(
+            "replay.configuration.poll_ms must equal "
+            f"{artifact_format.selection_policy_version} 100 ms"
+        )
+    evaluation_interval_ms = _as_int(
         configuration.get("evaluation_interval_ms"),
         "replay.configuration.evaluation_interval_ms",
         minimum=1,
-    ) != 500:
-        raise _fail("replay evaluation cadence must equal policy-v2 500 ms")
+    )
+    if evaluation_interval_ms != 500:
+        raise _fail(
+            "replay evaluation cadence must equal "
+            f"{artifact_format.selection_policy_version} 500 ms"
+        )
     lag_values = _as_list(configuration.get("lags_ms"), "replay.configuration.lags_ms")
     lags_ms = tuple(
         _as_int(value, f"replay.configuration.lags_ms[{index}]", minimum=1)
@@ -878,10 +997,16 @@ def _validate_replay_configuration(
     )
     expected_lags = tuple(lag for _version, lag, _beta in _EXPECTED_MODEL_SPECS)
     if lags_ms != expected_lags:
-        raise _fail("replay.configuration.lags_ms is not the policy-v2 candidate set")
+        raise _fail(
+            "replay.configuration.lags_ms is not the "
+            f"{artifact_format.selection_policy_version} candidate set"
+        )
     beta = _as_decimal(configuration.get("beta"), "replay.configuration.beta")
     if beta != Decimal("1"):
-        raise _fail("replay.configuration.beta must equal policy-v2 beta 1")
+        raise _fail(
+            "replay.configuration.beta must equal "
+            f"{artifact_format.selection_policy_version} beta 1"
+        )
     futures_stale_ms = _as_int(
         configuration.get("futures_stale_ms"),
         "replay.configuration.futures_stale_ms",
@@ -907,6 +1032,37 @@ def _validate_replay_configuration(
         "replay.configuration.max_future_skew_ms",
         minimum=0,
     )
+    if artifact_format.require_zero_future_skew and max_future_skew_ms != 0:
+        raise _fail(
+            "replay.configuration.max_future_skew_ms must equal "
+            f"{artifact_format.selection_policy_version} zero"
+        )
+    if artifact_format.require_visibility_assumptions:
+        _as_int(
+            configuration.get("futures_availability_delay_ms"),
+            "replay.configuration.futures_availability_delay_ms",
+            minimum=0,
+        )
+        _as_int(
+            configuration.get("chainlink_availability_delay_ms"),
+            "replay.configuration.chainlink_availability_delay_ms",
+            minimum=0,
+        )
+        evaluation_phase_offset_ms = _as_int(
+            configuration.get("evaluation_phase_offset_ms"),
+            "replay.configuration.evaluation_phase_offset_ms",
+            minimum=0,
+        )
+        if evaluation_phase_offset_ms >= evaluation_interval_ms:
+            raise _fail(
+                "replay.configuration.evaluation_phase_offset_ms must be less "
+                "than evaluation_interval_ms"
+            )
+        if evaluation_phase_offset_ms % poll_ms != 0:
+            raise _fail(
+                "replay.configuration.evaluation_phase_offset_ms must be a "
+                "multiple of poll_ms"
+            )
     minimum_retention_ms = (
         max(lags_ms) + chainlink_stale_ms + reference_max_gap_ms
     )
@@ -998,6 +1154,7 @@ def load_activated_selection(
         raise _fail("selection artifact SHA-256 does not match the trusted digest")
     selection = _decode_json(selection_raw, "selection")
     (
+        artifact_format,
         selection_models,
         primary_model,
         evidence_end_ms,
@@ -1016,6 +1173,7 @@ def load_activated_selection(
     replay = _decode_json(replay_raw, "replay")
     runtime = _validate_replay_configuration(
         replay,
+        artifact_format=artifact_format,
         replay_sha256=replay_digest,
         configuration_sha256=configuration_sha256,
         provenance_reports=provenance_reports,
@@ -1025,7 +1183,7 @@ def load_activated_selection(
     ordered_models = tuple(models_by_lag[lag_ms] for lag_ms in runtime.lags_ms)
 
     return ActivatedShadowSelection(
-        selection_schema_version=SELECTION_SCHEMA_VERSION,
+        selection_schema_version=artifact_format.selection_schema_version,
         primary_model=primary_model,
         models=ordered_models,
         poll_ms=runtime.poll_ms,
@@ -1034,7 +1192,7 @@ def load_activated_selection(
         reference_max_gap_ms=runtime.reference_max_gap_ms,
         history_retention_ms=runtime.history_retention_ms,
         max_future_skew_ms=runtime.max_future_skew_ms,
-        policy_version=SELECTION_POLICY_VERSION,
+        policy_version=artifact_format.selection_policy_version,
         selection_fingerprint_sha256=fingerprint_sha256,
         selection_artifact_sha256=selection_digest,
         evidence_end_ms=evidence_end_ms,

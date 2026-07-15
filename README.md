@@ -228,6 +228,11 @@ Each value has this shape:
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
 
+The Chainlink producer additionally writes internal
+`publisher_epoch` and `accepted_event_sequence` fields in the same atomic
+value. The three fields above remain unchanged, other source keys remain
+compatible, and API serialization never exposes the continuity metadata.
+
 Shadow-signal Phases 4 and 5 can also create `btc:live:chainlink_shadow`. That key is a
 typed shadow projection rather than a source price, and it expires 1.5 to 2.0
 seconds after each write. Those phases deliberately kept it out of the API.
@@ -247,24 +252,35 @@ The replay:
 
 - maps each futures 100 ms row to its `close_price`,
   `last_received_wall_ns`, and `last_trade_time_ms`;
-- consumes individual Chainlink events on their exact receive-wall timeline;
+- preserves individual Chainlink events on their exact receive-wall timeline,
+  while separately delaying source visibility by configured replay sensitivity
+  assumptions;
 - emulates an epoch-aligned Redis `MGET` every 100 ms and attempts forecasts
-  every 500 ms;
+  every 500 ms at a configured phase offset;
 - evaluates 3.0, 3.5, and 4.0-second ratio candidates against a separately
   paired no-change baseline;
 - uses only completed, drop-free, count-reconciled futures/Chainlink session
   intersections and resets state at every common session boundary;
-- reports coverage, censoring, median/mean error, RMSE, baseline skill,
-  direction, move-size, raw-bucket-return RMS, market-expiry, and session-edge
-  slices; and
+- reports coverage, censoring, median/mean error, RMSE, baseline skill, a full
+  `up`/`neutral`/`down` confusion matrix and derived directional rates,
+  move-size, raw-bucket-return RMS, market-expiry, and session-edge slices; and
 - keeps prices and calculations as `Decimal`, serialized as JSON strings.
 
 Each candidate's top-level metrics include all of its horizon-specific scored
 rows. Cross-model comparisons must use `candidates[].common_cohort.metrics`,
 which restricts every candidate to the same generation times where the maximum
-horizon fits and all configured models are valid. Replay schema version 2 also
+horizon fits and all configured models are valid. Replay schema version 3 also
 provides exact sufficient statistics and common-cohort slices so reports can be
-pooled without averaging RMSE, skill rates, or sampled medians.
+pooled without averaging RMSE, skill rates, directional rates, or sampled
+medians. Directional action precision includes every predicted action,
+including false actions when the actual outcome is neutral.
+
+Schema v3 freezes `max_future_skew_ms=0` and records independent fixed
+futures/Chainlink availability delays plus one of the five 100 ms evaluation
+phase offsets. These controls are sensitivity assumptions, not measurements of
+Redis publication completion. A timing study must run a preregistered delay and
+phase grid and compare the complete grid; it must not select whichever timing
+scenario makes a candidate look best.
 
 The command requires an explicit inclusive/exclusive UTC epoch-ms range and
 uses the writer `DATABASE_URL`, because the API reader cannot access
@@ -284,7 +300,7 @@ raw retention, and preserve its JSON output beyond that retention window. See
 the shadow-signal replay section in `OPERATIONS.md` for the copy/paste command.
 
 Phase 3 accepts explicitly assigned, non-overlapping older calibration reports
-and one later holdout report. Policy `chronological_holdout_v2` ranks the three
+and one later holdout report. Policy `chronological_holdout_v3` ranks the three
 fixed V0 candidates only on calibration common-cohort MAE and RMSE skill,
 freezes that winner, and either accepts it on holdout or abstains. It never
 reranks on the holdout or falls back to another model. Each report must contain
@@ -296,12 +312,12 @@ affect eligibility or ranking because overlapping 500 ms rows are
 autocorrelated. These are explicit project policy thresholds, not
 statistical-significance claims or values supplied by `engine.md`.
 
-Policy v2 supersedes v1. Any holdout inspected under v1 must be reclassified as
-calibration evidence, and v2 requires exactly one new, strictly later untouched
-holdout. The inspected v1 selection artifact remains historical and must not be
-overwritten by the v2 decision.
+Policy v3 supersedes v2. Every holdout inspected while developing v3, including
+the accepted v2 holdout, must be reclassified as calibration evidence. V3
+requires exactly one new, strictly later untouched holdout. Existing v1 and v2
+selection artifacts remain historical and must not be overwritten.
 
-The selector writes a deterministic schema-version-2 artifact with report
+The selector writes a deterministic schema-version-3 artifact with report
 hashes, evidence ranges, pooled metrics, common-cohort slices, gates, warnings,
 and either one provisional primary or `null`. Artifact creation is atomic and
 create-once; an identical rerun is idempotent, while different content cannot
@@ -310,6 +326,12 @@ this repository, so the code does not guess or hard-code a winner. The accepted
 artifact is an input to the later live-worker phase; Phase 3 itself does not
 change configuration, Redis, PostgreSQL, the API, or systemd. See the Phase 3
 selection section in `OPERATIONS.md`.
+
+This v3 checkpoint deliberately retains the 3.0/3.5/4.0-second V0 candidate
+set so the measurement corrections can be verified independently. It does not
+test 2.0 or 2.5 seconds. Adding shorter candidates requires a newly versioned,
+preregistered candidate policy, all previously inspected evidence as
+calibration, and a genuinely later untouched holdout.
 
 Shadow-signal Phase 4 adds the opt-in, standalone
 `price-collector-shadow-signal` service. Its epoch-aligned 100 ms loop reads
@@ -329,7 +351,10 @@ report that defines its configuration have been promoted to
 selection-file SHA-256. At startup the worker verifies the selection hash, the
 report hash recorded in selection provenance, the replay configuration digest,
 policy, evidence, candidate set, and frozen primary before it opens Redis. It
-does not choose a model dynamically or fall back to another candidate.
+does not choose a model dynamically or fall back to another candidate. The
+loader keeps the currently promoted v2 selection/replay pair valid under its
+original semantics and separately accepts only matching v3 pairs with the
+exact v3 policy and zero future skew; schema versions cannot be mixed.
 
 Every tick replaces the cached payload. When either source is missing, stale,
 malformed, regresses, lacks anchor history, or otherwise fails validation, the
@@ -349,27 +374,39 @@ tick.
 
 `generated_ms` is captured immediately after the Redis `MGET`, so it represents
 when the forecast inputs are locally available. A future-dated input is stored
-as an invalid evaluation rather than scored. A gap longer than two 100 ms poll
-intervals also invalidates outstanding actuals across the gap. This live target
-is exact over cache states returned by successful worker observations; because
-Redis retains only the latest value, a state created and overwritten entirely
-between polls cannot be reconstructed. The raw replay remains the event-complete
-authority for selection and fine-grained receive-time analysis.
+as an invalid evaluation rather than scored. The Chainlink producer includes a
+process epoch and monotonic accepted-event sequence in the same Redis value.
+The evaluator invalidates outcome history on a sequence jump or regression, a
+producer-epoch change, or metadata loss, then starts a new history epoch from
+the current value. A legacy-only startup retains the conservative gap check,
+but the first sequenced value resets that legacy history. Once sequencing has
+been established, metadata loss suppresses actual-outcome ingestion until a
+sequenced value recovers continuity. Redis is still latest-value-only, so
+missing events are not reconstructed; they are detected and the affected live
+evidence fails closed. The raw replay remains the event-complete authority for
+selection.
 
-Matured attempts enter a bounded nonblocking queue and are batch-inserted into
-`shadow_signal_evaluations`. Database connection, retry, retention, and shutdown
-work never runs on the 100 ms publication path. If the queue fills during an
-outage, its oldest queued row is dropped rather than blocking; a rate-limited
-warning is emitted on the first and every hundredth drop, and Redis signal
-generation continues. Transiently failed batches are requeued ahead of newer
-rows and retried safely because inserts are idempotent on
+Candidates retain their horizon-specific causal maturation time, but are held
+until every configured candidate from the same generation has matured. The
+complete cohort then enters a bounded nonblocking queue and is batch-inserted
+into `shadow_signal_evaluations`. Database connection, retry, retention, and
+shutdown work never runs on the 100 ms publication path. If the queue fills
+during an outage, whole oldest cohorts are dropped rather than individual
+candidate rows;
+a rate-limited warning is emitted on the first and every hundredth dropped
+cohort, and Redis signal generation continues. Batching, retry, permanent-error
+isolation, deferral, and retention also preserve whole cohorts. Transiently
+failed batches are requeued ahead of newer cohorts and retried safely because
+inserts are idempotent on
 `(model_version, generated_ms, horizon_ms)`, and the default derived-evidence
 retention is seven days. A deterministic PostgreSQL integrity or data error is
-isolated inside one transaction and rejected instead of poisoning the retry
-queue. Isolation is capped at eight rejected rows per batch; rejection and cap
-events are rate-limited, and unprobed rows beyond the cap return to the bounded
-queue instead of being mislabeled as rejected. These events remain
-evidence-coverage failures that require investigation. Invalid model attempts
+isolated at cohort boundaries inside one transaction and the entire affected
+cohort is rejected instead of poisoning the retry queue. Isolation is capped;
+rejection and cap events are rate-limited, and unprobed whole cohorts return to
+the bounded queue instead of being mislabeled as rejected. These events remain
+evidence-coverage failures that require investigation. Shutdown telemetry keeps
+both row and cohort totals for offered, enqueued, persisted, rejected, deferred,
+and dropped work, plus row/cohort queue high-water marks. Invalid model attempts
 that satisfy the storage contract are
 stored to preserve an honest coverage denominator. For valid attempts with an
 actual, signed `forecast_error` is

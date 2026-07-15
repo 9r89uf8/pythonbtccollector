@@ -831,8 +831,83 @@ async def insert_shadow_signal_evaluations(
 @dataclass
 class _ShadowEvaluationIsolationState:
     remaining_rejections: int
-    isolated_rejections: list[tuple[Any, Exception]]
+    isolated_rejections: list[
+        tuple["_ShadowEvaluationDatabaseCohort", Exception]
+    ]
     deferred_records: list[Any]
+
+
+@dataclass(frozen=True)
+class _ShadowEvaluationDatabaseCohort:
+    identity: tuple[Any, ...]
+    records: tuple[Any, ...]
+    rows: tuple[tuple[Any, ...], ...]
+
+
+def _shadow_evaluation_cohort_identity(record: Any) -> tuple[Any, ...]:
+    return (
+        record.selection_schema_version,
+        record.selection_policy_version,
+        record.selection_fingerprint_sha256,
+        record.selection_artifact_sha256,
+        record.selection_evidence_end_ms,
+        record.generated_ms,
+    )
+
+
+def _shadow_evaluation_database_cohorts(
+    records: Sequence[Any],
+) -> tuple[_ShadowEvaluationDatabaseCohort, ...]:
+    grouped: dict[tuple[Any, ...], list[Any]] = {}
+    order: list[tuple[Any, ...]] = []
+    for record in records:
+        identity = _shadow_evaluation_cohort_identity(record)
+        if identity not in grouped:
+            grouped[identity] = []
+            order.append(identity)
+        grouped[identity].append(record)
+
+    cohorts = tuple(
+        _ShadowEvaluationDatabaseCohort(
+            identity=identity,
+            records=tuple(grouped[identity]),
+            rows=tuple(
+                shadow_signal_evaluation_row(record)
+                for record in grouped[identity]
+            ),
+        )
+        for identity in order
+    )
+    if not cohorts:
+        return ()
+
+    expected_model_versions = tuple(
+        record.model_version for record in cohorts[0].records
+    )
+    if len(set(expected_model_versions)) != len(expected_model_versions):
+        raise ValueError("shadow evaluation cohort model versions must be unique")
+    for cohort in cohorts:
+        model_versions = tuple(
+            record.model_version for record in cohort.records
+        )
+        if model_versions != expected_model_versions:
+            raise ValueError(
+                "shadow evaluation batch contains an incomplete candidate cohort"
+            )
+        generation_markets = {
+            (
+                record.market_id,
+                record.market_start_ms,
+                record.market_end_ms,
+                record.ms_to_market_end,
+            )
+            for record in cohort.records
+        }
+        if len(generation_markets) != 1:
+            raise ValueError(
+                "shadow evaluation cohort has mixed generation-market fields"
+            )
+    return cohorts
 
 
 class AsyncpgShadowEvaluationBackend:
@@ -852,18 +927,24 @@ class AsyncpgShadowEvaluationBackend:
             "connect_timeout_seconds",
         )
         self._permanent_rejections_total = 0
+        self._permanent_rejected_cohorts_total = 0
         self._isolation_limit_events_total = 0
 
-    async def _write_rows_isolating_permanent_errors(
+    async def _write_cohorts_isolating_permanent_errors(
         self,
         connection: asyncpg.Connection,
-        records: Sequence[Any],
-        rows: Sequence[tuple[Any, ...]],
+        cohorts: Sequence[_ShadowEvaluationDatabaseCohort],
         state: _ShadowEvaluationIsolationState,
     ) -> int:
         if state.remaining_rejections == 0:
-            state.deferred_records.extend(records)
+            for cohort in cohorts:
+                state.deferred_records.extend(cohort.records)
             return 0
+        rows = tuple(
+            row
+            for cohort in cohorts
+            for row in cohort.rows
+        )
         try:
             async with connection.transaction():
                 await insert_shadow_signal_evaluations(connection, rows)
@@ -871,25 +952,23 @@ class AsyncpgShadowEvaluationBackend:
             asyncpg.IntegrityConstraintViolationError,
             asyncpg.DataError,
         ) as error:
-            if len(rows) > 1:
-                midpoint = len(rows) // 2
-                left = await self._write_rows_isolating_permanent_errors(
+            if len(cohorts) > 1:
+                midpoint = len(cohorts) // 2
+                left = await self._write_cohorts_isolating_permanent_errors(
                     connection,
-                    records[:midpoint],
-                    rows[:midpoint],
+                    cohorts[:midpoint],
                     state,
                 )
-                right = await self._write_rows_isolating_permanent_errors(
+                right = await self._write_cohorts_isolating_permanent_errors(
                     connection,
-                    records[midpoint:],
-                    rows[midpoint:],
+                    cohorts[midpoint:],
                     state,
                 )
                 return left + right
 
-            record = records[0]
+            cohort = cohorts[0]
             state.remaining_rejections -= 1
-            state.isolated_rejections.append((record, error))
+            state.isolated_rejections.append((cohort, error))
             return 0
         return len(rows)
 
@@ -897,9 +976,11 @@ class AsyncpgShadowEvaluationBackend:
         self,
         state: _ShadowEvaluationIsolationState,
     ) -> None:
-        for record, error in state.isolated_rejections:
-            self._permanent_rejections_total += 1
-            occurrence = self._permanent_rejections_total
+        for cohort, error in state.isolated_rejections:
+            record = cohort.records[0]
+            self._permanent_rejections_total += len(cohort.records)
+            self._permanent_rejected_cohorts_total += 1
+            occurrence = self._permanent_rejected_cohorts_total
             if (
                 occurrence != 1
                 and occurrence % SHADOW_EVALUATION_REJECTION_LOG_EVERY != 0
@@ -909,6 +990,7 @@ class AsyncpgShadowEvaluationBackend:
                 "shadow_evaluation_record_rejected",
                 extra={
                     "event": "shadow_evaluation_record_rejected",
+                    "cohort_rows": len(cohort.records),
                     "model_version": getattr(record, "model_version", None),
                     "generated_ms": getattr(record, "generated_ms", None),
                     "horizon_ms": getattr(record, "horizon_ms", None),
@@ -921,7 +1003,10 @@ class AsyncpgShadowEvaluationBackend:
                         None,
                     ),
                     "postgres_error_type": type(error).__name__,
-                    "permanent_rejections_total": occurrence,
+                    "permanent_rejections_total": (
+                        self._permanent_rejections_total
+                    ),
+                    "permanent_rejected_cohorts_total": occurrence,
                 },
             )
 
@@ -954,11 +1039,8 @@ class AsyncpgShadowEvaluationBackend:
         records: Sequence[Any],
     ) -> ShadowEvaluationWriteResult:
         record_batch = tuple(records)
-        rows = [
-            shadow_signal_evaluation_row(record)
-            for record in record_batch
-        ]
-        if not rows:
+        cohorts = _shadow_evaluation_database_cohorts(record_batch)
+        if not cohorts:
             return ShadowEvaluationWriteResult(0, 0)
         async with self._pool.acquire(
             timeout=self._connect_timeout_seconds
@@ -971,16 +1053,20 @@ class AsyncpgShadowEvaluationBackend:
                 deferred_records=[],
             )
             async with connection.transaction():
-                persisted = await self._write_rows_isolating_permanent_errors(
-                    connection,
-                    record_batch,
-                    rows,
-                    state,
+                persisted = (
+                    await self._write_cohorts_isolating_permanent_errors(
+                        connection,
+                        cohorts,
+                        state,
+                    )
                 )
         self._log_permanent_rejections(state)
         return ShadowEvaluationWriteResult(
             persisted_count=persisted,
-            rejected_count=len(state.isolated_rejections),
+            rejected_count=sum(
+                len(cohort.records)
+                for cohort, _error in state.isolated_rejections
+            ),
             deferred_records=tuple(state.deferred_records),
         )
 
@@ -1014,16 +1100,66 @@ class AsyncpgShadowEvaluationBackend:
         ) as connection:
             status = await connection.execute(
                 """
-                WITH expired AS (
-                    SELECT ctid
+                WITH expired_cohort_counts AS (
+                    SELECT
+                        selection_schema_version,
+                        selection_policy_version,
+                        selection_fingerprint_sha256,
+                        selection_artifact_sha256,
+                        selection_evidence_end_ms,
+                        generated_ms,
+                        count(*) AS cohort_rows
                     FROM shadow_signal_evaluations
                     WHERE generated_ms < $1
-                    ORDER BY generated_ms
+                    GROUP BY
+                        generated_ms,
+                        selection_artifact_sha256,
+                        selection_fingerprint_sha256,
+                        selection_schema_version,
+                        selection_policy_version,
+                        selection_evidence_end_ms
+                    ORDER BY
+                        generated_ms,
+                        selection_artifact_sha256,
+                        selection_fingerprint_sha256,
+                        selection_schema_version,
+                        selection_policy_version,
+                        selection_evidence_end_ms
                     LIMIT $2
+                ),
+                ordered_expired_cohorts AS (
+                    SELECT
+                        expired_cohort_counts.*,
+                        sum(cohort_rows) OVER (
+                            ORDER BY
+                                generated_ms,
+                                selection_artifact_sha256,
+                                selection_fingerprint_sha256,
+                                selection_schema_version,
+                                selection_policy_version,
+                                selection_evidence_end_ms
+                        ) AS cumulative_rows
+                    FROM expired_cohort_counts
+                ),
+                expired_cohorts AS (
+                    SELECT *
+                    FROM ordered_expired_cohorts
+                    WHERE cumulative_rows <= $2
                 )
                 DELETE FROM shadow_signal_evaluations AS evaluations
-                USING expired
-                WHERE evaluations.ctid = expired.ctid
+                USING expired_cohorts
+                WHERE evaluations.generated_ms
+                        = expired_cohorts.generated_ms
+                  AND evaluations.selection_schema_version
+                        = expired_cohorts.selection_schema_version
+                  AND evaluations.selection_policy_version
+                        = expired_cohorts.selection_policy_version
+                  AND evaluations.selection_fingerprint_sha256
+                        = expired_cohorts.selection_fingerprint_sha256
+                  AND evaluations.selection_artifact_sha256
+                        = expired_cohorts.selection_artifact_sha256
+                  AND evaluations.selection_evidence_end_ms
+                        = expired_cohorts.selection_evidence_end_ms
                 """,
                 cutoff_generated_ms,
                 limit,

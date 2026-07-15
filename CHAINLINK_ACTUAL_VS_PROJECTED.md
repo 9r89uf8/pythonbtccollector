@@ -31,7 +31,7 @@ A projection generated at time `t` by the selected model has a target at
 - **Projected Chainlink** is the model's estimate, made only from information
   locally available at generation time.
 - **Actual Chainlink** is the newest Chainlink observation the evaluator had
-  received no later than the target time.
+  observed whose producer receive time is no later than the target time.
 - **No-change baseline** is the Chainlink value at generation time carried
   forward unchanged to the same target.
 
@@ -40,10 +40,21 @@ next convenient update. A Chainlink observation received after the target is
 excluded, even if it is available when the evaluation row is eventually
 written. This prevents future information from leaking into the result.
 
-An evaluation is assigned to the five-minute market containing its
-`target_ms`. A forecast generated immediately before a market boundary can
-therefore be scored in the following market, which is where its actual outcome
-occurred.
+The Chainlink cache value also carries an internal producer epoch and monotonic
+accepted-event sequence. If the evaluator observes a sequence jump,
+regression, producer restart, or loss of sequence metadata, it discards outcome
+history that crosses that discontinuity. It cannot reconstruct an overwritten
+latest-cache value, so affected evidence is invalidated rather than paired with
+an older, apparently eligible actual. Legacy-only startup remains supported,
+but the first sequenced value resets that history. Once sequence metadata has
+been established, losing it suppresses actual-outcome ingestion until a new
+sequenced value re-establishes continuity.
+
+Each row retains the five-minute market in which it was generated. Reporting
+windows are selected by `target_ms`, so a forecast generated immediately before
+a boundary can be scored in the following target window. The reporting query
+therefore inspects only that target window's generation market and its
+predecessor.
 
 ## How the model works
 
@@ -164,6 +175,44 @@ version selected a lag from three fixed candidates while keeping beta fixed at
 1. A future version could test additional lags or estimate beta, but that would
 require a new replay, new calibration evidence, and a new untouched holdout.
 
+## Measurement-correction checkpoint
+
+The accepted production decision is immutable schema/policy v2 evidence and
+continues to select the provisional 3.0-second model. A later code review found
+measurement defects that do not change that frozen file but must be corrected
+before a shorter-horizon experiment:
+
+- Replay/selection v3 replaces the old directional counters with a complete
+  `up`/`neutral`/`down` confusion matrix. It reports three-class accuracy,
+  action precision over every predicted action, move recall, neutral
+  false-action rate, opposite-direction rate, and action frequency. The old
+  approximately 99% figure excluded false actions on neutral outcomes and must
+  not be described as action precision.
+- Replay v3 separates raw receive time from configured source-visibility time,
+  records fixed futures and Chainlink delay assumptions, and supports all five
+  100 ms generation-phase offsets. These are sensitivity inputs, not measured
+  Redis publication-completion timestamps.
+- New v3 evidence requires zero future skew so a signal accepted for
+  publication is evaluated under the same strict local-time causality rule.
+- The live Chainlink sequence metadata described above makes overwritten-cache
+  gaps detectable and fail-closed.
+- Live evaluations are persisted as complete generated-time candidate cohorts.
+  Maturation retains each horizon's causal target, while queue overflow,
+  batching, retry, permanent-error isolation, deferral, and retention operate
+  on whole cohorts.
+
+Rows written before the cohort-atomic rollout can still be partial. Any future
+live comparison must start at the rollout/new-artifact boundary and verify the
+exact artifact-defined candidate set at each common `generated_ms`; old rows
+cannot be made complete retroactively.
+
+This checkpoint still contains only the 3.0/3.5/4.0-second candidate family;
+it does not run or imply a 2.0/2.5-second result. Because the shorter candidates
+were proposed after inspecting the accepted v2 holdout, all existing evidence
+is now development/calibration data for that future expanded family. Its policy
+must be preregistered and frozen before collecting a genuinely later untouched
+holdout.
+
 ## How the model is used now
 
 The catch-up engine runs in the standalone
@@ -197,9 +246,11 @@ low. Absolute error measures distance without direction. The no-change
 baseline answers the practical question: was using the futures move better
 than simply assuming Chainlink would stay where it was?
 
-Evaluation persistence uses a separate bounded queue and writer. Database
-slowness or failure is not allowed to delay the 100 ms signal loop. Stored
-evaluation evidence is retained for seven days by default.
+Evaluation persistence uses a separate bounded queue and writer. Candidates
+from one generated time are held until the maximum configured horizon matures,
+then queued, retried, rejected, and retained only as a complete cohort.
+Database slowness or failure is not allowed to delay the 100 ms signal loop.
+Stored evaluation evidence is retained for seven days by default.
 
 ## Results from three recent five-minute markets
 
@@ -312,13 +363,20 @@ reconnects, and different times of day.
 
 Any future tuning should repeat the same discipline:
 
-1. Define candidate lags and beta values before inspecting the holdout.
-2. Replay every candidate on identical common cohorts.
-3. Keep no change as the paired baseline.
-4. Select using older calibration data.
-5. Freeze the winner before evaluating one strictly later untouched holdout.
-6. Promote a new immutable decision artifact only if all accuracy and coverage
-   gates pass.
+1. Preregister a candidate grid that extends below 2.0 seconds so another
+   lower-bound winner does not immediately trigger a second search.
+2. Treat every already inspected window as calibration and freeze lag, beta or
+   deadband, reference-gap limits, timing-delay scenarios, phase offsets, and
+   the robustness rule before the new holdout.
+3. Replay every candidate on identical common cohorts and keep no change as the
+   horizon-matched paired baseline.
+4. Report full confusion metrics, daily/session skill, non-overlapping-origin
+   sensitivity, and paired moving-block-bootstrap intervals. The block length
+   must exceed both forecast overlap and the update-dependence period.
+5. Freeze the calibration winner before evaluating one strictly later,
+   untouched multi-window holdout; do not rerank or fall back on holdout.
+6. Promote a new immutable decision artifact only if all preregistered error,
+   uncertainty, timing-robustness, and operational-coverage gates pass.
 
 Until then, the current production behavior should remain stable: publish only
 `catchup_ratio_l3000_b100`, continue evaluating the fixed candidates silently,

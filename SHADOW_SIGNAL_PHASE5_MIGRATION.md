@@ -421,7 +421,14 @@ SELECT
 FROM recent;
 
 WITH complete_buckets AS (
-    SELECT generated_ms, count(DISTINCT model_version) AS candidates
+    SELECT
+        selection_schema_version,
+        selection_policy_version,
+        selection_fingerprint_sha256,
+        selection_artifact_sha256,
+        selection_evidence_end_ms,
+        generated_ms,
+        count(DISTINCT model_version) AS candidates
     FROM shadow_signal_evaluations
     WHERE generated_ms < (
         extract(epoch FROM clock_timestamp()) * 1000
@@ -429,7 +436,13 @@ WITH complete_buckets AS (
       AND generated_ms >= (
         extract(epoch FROM clock_timestamp()) * 1000
     )::bigint - 600000
-    GROUP BY generated_ms
+    GROUP BY
+        selection_schema_version,
+        selection_policy_version,
+        selection_fingerprint_sha256,
+        selection_artifact_sha256,
+        selection_evidence_end_ms,
+        generated_ms
 )
 SELECT count(*) AS buckets_missing_a_candidate
 FROM complete_buckets
@@ -437,9 +450,12 @@ WHERE candidates <> 3;
 SQL
 ```
 
-Every printed diagnostic must be `0`. A nonzero
-`buckets_missing_a_candidate` may indicate queue drops or a restart inside the
-ten-minute inspection range; inspect the bounded journal before accepting it.
+Every printed diagnostic must be `0`. The full selection provenance plus
+`generated_ms` is the cohort identity; grouping only by time could incorrectly
+combine two artifacts. A nonzero `buckets_missing_a_candidate` may be a legacy
+pre-rollout partial cohort, a queue drop, or a restart inside the ten-minute
+inspection range. Restrict acceptance evidence to the cohort-atomic rollout
+and inspect the bounded journal before accepting it.
 
 ## 10. Verify idempotency and the seven-day retention configuration
 
@@ -475,7 +491,10 @@ SELECT
     max(generated_ms) AS newest_generated_ms,
     pg_size_pretty(pg_total_relation_size(
         'public.shadow_signal_evaluations'
-    )) AS total_relation_size
+    )) AS total_relation_size,
+    to_regclass(
+        'public.shadow_signal_evaluations_retention_cohort_idx'
+    ) AS retention_cohort_index
 FROM shadow_signal_evaluations;
 SQL
 
@@ -486,8 +505,10 @@ sudo grep -E \
 
 The configured values must be `168` hours, `300` seconds, and `5000` rows. The
 batch can out-delete a conservative five-candidate capacity envelope at the
-500 ms cadence. Retention removes old rows in bounded transactions, so a pre-existing
-backlog can still decline over multiple checks rather than in one large lock.
+500 ms cadence. The retention row budget must fit at least one complete
+candidate cohort. Cleanup examines a bounded ordered set and deletes only whole
+cohorts, so a pre-existing backlog can still decline over multiple checks
+rather than in one large lock.
 
 ## 11. Final bounded health check
 
@@ -506,24 +527,28 @@ sudo journalctl \
 ```
 
 `shadow_signal_evaluation_queue_drop` is rate-limited to the first and every
-hundredth queue overflow. `shadow_evaluation_batch_failed`,
+hundredth dropped cohort. `shadow_evaluation_batch_failed`,
 `shadow_evaluation_cleanup_failed`, and
 `shadow_evaluation_backend_close_failed` concern evidence coverage and require
-investigation; transient failed batches are requeued and retried until bounded
-capacity requires shedding old evidence. A deterministic PostgreSQL integrity
-or data violation is bisected inside one transaction instead: the worker logs
+investigation; transient failed batches are requeued and retried as whole
+cohorts until bounded capacity requires shedding old evidence. A deterministic
+PostgreSQL integrity or data violation is bisected only at cohort boundaries
+inside one transaction instead: the worker logs
 `shadow_evaluation_record_rejected` and
-`shadow_evaluation_batch_records_rejected`, drops the rejected evidence, and
-continues. Isolation is capped at eight rejected rows per batch so a
+`shadow_evaluation_batch_records_rejected`, drops the entire rejected cohort,
+and continues. Isolation is capped at eight rejected cohorts per batch so a
 schema-wide fault cannot produce unbounded database calls; if the cap is hit,
-the remaining unprobed rows are deferred back to the bounded queue and
+the remaining unprobed cohorts are deferred back to the bounded queue and
 `shadow_evaluation_rejection_isolation_limit_reached` is logged. Any rejection
 event requires investigation.
 `shadow_signal_evaluation_observation_gap`
 means outstanding targets across a polling gap were deliberately left without
-an actual. `shadow_signal_evaluation_writer_closed` prints the final persisted,
-rejected, deferred, dropped, failure, cleanup, and active-batch counters. None
-of these conditions may stop `btc:live:chainlink_shadow` from refreshing.
+an actual. Sequence-gap, regression, publisher-epoch-change, and
+sequence-metadata-loss warnings likewise identify deliberately invalidated
+outcome history. `shadow_signal_evaluation_writer_closed` prints row and cohort
+offered, enqueued, persisted, rejected, deferred, dropped, queue-high-water,
+failure, cleanup, and active-batch counters. None of these conditions may stop
+`btc:live:chainlink_shadow` from refreshing.
 Do not stop PostgreSQL deliberately to test this isolation because the other
 collectors also use it.
 

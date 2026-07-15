@@ -18,6 +18,7 @@ from price_collector.shadow_signal import (
 )
 from price_collector.shadow_signal_evaluation import (
     FORECAST_INPUT_AFTER_GENERATED,
+    ShadowEvaluationCohort,
     ShadowEvaluationProvenance,
     ShadowEvaluationScheduler,
     ShadowEvaluationWriteResult,
@@ -34,11 +35,20 @@ PROVENANCE = ShadowEvaluationProvenance(
 )
 
 
-def price(value, received_ms, source_timestamp_ms=None):
+def price(
+    value,
+    received_ms,
+    source_timestamp_ms=None,
+    *,
+    publisher_epoch=None,
+    accepted_event_sequence=None,
+):
     return ObservedPrice(
         value=Decimal(value),
         source_timestamp_ms=source_timestamp_ms,
         received_ms=received_ms,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=accepted_event_sequence,
     )
 
 
@@ -373,7 +383,7 @@ def test_rejected_candidate_set_does_not_consume_or_partially_fill_bucket():
     assert evaluator.pending_count == 2
 
 
-def test_pending_heap_matures_distinct_horizons_in_target_order():
+def test_pending_heap_stages_distinct_horizons_until_cohort_is_complete():
     long_model, short_model = models(900, 300)
     evaluator = scheduler((long_model, short_model))
     evaluator.observe(
@@ -390,10 +400,16 @@ def test_pending_heap_matures_distinct_horizons_in_target_order():
         chainlink=price("102", 850),
     )
 
-    assert [record.model_version for record in first] == [short_model.version]
+    assert first == ()
     assert [record.model_version for record in second if record.generated_ms == 0] == [
-        long_model.version
+        long_model.version,
+        short_model.version,
     ]
+    generated_zero = [
+        record for record in second if record.generated_ms == 0
+    ]
+    assert generated_zero[0].matured_ms == 900
+    assert generated_zero[1].matured_ms == 300
 
 
 def test_actual_is_latest_causal_value_and_excludes_after_target_update():
@@ -544,6 +560,273 @@ def test_live_observation_gap_fails_closed_for_outstanding_actuals():
     assert record.forecast_error is None
 
 
+def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
+    (candidate,) = models(1_000)
+    evaluator = scheduler(
+        (candidate,),
+        max_observation_gap_ms=200,
+    )
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=5,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    evaluator.observe(
+        observation(350, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    updated = price(
+        "101",
+        900,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=6,
+    )
+    matured = evaluator.observe(
+        observation(1_000, (candidate,), chainlink=updated),
+        chainlink=updated,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink == Decimal("101")
+    assert evaluator.observation_gap_count == 0
+    assert evaluator.chainlink_sequence_gap_count == 0
+    assert evaluator.chainlink_sequence_regression_count == 0
+    assert evaluator.chainlink_publisher_epoch_change_count == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "first_epoch",
+        "first_sequence",
+        "next_epoch",
+        "next_sequence",
+        "counter_name",
+    ),
+    (
+        (
+            "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            1,
+            "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            3,
+            "chainlink_sequence_gap_count",
+        ),
+        (
+            "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            3,
+            "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            2,
+            "chainlink_sequence_regression_count",
+        ),
+        (
+            "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            3,
+            "43cddae5-cf07-4e7c-948f-bfb4f0c945b7",
+            1,
+            "chainlink_publisher_epoch_change_count",
+        ),
+    ),
+)
+def test_chainlink_delivery_discontinuity_invalidates_old_actual_history(
+    first_epoch,
+    first_sequence,
+    next_epoch,
+    next_sequence,
+    counter_name,
+):
+    (candidate,) = models(1_000)
+    evaluator = scheduler(
+        (candidate,),
+        max_observation_gap_ms=200,
+    )
+    initial = price(
+        "100",
+        0,
+        publisher_epoch=first_epoch,
+        accepted_event_sequence=first_sequence,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    restarted = price(
+        "101",
+        500,
+        publisher_epoch=next_epoch,
+        accepted_event_sequence=next_sequence,
+    )
+    evaluator.observe(
+        observation(500, (candidate,), chainlink=restarted),
+        chainlink=restarted,
+    )
+    matured = evaluator.observe(
+        observation(1_000, (candidate,), chainlink=restarted),
+        chainlink=restarted,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink is None
+    assert record.forecast_error is None
+    assert evaluator.history_size == 1
+    assert getattr(evaluator, counter_name) == 1
+    assert evaluator.observation_gap_count == 0
+
+
+def test_sequence_metadata_downgrade_and_recovery_each_fail_closed():
+    (candidate,) = models(300)
+    evaluator = scheduler(
+        (candidate,),
+        max_observation_gap_ms=200,
+    )
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    sequenced = price(
+        "100",
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=sequenced),
+        chainlink=sequenced,
+    )
+    legacy = price("101", 100)
+    evaluator.observe(
+        observation(100, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+    evaluator.observe(
+        observation(200, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+    matured = evaluator.observe(
+        observation(300, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink is None
+    assert evaluator.chainlink_sequence_metadata_loss_count == 1
+    assert evaluator.observation_gap_count == 0
+
+    recovered = price(
+        "102",
+        400,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(400, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+    assert evaluator.history_size == 1
+
+
+def test_sequence_metadata_loss_stays_fail_closed_until_recovery():
+    (candidate,) = models(300)
+    evaluator = scheduler((candidate,), max_observation_gap_ms=200)
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    sequenced = price(
+        "100",
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=sequenced),
+        chainlink=sequenced,
+    )
+    legacy = price("101", 100)
+    evaluator.observe(
+        observation(100, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+
+    evaluator.observe(
+        observation(500, (candidate,), chainlink=price("100", 500)),
+        chainlink=price("100", 500),
+    )
+    matured = evaluator.observe(
+        observation(800, (candidate,), chainlink=price("100", 790)),
+        chainlink=price("100", 790),
+    )
+
+    record = next(record for record in matured if record.generated_ms == 500)
+    assert record.actual_chainlink is None
+    assert record.forecast_error is None
+    assert evaluator.history_size == 0
+    assert evaluator.chainlink_sequence_metadata_loss_count == 1
+
+    recovered = price(
+        "104",
+        900,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(900, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+    assert evaluator.history_size == 1
+
+
+def test_startup_legacy_to_sequenced_transition_resets_actual_history():
+    (candidate,) = models(300)
+    evaluator = scheduler((candidate,), max_observation_gap_ms=200)
+    legacy = price("100", 0)
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+    sequenced = price(
+        "101",
+        100,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=10,
+    )
+    evaluator.observe(
+        observation(100, (candidate,), chainlink=sequenced),
+        chainlink=sequenced,
+    )
+    matured = evaluator.observe(
+        observation(300, (candidate,), chainlink=sequenced),
+        chainlink=sequenced,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink is None
+    assert record.forecast_error is None
+    assert evaluator.history_size == 1
+    assert evaluator.chainlink_sequence_metadata_loss_count == 0
+
+
+def test_legacy_only_startup_keeps_gap_fallback_and_causal_actuals():
+    (candidate,) = models(300)
+    evaluator = scheduler((candidate,), max_observation_gap_ms=200)
+    initial = price("100", 0)
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    actual = price("101", 200)
+    evaluator.observe(
+        observation(200, (candidate,), chainlink=actual),
+        chainlink=actual,
+    )
+    matured = evaluator.observe(
+        observation(300, (candidate,), chainlink=actual),
+        chainlink=actual,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink == Decimal("101")
+    assert record.actual_chainlink_received_ms == 200
+
+
 def test_signed_decimal_error_math_and_provenance_are_exact():
     (candidate,) = models(1_000)
     evaluator = scheduler((candidate,))
@@ -586,6 +869,28 @@ def mature_record(*, generated_ms=0):
         chainlink=actual,
     )
     return next(record for record in matured if record.generated_ms == generated_ms)
+
+
+def mature_cohort(*, generated_ms=0):
+    candidate_models = models(100, 150, 200)
+    evaluator = scheduler(candidate_models, cadence_ms=50)
+    initial = price("100", generated_ms, generated_ms)
+    evaluator.observe(
+        observation(generated_ms, candidate_models, chainlink=initial),
+        chainlink=initial,
+    )
+    actual = price("101", generated_ms + 190, generated_ms + 180)
+    matured = evaluator.observe(
+        observation(
+            generated_ms + 200,
+            candidate_models,
+            chainlink=actual,
+        ),
+        chainlink=actual,
+    )
+    return tuple(
+        record for record in matured if record.generated_ms == generated_ms
+    )
 
 
 class Backend:
@@ -644,6 +949,7 @@ async def wait_until(predicate, *, timeout=1):
 def writer(backend_factory, **overrides):
     arguments = {
         "backend_factory": backend_factory,
+        "candidate_model_versions": ("candidate_100",),
         "queue_max_records": 10,
         "batch_max_rows": 3,
         "flush_ms": 10,
@@ -680,6 +986,176 @@ def test_writer_queue_overflow_drops_oldest_without_starting_backend(caplog):
 
     asyncio.run(scenario())
     assert "shadow_signal_evaluation_queue_drop" in caplog.text
+
+
+def test_writer_queue_overflow_drops_one_complete_candidate_cohort(caplog):
+    async def scenario():
+        backend = Backend()
+        first = mature_cohort(generated_ms=0)
+        second = mature_cohort(generated_ms=1_000)
+        third = mature_cohort(generated_ms=2_000)
+        runtime = writer(
+            lambda: backend,
+            candidate_model_versions=tuple(
+                record.model_version for record in first
+            ),
+            queue_max_records=6,
+            batch_max_rows=6,
+        )
+
+        runtime.offer_cohort_nowait(first)
+        runtime.offer_cohort_nowait(second)
+        result = runtime.offer_cohort_nowait(third)
+
+        assert result.dropped_oldest is True
+        assert result.dropped_records == first
+        assert result.queue_depth == 6
+        assert result.queue_cohort_depth == 2
+        assert runtime.counters.records_dropped_total == 3
+        assert runtime.counters.records_enqueued_total == 9
+        assert runtime.counters.cohorts_offered_total == 3
+        assert runtime.counters.cohorts_enqueued_total == 3
+        assert runtime.counters.cohorts_dropped_total == 1
+        assert runtime.counters.queue_cohort_high_water == 2
+        assert backend.batches == []
+        await runtime.close()
+
+    asyncio.run(scenario())
+    assert "shadow_signal_evaluation_queue_drop" in caplog.text
+
+
+def test_writer_rejects_incomplete_candidate_cohort_before_queueing():
+    cohort = mature_cohort()
+    runtime = writer(
+        lambda: Backend(),
+        candidate_model_versions=tuple(
+            record.model_version for record in cohort
+        ),
+        queue_max_records=3,
+        batch_max_rows=3,
+    )
+
+    with pytest.raises(ValueError, match="model set or order"):
+        runtime.offer_cohort_nowait(cohort[:2])
+
+    assert runtime.queue_depth == 0
+    assert runtime.counters.records_offered_total == 0
+
+
+def test_candidate_cohort_rejects_mixed_generation_market_fields():
+    cohort = mature_cohort()
+    malformed = replace(
+        cohort[1],
+        market_id=1,
+        market_start_ms=300_000,
+        market_end_ms=600_000,
+        ms_to_market_end=600_000 - cohort[1].generated_ms,
+    )
+
+    with pytest.raises(ValueError, match="generation-market fields"):
+        ShadowEvaluationCohort((cohort[0], malformed, cohort[2]))
+
+
+def test_writer_batch_row_limit_never_splits_candidate_cohort():
+    async def scenario():
+        backend = Backend()
+        first = mature_cohort(generated_ms=0)
+        second = mature_cohort(generated_ms=1_000)
+        runtime = writer(
+            lambda: backend,
+            candidate_model_versions=tuple(
+                record.model_version for record in first
+            ),
+            queue_max_records=6,
+            batch_max_rows=4,
+            flush_ms=2,
+        )
+        runtime.start()
+        runtime.offer_cohort_nowait(first)
+        runtime.offer_cohort_nowait(second)
+
+        await wait_until(lambda: runtime.counters.records_persisted_total == 6)
+        await runtime.close()
+
+        assert backend.batches == [list(first), list(second)]
+        assert [len(batch) for batch in backend.batches] == [3, 3]
+        assert runtime.counters.cohorts_persisted_total == 2
+
+    asyncio.run(scenario())
+
+
+def test_writer_retries_whole_batch_when_backend_splits_cohort_result():
+    class SplitResultBackend(Backend):
+        async def write_evaluations(self, records):
+            self.entered.set()
+            self.batches.append(list(records))
+            return ShadowEvaluationWriteResult(
+                persisted_count=2,
+                rejected_count=1,
+            )
+
+    async def scenario():
+        backend = SplitResultBackend()
+        cohort = mature_cohort()
+        runtime = writer(
+            lambda: backend,
+            candidate_model_versions=tuple(
+                record.model_version for record in cohort
+            ),
+            queue_max_records=3,
+            batch_max_rows=3,
+            flush_ms=2,
+            retry_ms=50,
+        )
+        runtime.start()
+        runtime.offer_cohort_nowait(cohort)
+
+        await wait_until(lambda: runtime.counters.batches_failed_total == 1)
+        assert runtime.queue_depth == 3
+        assert runtime.counters.records_persisted_total == 0
+        assert runtime.counters.records_rejected_total == 0
+        await runtime.close()
+
+        assert runtime.counters.records_dropped_total == 3
+
+    asyncio.run(scenario())
+
+
+def test_writer_shutdown_summary_exposes_cohort_coverage(caplog):
+    async def scenario():
+        cohort = mature_cohort()
+        runtime = writer(
+            lambda: Backend(),
+            candidate_model_versions=tuple(
+                record.model_version for record in cohort
+            ),
+            queue_max_records=3,
+            batch_max_rows=3,
+        )
+        runtime.offer_cohort_nowait(cohort)
+        await runtime.close()
+
+    caplog.set_level(
+        "INFO",
+        logger="price_collector.shadow_signal_evaluation",
+    )
+    asyncio.run(scenario())
+
+    summary = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None)
+        == "shadow_signal_evaluation_writer_closed"
+    )
+    assert summary.records_offered_total == 3
+    assert summary.records_dropped_total == 3
+    assert summary.cohorts_offered_total == 1
+    assert summary.cohorts_enqueued_total == 1
+    assert summary.cohorts_persisted_total == 0
+    assert summary.cohorts_rejected_total == 0
+    assert summary.cohorts_deferred_total == 0
+    assert summary.cohorts_dropped_total == 1
+    assert summary.queue_cohort_high_water == 1
 
 
 def test_writer_batches_records_and_flushes_partial_batch():
@@ -909,6 +1385,19 @@ def test_writer_rejects_bad_configuration_and_offers_after_close():
 
     with pytest.raises(ValueError, match="cannot exceed"):
         writer(lambda: Backend(), queue_max_records=1, batch_max_rows=2)
+
+    cohort = mature_cohort()
+    with pytest.raises(ValueError, match="cleanup_batch_rows must fit"):
+        writer(
+            lambda: Backend(),
+            candidate_model_versions=tuple(
+                candidate.model_version for candidate in cohort
+            ),
+            queue_max_records=3,
+            batch_max_rows=3,
+            retention_ms=10_000,
+            cleanup_batch_rows=2,
+        )
 
     async def scenario():
         runtime = writer(lambda: Backend())

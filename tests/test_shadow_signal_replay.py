@@ -3,7 +3,7 @@ import asyncio
 import json
 from collections import deque
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -206,9 +206,30 @@ def test_replay_uses_bucket_close_ratio_and_pairs_no_change_baseline():
     assert metrics["wins"] == 2
     assert metrics["ties"] == 3
     assert metrics["losses"] == 0
-    assert metrics["directional_eligible"] == 2
-    assert metrics["directional_correct"] == 2
-    assert metrics["directional_accuracy"] == Decimal("1")
+    directional = metrics["directional"]
+    assert directional["confusion_matrix"] == {
+        "actual_up": {
+            "predicted_up": 2,
+            "predicted_neutral": 0,
+            "predicted_down": 0,
+        },
+        "actual_neutral": {
+            "predicted_up": 0,
+            "predicted_neutral": 3,
+            "predicted_down": 0,
+        },
+        "actual_down": {
+            "predicted_up": 0,
+            "predicted_neutral": 0,
+            "predicted_down": 0,
+        },
+    }
+    assert directional["rates"]["three_class_accuracy"] == Decimal("1")
+    assert directional["rates"]["action_precision"] == Decimal("1")
+    assert directional["rates"]["move_recall"] == Decimal("1")
+    assert directional["rates"]["predicted_action_frequency"] == (
+        Decimal("2") / Decimal("5")
+    )
     assert common_cohort["scored"] == 5
     assert common_cohort["metrics"][
         "model_mean_absolute_error_usd"
@@ -216,6 +237,110 @@ def test_replay_uses_bucket_close_ratio_and_pairs_no_change_baseline():
     assert common_cohort["metrics"][
         "baseline_mean_absolute_error_usd"
     ] == Decimal("4")
+
+
+def test_directional_metrics_cover_all_confusion_cells_and_neutral_false_actions():
+    aggregate = replay_module._MetricAggregate(
+        keep_medians=False,
+        sample_max=10,
+        seed=1,
+    )
+    direction_value = {
+        "up": Decimal("2"),
+        "neutral": Decimal("0"),
+        "down": Decimal("-2"),
+    }
+    for actual in ("up", "neutral", "down"):
+        for predicted in ("up", "neutral", "down"):
+            aggregate.add(
+                SimpleNamespace(
+                    model_error=Decimal("0"),
+                    baseline_error=Decimal("0"),
+                    model_error_bps=Decimal("0"),
+                    baseline_error_bps=Decimal("0"),
+                    actual_move_bps=direction_value[actual],
+                    absolute_advantage=Decimal("0"),
+                    forecast=SimpleNamespace(
+                        predicted_move_bps=direction_value[predicted]
+                    ),
+                ),
+                neutral_band_bps=Decimal("1"),
+            )
+
+    directional = aggregate.summary()["directional"]
+
+    assert directional["confusion_matrix"] == {
+        "actual_up": {
+            "predicted_up": 1,
+            "predicted_neutral": 1,
+            "predicted_down": 1,
+        },
+        "actual_neutral": {
+            "predicted_up": 1,
+            "predicted_neutral": 1,
+            "predicted_down": 1,
+        },
+        "actual_down": {
+            "predicted_up": 1,
+            "predicted_neutral": 1,
+            "predicted_down": 1,
+        },
+    }
+    assert directional["counts"] == {
+        "three_class_correct": 3,
+        "predicted_actions": 6,
+        "actual_moves": 6,
+        "actual_neutral": 3,
+        "correct_actions": 2,
+        "false_actions_on_neutral": 2,
+        "opposite_direction_actions": 2,
+    }
+    with localcontext() as context:
+        context.prec = 50
+        assert directional["rates"] == {
+            "three_class_accuracy": Decimal("1") / Decimal("3"),
+            "action_precision": Decimal("1") / Decimal("3"),
+            "move_recall": Decimal("1") / Decimal("3"),
+            "false_action_rate_on_neutral": Decimal("2") / Decimal("3"),
+            "opposite_direction_rate_on_actual_moves": (
+                Decimal("1") / Decimal("3")
+            ),
+            "predicted_action_frequency": Decimal("2") / Decimal("3"),
+        }
+
+
+def test_directional_metrics_use_null_for_zero_denominators_and_band_is_inclusive():
+    aggregate = replay_module._MetricAggregate(
+        keep_medians=False,
+        sample_max=10,
+        seed=1,
+    )
+    aggregate.add(
+        SimpleNamespace(
+            model_error=Decimal("0"),
+            baseline_error=Decimal("0"),
+            model_error_bps=Decimal("0"),
+            baseline_error_bps=Decimal("0"),
+            actual_move_bps=Decimal("1"),
+            absolute_advantage=Decimal("0"),
+            forecast=SimpleNamespace(predicted_move_bps=Decimal("-1")),
+        ),
+        neutral_band_bps=Decimal("1"),
+    )
+
+    directional = aggregate.summary()["directional"]
+
+    assert directional["confusion_matrix"]["actual_neutral"][
+        "predicted_neutral"
+    ] == 1
+    assert directional["rates"] == {
+        "three_class_accuracy": Decimal("1"),
+        "action_precision": None,
+        "move_recall": None,
+        "false_action_rate_on_neutral": Decimal("0"),
+        "opposite_direction_rate_on_actual_moves": None,
+        "predicted_action_frequency": Decimal("0"),
+    }
 
 
 @pytest.mark.parametrize(
@@ -284,6 +409,192 @@ def test_poll_visibility_includes_exact_event_and_excludes_one_ns_after(
     assert only_candidate(report)["metrics"][
         "model_mean_absolute_error_usd"
     ] == expected_model_error
+
+
+@pytest.mark.parametrize(
+    ("futures_offset_ns", "expected_model_error"),
+    [
+        (0, Decimal("0")),
+        (1, Decimal("10")),
+    ],
+)
+def test_delayed_visibility_includes_exact_boundary_but_not_one_ns_after(
+    futures_offset_ns,
+    expected_model_error,
+):
+    events = sorted(
+        [
+            event(FUTURES_EVENT, ORIGIN_MS, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 500, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 1_500, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 1_500, "100"),
+            event(
+                FUTURES_EVENT,
+                ORIGIN_MS + 1_900,
+                "110",
+                received_offset_ns=futures_offset_ns,
+            ),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 3_000, "110"),
+        ],
+        key=lambda item: item.sort_key,
+    )
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            end_ms=ORIGIN_MS + 3_001,
+            futures_availability_delay_ms=100,
+        ),
+    )
+
+    assert only_candidate(report)["metrics"][
+        "model_mean_absolute_error_usd"
+    ] == expected_model_error
+
+
+def test_source_delays_reorder_visibility_without_advancing_polls_early():
+    events = sorted(
+        [
+            event(FUTURES_EVENT, ORIGIN_MS, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 500, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 1_500, "100"),
+            # This raw event is encountered before the Chainlink event below,
+            # but its assumed visibility time is later than the 2,000 ms poll.
+            event(FUTURES_EVENT, ORIGIN_MS + 1_900, "110"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 1_950, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 3_000, "100"),
+        ],
+        key=lambda item: item.sort_key,
+    )
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            end_ms=ORIGIN_MS + 3_001,
+            reference_max_gap_ms=500,
+            history_retention_ms=6_500,
+            futures_availability_delay_ms=200,
+            chainlink_availability_delay_ms=0,
+        ),
+    )
+    candidate = only_candidate(report)
+
+    assert candidate["scored"] == 1
+    assert candidate["metrics"]["model_mean_absolute_error_usd"] == Decimal("0")
+    assert candidate["metrics"]["baseline_mean_absolute_error_usd"] == Decimal(
+        "0"
+    )
+
+
+def test_visibility_delay_preserves_raw_lag_but_gates_actual_history():
+    events = base_events()
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            end_ms=ORIGIN_MS + 3_001,
+            chainlink_availability_delay_ms=100,
+        ),
+    )
+    candidate = only_candidate(report)
+
+    # The 1,500 ms Chainlink anchor still targets the futures event received at
+    # 500 ms, rather than treating its assumed 1,600 ms visibility as receipt.
+    assert candidate["reference_gap_ms"]["max"] == 0
+    # The raw Chainlink event received exactly at the 3,000 ms target is not an
+    # evaluator-visible actual until 3,100 ms, so the prior visible value wins.
+    assert candidate["scored"] == 1
+    assert candidate["metrics"]["model_mean_absolute_error_usd"] == Decimal(
+        "10"
+    )
+    assert candidate["metrics"]["baseline_mean_absolute_error_usd"] == Decimal(
+        "0"
+    )
+
+
+@pytest.mark.parametrize(
+    ("chainlink_offset_ns", "expected_model_error"),
+    [
+        (0, Decimal("0")),
+        (1, Decimal("10")),
+    ],
+)
+def test_delayed_actual_visibility_includes_exact_target_not_one_ns_after(
+    chainlink_offset_ns,
+    expected_model_error,
+):
+    events = sorted(
+        [
+            event(FUTURES_EVENT, ORIGIN_MS, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 500, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 1_500, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 1_500, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 2_000, "110"),
+            event(
+                CHAINLINK_EVENT,
+                ORIGIN_MS + 2_900,
+                "110",
+                received_offset_ns=chainlink_offset_ns,
+            ),
+        ],
+        key=lambda item: item.sort_key,
+    )
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            end_ms=ORIGIN_MS + 3_001,
+            chainlink_availability_delay_ms=100,
+        ),
+    )
+
+    assert only_candidate(report)["metrics"][
+        "model_mean_absolute_error_usd"
+    ] == expected_model_error
+
+
+def test_evaluation_phase_generates_at_the_configured_poll_offset():
+    events = sorted(
+        [
+            event(FUTURES_EVENT, ORIGIN_MS, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 500, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 1_500, "100"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 1_500, "100"),
+            event(FUTURES_EVENT, ORIGIN_MS + 2_050, "110"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 3_000, "110"),
+            event(CHAINLINK_EVENT, ORIGIN_MS + 3_100, "110"),
+        ],
+        key=lambda item: item.sort_key,
+    )
+
+    exact_phase = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(end_ms=ORIGIN_MS + 3_101),
+    )
+    shifted_phase = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            end_ms=ORIGIN_MS + 3_101,
+            evaluation_phase_offset_ms=100,
+        ),
+    )
+
+    assert only_candidate(exact_phase)["metrics"][
+        "model_mean_absolute_error_usd"
+    ] == Decimal("10")
+    assert only_candidate(shifted_phase)["metrics"][
+        "model_mean_absolute_error_usd"
+    ] == Decimal("0")
 
 
 def test_error_metrics_are_decimal_and_match_hand_calculation():
@@ -851,16 +1162,37 @@ def test_report_json_serializes_decimals_as_strings_and_does_not_select_model():
     )
     payload = json.loads(encode_replay_report(report))
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["mode"] == "shadow_raw_replay"
     assert payload["selection_performed"] is False
     assert payload["configuration"]["beta"] == "1"
+    assert payload["configuration"]["max_future_skew_ms"] == 0
+    assert payload["configuration"]["futures_availability_delay_ms"] == 0
+    assert payload["configuration"]["chainlink_availability_delay_ms"] == 0
+    assert payload["configuration"]["evaluation_phase_offset_ms"] == 0
+    assert any(
+        "not measured Redis publication-completion timing" in limitation
+        for limitation in payload["data_quality"]["limitations"]
+    )
     assert payload["candidates"][0]["metrics"][
         "baseline_mean_absolute_error_usd"
     ] == "4"
     assert payload["candidates"][0]["common_cohort"]["metrics"][
         "baseline_mean_absolute_error_usd"
     ] == "4"
+    directional = payload["candidates"][0]["metrics"]["directional"]
+    assert all(
+        isinstance(value, int)
+        for row in directional["confusion_matrix"].values()
+        for value in row.values()
+    )
+    assert all(
+        value is None or isinstance(value, str)
+        for value in directional["rates"].values()
+    )
+    assert "directional_accuracy_when_action" not in payload["candidates"][0][
+        "metrics"
+    ]
     statistics = payload["candidates"][0]["metrics"][
         "sufficient_statistics"
     ]
@@ -894,8 +1226,30 @@ def test_report_file_write_is_atomic_and_leaves_no_temporary_file(tmp_path):
 
     write_replay_report(output, report)
 
-    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 3
     assert list(tmp_path.iterdir()) == [output]
+
+
+def test_report_records_fixed_timing_sensitivity_assumptions():
+    report = replay_shadow_signals(
+        events=[],
+        sessions=[],
+        config=replay_config(
+            futures_availability_delay_ms=25,
+            chainlink_availability_delay_ms=50,
+            evaluation_phase_offset_ms=100,
+        ),
+    )
+
+    payload = report.to_dict()
+
+    assert payload["configuration"]["futures_availability_delay_ms"] == 25
+    assert payload["configuration"]["chainlink_availability_delay_ms"] == 50
+    assert payload["configuration"]["evaluation_phase_offset_ms"] == 100
+    assert any(
+        "not measured Redis publication-completion timing" in limitation
+        for limitation in payload["data_quality"]["limitations"]
+    )
 
 
 def test_report_status_distinguishes_missing_evidence():
@@ -976,6 +1330,11 @@ def _contains_float(value):
         {"poll_ms": 150, "evaluation_interval_ms": 600},
         {"evaluation_interval_ms": 400},
         {"poll_ms": 300, "evaluation_interval_ms": 500},
+        {"futures_availability_delay_ms": -1},
+        {"chainlink_availability_delay_ms": -1},
+        {"evaluation_phase_offset_ms": -1},
+        {"evaluation_phase_offset_ms": 1},
+        {"evaluation_phase_offset_ms": 500},
         {"quantile_sample_max": 50_001},
         {"history_retention_ms": 30_001},
         {"volatility_lookback_ms": 30_001},
@@ -1022,12 +1381,19 @@ def test_replay_config_accepts_operational_bounds():
         lags_ms=(500, 1_000, 1_500, 2_000, 2_500),
         history_retention_ms=7_600,
         quantile_sample_max=30_000,
+        futures_availability_delay_ms=300,
+        chainlink_availability_delay_ms=400,
+        evaluation_phase_offset_ms=400,
     )
     single_candidate = replay_config(quantile_sample_max=50_000)
 
     assert len(config.models) == 5
     assert config.poll_ms == 100
     assert config.evaluation_interval_ms == 500
+    assert config.max_future_skew_ms == 0
+    assert config.futures_availability_delay_ms == 300
+    assert config.chainlink_availability_delay_ms == 400
+    assert config.evaluation_phase_offset_ms == 400
     assert single_candidate.quantile_sample_max == 50_000
 
 
@@ -1047,6 +1413,12 @@ def test_cli_requires_bounded_range_and_builds_decimal_config():
             "1.00",
             "--neutral-band-bps",
             "0.75",
+            "--futures-availability-delay-ms",
+            "25",
+            "--chainlink-availability-delay-ms",
+            "50",
+            "--evaluation-phase-offset-ms",
+            "100",
         ]
     )
 
@@ -1055,6 +1427,10 @@ def test_cli_requires_bounded_range_and_builds_decimal_config():
     assert config.lags_ms == (3_000, 3_500, 4_000)
     assert config.beta == Decimal("1.00")
     assert config.neutral_band_bps == Decimal("0.75")
+    assert config.max_future_skew_ms == 0
+    assert config.futures_availability_delay_ms == 25
+    assert config.chainlink_availability_delay_ms == 50
+    assert config.evaluation_phase_offset_ms == 100
     assert not hasattr(arguments, "database_url")
 
 

@@ -2528,7 +2528,10 @@ flag unless a separate raw-capture failure justifies that action.
 
 This is an offline, read-only analysis job. It does not run inside a collector,
 FastAPI, Redis, or systemd. It does not select the provisional primary model;
-that decision is a later shadow-signal checkpoint.
+that decision is a later shadow-signal checkpoint. The current command writes
+replay schema v3. V3 corrects the directional accounting, requires strict
+zero-future-skew evidence, and records explicit source-visibility-delay and
+evaluation-phase sensitivity assumptions.
 
 Prerequisites:
 
@@ -2571,7 +2574,14 @@ WHERE disconnected_wall_ns IS NOT NULL;
 test -n "$END_MS"
 START_MS="$((END_MS - 86400000))"
 REPORT="/var/lib/price-collector/shadow-replay-${START_MS}-${END_MS}.json"
+FUTURES_AVAILABILITY_DELAY_MS=0
+CHAINLINK_AVAILABILITY_DELAY_MS=0
+EVALUATION_PHASE_OFFSET_MS=0
 printf 'START_MS=%s\nEND_MS=%s\nREPORT=%s\n' "$START_MS" "$END_MS" "$REPORT"
+printf 'futures_delay_ms=%s chainlink_delay_ms=%s phase_ms=%s\n' \
+  "$FUTURES_AVAILABILITY_DELAY_MS" \
+  "$CHAINLINK_AVAILABILITY_DELAY_MS" \
+  "$EVALUATION_PHASE_OFFSET_MS"
 ```
 
 Run the replay with the service user's existing writer environment. The
@@ -2583,6 +2593,9 @@ coverage, and RMSE are exact.
 REPLAY_EXIT=0
 sudo -u pricecollector \
   env START_MS="$START_MS" END_MS="$END_MS" REPORT="$REPORT" \
+      FUTURES_AVAILABILITY_DELAY_MS="$FUTURES_AVAILABILITY_DELAY_MS" \
+      CHAINLINK_AVAILABILITY_DELAY_MS="$CHAINLINK_AVAILABILITY_DELAY_MS" \
+      EVALUATION_PHASE_OFFSET_MS="$EVALUATION_PHASE_OFFSET_MS" \
   bash -c '
     set -a
     . /etc/price-collector/collector.env
@@ -2591,6 +2604,10 @@ sudo -u pricecollector \
     exec .venv/bin/python -m price_collector.shadow_signal_replay \
       --start-ms "$START_MS" \
       --end-ms "$END_MS" \
+      --max-future-skew-ms 0 \
+      --futures-availability-delay-ms "$FUTURES_AVAILABILITY_DELAY_MS" \
+      --chainlink-availability-delay-ms "$CHAINLINK_AVAILABILITY_DELAY_MS" \
+      --evaluation-phase-offset-ms "$EVALUATION_PHASE_OFFSET_MS" \
       --output "$REPORT"
   ' || REPLAY_EXIT=$?
 printf 'replay_exit=%s\n' "$REPLAY_EXIT"
@@ -2618,6 +2635,15 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 print("status:", report["status"])
 print("range:", report["range"])
+print("timing assumptions:", {
+    key: report["configuration"][key]
+    for key in (
+        "max_future_skew_ms",
+        "futures_availability_delay_ms",
+        "chainlink_availability_delay_ms",
+        "evaluation_phase_offset_ms",
+    )
+})
 print("session exclusions:", report["data_quality"]["sessions_excluded_by_reason"])
 for candidate in report["candidates"]:
     cohort = candidate["common_cohort"]
@@ -2638,6 +2664,7 @@ for candidate in report["candidates"]:
         "wins": metrics["wins"],
         "ties": metrics["ties"],
         "losses": metrics["losses"],
+        "directional": metrics["directional"],
     })
 PY
 ```
@@ -2646,9 +2673,20 @@ The summary deliberately reads `common_cohort.metrics`, so every candidate is
 compared on the same generation times. Positive `mae_skill_vs_no_change` means
 the candidate reduced mean absolute error against no-change on those paired
 rows. Do not select a model from directional accuracy alone. Compare error,
-baseline advantage, coverage, move-size, direction, expiry,
+baseline advantage, coverage, the complete directional confusion matrix,
+move-size, expiry,
 raw-bucket-return RMS, and session-boundary slices across multiple
 chronological reports.
+
+The zero-delay example above is one explicit sensitivity point, not a claim
+that Redis publication has zero latency. Before any shorter-horizon model
+selection, preregister and preserve a timing matrix that includes, at minimum,
+25, 50, 100, 200, and 300 ms visibility-delay scenarios at phase offsets 0,
+100, 200, 300, and 400 ms. Use source-specific delay pairs when measured
+publication-completion telemetry is available. Do not inspect the matrix and
+then choose the delay or phase that favors a candidate; freeze the robustness
+rule before the new holdout. Every calibration/holdout pair passed to one v3
+selector run must use exactly the same timing configuration.
 
 Run this at least daily or preserve the derived JSON elsewhere: raw retention
 is configured for 72 hours. Phase 4 partition-boundary, retention, and storage
@@ -2660,12 +2698,12 @@ as proof that Phase 4 retention risks are closed.
 ## Shadow-Signal Phase 3 Provisional Selection
 
 Phase 3 is an offline decision checkpoint. It does not configure or start the
-future shadow worker. It consumes replay schema-version-2 reports, freezes a
+future shadow worker. It consumes replay schema-version-3 reports, freezes a
 winner using older calibration evidence, and tests only that frozen winner on
 later holdout evidence. It never chooses the model that happens to look best on
 the holdout and never falls back after a holdout failure.
 
-Policy `chronological_holdout_v2` requires, for every replay report:
+Policy `chronological_holdout_v3` requires, for every replay report:
 
 - at least 10,000 common-cohort scored forecasts;
 - common valid coverage of at least 50%; and
@@ -2680,12 +2718,21 @@ Slice categories with fewer than 500 forecasts or no MAE improvement are also
 surfaced as warnings, not treated as significance tests. These thresholds are
 versioned project policy, not values supplied by `engine.md`.
 
+Policy v3 deliberately keeps the existing 3.0/3.5/4.0-second candidate set. It
+validates the measurement corrections without testing a new horizon. Do not
+add 2.0 or 2.5 seconds to these commands: the expanded grid, timing-robustness
+rule, reference-gap rule, uncertainty method, and evidence windows must be
+preregistered together under a later policy version.
+
 For a new evaluation, generate at least one calibration report followed by one
-strictly later untouched holdout report. When migrating from policy v1, treat
-the original v1 calibration and the already-inspected v1 holdout as two v2
-calibration reports, then collect exactly one new future holdout. Never pass a
-v1 selection artifact as replay evidence. The following derives initial
-windows from the older of the latest completed futures and Chainlink sessions:
+strictly later untouched holdout report. Policy v3 was created after the v2
+holdout was inspected, so that window and every other inspected window are now
+calibration-only. V3 cannot reconstruct its corrected directional matrix or
+timing sensitivity from a v1/v2 aggregate report: rerun any still-retained raw
+window with replay v3, or omit it if its raw events have expired. Never pass a
+v1/v2 selection artifact or replay report as v3 replay evidence. The following
+derives initial windows from the older of the latest completed futures and
+Chainlink sessions:
 
 ```bash
 END_MS="$(sudo -u postgres psql -At -d price_collector -c "
@@ -2707,7 +2754,10 @@ CALIBRATION_END_MS="$HOLDOUT_START_MS"
 CALIBRATION_START_MS="$((CALIBRATION_END_MS - 86400000))"
 CALIBRATION_REPORT="/var/lib/price-collector/shadow-replay-calibration-${CALIBRATION_START_MS}-${CALIBRATION_END_MS}.json"
 HOLDOUT_REPORT="/var/lib/price-collector/shadow-replay-holdout-${HOLDOUT_START_MS}-${HOLDOUT_END_MS}.json"
-SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v2-${HOLDOUT_END_MS}.json"
+SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v3-${HOLDOUT_END_MS}.json"
+FUTURES_AVAILABILITY_DELAY_MS=0
+CHAINLINK_AVAILABILITY_DELAY_MS=0
+EVALUATION_PHASE_OFFSET_MS=0
 ```
 
 Generate the calibration report first:
@@ -2716,6 +2766,9 @@ Generate the calibration report first:
 sudo -u pricecollector \
   env START_MS="$CALIBRATION_START_MS" END_MS="$CALIBRATION_END_MS" \
       REPORT="$CALIBRATION_REPORT" \
+      FUTURES_AVAILABILITY_DELAY_MS="$FUTURES_AVAILABILITY_DELAY_MS" \
+      CHAINLINK_AVAILABILITY_DELAY_MS="$CHAINLINK_AVAILABILITY_DELAY_MS" \
+      EVALUATION_PHASE_OFFSET_MS="$EVALUATION_PHASE_OFFSET_MS" \
   bash -c '
     set -a
     . /etc/price-collector/collector.env
@@ -2724,6 +2777,10 @@ sudo -u pricecollector \
     exec .venv/bin/python -m price_collector.shadow_signal_replay \
       --start-ms "$START_MS" \
       --end-ms "$END_MS" \
+      --max-future-skew-ms 0 \
+      --futures-availability-delay-ms "$FUTURES_AVAILABILITY_DELAY_MS" \
+      --chainlink-availability-delay-ms "$CHAINLINK_AVAILABILITY_DELAY_MS" \
+      --evaluation-phase-offset-ms "$EVALUATION_PHASE_OFFSET_MS" \
       --output "$REPORT"
   '
 ```
@@ -2731,12 +2788,30 @@ sudo -u pricecollector \
 Generate the strictly later holdout report without changing replay settings:
 
 ```bash
-
-
+sudo -u pricecollector \
+  env START_MS="$HOLDOUT_START_MS" END_MS="$HOLDOUT_END_MS" \
+      REPORT="$HOLDOUT_REPORT" \
+      FUTURES_AVAILABILITY_DELAY_MS="$FUTURES_AVAILABILITY_DELAY_MS" \
+      CHAINLINK_AVAILABILITY_DELAY_MS="$CHAINLINK_AVAILABILITY_DELAY_MS" \
+      EVALUATION_PHASE_OFFSET_MS="$EVALUATION_PHASE_OFFSET_MS" \
+  bash -c '
+    set -a
+    . /etc/price-collector/collector.env
+    set +a
+    cd /opt/price-collector
+    exec .venv/bin/python -m price_collector.shadow_signal_replay \
+      --start-ms "$START_MS" \
+      --end-ms "$END_MS" \
+      --max-future-skew-ms 0 \
+      --futures-availability-delay-ms "$FUTURES_AVAILABILITY_DELAY_MS" \
+      --chainlink-availability-delay-ms "$CHAINLINK_AVAILABILITY_DELAY_MS" \
+      --evaluation-phase-offset-ms "$EVALUATION_PHASE_OFFSET_MS" \
+      --output "$REPORT"
+  '
 ```
 
-Confirm all inputs are successful schema-version-2 reports, then run the
-selector. `--calibration-report` may repeat; policy v2 requires exactly one
+Confirm all inputs are successful schema-version-3 reports, then run the
+selector. `--calibration-report` may repeat; policy v3 requires exactly one
 strictly later `--holdout-report`.
 
 ```bash
@@ -2749,7 +2824,7 @@ for path in sys.argv[1:]:
     with open(path, encoding="utf-8") as stream:
         report = json.load(stream)
     print(path, "schema=", report["schema_version"], "status=", report["status"])
-    if report["schema_version"] != 2 or report["status"] != "ok":
+    if report["schema_version"] != 3 or report["status"] != "ok":
         raise SystemExit(1)
 PY
 
@@ -2768,43 +2843,13 @@ if [ -f "$SELECTION_REPORT" ]; then
 fi
 ```
 
-For a v1-to-v2 migration, assign the three replay JSON paths explicitly and
-use both inspected v1 windows as calibration. The v2 holdout must be new and
-strictly later than both:
-
-```bash
-V1_CALIBRATION_REPORT="/absolute/path/to/v1-calibration-replay.json"
-V1_INSPECTED_HOLDOUT_REPORT="/absolute/path/to/inspected-v1-holdout-replay.json"
-V2_NEW_HOLDOUT_REPORT="/absolute/path/to/new-v2-holdout-replay.json"
-V2_SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v2.json"
-
-sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
-  "$V1_CALIBRATION_REPORT" \
-  "$V1_INSPECTED_HOLDOUT_REPORT" \
-  "$V2_NEW_HOLDOUT_REPORT" <<'PY'
-import json
-import sys
-
-for path in sys.argv[1:]:
-    with open(path, encoding="utf-8") as stream:
-        report = json.load(stream)
-    print(path, "schema=", report["schema_version"], "status=", report["status"])
-    if report["schema_version"] != 2 or report["status"] != "ok":
-        raise SystemExit(1)
-PY
-
-V2_SELECTION_EXIT=0
-(
-  cd /opt/price-collector &&
-  sudo -u pricecollector .venv/bin/python \
-    -m price_collector.shadow_signal_selection \
-    --calibration-report "$V1_CALIBRATION_REPORT" \
-    --calibration-report "$V1_INSPECTED_HOLDOUT_REPORT" \
-    --holdout-report "$V2_NEW_HOLDOUT_REPORT" \
-    --output "$V2_SELECTION_REPORT"
-) || V2_SELECTION_EXIT=$?
-printf 'v2_selection_exit=%s\n' "$V2_SELECTION_EXIT"
-```
+The selector intentionally rejects v1/v2 reports instead of pretending their
+old aggregate directional counters can be upgraded. To reuse an older window
+as v3 calibration, rerun that exact `[start_ms,end_ms)` range from raw events
+with the same explicit v3 timing configuration used above. Repeat
+`--calibration-report` for each resulting v3 file. If the raw window has already
+expired, keep its old artifact as historical evidence but do not include it in
+the v3 decision.
 
 Exit `0` means one frozen calibration winner passed every holdout gate. Exit
 `2` means a valid artifact was written but selection abstained because of
@@ -2837,15 +2882,17 @@ for candidate in selection["candidates"]:
         "holdout_gates": candidate["holdout"]["gates"],
         "calibration_paired_frequency": candidate["calibration"]["paired_frequency_diagnostic"],
         "holdout_paired_frequency": candidate["holdout"]["paired_frequency_diagnostic"],
+        "calibration_directional": candidate["calibration"]["metrics"]["directional"],
+        "holdout_directional": candidate["holdout"]["metrics"]["directional"],
         "slice_warning_count": len(candidate["slice_warnings"]),
     })
 PY
 ```
 
 Preserve every replay input and selection artifact beyond raw retention. Keep
-the v1 artifact as historical evidence; do not overwrite it. An inspected v1
-holdout is calibration-only under v2, whose validity must come from one new
-future holdout and a new schema-version-2 selection output filename.
+v1/v2 artifacts as historical evidence; do not overwrite them. Every inspected
+v1/v2 holdout is calibration-only for v3, whose validity must come from one new
+future holdout and a new schema-version-3 selection output filename.
 The selector permits an identical idempotent write but refuses to replace an
 existing artifact with different content; use a new evidence-end filename for
 a genuinely new decision checkpoint.

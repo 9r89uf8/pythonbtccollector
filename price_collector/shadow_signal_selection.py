@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 
-SELECTION_SCHEMA_VERSION = 2
-SUPPORTED_REPLAY_SCHEMA_VERSION = 2
-SELECTION_POLICY_VERSION = "chronological_holdout_v2"
+SELECTION_SCHEMA_VERSION = 3
+SUPPORTED_REPLAY_SCHEMA_VERSION = 3
+SELECTION_POLICY_VERSION = "chronological_holdout_v3"
 COMMON_COHORT_DEFINITION = (
     "same_generated_ms_max_horizon_eligible_all_models_valid"
 )
@@ -25,8 +25,27 @@ EXPECTED_CANDIDATES = (
 )
 EXPECTED_LAGS_MS = tuple(horizon for _version, horizon in EXPECTED_CANDIDATES)
 EXPECTED_BETA = Decimal("1")
+DIRECTION_LABELS = ("up", "neutral", "down")
+DIRECTIONAL_COUNT_KEYS = (
+    "three_class_correct",
+    "predicted_actions",
+    "actual_moves",
+    "actual_neutral",
+    "correct_actions",
+    "false_actions_on_neutral",
+    "opposite_direction_actions",
+)
+DIRECTIONAL_RATE_KEYS = (
+    "three_class_accuracy",
+    "action_precision",
+    "move_recall",
+    "false_action_rate_on_neutral",
+    "opposite_direction_rate_on_actual_moves",
+    "predicted_action_frequency",
+)
+DirectionalMatrix = tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]
 
-# These are project policy-v2 thresholds, not claims of statistical
+# These are project policy-v3 thresholds, not claims of statistical
 # significance and not values supplied by engine.md. Changing any one requires
 # a new policy version so a holdout cannot be tuned after its results are seen.
 MIN_COMMON_SCORED_PER_REPORT = 10_000
@@ -76,6 +95,9 @@ POSITIVE_CONFIGURATION_INTS = (
 NON_NEGATIVE_CONFIGURATION_INTS = (
     "reference_max_gap_ms",
     "max_future_skew_ms",
+    "futures_availability_delay_ms",
+    "chainlink_availability_delay_ms",
+    "evaluation_phase_offset_ms",
 )
 
 
@@ -87,6 +109,15 @@ def _as_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
     if not isinstance(value, dict):
         raise SelectionInputError(f"{field_name} must be an object")
     return value
+
+
+def _require_exact_keys(
+    payload: Mapping[str, Any],
+    expected: Sequence[str],
+    field_name: str,
+) -> None:
+    if set(payload) != set(expected):
+        raise SelectionInputError(f"{field_name} has unsupported fields")
 
 
 def _as_list(value: Any, field_name: str) -> list[Any]:
@@ -204,6 +235,175 @@ def _decimal_ratio(
         return Decimal(numerator) / Decimal(denominator)
 
 
+def _directional_summary(
+    matrix: DirectionalMatrix,
+    *,
+    count: int,
+) -> dict[str, Any]:
+    cells = {
+        (actual, predicted): matrix[actual_index][predicted_index]
+        for actual_index, actual in enumerate(DIRECTION_LABELS)
+        for predicted_index, predicted in enumerate(DIRECTION_LABELS)
+    }
+    matrix_count = sum(cells.values())
+    if matrix_count != count:
+        raise SelectionInputError(
+            "directional confusion matrix count differs from metric count"
+        )
+
+    correct_actions = cells[("up", "up")] + cells[("down", "down")]
+    three_class_correct = correct_actions + cells[("neutral", "neutral")]
+    predicted_actions = sum(
+        cells[(actual, predicted)]
+        for actual in DIRECTION_LABELS
+        for predicted in ("up", "down")
+    )
+    actual_moves = sum(
+        cells[(actual, predicted)]
+        for actual in ("up", "down")
+        for predicted in DIRECTION_LABELS
+    )
+    actual_neutral = sum(
+        cells[("neutral", predicted)] for predicted in DIRECTION_LABELS
+    )
+    false_actions_on_neutral = (
+        cells[("neutral", "up")] + cells[("neutral", "down")]
+    )
+    opposite_direction_actions = (
+        cells[("up", "down")] + cells[("down", "up")]
+    )
+    return {
+        "confusion_matrix": {
+            f"actual_{actual}": {
+                f"predicted_{predicted}": cells[(actual, predicted)]
+                for predicted in DIRECTION_LABELS
+            }
+            for actual in DIRECTION_LABELS
+        },
+        "counts": {
+            "three_class_correct": three_class_correct,
+            "predicted_actions": predicted_actions,
+            "actual_moves": actual_moves,
+            "actual_neutral": actual_neutral,
+            "correct_actions": correct_actions,
+            "false_actions_on_neutral": false_actions_on_neutral,
+            "opposite_direction_actions": opposite_direction_actions,
+        },
+        "rates": {
+            "three_class_accuracy": _decimal_ratio(three_class_correct, count),
+            "action_precision": _decimal_ratio(
+                correct_actions,
+                predicted_actions,
+            ),
+            "move_recall": _decimal_ratio(correct_actions, actual_moves),
+            "false_action_rate_on_neutral": _decimal_ratio(
+                false_actions_on_neutral,
+                actual_neutral,
+            ),
+            "opposite_direction_rate_on_actual_moves": _decimal_ratio(
+                opposite_direction_actions,
+                actual_moves,
+            ),
+            "predicted_action_frequency": _decimal_ratio(
+                predicted_actions,
+                count,
+            ),
+        },
+    }
+
+
+def _parse_directional(
+    value: Any,
+    field_name: str,
+    *,
+    count: int,
+) -> DirectionalMatrix:
+    directional = _as_mapping(value, field_name)
+    _require_exact_keys(
+        directional,
+        ("confusion_matrix", "counts", "rates"),
+        field_name,
+    )
+    confusion = _as_mapping(
+        directional["confusion_matrix"],
+        f"{field_name}.confusion_matrix",
+    )
+    expected_rows = tuple(f"actual_{label}" for label in DIRECTION_LABELS)
+    _require_exact_keys(
+        confusion,
+        expected_rows,
+        f"{field_name}.confusion_matrix",
+    )
+    parsed_rows: list[tuple[int, int, int]] = []
+    for actual in DIRECTION_LABELS:
+        row_name = f"actual_{actual}"
+        row = _as_mapping(
+            confusion[row_name],
+            f"{field_name}.confusion_matrix.{row_name}",
+        )
+        expected_columns = tuple(
+            f"predicted_{label}" for label in DIRECTION_LABELS
+        )
+        _require_exact_keys(
+            row,
+            expected_columns,
+            f"{field_name}.confusion_matrix.{row_name}",
+        )
+        parsed_rows.append(
+            tuple(
+                _as_int(
+                    row[f"predicted_{predicted}"],
+                    (
+                        f"{field_name}.confusion_matrix.{row_name}."
+                        f"predicted_{predicted}"
+                    ),
+                    minimum=0,
+                )
+                for predicted in DIRECTION_LABELS
+            )
+        )
+    matrix: DirectionalMatrix = tuple(parsed_rows)  # type: ignore[assignment]
+    expected = _directional_summary(matrix, count=count)
+
+    reported_counts = _as_mapping(
+        directional["counts"],
+        f"{field_name}.counts",
+    )
+    _require_exact_keys(
+        reported_counts,
+        DIRECTIONAL_COUNT_KEYS,
+        f"{field_name}.counts",
+    )
+    for key in DIRECTIONAL_COUNT_KEYS:
+        reported = _as_int(
+            reported_counts[key],
+            f"{field_name}.counts.{key}",
+            minimum=0,
+        )
+        if reported != expected["counts"][key]:
+            raise SelectionInputError(
+                f"{field_name}.counts.{key} is inconsistent with confusion matrix"
+            )
+
+    reported_rates = _as_mapping(
+        directional["rates"],
+        f"{field_name}.rates",
+    )
+    _require_exact_keys(
+        reported_rates,
+        DIRECTIONAL_RATE_KEYS,
+        f"{field_name}.rates",
+    )
+    for key in DIRECTIONAL_RATE_KEYS:
+        _require_reported_decimal(
+            reported_rates,
+            key,
+            expected["rates"][key],
+            f"{field_name}.rates",
+        )
+    return matrix
+
+
 def _reject_float(raw_value: str) -> None:
     raise SelectionInputError(
         f"JSON floating-point value is forbidden: {raw_value}"
@@ -271,9 +471,7 @@ class MetricEvidence:
     wins: int
     ties: int
     losses: int
-    directional_eligible: int
-    directional_correct: int
-    directional_action: int
+    directional_matrix: DirectionalMatrix
 
     @classmethod
     def from_payload(
@@ -407,37 +605,11 @@ class MetricEvidence:
             raise SelectionInputError(
                 f"{field_name} wins, ties, and losses do not equal count"
             )
-        directional_eligible = _as_int(
-            metrics.get("directional_eligible"),
-            f"{field_name}.directional_eligible",
-            minimum=0,
+        directional_matrix = _parse_directional(
+            metrics.get("directional"),
+            f"{field_name}.directional",
+            count=count,
         )
-        directional_correct = _as_int(
-            metrics.get("directional_correct"),
-            f"{field_name}.directional_correct",
-            minimum=0,
-        )
-        directional_action = _as_int(
-            metrics.get("directional_action"),
-            f"{field_name}.directional_action",
-            minimum=0,
-        )
-        if directional_eligible > count:
-            raise SelectionInputError(
-                f"{field_name}.directional_eligible exceeds count"
-            )
-        if directional_correct > directional_eligible:
-            raise SelectionInputError(
-                f"{field_name}.directional_correct exceeds eligible count"
-            )
-        if directional_action > directional_eligible:
-            raise SelectionInputError(
-                f"{field_name}.directional_action exceeds eligible count"
-            )
-        if directional_correct > directional_action:
-            raise SelectionInputError(
-                f"{field_name}.directional_correct exceeds action count"
-            )
         return cls(
             count=count,
             model_absolute_error_sum=model_absolute_error_sum,
@@ -448,9 +620,7 @@ class MetricEvidence:
             wins=wins,
             ties=ties,
             losses=losses,
-            directional_eligible=directional_eligible,
-            directional_correct=directional_correct,
-            directional_action=directional_action,
+            directional_matrix=directional_matrix,
         )
 
 
@@ -465,9 +635,10 @@ class MetricPool:
         self.wins = 0
         self.ties = 0
         self.losses = 0
-        self.directional_eligible = 0
-        self.directional_correct = 0
-        self.directional_action = 0
+        self.directional_matrix = [
+            [0 for _predicted in DIRECTION_LABELS]
+            for _actual in DIRECTION_LABELS
+        ]
 
     def add(self, evidence: MetricEvidence) -> None:
         self.count += evidence.count
@@ -483,9 +654,9 @@ class MetricPool:
         self.wins += evidence.wins
         self.ties += evidence.ties
         self.losses += evidence.losses
-        self.directional_eligible += evidence.directional_eligible
-        self.directional_correct += evidence.directional_correct
-        self.directional_action += evidence.directional_action
+        for actual_index, row in enumerate(evidence.directional_matrix):
+            for predicted_index, value in enumerate(row):
+                self.directional_matrix[actual_index][predicted_index] += value
 
     @property
     def model_mae(self) -> Optional[Decimal]:
@@ -531,6 +702,9 @@ class MetricPool:
         return _decimal_ratio(self.wins - self.losses, self.count)
 
     def summary(self) -> dict[str, Any]:
+        directional_matrix: DirectionalMatrix = tuple(
+            tuple(row) for row in self.directional_matrix
+        )  # type: ignore[assignment]
         return {
             "count": self.count,
             "model_mean_absolute_error_usd": self.model_mae,
@@ -550,16 +724,9 @@ class MetricPool:
             "tie_rate": _decimal_ratio(self.ties, self.count),
             "loss_rate": _decimal_ratio(self.losses, self.count),
             "paired_net_win_rate": self.paired_net_win_rate,
-            "directional_eligible": self.directional_eligible,
-            "directional_correct": self.directional_correct,
-            "directional_action": self.directional_action,
-            "directional_accuracy": _decimal_ratio(
-                self.directional_correct,
-                self.directional_eligible,
-            ),
-            "directional_action_coverage": _decimal_ratio(
-                self.directional_action,
-                self.directional_eligible,
+            "directional": _directional_summary(
+                directional_matrix,
+                count=self.count,
             ),
             "sufficient_statistics": {
                 "model_absolute_error_sum_usd": self.model_absolute_error_sum,
@@ -740,12 +907,14 @@ def _validate_configuration(configuration: Mapping[str, Any]) -> None:
         EXPECTED_BETA
     ):
         raise SelectionInputError("configuration.beta must equal 1")
-    if _as_int(configuration.get("poll_ms"), "configuration.poll_ms") != 100:
+    poll_ms = _as_int(configuration.get("poll_ms"), "configuration.poll_ms")
+    if poll_ms != 100:
         raise SelectionInputError("configuration.poll_ms must equal 100")
-    if _as_int(
+    evaluation_interval_ms = _as_int(
         configuration.get("evaluation_interval_ms"),
         "configuration.evaluation_interval_ms",
-    ) != 500:
+    )
+    if evaluation_interval_ms != 500:
         raise SelectionInputError(
             "configuration.evaluation_interval_ms must equal 500"
         )
@@ -755,11 +924,29 @@ def _validate_configuration(configuration: Mapping[str, Any]) -> None:
             f"configuration.{field_name}",
             minimum=1,
         )
+    non_negative_values = {}
     for field_name in NON_NEGATIVE_CONFIGURATION_INTS:
-        _as_int(
+        non_negative_values[field_name] = _as_int(
             configuration.get(field_name),
             f"configuration.{field_name}",
             minimum=0,
+        )
+    if non_negative_values["max_future_skew_ms"] != 0:
+        raise SelectionInputError(
+            "configuration.max_future_skew_ms must equal policy-v3 zero"
+        )
+    evaluation_phase_offset_ms = non_negative_values[
+        "evaluation_phase_offset_ms"
+    ]
+    if evaluation_phase_offset_ms >= evaluation_interval_ms:
+        raise SelectionInputError(
+            "configuration.evaluation_phase_offset_ms must be less than "
+            "evaluation_interval_ms"
+        )
+    if evaluation_phase_offset_ms % poll_ms != 0:
+        raise SelectionInputError(
+            "configuration.evaluation_phase_offset_ms must be a multiple "
+            "of poll_ms"
         )
     for field_name in (
         "neutral_band_bps",
@@ -1141,10 +1328,12 @@ def _report_records(
 def _policy_payload() -> dict[str, Any]:
     return {
         "version": SELECTION_POLICY_VERSION,
-        "supersedes": "chronological_holdout_v1",
+        "supersedes": "chronological_holdout_v2",
         "revision_reason": (
-            "paired win/loss frequency is diagnostic on autocorrelated "
-            "500 ms rows; MAE and RMSE remain efficacy gates"
+            "directional diagnostics use a full three-class confusion matrix "
+            "that includes actions on neutral outcomes; MAE and RMSE remain "
+            "efficacy gates; fixed replay visibility delays and evaluation "
+            "phase are frozen sensitivity assumptions, with zero future skew"
         ),
         "previously_inspected_holdouts_must_be_calibration": True,
         "new_later_holdout_required_after_revision": True,
@@ -1192,7 +1381,7 @@ def _policy_payload() -> dict[str, Any]:
             }
         },
         "threshold_provenance": (
-            "project_policy_v2_not_statistical_significance_and_not_engine_md"
+            "project_policy_v3_not_statistical_significance_and_not_engine_md"
         ),
     }
 
@@ -1232,7 +1421,7 @@ def select_provisional_primary(
 ) -> SelectionArtifact:
     if len(holdout_report_paths) != 1:
         raise SelectionInputError(
-            "policy v2 requires exactly one untouched holdout report"
+            "policy v3 requires exactly one untouched holdout report"
         )
     calibration = _load_role_reports(
         calibration_report_paths,

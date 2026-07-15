@@ -63,6 +63,30 @@ def evaluation_record(**overrides):
     return SimpleNamespace(**values)
 
 
+def evaluation_cohort(generated_ms):
+    cohort = []
+    for model_version, horizon_ms in (
+        ("catchup_ratio_l3000_b100", 3_000),
+        ("catchup_ratio_l3500_b100", 3_500),
+        ("catchup_ratio_l4000_b100", 4_000),
+    ):
+        cohort.append(
+            evaluation_record(
+                model_version=model_version,
+                generated_ms=generated_ms,
+                horizon_ms=horizon_ms,
+                target_ms=generated_ms + horizon_ms,
+                matured_ms=generated_ms + 4_100,
+                ms_to_market_end=300_000 - generated_ms,
+                futures_reference_target_ms=max(
+                    0,
+                    generated_ms - horizon_ms,
+                ),
+            )
+        )
+    return tuple(cohort)
+
+
 class FakeAcquire:
     def __init__(self, connection):
         self.connection = connection
@@ -253,7 +277,7 @@ def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
         "ON CONFLICT (model_version, generated_ms, horizon_ms) DO NOTHING"
         in query
     )
-    assert rows == [db.shadow_signal_evaluation_row(record)]
+    assert rows == (db.shadow_signal_evaluation_row(record),)
     assert result.persisted_count == 1
     assert result.rejected_count == 0
     assert result.deferred_records == ()
@@ -332,6 +356,70 @@ def test_shadow_evaluation_backend_isolates_permanently_rejected_row(
     assert "shadow_evaluation_record_rejected" in caplog.text
 
 
+def test_shadow_evaluation_backend_rejects_poison_only_at_cohort_boundary(
+    monkeypatch,
+    caplog,
+):
+    generated_index = db.SHADOW_SIGNAL_EVALUATION_COLUMNS.index(
+        "generated_ms"
+    )
+    model_index = db.SHADOW_SIGNAL_EVALUATION_COLUMNS.index("model_version")
+    poison_generated_ms = 20_000
+
+    class PermanentCheckViolation(Exception):
+        sqlstate = "23514"
+        constraint_name = (
+            "shadow_signal_evaluations_projection_consistency_check"
+        )
+
+    class FakeConnection(FakeTransactionalConnection):
+        def __init__(self):
+            self.calls = []
+            self.persisted = []
+
+        async def executemany(self, query, rows):
+            identities = [
+                (row[generated_index], row[model_index]) for row in rows
+            ]
+            self.calls.append(identities)
+            if any(
+                generated_ms == poison_generated_ms
+                for generated_ms, _model_version in identities
+            ):
+                raise PermanentCheckViolation("projection check failed")
+            self.persisted.extend(identities)
+
+    monkeypatch.setattr(
+        db.asyncpg,
+        "IntegrityConstraintViolationError",
+        PermanentCheckViolation,
+    )
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    good = evaluation_cohort(10_000)
+    poison = evaluation_cohort(poison_generated_ms)
+
+    result = asyncio.run(backend.write_evaluations((*good, *poison)))
+
+    assert result.persisted_count == 3
+    assert result.rejected_count == 3
+    assert result.deferred_records == ()
+    assert connection.persisted == [
+        (record.generated_ms, record.model_version) for record in good
+    ]
+    poison_calls = [
+        call
+        for call in connection.calls
+        if any(generated_ms == poison_generated_ms for generated_ms, _ in call)
+    ]
+    assert poison_calls[-1] == [
+        (record.generated_ms, record.model_version) for record in poison
+    ]
+    assert not any(len(call) in (1, 2) for call in poison_calls)
+    assert backend._permanent_rejections_total == 3
+    assert "shadow_evaluation_record_rejected" in caplog.text
+
+
 def test_shadow_evaluation_backend_bounds_all_poison_isolation(
     monkeypatch,
     caplog,
@@ -374,6 +462,43 @@ def test_shadow_evaluation_backend_bounds_all_poison_isolation(
         "shadow_evaluation_rejection_isolation_limit_reached"
     ) == 1
     assert backend._permanent_rejections_total == 8
+
+
+def test_shadow_evaluation_backend_defers_only_complete_cohorts_at_limit(
+    monkeypatch,
+):
+    class PermanentCheckViolation(Exception):
+        pass
+
+    class FakeConnection(FakeTransactionalConnection):
+        async def executemany(self, query, rows):
+            raise PermanentCheckViolation("poison cohort")
+
+    monkeypatch.setattr(
+        db.asyncpg,
+        "IntegrityConstraintViolationError",
+        PermanentCheckViolation,
+    )
+    backend = db.AsyncpgShadowEvaluationBackend(
+        FakePool(FakeConnection())
+    )
+    cohorts = [
+        evaluation_cohort(10_000 + index * 500)
+        for index in range(10)
+    ]
+
+    result = asyncio.run(
+        backend.write_evaluations(
+            tuple(record for cohort in cohorts for record in cohort)
+        )
+    )
+
+    assert result.persisted_count == 0
+    assert result.rejected_count == 8 * 3
+    assert result.deferred_records == tuple(
+        record for cohort in cohorts[8:] for record in cohort
+    )
+    assert len(result.deferred_records) == 2 * 3
 
 
 def test_shadow_evaluation_backend_defers_unprobed_good_rows(
@@ -528,7 +653,10 @@ def test_shadow_evaluation_backend_does_not_bisect_transient_batch_failure():
     with pytest.raises(RuntimeError, match="database unavailable"):
         asyncio.run(
             backend.write_evaluations(
-                [evaluation_record(), evaluation_record()]
+                [
+                    evaluation_record(generated_ms=10_000),
+                    evaluation_record(generated_ms=20_000),
+                ]
             )
         )
 
@@ -561,10 +689,23 @@ def test_shadow_evaluation_backend_deletes_expired_rows_in_bounded_order():
     assert deleted == 7
     assert pool.acquire_calls == [{"timeout": 4}]
     query, args = connection.calls[0]
-    assert "WITH expired AS" in query
+    assert "WITH expired_cohort_counts AS" in query
     assert "WHERE generated_ms < $1" in query
-    assert "ORDER BY generated_ms LIMIT $2" in query
-    assert "USING expired" in query
+    assert "GROUP BY generated_ms" in query
+    assert "LIMIT $2 ), ordered_expired_cohorts AS" in query
+    assert "sum(cohort_rows) OVER" in query
+    assert "WHERE cumulative_rows <= $2" in query
+    assert "USING expired_cohorts" in query
+    assert (
+        "evaluations.selection_artifact_sha256 = "
+        "expired_cohorts.selection_artifact_sha256"
+        in query
+    )
+    assert (
+        "evaluations.selection_evidence_end_ms = "
+        "expired_cohorts.selection_evidence_end_ms"
+        in query
+    )
     assert args == (1_000_000, 7)
 
 
@@ -653,6 +794,22 @@ def test_schema_has_causal_internal_shadow_evaluation_table():
     )
 
     assert "shadow_signal_evaluations_generated_idx" in schema
+    assert "shadow_signal_evaluations_retention_cohort_idx" in schema
+    retention_index = schema[
+        schema.index("shadow_signal_evaluations_retention_cohort_idx") :
+        schema.index(");", schema.index(
+            "shadow_signal_evaluations_retention_cohort_idx"
+        )) + 2
+    ]
+    for cohort_column in (
+        "generated_ms",
+        "selection_artifact_sha256",
+        "selection_fingerprint_sha256",
+        "selection_schema_version",
+        "selection_policy_version",
+        "selection_evidence_end_ms",
+    ):
+        assert cohort_column in retention_index
     assert "shadow_signal_evaluations_market_model_idx" in schema
     assert "REVOKE ALL ON TABLE shadow_signal_evaluations" in schema
     assert "FROM PUBLIC, price_reader, price_writer" in schema

@@ -32,7 +32,7 @@ FUTURES_SESSION_SOURCE = "binance_futures_agg_trade"
 CHAINLINK_SESSION_SOURCE = "polymarket_chainlink_rtds"
 REPLAY_APPLICATION_NAME = "price_collector_shadow_signal_replay"
 NS_PER_MS = 1_000_000
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 MAX_REPLAY_WINDOW_MS = 24 * 60 * 60 * 1000
 DEFAULT_QUANTILE_SAMPLE_MAX = 10_000
 DEFAULT_DATABASE_CHUNK_MS = 5 * 60 * 1000
@@ -47,6 +47,7 @@ MAX_CANDIDATE_QUANTILE_BUDGET = 150_000
 
 DEFAULT_LAGS_MS = (3_000, 3_500, 4_000)
 DEFAULT_BETA = Decimal("1")
+DIRECTION_LABELS = ("up", "neutral", "down")
 
 
 class ReplayDataError(ValueError):
@@ -117,7 +118,91 @@ def _require_finite_decimal(value: object, field_name: str) -> None:
 def _decimal_rate(numerator: int, denominator: int) -> Optional[Decimal]:
     if denominator == 0:
         return None
-    return Decimal(numerator) / Decimal(denominator)
+    with localcontext() as context:
+        context.prec = 50
+        return Decimal(numerator) / Decimal(denominator)
+
+
+def _directional_summary(
+    confusion: Mapping[tuple[str, str], int],
+    *,
+    count: int,
+) -> dict[str, Any]:
+    matrix = {
+        f"actual_{actual}": {
+            f"predicted_{predicted}": confusion.get((actual, predicted), 0)
+            for predicted in DIRECTION_LABELS
+        }
+        for actual in DIRECTION_LABELS
+    }
+    matrix_count = sum(
+        matrix[f"actual_{actual}"][f"predicted_{predicted}"]
+        for actual in DIRECTION_LABELS
+        for predicted in DIRECTION_LABELS
+    )
+    if matrix_count != count:
+        raise ReplayDataError(
+            "directional confusion matrix count differs from metric count"
+        )
+
+    correct_actions = (
+        matrix["actual_up"]["predicted_up"]
+        + matrix["actual_down"]["predicted_down"]
+    )
+    three_class_correct = (
+        correct_actions + matrix["actual_neutral"]["predicted_neutral"]
+    )
+    predicted_actions = sum(
+        matrix[f"actual_{actual}"][f"predicted_{predicted}"]
+        for actual in DIRECTION_LABELS
+        for predicted in ("up", "down")
+    )
+    actual_moves = sum(
+        matrix[f"actual_{actual}"][f"predicted_{predicted}"]
+        for actual in ("up", "down")
+        for predicted in DIRECTION_LABELS
+    )
+    actual_neutral = sum(matrix["actual_neutral"].values())
+    false_actions_on_neutral = (
+        matrix["actual_neutral"]["predicted_up"]
+        + matrix["actual_neutral"]["predicted_down"]
+    )
+    opposite_direction_actions = (
+        matrix["actual_up"]["predicted_down"]
+        + matrix["actual_down"]["predicted_up"]
+    )
+    return {
+        "confusion_matrix": matrix,
+        "counts": {
+            "three_class_correct": three_class_correct,
+            "predicted_actions": predicted_actions,
+            "actual_moves": actual_moves,
+            "actual_neutral": actual_neutral,
+            "correct_actions": correct_actions,
+            "false_actions_on_neutral": false_actions_on_neutral,
+            "opposite_direction_actions": opposite_direction_actions,
+        },
+        "rates": {
+            "three_class_accuracy": _decimal_rate(three_class_correct, count),
+            "action_precision": _decimal_rate(
+                correct_actions,
+                predicted_actions,
+            ),
+            "move_recall": _decimal_rate(correct_actions, actual_moves),
+            "false_action_rate_on_neutral": _decimal_rate(
+                false_actions_on_neutral,
+                actual_neutral,
+            ),
+            "opposite_direction_rate_on_actual_moves": _decimal_rate(
+                opposite_direction_actions,
+                actual_moves,
+            ),
+            "predicted_action_frequency": _decimal_rate(
+                predicted_actions,
+                count,
+            ),
+        },
+    }
 
 
 def _decimal_mean(total: Decimal, count: int) -> Optional[Decimal]:
@@ -176,7 +261,10 @@ class ReplayConfig:
     chainlink_stale_ms: int = 5_000
     reference_max_gap_ms: int = 250
     history_retention_ms: int = 10_000
-    max_future_skew_ms: int = 250
+    max_future_skew_ms: int = 0
+    futures_availability_delay_ms: int = 0
+    chainlink_availability_delay_ms: int = 0
+    evaluation_phase_offset_ms: int = 0
     neutral_band_bps: Decimal = Decimal("1")
     move_size_thresholds_bps: tuple[Decimal, Decimal] = (
         Decimal("1"),
@@ -236,12 +324,33 @@ class ReplayConfig:
             "reference_max_gap_ms",
         )
         _require_non_negative_int(self.max_future_skew_ms, "max_future_skew_ms")
+        _require_non_negative_int(
+            self.futures_availability_delay_ms,
+            "futures_availability_delay_ms",
+        )
+        _require_non_negative_int(
+            self.chainlink_availability_delay_ms,
+            "chainlink_availability_delay_ms",
+        )
+        _require_non_negative_int(
+            self.evaluation_phase_offset_ms,
+            "evaluation_phase_offset_ms",
+        )
         if self.poll_ms < MIN_POLL_MS or self.poll_ms % MIN_POLL_MS != 0:
             raise ValueError("poll_ms must be a multiple of 100 and at least 100")
         if self.evaluation_interval_ms < MIN_EVALUATION_INTERVAL_MS:
             raise ValueError("evaluation_interval_ms must be at least 500")
         if self.evaluation_interval_ms % self.poll_ms != 0:
             raise ValueError("poll_ms must divide evaluation_interval_ms")
+        if self.evaluation_phase_offset_ms >= self.evaluation_interval_ms:
+            raise ValueError(
+                "evaluation_phase_offset_ms must be less than "
+                "evaluation_interval_ms"
+            )
+        if self.evaluation_phase_offset_ms % self.poll_ms != 0:
+            raise ValueError(
+                "evaluation_phase_offset_ms must be a multiple of poll_ms"
+            )
         if self.quantile_sample_max > MAX_QUANTILE_SAMPLE_MAX:
             raise ValueError(
                 "quantile_sample_max cannot exceed "
@@ -626,9 +735,7 @@ class _MetricAggregate:
         self.wins = 0
         self.ties = 0
         self.losses = 0
-        self.directional_eligible = 0
-        self.directional_correct = 0
-        self.directional_action = 0
+        self.directional_confusion: Counter[tuple[str, str]] = Counter()
         self._keep_medians = keep_medians
         self._model_absolute_errors = _BoundedSample(
             sample_max,
@@ -675,12 +782,7 @@ class _MetricAggregate:
             outcome.forecast.predicted_move_bps,
             neutral_band_bps,
         )
-        if actual_direction != "neutral":
-            self.directional_eligible += 1
-            if predicted_direction != "neutral":
-                self.directional_action += 1
-            if predicted_direction == actual_direction:
-                self.directional_correct += 1
+        self.directional_confusion[(actual_direction, predicted_direction)] += 1
 
         if self._keep_medians:
             self._model_absolute_errors.add(model_absolute_error)
@@ -726,20 +828,9 @@ class _MetricAggregate:
             "win_rate": _decimal_rate(self.wins, self.count),
             "tie_rate": _decimal_rate(self.ties, self.count),
             "loss_rate": _decimal_rate(self.losses, self.count),
-            "directional_eligible": self.directional_eligible,
-            "directional_correct": self.directional_correct,
-            "directional_action": self.directional_action,
-            "directional_accuracy": _decimal_rate(
-                self.directional_correct,
-                self.directional_eligible,
-            ),
-            "directional_action_coverage": _decimal_rate(
-                self.directional_action,
-                self.directional_eligible,
-            ),
-            "directional_accuracy_when_action": _decimal_rate(
-                self.directional_correct,
-                self.directional_action,
+            "directional": _directional_summary(
+                self.directional_confusion,
+                count=self.count,
             ),
             "sufficient_statistics": {
                 "model_absolute_error_sum_usd": (
@@ -1259,6 +1350,15 @@ class ReplayReport:
                 "reference_max_gap_ms": self.config.reference_max_gap_ms,
                 "history_retention_ms": self.config.history_retention_ms,
                 "max_future_skew_ms": self.config.max_future_skew_ms,
+                "futures_availability_delay_ms": (
+                    self.config.futures_availability_delay_ms
+                ),
+                "chainlink_availability_delay_ms": (
+                    self.config.chainlink_availability_delay_ms
+                ),
+                "evaluation_phase_offset_ms": (
+                    self.config.evaluation_phase_offset_ms
+                ),
                 "neutral_band_bps": self.config.neutral_band_bps,
                 "move_size_thresholds_bps": list(
                     self.config.move_size_thresholds_bps
@@ -1303,6 +1403,7 @@ class ReplayReport:
                 "limitations": [
                     "100 ms futures OHLC exposes only each bucket close at its last receive time.",
                     "Raw receive time precedes parsing and Redis publication latency.",
+                    "Configured source visibility delays and evaluation phase are fixed sensitivity assumptions, not measured Redis publication-completion timing.",
                     "Open sessions are excluded because their persisted counters are not final.",
                     "Cross-model comparisons must use the common-cohort "
                     "metrics; top-level metrics include horizon-specific "
@@ -1384,11 +1485,16 @@ class _SegmentRuntime:
         )
         self.next_poll_ms = simulation_start_ms
         self.engine = self._new_engine()
-        self.latest_futures = initial_futures
-        self.latest_chainlink = initial_chainlink
-        self._chainlink_history: Deque[ReplayEvent] = deque()
+        self.latest_futures: Optional[ReplayEvent] = None
+        self.latest_chainlink: Optional[ReplayEvent] = None
+        self._visibility_pending: list[
+            tuple[int, tuple[int, int, int, int, str], ReplayEvent]
+        ] = []
+        if initial_futures is not None:
+            self._queue_for_visibility(initial_futures)
         if initial_chainlink is not None:
-            self._chainlink_history.append(initial_chainlink)
+            self._queue_for_visibility(initial_chainlink)
+        self._chainlink_history: Deque[ReplayEvent] = deque()
         self._pending: list[tuple[int, int, MaturedForecast]] = []
         self._pending_sequence = 0
         self.polls_processed = 0
@@ -1415,17 +1521,43 @@ class _SegmentRuntime:
         self.events_processed += 1
         self.diagnostics.observe(event)
         if event.kind == FUTURES_EVENT:
-            self.latest_futures = event
             self._observe_volatility_event(event)
-        else:
-            self.latest_chainlink = event
-            self._chainlink_history.append(event)
-            cutoff_ms = event.received_ms - self.config.history_retention_ms
-            while (
-                len(self._chainlink_history) > 1
-                and self._chainlink_history[1].received_ms < cutoff_ms
-            ):
-                self._chainlink_history.popleft()
+        self._queue_for_visibility(event)
+
+    def _queue_for_visibility(self, event: ReplayEvent) -> None:
+        delay_ms = (
+            self.config.futures_availability_delay_ms
+            if event.kind == FUTURES_EVENT
+            else self.config.chainlink_availability_delay_ms
+        )
+        available_wall_ns = event.received_wall_ns + delay_ms * NS_PER_MS
+        heapq.heappush(
+            self._visibility_pending,
+            (available_wall_ns, event.sort_key, event),
+        )
+
+    def _apply_visible_events(self, tick_ms: int) -> None:
+        tick_wall_ns = tick_ms * NS_PER_MS
+        while (
+            self._visibility_pending
+            and self._visibility_pending[0][0] <= tick_wall_ns
+        ):
+            _available_wall_ns, _sort_key, event = heapq.heappop(
+                self._visibility_pending
+            )
+            if event.kind == FUTURES_EVENT:
+                self.latest_futures = event
+            else:
+                self.latest_chainlink = event
+                self._chainlink_history.append(event)
+                cutoff_ms = (
+                    event.received_ms - self.config.history_retention_ms
+                )
+                while (
+                    len(self._chainlink_history) > 1
+                    and self._chainlink_history[1].received_ms < cutoff_ms
+                ):
+                    self._chainlink_history.popleft()
 
     def finish(self) -> None:
         self._advance_polls_before(self.effective_end_wall_ns)
@@ -1441,6 +1573,7 @@ class _SegmentRuntime:
 
     def _poll(self, tick_ms: int) -> None:
         self.polls_processed += 1
+        self._apply_visible_events(tick_ms)
         observation = self.engine.observe(
             futures=(
                 self.latest_futures.observed_price
@@ -1459,7 +1592,10 @@ class _SegmentRuntime:
             self._generate(observation)
 
     def _is_generation_tick(self, tick_ms: int) -> bool:
-        if tick_ms % self.config.evaluation_interval_ms != 0:
+        if (
+            tick_ms % self.config.evaluation_interval_ms
+            != self.config.evaluation_phase_offset_ms
+        ):
             return False
         if tick_ms < self.config.start_ms:
             return False
@@ -2467,7 +2603,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chainlink-stale-ms", type=int, default=5_000)
     parser.add_argument("--reference-max-gap-ms", type=int, default=250)
     parser.add_argument("--history-retention-ms", type=int, default=10_000)
-    parser.add_argument("--max-future-skew-ms", type=int, default=250)
+    parser.add_argument("--max-future-skew-ms", type=int, default=0)
+    parser.add_argument("--futures-availability-delay-ms", type=int, default=0)
+    parser.add_argument("--chainlink-availability-delay-ms", type=int, default=0)
+    parser.add_argument("--evaluation-phase-offset-ms", type=int, default=0)
     parser.add_argument("--neutral-band-bps", default="1")
     parser.add_argument("--chunk-ms", type=int, default=DEFAULT_DATABASE_CHUNK_MS)
     parser.add_argument(
@@ -2496,6 +2635,13 @@ def config_from_arguments(arguments: argparse.Namespace) -> ReplayConfig:
         reference_max_gap_ms=arguments.reference_max_gap_ms,
         history_retention_ms=arguments.history_retention_ms,
         max_future_skew_ms=arguments.max_future_skew_ms,
+        futures_availability_delay_ms=(
+            arguments.futures_availability_delay_ms
+        ),
+        chainlink_availability_delay_ms=(
+            arguments.chainlink_availability_delay_ms
+        ),
+        evaluation_phase_offset_ms=arguments.evaluation_phase_offset_ms,
         neutral_band_bps=_parse_decimal(
             arguments.neutral_band_bps,
             "neutral_band_bps",

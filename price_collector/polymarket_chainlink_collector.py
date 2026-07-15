@@ -107,6 +107,7 @@ class ChainlinkDeliveryState:
         self.history_capacity_seconds = history_capacity_seconds
         self.history_settle_ms = history_settle_ms
         self._accepting = True
+        self._publisher_epoch = str(uuid4())
         self._sequence = 0
         self._latest: Optional[SequencedChainlinkSample] = None
         self._latest_event: Optional[asyncio.Event] = None
@@ -144,6 +145,10 @@ class ChainlinkDeliveryState:
     @property
     def current_connection_id(self) -> Optional[UUID]:
         return self._current_connection_id
+
+    @property
+    def publisher_epoch(self) -> str:
+        return self._publisher_epoch
 
     @property
     def history_pending_count(self) -> int:
@@ -613,17 +618,25 @@ def build_polymarket_chainlink_sample(
 async def update_chainlink_live_cache(
     live_cache: Any,
     sample: PolymarketChainlinkSample,
+    *,
+    publisher_epoch: Optional[str] = None,
+    accepted_event_sequence: Optional[int] = None,
 ) -> bool:
     if live_cache is None:
         return False
 
     try:
-        await live_cache.set_price(
-            CHAINLINK_LIVE_KEY,
-            value=sample.price,
-            source_timestamp_ms=sample.provider_event_ms,
-            received_ms=sample.received_ms,
-        )
+        live_fields: dict[str, Any] = {
+            "value": sample.price,
+            "source_timestamp_ms": sample.provider_event_ms,
+            "received_ms": sample.received_ms,
+        }
+        if publisher_epoch is not None or accepted_event_sequence is not None:
+            live_fields.update(
+                publisher_epoch=publisher_epoch,
+                accepted_event_sequence=accepted_event_sequence,
+            )
+        await live_cache.set_price(CHAINLINK_LIVE_KEY, **live_fields)
     except LIVE_CACHE_WRITE_ERRORS as exc:
         LOGGER.warning(
             "live_cache_write_failed",
@@ -714,6 +727,8 @@ async def chainlink_live_worker(
             succeeded = await update_chainlink_live_cache(
                 live_cache,
                 item.sample,
+                publisher_epoch=delivery_state.publisher_epoch,
+                accepted_event_sequence=item.sequence,
             )
         except asyncio.CancelledError:
             raise

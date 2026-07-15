@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Iterable, Mapping, Optional
+from uuid import UUID
 
 import redis.asyncio as redis
 from redis.exceptions import RedisError
@@ -41,6 +42,8 @@ class LivePrice:
     value: str
     source_timestamp_ms: Optional[int]
     received_ms: int
+    publisher_epoch: Optional[str] = None
+    accepted_event_sequence: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -475,6 +478,49 @@ def _required_int(value: Any, field_name: str) -> int:
     return parsed
 
 
+def _price_delivery_metadata(
+    publisher_epoch: Any,
+    accepted_event_sequence: Any,
+    *,
+    payload_error: bool,
+) -> tuple[Optional[str], Optional[int]]:
+    error_type = LiveCachePayloadError if payload_error else ValueError
+    present = (
+        publisher_epoch is not None,
+        accepted_event_sequence is not None,
+    )
+    if present[0] != present[1]:
+        raise error_type(
+            "publisher_epoch and accepted_event_sequence must be provided together"
+        )
+    if publisher_epoch is None:
+        return None, None
+    if not isinstance(publisher_epoch, str):
+        if payload_error:
+            raise LiveCachePayloadError("publisher_epoch must be a string")
+        raise TypeError("publisher_epoch must be a string")
+    try:
+        parsed_epoch = UUID(publisher_epoch)
+    except (ValueError, AttributeError) as exc:
+        raise error_type("publisher_epoch must be a canonical UUID") from exc
+    if str(parsed_epoch) != publisher_epoch:
+        raise error_type("publisher_epoch must be a canonical UUID")
+    if (
+        isinstance(accepted_event_sequence, bool)
+        or not isinstance(accepted_event_sequence, int)
+    ):
+        if payload_error:
+            raise LiveCachePayloadError(
+                "accepted_event_sequence must be an integer"
+            )
+        raise TypeError("accepted_event_sequence must be an integer")
+    if accepted_event_sequence <= 0:
+        raise error_type("accepted_event_sequence must be positive")
+    if accepted_event_sequence > SHADOW_SIGNAL_MAX_WIRE_INT:
+        raise error_type("accepted_event_sequence exceeds signed BIGINT")
+    return publisher_epoch, accepted_event_sequence
+
+
 def _redis_payload_text(raw: Any, field_name: str) -> Optional[str]:
     if raw is None:
         return None
@@ -495,13 +541,24 @@ def encode_live_price(
     value: Decimal,
     source_timestamp_ms: Optional[int],
     received_ms: int,
+    publisher_epoch: Optional[str] = None,
+    accepted_event_sequence: Optional[int] = None,
 ) -> str:
+    publisher_epoch, accepted_event_sequence = _price_delivery_metadata(
+        publisher_epoch,
+        accepted_event_sequence,
+        payload_error=False,
+    )
+    payload = {
+        "value": str(value),
+        "source_timestamp_ms": source_timestamp_ms,
+        "received_ms": received_ms,
+    }
+    if publisher_epoch is not None:
+        payload["publisher_epoch"] = publisher_epoch
+        payload["accepted_event_sequence"] = accepted_event_sequence
     return json.dumps(
-        {
-            "value": str(value),
-            "source_timestamp_ms": source_timestamp_ms,
-            "received_ms": received_ms,
-        },
+        payload,
         separators=(",", ":"),
     )
 
@@ -529,6 +586,12 @@ def decode_live_price(raw: Any) -> Optional[LivePrice]:
             "live cache value must contain valid Unicode"
         ) from exc
 
+    publisher_epoch, accepted_event_sequence = _price_delivery_metadata(
+        payload.get("publisher_epoch"),
+        payload.get("accepted_event_sequence"),
+        payload_error=True,
+    )
+
     return LivePrice(
         value=value,
         source_timestamp_ms=_optional_int(
@@ -536,6 +599,8 @@ def decode_live_price(raw: Any) -> Optional[LivePrice]:
             "source_timestamp_ms",
         ),
         received_ms=_required_int(payload.get("received_ms"), "received_ms"),
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=accepted_event_sequence,
     )
 
 
@@ -859,6 +924,8 @@ class LiveCache:
         value: Decimal,
         source_timestamp_ms: Optional[int],
         received_ms: int,
+        publisher_epoch: Optional[str] = None,
+        accepted_event_sequence: Optional[int] = None,
     ) -> None:
         await self.redis.set(
             key,
@@ -866,6 +933,8 @@ class LiveCache:
                 value=value,
                 source_timestamp_ms=source_timestamp_ms,
                 received_ms=received_ms,
+                publisher_epoch=publisher_epoch,
+                accepted_event_sequence=accepted_event_sequence,
             ),
         )
 

@@ -291,6 +291,21 @@ def test_delivery_state_collapses_same_second_to_latest_received_version():
     assert ready.sample.received_ms == 1_783_459_201_100
 
 
+def test_delivery_sequence_and_publisher_epoch_are_process_stable_across_reconnects():
+    state = collector.ChainlinkDeliveryState()
+    publisher_epoch = state.publisher_epoch
+    assert str(UUID(publisher_epoch)) == publisher_epoch
+
+    first = state.update_latest(chainlink_sample())
+    state.raw_connection_opened(UUID("11111111-1111-4111-8111-111111111111"))
+    state.raw_connection_closed(UUID("11111111-1111-4111-8111-111111111111"))
+    state.raw_connection_opened(UUID("22222222-2222-4222-8222-222222222222"))
+    second = state.update_latest(chainlink_sample(price="62001.00"))
+
+    assert (first.sequence, second.sequence) == (1, 2)
+    assert state.publisher_epoch == publisher_epoch
+
+
 def test_delivery_state_keeps_newer_version_arriving_during_inflight_write():
     state = collector.ChainlinkDeliveryState(history_settle_ms=0)
     first = state.update_latest(chainlink_sample(price="62000.00"))
@@ -365,6 +380,9 @@ def test_live_attempt_barrier_keeps_redis_before_postgres(monkeypatch):
             "redis_finished",
             "postgres",
         ]
+        redis_fields = events[0][2]
+        assert redis_fields["publisher_epoch"] == state.publisher_epoch
+        assert redis_fields["accepted_event_sequence"] == item.sequence
 
         state.close()
         await asyncio.wait_for(

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import price_collector.shadow_signal_artifact as artifact_module
+import price_collector.shadow_signal_selection as selection_module
 from price_collector.shadow_signal_artifact import (
     ShadowSignalArtifactError,
     load_activated_selection,
@@ -43,6 +44,13 @@ CONFIGURATION = {
     ),
     "quantile_sample_max": 10_000,
     "exclude_parse_error_sessions": False,
+}
+V3_CONFIGURATION = {
+    **CONFIGURATION,
+    "max_future_skew_ms": 0,
+    "futures_availability_delay_ms": 25,
+    "chainlink_availability_delay_ms": 50,
+    "evaluation_phase_offset_ms": 100,
 }
 
 
@@ -115,9 +123,11 @@ def evidence_payload():
     }
 
 
-def replay_payload():
+def replay_payload(*, schema_version=2, configuration=None):
+    if configuration is None:
+        configuration = CONFIGURATION
     return {
-        "schema_version": 2,
+        "schema_version": schema_version,
         "mode": "shadow_raw_replay",
         "status": "ok",
         "selection_performed": False,
@@ -126,7 +136,7 @@ def replay_payload():
             "end_ms": 2_000_000,
             "boundary": "[start_ms,end_ms)",
         },
-        "configuration": deepcopy(CONFIGURATION),
+        "configuration": deepcopy(configuration),
         "candidates": [
             {
                 "model_version": version,
@@ -138,9 +148,17 @@ def replay_payload():
     }
 
 
-def selection_payload(replay_raw):
+def selection_payload(
+    replay_raw,
+    *,
+    schema_version=2,
+    configuration=None,
+    policy=None,
+):
+    if configuration is None:
+        configuration = CONFIGURATION
     replay_digest = sha256(replay_raw)
-    configuration_digest = sha256(canonical_json_bytes(CONFIGURATION))
+    configuration_digest = sha256(canonical_json_bytes(configuration))
     reports = [
         {
             "role": "calibration",
@@ -161,7 +179,13 @@ def selection_payload(replay_raw):
             "coverage": coverage_payload(),
         },
     ]
-    policy = deepcopy(artifact_module._EXPECTED_POLICY)
+    if policy is None:
+        policy = (
+            artifact_module._EXPECTED_POLICY
+            if schema_version == 2
+            else artifact_module._EXPECTED_POLICY_V3
+        )
+    policy = deepcopy(policy)
     fingerprint_payload = {
         "policy": policy,
         "configuration_sha256": configuration_digest,
@@ -176,7 +200,7 @@ def selection_payload(replay_raw):
         ],
     }
     return {
-        "schema_version": 2,
+        "schema_version": schema_version,
         "mode": "shadow_primary_selection",
         "status": "selected",
         "selection_performed": True,
@@ -230,6 +254,24 @@ def write_valid_artifacts(tmp_path):
     selection = selection_payload(replay_raw)
     selection_raw = encoded_json(selection)
     selection_path = tmp_path / "selection.json"
+    selection_path.write_bytes(selection_raw)
+    return selection_path, sha256(selection_raw), replay_path, selection
+
+
+def write_valid_v3_artifacts(tmp_path, *, configuration=None):
+    if configuration is None:
+        configuration = V3_CONFIGURATION
+    replay = replay_payload(schema_version=3, configuration=configuration)
+    replay_raw = encoded_json(replay)
+    replay_path = tmp_path / "replay-v3.json"
+    replay_path.write_bytes(replay_raw)
+    selection = selection_payload(
+        replay_raw,
+        schema_version=3,
+        configuration=configuration,
+    )
+    selection_raw = encoded_json(selection)
+    selection_path = tmp_path / "selection-v3.json"
     selection_path.write_bytes(selection_raw)
     return selection_path, sha256(selection_raw), replay_path, selection
 
@@ -299,6 +341,116 @@ def test_load_activated_selection_binds_primary_models_and_runtime_config(tmp_pa
     assert activated.reference_max_gap_ms == 3_000
     assert activated.history_retention_ms == 10_000
     assert activated.max_future_skew_ms == 250
+
+
+def test_load_activated_selection_accepts_strict_v3_evidence_pair(tmp_path):
+    selection_path, digest, replay_path, selection = write_valid_v3_artifacts(
+        tmp_path
+    )
+
+    activated = load(selection_path, digest, replay_path)
+
+    assert activated.selection_schema_version == 3
+    assert activated.policy_version == "chronological_holdout_v3"
+    assert activated.selection_fingerprint_sha256 == selection["provenance"][
+        "selection_fingerprint_sha256"
+    ]
+    assert activated.primary_model.version == MODEL_SPECS[0][0]
+    assert [model.version for model in activated.models] == [
+        version for version, _horizon_ms in MODEL_SPECS
+    ]
+    assert activated.poll_ms == 100
+    assert activated.futures_stale_ms == 3_000
+    assert activated.chainlink_stale_ms == 2_500
+    assert activated.reference_max_gap_ms == 3_000
+    assert activated.history_retention_ms == 10_000
+    assert activated.max_future_skew_ms == 0
+
+
+def test_v3_activation_contract_matches_the_selection_writer():
+    assert artifact_module._EXPECTED_POLICY_V3 == selection_module._json_ready(
+        selection_module._policy_payload()
+    )
+    assert [
+        (version, horizon_ms)
+        for version, horizon_ms, _beta in artifact_module._EXPECTED_MODEL_SPECS
+    ] == list(selection_module.EXPECTED_CANDIDATES)
+
+
+def test_v3_selection_cannot_use_v2_policy_even_with_recalculated_fingerprint(
+    tmp_path,
+):
+    selection_path, _digest, replay_path, selection = write_valid_v3_artifacts(
+        tmp_path
+    )
+    selection["policy"] = deepcopy(artifact_module._EXPECTED_POLICY_V2)
+    recalculate_fingerprint(selection)
+    digest = rewrite_selection(selection_path, selection)
+
+    with pytest.raises(ShadowSignalArtifactError, match="selection.policy"):
+        load(selection_path, digest, replay_path)
+
+
+@pytest.mark.parametrize(
+    ("selection_schema_version", "replay_schema_version"),
+    [(3, 2), (2, 3)],
+)
+def test_selection_and_replay_schema_generations_cannot_be_mixed(
+    tmp_path,
+    selection_schema_version,
+    replay_schema_version,
+):
+    configuration = (
+        V3_CONFIGURATION if selection_schema_version == 3 else CONFIGURATION
+    )
+    replay = replay_payload(
+        schema_version=replay_schema_version,
+        configuration=configuration,
+    )
+    replay_raw = encoded_json(replay)
+    replay_path = tmp_path / "mixed-replay.json"
+    replay_path.write_bytes(replay_raw)
+    selection = selection_payload(
+        replay_raw,
+        schema_version=selection_schema_version,
+        configuration=configuration,
+    )
+    selection_raw = encoded_json(selection)
+    selection_path = tmp_path / "mixed-selection.json"
+    selection_path.write_bytes(selection_raw)
+
+    with pytest.raises(ShadowSignalArtifactError, match="replay.schema_version"):
+        load(selection_path, sha256(selection_raw), replay_path)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "match"),
+    [
+        ("max_future_skew_ms", 1, "must equal chronological_holdout_v3 zero"),
+        ("futures_availability_delay_ms", -1, "must be at least 0"),
+        ("chainlink_availability_delay_ms", -1, "must be at least 0"),
+        ("evaluation_phase_offset_ms", 50, "multiple of poll_ms"),
+        (
+            "evaluation_phase_offset_ms",
+            500,
+            "must be less than evaluation_interval_ms",
+        ),
+    ],
+)
+def test_v3_replay_timing_assumptions_are_fail_closed(
+    tmp_path,
+    field_name,
+    invalid_value,
+    match,
+):
+    configuration = {**V3_CONFIGURATION, field_name: invalid_value}
+    selection_path, digest, replay_path, _selection = write_valid_v3_artifacts(
+        tmp_path,
+        configuration=configuration,
+    )
+
+    with pytest.raises(ShadowSignalArtifactError, match=match):
+        load(selection_path, digest, replay_path)
 
 
 def test_selection_whole_file_sha_is_required_before_activation(tmp_path):

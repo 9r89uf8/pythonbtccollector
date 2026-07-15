@@ -1068,6 +1068,46 @@ def test_observed_price_rejects_invalid_timestamps(field, value, error_type):
         ObservedPrice(**arguments)
 
 
+def test_observed_price_preserves_atomic_delivery_sequence_metadata():
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    price = ObservedPrice(
+        value=Decimal("1"),
+        source_timestamp_ms=1,
+        received_ms=2,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=3,
+    )
+
+    assert price.publisher_epoch == publisher_epoch
+    assert price.accepted_event_sequence == 3
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"publisher_epoch": "8b3f42da-8927-48f8-9c90-4f2ce84100d8"},
+        {"accepted_event_sequence": 1},
+        {
+            "publisher_epoch": "not-a-uuid",
+            "accepted_event_sequence": 1,
+        },
+        {
+            "publisher_epoch": "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            "accepted_event_sequence": 0,
+        },
+    ),
+)
+def test_observed_price_rejects_invalid_delivery_sequence_metadata(overrides):
+    arguments = {
+        "value": Decimal("1"),
+        "source_timestamp_ms": 1,
+        "received_ms": 2,
+        **overrides,
+    }
+    with pytest.raises((TypeError, ValueError)):
+        ObservedPrice(**arguments)
+
+
 def test_engine_validates_models_and_history_retention():
     duplicate = CatchupModel(MODEL_VERSION, 3_000, Decimal("1"))
     with pytest.raises(ValueError, match="unique"):

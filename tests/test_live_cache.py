@@ -131,6 +131,71 @@ def test_live_cache_set_price_stores_requested_json_shape():
     )
 
 
+def test_chainlink_live_price_sequence_metadata_round_trips_and_is_optional():
+    redis = FakeRedis()
+    cache = LiveCache(redis_client=redis)
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+
+    asyncio.run(
+        cache.set_price(
+            CHAINLINK_LIVE_KEY,
+            value=Decimal("62067.89000000"),
+            source_timestamp_ms=123,
+            received_ms=456,
+            publisher_epoch=publisher_epoch,
+            accepted_event_sequence=17,
+        )
+    )
+
+    encoded = redis.data[CHAINLINK_LIVE_KEY]
+    assert json.loads(encoded) == {
+        "value": "62067.89000000",
+        "source_timestamp_ms": 123,
+        "received_ms": 456,
+        "publisher_epoch": publisher_epoch,
+        "accepted_event_sequence": 17,
+    }
+    decoded = asyncio.run(cache.get_price(CHAINLINK_LIVE_KEY))
+    assert decoded is not None
+    assert decoded.publisher_epoch == publisher_epoch
+    assert decoded.accepted_event_sequence == 17
+
+    legacy = live_cache_module.decode_live_price(
+        '{"value":"1","source_timestamp_ms":null,"received_ms":2}'
+    )
+    assert legacy is not None
+    assert legacy.publisher_epoch is None
+    assert legacy.accepted_event_sequence is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"publisher_epoch": "8b3f42da-8927-48f8-9c90-4f2ce84100d8"},
+        {"accepted_event_sequence": 1},
+        {
+            "publisher_epoch": "not-a-uuid",
+            "accepted_event_sequence": 1,
+        },
+        {
+            "publisher_epoch": "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+            "accepted_event_sequence": 0,
+        },
+    ),
+)
+def test_live_price_decoder_rejects_non_atomic_or_invalid_sequence_metadata(
+    overrides,
+):
+    payload = {
+        "value": "1",
+        "source_timestamp_ms": 1,
+        "received_ms": 2,
+        **overrides,
+    }
+    with pytest.raises(LiveCachePayloadError):
+        live_cache_module.decode_live_price(json.dumps(payload))
+
+
 def test_shadow_signal_round_trip_is_typed_and_uses_decimal_strings():
     signal = valid_shadow_signal()
 

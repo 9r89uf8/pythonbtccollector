@@ -112,6 +112,8 @@ def _observed_price(
             value=value,
             source_timestamp_ms=price.source_timestamp_ms,
             received_ms=price.received_ms,
+            publisher_epoch=price.publisher_epoch,
+            accepted_event_sequence=price.accepted_event_sequence,
         )
     except (DecimalException, TypeError, ValueError) as exc:
         raise LiveCachePayloadError(
@@ -334,6 +336,18 @@ class ShadowSignalWorker:
             return
         try:
             prior_gap_count = scheduler.observation_gap_count
+            prior_discontinuity_counts = {
+                "sequence_gap": scheduler.chainlink_sequence_gap_count,
+                "sequence_regression": (
+                    scheduler.chainlink_sequence_regression_count
+                ),
+                "publisher_epoch_change": (
+                    scheduler.chainlink_publisher_epoch_change_count
+                ),
+                "sequence_metadata_loss": (
+                    scheduler.chainlink_sequence_metadata_loss_count
+                ),
+            }
             matured = scheduler.observe(
                 observation,
                 chainlink=chainlink,
@@ -349,8 +363,49 @@ class ShadowSignalWorker:
                         ),
                     },
                 )
-            for record in matured:
-                writer.offer_nowait(record)
+            discontinuities = (
+                (
+                    "sequence_gap",
+                    "shadow_signal_evaluation_chainlink_sequence_gap",
+                    scheduler.chainlink_sequence_gap_count,
+                ),
+                (
+                    "sequence_regression",
+                    "shadow_signal_evaluation_chainlink_sequence_regression",
+                    scheduler.chainlink_sequence_regression_count,
+                ),
+                (
+                    "publisher_epoch_change",
+                    "shadow_signal_evaluation_chainlink_publisher_epoch_change",
+                    scheduler.chainlink_publisher_epoch_change_count,
+                ),
+                (
+                    "sequence_metadata_loss",
+                    "shadow_signal_evaluation_chainlink_sequence_metadata_loss",
+                    scheduler.chainlink_sequence_metadata_loss_count,
+                ),
+            )
+            for reason, event, count in discontinuities:
+                if count == prior_discontinuity_counts[reason]:
+                    continue
+                LOGGER.warning(
+                    event,
+                    extra={
+                        "event": event,
+                        "reason": reason,
+                        "generated_ms": observation.generated_ms,
+                        "occurrence": count,
+                    },
+                )
+            candidate_count = len(self.activated.models)
+            if len(matured) % candidate_count:
+                raise RuntimeError(
+                    "evaluation scheduler emitted an incomplete candidate cohort"
+                )
+            for offset in range(0, len(matured), candidate_count):
+                writer.offer_cohort_nowait(
+                    matured[offset : offset + candidate_count]
+                )
         except Exception:
             # Evaluation is deliberately subordinate to the expiring Redis
             # publication. A scheduler or queue defect must not kill that path.
@@ -494,6 +549,9 @@ async def run_collector(
             )
             evaluation_writer = writer_factory(
                 backend_factory=evaluation_backend_factory,
+                candidate_model_versions=tuple(
+                    model.version for model in activated.models
+                ),
                 queue_max_records=(
                     settings.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX
                 ),

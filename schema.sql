@@ -765,6 +765,16 @@ $$;
 CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_generated_idx
     ON shadow_signal_evaluations (generated_ms);
 
+CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_retention_cohort_idx
+    ON shadow_signal_evaluations (
+        generated_ms,
+        selection_artifact_sha256,
+        selection_fingerprint_sha256,
+        selection_schema_version,
+        selection_policy_version,
+        selection_evidence_end_ms
+    );
+
 CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_market_model_idx
     ON shadow_signal_evaluations (market_id, model_version, generated_ms);
 
