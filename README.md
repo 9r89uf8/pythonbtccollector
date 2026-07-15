@@ -410,8 +410,13 @@ The Phase 7 backend prerequisite adds two separate PostgreSQL reporting routes:
 supported V0 `model_version`, select one five-minute window by forecast
 `target_ms`, include boundary-crossing forecasts generated in the predecessor
 market, and reject an anomalous result above 1,000 rows. Financial values remain
-exact JSON strings or `null`. The API reader still has no privilege on the base
-`shadow_signal_evaluations` table; it can select only the deliberately narrow
+exact JSON strings or `null`. Each response also derives per-market performance
+cohorts from its valid, causally scored points, separated by selection identity:
+forecast MAE, median/p95/maximum absolute error, RMSE, signed bias, no-change
+baseline comparisons, skill, and paired wins/ties/losses. This calculation uses
+the already fetched rows and does not add storage or another query. The API
+reader still has no privilege on the base `shadow_signal_evaluations` table; it
+can select only the deliberately narrow
 `shadow_signal_evaluation_chart_points` view. `/markets/current/live` remains
 Redis-only and unchanged. No dashboard code is included in this repository.
 The Phase 7 product, chart semantics, laptop networking, and Vite build plan

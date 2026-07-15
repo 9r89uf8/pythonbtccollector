@@ -1473,6 +1473,40 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
         "invalid": 0,
         "valid_without_actual": 0,
     }
+    assert body["performance"] == {
+        "cohorts": [
+            {
+                "selection_identity": {
+                    "fingerprint_sha256": "a" * 64,
+                    "artifact_sha256": "b" * 64,
+                },
+                "scored_points": 1,
+                "forecast": {
+                    "mean_absolute_error_usd": "0.5",
+                    "median_absolute_error_usd": "0.5",
+                    "p95_absolute_error_usd": "0.5",
+                    "maximum_absolute_error_usd": "0.5",
+                    "root_mean_squared_error_usd": "0.5",
+                    "mean_signed_error_usd": "0.5",
+                },
+                "no_change_baseline": {
+                    "mean_absolute_error_usd": "0.5",
+                    "root_mean_squared_error_usd": "0.5",
+                },
+                "mean_absolute_advantage_usd": "0.0",
+                "mae_skill_vs_no_change": "0",
+                "rmse_skill_vs_no_change": "0",
+                "paired_comparison": {
+                    "wins": 0,
+                    "ties": 1,
+                    "losses": 0,
+                    "win_rate": "0",
+                    "tie_rate": "1",
+                    "loss_rate": "0",
+                },
+            }
+        ]
+    }
     assert body["points"] == [
         {
             "selection_fingerprint_sha256": "a" * 64,
@@ -1537,6 +1571,7 @@ def test_shadow_evaluations_by_id_returns_completed_market_report(
     assert body["coverage"]["market_window_elapsed"] is True
     assert body["coverage"]["observed_buckets"] == 1
     assert body["coverage"]["unobserved_buckets_as_of_response"] == 599
+    assert body["performance"]["cohorts"][0]["scored_points"] == 1
     assert body["points"][0]["projected_chainlink"] == "62001"
     assert client.fake_live_cache.requested_keys == []
     assert client.fake_pool.acquire_calls == 0
@@ -1596,6 +1631,7 @@ def test_current_shadow_evaluation_window_is_known_before_market_row_exists(
             "invalid": 0,
             "valid_without_actual": 0,
         },
+        "performance": {"cohorts": []},
         "points": [],
     }
     assert client.fake_live_cache.requested_keys == []
@@ -1667,6 +1703,7 @@ def test_shadow_evaluations_known_historical_market_can_have_no_retained_rows(
         "invalid": 0,
         "valid_without_actual": 0,
     }
+    assert body["performance"] == {"cohorts": []}
     assert body["points"] == []
     assert client.fake_live_cache.requested_keys == []
     assert client.fake_pool.acquire_calls == 0

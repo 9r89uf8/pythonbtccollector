@@ -441,6 +441,196 @@ def _serialize_shadow_evaluation_point(
     }
 
 
+def _median(values: Sequence[Decimal]) -> Decimal:
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) / Decimal("2")
+
+
+def _nearest_rank_p95(values: Sequence[Decimal]) -> Decimal:
+    rank = (95 * len(values) + 99) // 100
+    return values[rank - 1]
+
+
+def _build_shadow_evaluation_performance_cohort(
+    *,
+    selection_fingerprint_sha256: str,
+    selection_artifact_sha256: str,
+    observations: Sequence[tuple[Decimal, Decimal]],
+) -> dict[str, Any]:
+    scored_points = len(observations)
+    if scored_points == 0:
+        return {
+            "selection_identity": {
+                "fingerprint_sha256": selection_fingerprint_sha256,
+                "artifact_sha256": selection_artifact_sha256,
+            },
+            "scored_points": 0,
+            "forecast": {
+                "mean_absolute_error_usd": None,
+                "median_absolute_error_usd": None,
+                "p95_absolute_error_usd": None,
+                "maximum_absolute_error_usd": None,
+                "root_mean_squared_error_usd": None,
+                "mean_signed_error_usd": None,
+            },
+            "no_change_baseline": {
+                "mean_absolute_error_usd": None,
+                "root_mean_squared_error_usd": None,
+            },
+            "mean_absolute_advantage_usd": None,
+            "mae_skill_vs_no_change": None,
+            "rmse_skill_vs_no_change": None,
+            "paired_comparison": {
+                "wins": 0,
+                "ties": 0,
+                "losses": 0,
+                "win_rate": None,
+                "tie_rate": None,
+                "loss_rate": None,
+            },
+        }
+
+    with localcontext() as context:
+        context.prec = REPORT_DECIMAL_PRECISION
+        count = Decimal(scored_points)
+        forecast_errors = [forecast for forecast, _baseline in observations]
+        baseline_errors = [baseline for _forecast, baseline in observations]
+        forecast_absolute_errors = sorted(abs(error) for error in forecast_errors)
+        baseline_absolute_errors = sorted(abs(error) for error in baseline_errors)
+
+        forecast_mae = sum(
+            forecast_absolute_errors,
+            start=Decimal("0"),
+        ) / count
+        baseline_mae = sum(
+            baseline_absolute_errors,
+            start=Decimal("0"),
+        ) / count
+        forecast_rmse = (
+            sum(
+                (error * error for error in forecast_errors),
+                start=Decimal("0"),
+            )
+            / count
+        ).sqrt()
+        baseline_rmse = (
+            sum(
+                (error * error for error in baseline_errors),
+                start=Decimal("0"),
+            )
+            / count
+        ).sqrt()
+        forecast_mean_signed_error = sum(
+            forecast_errors,
+            start=Decimal("0"),
+        ) / count
+        forecast_median = _median(forecast_absolute_errors)
+        forecast_p95 = _nearest_rank_p95(forecast_absolute_errors)
+        mean_absolute_advantage = baseline_mae - forecast_mae
+        mae_skill = (
+            None
+            if baseline_mae == 0
+            else Decimal("1") - (forecast_mae / baseline_mae)
+        )
+        rmse_skill = (
+            None
+            if baseline_rmse == 0
+            else Decimal("1") - (forecast_rmse / baseline_rmse)
+        )
+
+        wins = sum(
+            abs(forecast) < abs(baseline)
+            for forecast, baseline in observations
+        )
+        ties = sum(
+            abs(forecast) == abs(baseline)
+            for forecast, baseline in observations
+        )
+        losses = scored_points - wins - ties
+
+        win_rate = Decimal(wins) / count
+        tie_rate = Decimal(ties) / count
+        loss_rate = Decimal(losses) / count
+
+    return {
+        "selection_identity": {
+            "fingerprint_sha256": selection_fingerprint_sha256,
+            "artifact_sha256": selection_artifact_sha256,
+        },
+        "scored_points": scored_points,
+        "forecast": {
+            "mean_absolute_error_usd": _decimal_string(forecast_mae),
+            "median_absolute_error_usd": _decimal_string(forecast_median),
+            "p95_absolute_error_usd": _decimal_string(forecast_p95),
+            "maximum_absolute_error_usd": _decimal_string(
+                forecast_absolute_errors[-1]
+            ),
+            "root_mean_squared_error_usd": _decimal_string(forecast_rmse),
+            "mean_signed_error_usd": _decimal_string(
+                forecast_mean_signed_error
+            ),
+        },
+        "no_change_baseline": {
+            "mean_absolute_error_usd": _decimal_string(baseline_mae),
+            "root_mean_squared_error_usd": _decimal_string(baseline_rmse),
+        },
+        "mean_absolute_advantage_usd": _decimal_string(
+            mean_absolute_advantage
+        ),
+        "mae_skill_vs_no_change": _decimal_string(mae_skill),
+        "rmse_skill_vs_no_change": _decimal_string(rmse_skill),
+        "paired_comparison": {
+            "wins": wins,
+            "ties": ties,
+            "losses": losses,
+            "win_rate": _decimal_string(win_rate),
+            "tie_rate": _decimal_string(tie_rate),
+            "loss_rate": _decimal_string(loss_rate),
+        },
+    }
+
+
+def _build_shadow_evaluation_performance(
+    points: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    observations_by_identity: dict[
+        tuple[str, str],
+        list[tuple[Decimal, Decimal]],
+    ] = {}
+
+    for point in points:
+        identity = (
+            point["selection_fingerprint_sha256"],
+            point["selection_artifact_sha256"],
+        )
+        observations = observations_by_identity.setdefault(identity, [])
+        if not point["valid"] or point["actual_chainlink"] is None:
+            continue
+
+        forecast_error = point["forecast_error"]
+        baseline_error = point["baseline_error"]
+        if forecast_error is None or baseline_error is None:
+            raise ShadowEvaluationReportingError(
+                "scored point has null error fields"
+            )
+        observations.append(
+            (Decimal(forecast_error), Decimal(baseline_error))
+        )
+
+    return {
+        "cohorts": [
+            _build_shadow_evaluation_performance_cohort(
+                selection_fingerprint_sha256=fingerprint,
+                selection_artifact_sha256=artifact,
+                observations=observations_by_identity[(fingerprint, artifact)],
+            )
+            for fingerprint, artifact in sorted(observations_by_identity)
+        ]
+    }
+
+
 def build_shadow_evaluation_report(
     *,
     window: MarketWindow,
@@ -498,6 +688,14 @@ def build_shadow_evaluation_report(
             for point in points
         }
     )
+    performance = _build_shadow_evaluation_performance(points)
+    performance_scored = sum(
+        cohort["scored_points"] for cohort in performance["cohorts"]
+    )
+    if performance_scored != scored:
+        raise ShadowEvaluationReportingError(
+            "performance scored count is inconsistent"
+        )
 
     return {
         "schema_version": SHADOW_EVALUATION_REPORT_SCHEMA_VERSION,
@@ -536,5 +734,6 @@ def build_shadow_evaluation_report(
             "invalid": invalid,
             "valid_without_actual": valid_without_actual,
         },
+        "performance": performance,
         "points": points,
     }

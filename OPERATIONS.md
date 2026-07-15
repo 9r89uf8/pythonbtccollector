@@ -3406,6 +3406,8 @@ report = json.load(sys.stdin)
 points = report["points"]
 market = report["market"]
 model = report["model"]
+coverage = report["coverage"]
+performance_cohorts = report["performance"]["cohorts"]
 expected_model = os.environ["REPORT_MODEL_VERSION"]
 financial_fields = (
     "beta",
@@ -3437,11 +3439,35 @@ assert all(
     for point in points
     for field in financial_fields
 )
+assert [
+    cohort["selection_identity"] for cohort in performance_cohorts
+] == model["selection_identities"]
+assert sum(
+    cohort["scored_points"] for cohort in performance_cohorts
+) == coverage["scored"]
+for cohort in performance_cohorts:
+    comparison = cohort["paired_comparison"]
+    assert (
+        comparison["wins"] + comparison["ties"] + comparison["losses"]
+        == cohort["scored_points"]
+    )
+    derived_values = (
+        *cohort["forecast"].values(),
+        *cohort["no_change_baseline"].values(),
+        cohort["mean_absolute_advantage_usd"],
+        cohort["mae_skill_vs_no_change"],
+        cohort["rmse_skill_vs_no_change"],
+        comparison["win_rate"],
+        comparison["tie_rate"],
+        comparison["loss_rate"],
+    )
+    assert all(value is None or isinstance(value, str) for value in derived_values)
 print({
     "market_id": market["market_id"],
     "model_version": model["model_version"],
     "points": len(points),
-    "coverage": report["coverage"],
+    "coverage": coverage,
+    "performance": performance_cohorts,
 })
 '
 }
@@ -3481,8 +3507,11 @@ sudo journalctl \
 
 Both reporting responses must contain at most 1,000 ordered points for only the
 requested model. Every `target_ms` must satisfy the returned half-open market
-boundary, and every financial value must be a JSON string or `null`. The
-missing-model request must return HTTP `422`. A known market with expired or no
+boundary, and every point or derived financial value must be a JSON string or
+`null`. Performance cohorts must match the response selection identities, their
+scored counts must sum to `coverage.scored`, and each paired comparison must
+account for every scored point. The missing-model request must return HTTP
+`422`. A known market with expired or no
 evaluation evidence returns HTTP `200` with `points: []`; an unknown
 non-current market returns HTTP `404`.
 

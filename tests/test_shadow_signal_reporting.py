@@ -94,6 +94,37 @@ def evaluation_row(
     return row
 
 
+def scored_evaluation_row(
+    forecast_error,
+    baseline_error,
+    **row_overrides,
+):
+    row = evaluation_row(**row_overrides)
+    actual_chainlink = Decimal("100")
+    projected_chainlink = actual_chainlink + Decimal(forecast_error)
+    chainlink_at_forecast = actual_chainlink + Decimal(baseline_error)
+    pending_move = projected_chainlink - chainlink_at_forecast
+    pending_move_bps = (
+        pending_move * Decimal("10000") / chainlink_at_forecast
+    )
+    direction = (
+        "up" if pending_move > 0 else "down" if pending_move < 0 else "flat"
+    )
+    row.update(
+        {
+            "chainlink_at_forecast": chainlink_at_forecast,
+            "projected_chainlink": projected_chainlink,
+            "actual_chainlink": actual_chainlink,
+            "pending_move": pending_move,
+            "pending_move_bps": pending_move_bps,
+            "direction": direction,
+            "forecast_error": Decimal(forecast_error),
+            "baseline_error": Decimal(baseline_error),
+        }
+    )
+    return row
+
+
 class FakeConnection:
     def __init__(self, *, market_exists=True, rows=()):
         self.market_exists = market_exists
@@ -216,6 +247,128 @@ def test_report_serializes_exact_decimal_strings_without_rounding():
     assert point["baseline_error"] == "-0.750000000000000000"
 
 
+def test_performance_reports_exact_decimal_forecast_and_baseline_metrics():
+    report = build_report(
+        [
+            scored_evaluation_row(
+                "-3",
+                "-6",
+                generated_ms=WINDOW.market_start_ms + 1_000,
+            ),
+            scored_evaluation_row(
+                "3",
+                "6",
+                generated_ms=WINDOW.market_start_ms + 1_500,
+            ),
+        ]
+    )
+
+    assert report["performance"] == {
+        "cohorts": [
+            {
+                "selection_identity": {
+                    "fingerprint_sha256": "a" * 64,
+                    "artifact_sha256": "b" * 64,
+                },
+                "scored_points": 2,
+                "forecast": {
+                    "mean_absolute_error_usd": "3",
+                    "median_absolute_error_usd": "3",
+                    "p95_absolute_error_usd": "3",
+                    "maximum_absolute_error_usd": "3",
+                    "root_mean_squared_error_usd": "3",
+                    "mean_signed_error_usd": "0",
+                },
+                "no_change_baseline": {
+                    "mean_absolute_error_usd": "6",
+                    "root_mean_squared_error_usd": "6",
+                },
+                "mean_absolute_advantage_usd": "3",
+                "mae_skill_vs_no_change": "0.5",
+                "rmse_skill_vs_no_change": "0.5",
+                "paired_comparison": {
+                    "wins": 2,
+                    "ties": 0,
+                    "losses": 0,
+                    "win_rate": "1",
+                    "tie_rate": "0",
+                    "loss_rate": "0",
+                },
+            }
+        ]
+    }
+
+
+def test_performance_uses_full_cohort_nearest_rank_p95_and_paired_rows():
+    report = build_report(
+        [
+            scored_evaluation_row(
+                forecast_error,
+                baseline_error,
+                generated_ms=WINDOW.market_start_ms + 1_000 + index * 500,
+            )
+            for index, (forecast_error, baseline_error) in enumerate(
+                (
+                    ("1", "100"),
+                    ("50", "2"),
+                    ("3", "20"),
+                    ("4", "20"),
+                    ("10", "20"),
+                )
+            )
+        ]
+    )
+
+    cohort = report["performance"]["cohorts"][0]
+    assert cohort["forecast"]["median_absolute_error_usd"] == "4"
+    assert cohort["forecast"]["p95_absolute_error_usd"] == "50"
+    assert cohort["forecast"]["maximum_absolute_error_usd"] == "50"
+    assert cohort["paired_comparison"]["wins"] == 4
+    assert cohort["paired_comparison"]["ties"] == 0
+    assert cohort["paired_comparison"]["losses"] == 1
+
+
+def test_performance_even_median_averages_the_two_middle_errors():
+    report = build_report(
+        [
+            scored_evaluation_row(
+                "1",
+                "5",
+                generated_ms=WINDOW.market_start_ms + 1_000,
+            ),
+            scored_evaluation_row(
+                "3",
+                "5",
+                generated_ms=WINDOW.market_start_ms + 1_500,
+            ),
+        ]
+    )
+
+    forecast = report["performance"]["cohorts"][0]["forecast"]
+    assert forecast["median_absolute_error_usd"] == "2"
+    assert forecast["p95_absolute_error_usd"] == "3"
+
+
+def test_performance_zero_baseline_returns_null_skill():
+    report = build_report([scored_evaluation_row("1", "0")])
+
+    cohort = report["performance"]["cohorts"][0]
+    assert cohort["no_change_baseline"] == {
+        "mean_absolute_error_usd": "0",
+        "root_mean_squared_error_usd": "0",
+    }
+    assert cohort["mae_skill_vs_no_change"] is None
+    assert cohort["rmse_skill_vs_no_change"] is None
+    assert cohort["paired_comparison"] == {
+        "wins": 0,
+        "ties": 0,
+        "losses": 1,
+        "win_rate": "0",
+        "tie_rate": "0",
+        "loss_rate": "1",
+    }
+
+
 def test_invalid_and_valid_unscored_attempts_preserve_honest_null_contract():
     invalid = evaluation_row(
         generated_ms=WINDOW.market_start_ms + 1_000,
@@ -253,6 +406,47 @@ def test_invalid_and_valid_unscored_attempts_preserve_honest_null_contract():
         "invalid": 1,
         "valid_without_actual": 1,
     }
+    assert report["performance"] == {
+        "cohorts": [
+            {
+                "selection_identity": {
+                    "fingerprint_sha256": "a" * 64,
+                    "artifact_sha256": "b" * 64,
+                },
+                "scored_points": 0,
+                "forecast": {
+                    "mean_absolute_error_usd": None,
+                    "median_absolute_error_usd": None,
+                    "p95_absolute_error_usd": None,
+                    "maximum_absolute_error_usd": None,
+                    "root_mean_squared_error_usd": None,
+                    "mean_signed_error_usd": None,
+                },
+                "no_change_baseline": {
+                    "mean_absolute_error_usd": None,
+                    "root_mean_squared_error_usd": None,
+                },
+                "mean_absolute_advantage_usd": None,
+                "mae_skill_vs_no_change": None,
+                "rmse_skill_vs_no_change": None,
+                "paired_comparison": {
+                    "wins": 0,
+                    "ties": 0,
+                    "losses": 0,
+                    "win_rate": None,
+                    "tie_rate": None,
+                    "loss_rate": None,
+                },
+            }
+        ]
+    }
+
+
+def test_empty_report_has_no_performance_cohorts():
+    report = build_report([])
+
+    assert report["coverage"]["scored"] == 0
+    assert report["performance"] == {"cohorts": []}
 
 
 def test_current_market_does_not_label_future_buckets_unobserved():
@@ -316,6 +510,25 @@ def test_selection_identity_uses_fingerprint_and_artifact_as_a_pair():
             "artifact_sha256": "d" * 64,
         },
     ]
+    assert [
+        (cohort["selection_identity"], cohort["scored_points"])
+        for cohort in report["performance"]["cohorts"]
+    ] == [
+        (
+            {
+                "fingerprint_sha256": "a" * 64,
+                "artifact_sha256": "c" * 64,
+            },
+            2,
+        ),
+        (
+            {
+                "fingerprint_sha256": "b" * 64,
+                "artifact_sha256": "d" * 64,
+            },
+            1,
+        ),
+    ]
 
 
 def test_preceding_market_forecast_is_selected_by_target_time():
@@ -329,6 +542,7 @@ def test_preceding_market_forecast_is_selected_by_target_time():
     assert point["forecast_market_id"] == WINDOW.market_id - 1
     assert point["target_ms"] == WINDOW.market_start_ms + 500
     assert point["full_horizon_before_forecast_market_end"] is False
+    assert report["performance"]["cohorts"][0]["scored_points"] == 1
 
 
 def test_target_exactly_at_market_start_is_included():

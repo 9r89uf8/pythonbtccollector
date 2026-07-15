@@ -992,6 +992,40 @@ Both routes use this response shape:
     "invalid": 0,
     "valid_without_actual": 0
   },
+  "performance": {
+    "cohorts": [
+      {
+        "selection_identity": {
+          "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
+          "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
+        },
+        "scored_points": 1,
+        "forecast": {
+          "mean_absolute_error_usd": "3.250000000000000000",
+          "median_absolute_error_usd": "3.250000000000000000",
+          "p95_absolute_error_usd": "3.250000000000000000",
+          "maximum_absolute_error_usd": "3.250000000000000000",
+          "root_mean_squared_error_usd": "3.250000000000000000",
+          "mean_signed_error_usd": "3.250000000000000000"
+        },
+        "no_change_baseline": {
+          "mean_absolute_error_usd": "19.350000000000000000",
+          "root_mean_squared_error_usd": "19.350000000000000000"
+        },
+        "mean_absolute_advantage_usd": "16.100000000000000000",
+        "mae_skill_vs_no_change": "0.83204134366925064599483204134366925064599483204134366925064599483204134366925065",
+        "rmse_skill_vs_no_change": "0.83204134366925064599483204134366925064599483204134366925064599483204134366925065",
+        "paired_comparison": {
+          "wins": 1,
+          "ties": 0,
+          "losses": 0,
+          "win_rate": "1",
+          "tie_rate": "0",
+          "loss_rate": "0"
+        }
+      }
+    ]
+  },
   "points": [
     {
       "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
@@ -1071,6 +1105,59 @@ A valid attempt always has a projection. It is counted as `scored` only when
 `forecast_error`, and `baseline_error` are null and it contributes to
 `valid_without_actual`.
 
+### Per-market performance
+
+`performance` is calculated on demand from the same bounded rows returned in
+`points`; it does not add a query or persist a second accuracy record. Each
+cohort is scoped to the requested target-time market, requested model, and one
+exact `(selection_fingerprint_sha256, selection_artifact_sha256)` pair. Never
+combine cohorts when `model.selection_identities` contains more than one pair.
+
+Only valid points with a causal `actual_chainlink` contribute. For every such
+point, the persisted signed errors are used directly:
+
+```text
+forecast absolute error = abs(forecast_error)
+baseline absolute error = abs(baseline_error)
+```
+
+`forecast` reports mean, median, nearest-rank p95, and maximum absolute error;
+root mean squared error; and mean signed error. Median averages the two middle
+values for an even cohort. The p95 uses every scored point and selects the
+1-based value at `ceil(0.95 * scored_points)` after sorting absolute errors.
+No sampling or binary floating-point calculation is used.
+
+`no_change_baseline` measures the same scored points using the Chainlink value
+at forecast time as the prediction. The comparison fields are:
+
+```text
+mean_absolute_advantage_usd = baseline MAE - forecast MAE
+mae_skill_vs_no_change = 1 - (forecast MAE / baseline MAE)
+rmse_skill_vs_no_change = 1 - (forecast RMSE / baseline RMSE)
+```
+
+A positive advantage or skill means the forecast was closer than no change;
+zero means equal aggregate error; a negative value means worse. Skill is not
+clamped. It is `null` when its baseline denominator is zero.
+
+`paired_comparison` compares each forecast and baseline absolute error from the
+same point. A smaller forecast error is a win, an exact equality is a tie, and
+a larger forecast error is a loss. Counts always sum to `scored_points`; rates
+are counts divided by that value. Comparisons use exact stored decimals with no
+tie tolerance.
+
+All derived financial metrics and rates are fixed-point JSON strings or
+`null`, never JSON numbers. The cohort `scored_points` values sum to
+`coverage.scored`. A represented selection identity with no scored points has
+zero counts and `null` metrics and rates. When there are no points at all,
+`performance.cohorts` is empty.
+
+Treat these as descriptive forecast-error measurements for one five-minute
+market, not settlement accuracy, probability accuracy, or evidence of
+statistical significance. The overlapping 500 ms forecasts are strongly
+autocorrelated. For an active market, label the metrics "so far" and show
+`coverage.scored` beside them.
+
 ### Coverage and bounds
 
 `window_buckets` is always `600` for the 300-second market and 500 ms
@@ -1100,9 +1187,9 @@ one claimed-primary series.
 
 A known market with no retained rows for the requested model returns HTTP
 `200` with the normal metadata, zero coverage counts, an empty
-`selection_identities` array, and `points: []`. This is normal before the first
-current-window evaluation is persisted and after derived-evidence retention
-has removed older rows.
+`selection_identities` array, `performance: {"cohorts": []}`, and `points: []`.
+This is normal before the first current-window evaluation is persisted and
+after derived-evidence retention has removed older rows.
 
 The current route snapshots `server_time_ms` and its corresponding market once
 before querying PostgreSQL. Its returned `market` object is authoritative for

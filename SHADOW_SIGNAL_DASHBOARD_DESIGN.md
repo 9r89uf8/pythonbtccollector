@@ -154,7 +154,13 @@ If the configured and live model versions differ, show a prominent
 configuration-mismatch banner, hide the projection line and live ghost, and do
 not resume projection rendering until the configuration is corrected.
 
-### Required response contract
+### Required chart-point contract
+
+The authoritative complete endpoint response, including the required additive
+`performance.cohorts` object, is documented in
+[`FRONTEND_API.md`](FRONTEND_API.md#persisted-shadow-evaluation-chart-data).
+The chart-focused excerpt below shows the point and coverage fields used by
+this design without duplicating the performance contract.
 
 ```json
 {
@@ -254,6 +260,13 @@ must not appear to be missing. Once `market_window_elapsed` is true, that field
 is `window_buckets - observed_buckets`. It is deliberately an as-of-response
 observation, not a finality claim. Absence can mean a skipped observation,
 restart, queue drop, rejected write, database delay, or retention.
+
+Every actual response also groups its derived per-market performance by the
+exact selection fingerprint and artifact pair. Cohorts use only valid points
+with causal actuals, their `scored_points` sum to `coverage.scored`, and an
+identity with no scored points has null metrics. With no retained points,
+`performance.cohorts` is empty. A dashboard must never blend multiple
+selection identities into one claimed-primary score.
 
 Detailed futures inputs and `created_at` are not needed in the first dashboard
 contract.
@@ -634,9 +647,12 @@ The first version should show:
 - the configured model and horizon; and
 - point-level error in the tooltip.
 
-Do not show a generic “accuracy percentage.” Later, add forecast MAE,
-no-change baseline MAE, and skill only after their calculation and presentation
-are specified and tested consistently with the backend.
+Do not show a generic “accuracy percentage.” The backend now returns tested
+per-selection performance cohorts with forecast-error, no-change-baseline,
+skill, and paired comparison fields. Dashboard consumption belongs in the
+separate dashboard repository and must follow the calculation and presentation
+rules in `FRONTEND_API.md`, including the active-market “so far” label and
+scored coverage.
 
 Evaluation retention is currently 168 hours. If a known market has no retained
 points, show:
