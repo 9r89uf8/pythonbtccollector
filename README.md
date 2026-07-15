@@ -397,11 +397,26 @@ malformed shadow value produces `null` in that slot. A malformed shadow value is
 logged but cannot turn otherwise readable actual prices into an HTTP `503`.
 
 FastAPI remains a read-only serializer in Phase 6. The live route performs no
-PostgreSQL query, does not expose `shadow_signal_evaluations`, and neither runs
-nor imports model execution or model state. The shadow worker remains isolated
-in its standalone service. Phase 6 is backend-only; dashboard integration is
-reserved for Phase 7 in a different repository. Deploy and verify this API
-addition with
+PostgreSQL query and neither runs nor imports model execution or model state.
+The shadow worker remains isolated in its standalone service. Phase 6 is
+backend-only.
+
+The Phase 7 backend prerequisite adds two separate PostgreSQL reporting routes:
+`GET /markets/current/shadow-evaluations` and
+`GET /markets/{market_id}/shadow-evaluations`. Both require one explicitly
+supported V0 `model_version`, select one five-minute window by forecast
+`target_ms`, include boundary-crossing forecasts generated in the predecessor
+market, and reject an anomalous result above 1,000 rows. Financial values remain
+exact JSON strings or `null`. The API reader still has no privilege on the base
+`shadow_signal_evaluations` table; it can select only the deliberately narrow
+`shadow_signal_evaluation_chart_points` view. `/markets/current/live` remains
+Redis-only and unchanged. No dashboard code is included in this repository.
+The Phase 7 product, chart semantics, laptop networking, and Vite build plan
+are specified in
+[`SHADOW_SIGNAL_DASHBOARD_DESIGN.md`](SHADOW_SIGNAL_DASHBOARD_DESIGN.md).
+Deploy the reporting prerequisite with the schema-first procedure in
+[`OPERATIONS.md`](OPERATIONS.md#shadow-signal-evaluation-reporting-api).
+Deploy and verify the Phase 6 API addition with
 [`SHADOW_SIGNAL_PHASE6_MIGRATION.md`](SHADOW_SIGNAL_PHASE6_MIGRATION.md).
 
 ## API
@@ -426,12 +441,17 @@ Current routes:
 - `GET /markets/current/download`
 - `GET /markets/{market_id}/download`
 - `GET /markets/current/live`
+- `GET /markets/current/shadow-evaluations?model_version=...`
+- `GET /markets/{market_id}/shadow-evaluations?model_version=...`
 
 The data and download routes accept optional `include_probabilities`,
 `include_futures`, `include_oi`, `include_flow`, `include_book`, `fill_display`,
 and `max_carry_forward_ms` query parameters. `/markets/current/live` reads the
 three source prices plus the optional shadow signal from Redis with one four-key
 `MGET`; the historical and aggregate routes read PostgreSQL.
+The shadow-evaluation reporting routes also read PostgreSQL, but only through
+their restricted view and only for one explicit model and five-minute target
+window. They do not alter the Redis-only live request path.
 
 The data and download responses use schema version `2` and always include
 `market.chainlink_resolution` and `market.resolution`, independently of the
@@ -463,12 +483,14 @@ parameters, complete response shapes, optional fields, and error responses.
 
 ```text
 price_collector/       Collectors, API, shadow engine, replay, and selection
+price_collector/shadow_signal_reporting.py  Bounded read-only evaluation reporting
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
 SHADOW_SIGNAL_PHASE5_MIGRATION.md  Matured-evaluation rollout and rollback
 SHADOW_SIGNAL_PHASE6_MIGRATION.md  Redis-only live API rollout and rollback
+SHADOW_SIGNAL_DASHBOARD_DESIGN.md  Phase 7 Vite dashboard and chart specification
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 LIVE_DATA.md           Live BTC extraction, cache, and dashboard consumption guide
 requirements.txt       Python runtime and test dependencies
@@ -761,6 +783,11 @@ REVOKE ALL ON TABLE shadow_signal_evaluations
 FROM PUBLIC, price_reader, price_writer;
 GRANT SELECT, INSERT, DELETE ON TABLE shadow_signal_evaluations
 TO price_writer;
+
+REVOKE ALL ON TABLE shadow_signal_evaluation_chart_points
+FROM PUBLIC, price_reader, price_writer;
+GRANT SELECT ON TABLE shadow_signal_evaluation_chart_points
+TO price_reader;
 \q
 ```
 
@@ -768,8 +795,10 @@ TO price_writer;
 grant `price_reader` or `PUBLIC` access to it. Its narrowly scoped
 `price_writer` ownership and `CREATE` permission are for raw partition
 maintenance only and do not grant DDL access in `public`.
-The explicit shadow-evaluation revoke must remain after the broad first-install
-grants so the API reader cannot access internal model evidence.
+The explicit base-table and reporting-view privilege corrections must remain
+after the broad first-install grants. The API reader can select the restricted
+view, but cannot access the internal evaluation table; the writer does not gain
+view access.
 
 ### Configure Redis
 

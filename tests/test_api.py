@@ -15,6 +15,7 @@ from price_collector.live_cache import (
     LivePrice,
     LiveShadowSignal,
 )
+from price_collector.shadow_signal_reporting import ShadowEvaluationFetchResult
 
 
 class FakePool:
@@ -1371,3 +1372,422 @@ def test_markets_download_trims_flow_and_book_to_export_fields(client, monkeypat
     assert "buy_quote" not in body["series"][0]["flow"]
     assert "bid" not in body["series"][0]["book"]
     assert "freshness" not in body["series"][0]
+
+
+SHADOW_REPORT_NOW_MS = 1_783_459_250_123
+SHADOW_REPORT_MARKET_ID = 5_944_864
+SHADOW_REPORT_MARKET_START_MS = 1_783_459_200_000
+SHADOW_REPORT_MARKET_END_MS = 1_783_459_500_000
+SHADOW_REPORT_MODEL = "catchup_ratio_l3000_b100"
+
+
+def shadow_evaluation_chart_row(**overrides):
+    generated_ms = 1_783_459_247_100
+    target_ms = generated_ms + 3_000
+    values = {
+        "selection_fingerprint_sha256": "a" * 64,
+        "selection_artifact_sha256": "b" * 64,
+        "model_version": SHADOW_REPORT_MODEL,
+        "beta": Decimal("1"),
+        "generated_ms": generated_ms,
+        "target_ms": target_ms,
+        "matured_ms": target_ms + 10,
+        "horizon_ms": 3_000,
+        "valid": True,
+        "status": "valid",
+        "invalid_reasons": (),
+        "state": "anchored",
+        "forecast_market_id": SHADOW_REPORT_MARKET_ID,
+        "full_horizon_before_forecast_market_end": True,
+        "chainlink_at_forecast": Decimal("62000"),
+        "projected_chainlink": Decimal("62001"),
+        "actual_chainlink": Decimal("62000.5"),
+        "actual_chainlink_source_timestamp_ms": target_ms - 1_100,
+        "actual_chainlink_received_ms": target_ms - 100,
+        "actual_chainlink_age_at_target_ms": 100,
+        "pending_move": Decimal("1"),
+        "pending_move_bps": Decimal(
+            "0.1612903225806451612903225806"
+        ),
+        "direction": "up",
+        "forecast_error": Decimal("0.5"),
+        "baseline_error": Decimal("-0.5"),
+    }
+    values.update(overrides)
+    return values
+
+
+def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == SHADOW_REPORT_MARKET_ID
+        assert window.market_start_ms == SHADOW_REPORT_MARKET_START_MS
+        assert window.market_end_ms == SHADOW_REPORT_MARKET_END_MS
+        assert model_version == SHADOW_REPORT_MODEL
+        return ShadowEvaluationFetchResult(
+            market_exists=True,
+            rows=(shadow_evaluation_chart_row(),),
+        )
+
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: SHADOW_REPORT_NOW_MS)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(
+        "/markets/current/shadow-evaluations"
+        f"?model_version={SHADOW_REPORT_MODEL}"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 1
+    assert body["server_time_ms"] == SHADOW_REPORT_NOW_MS
+    assert body["market"] == {
+        "market_id": SHADOW_REPORT_MARKET_ID,
+        "market_start_ms": SHADOW_REPORT_MARKET_START_MS,
+        "market_end_ms": SHADOW_REPORT_MARKET_END_MS,
+        "boundary": "[start_ms,end_ms)",
+    }
+    assert body["model"] == {
+        "model_version": SHADOW_REPORT_MODEL,
+        "horizon_ms": 3_000,
+        "beta": "1",
+        "evaluation_cadence_ms": 500,
+        "selection_identities": [
+            {
+                "fingerprint_sha256": "a" * 64,
+                "artifact_sha256": "b" * 64,
+            }
+        ],
+    }
+    assert body["coverage"] == {
+        "window_buckets": 600,
+        "market_window_elapsed": False,
+        "observed_buckets": 1,
+        "unobserved_buckets_as_of_response": None,
+        "attempts": 1,
+        "valid_forecasts": 1,
+        "scored": 1,
+        "invalid": 0,
+        "valid_without_actual": 0,
+    }
+    assert body["points"] == [
+        {
+            "selection_fingerprint_sha256": "a" * 64,
+            "selection_artifact_sha256": "b" * 64,
+            "model_version": SHADOW_REPORT_MODEL,
+            "beta": "1",
+            "generated_ms": 1_783_459_247_100,
+            "target_ms": 1_783_459_250_100,
+            "matured_ms": 1_783_459_250_110,
+            "horizon_ms": 3_000,
+            "valid": True,
+            "status": "valid",
+            "invalid_reasons": [],
+            "state": "anchored",
+            "forecast_market_id": SHADOW_REPORT_MARKET_ID,
+            "full_horizon_before_forecast_market_end": True,
+            "chainlink_at_forecast": "62000",
+            "projected_chainlink": "62001",
+            "actual_chainlink": "62000.5",
+            "actual_chainlink_source_timestamp_ms": 1_783_459_249_000,
+            "actual_chainlink_received_ms": 1_783_459_250_000,
+            "actual_chainlink_age_at_target_ms": 100,
+            "pending_move": "1",
+            "pending_move_bps": "0.1612903225806451612903225806",
+            "direction": "up",
+            "forecast_error": "0.5",
+            "baseline_error": "-0.5",
+        }
+    ]
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_shadow_evaluations_by_id_returns_completed_market_report(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == SHADOW_REPORT_MARKET_ID
+        assert model_version == SHADOW_REPORT_MODEL
+        return ShadowEvaluationFetchResult(
+            market_exists=True,
+            rows=(shadow_evaluation_chart_row(),),
+        )
+
+    monkeypatch.setattr(
+        api,
+        "current_utc_epoch_ms",
+        lambda: SHADOW_REPORT_MARKET_END_MS + 1_000,
+    )
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations"
+        f"?model_version={SHADOW_REPORT_MODEL}"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market"]["market_id"] == SHADOW_REPORT_MARKET_ID
+    assert body["coverage"]["market_window_elapsed"] is True
+    assert body["coverage"]["observed_buckets"] == 1
+    assert body["coverage"]["unobserved_buckets_as_of_response"] == 599
+    assert body["points"][0]["projected_chainlink"] == "62001"
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/markets/current/shadow-evaluations",
+        "/markets/5944865/shadow-evaluations",
+    ),
+)
+def test_current_shadow_evaluation_window_is_known_before_market_row_exists(
+    client,
+    monkeypatch,
+    path,
+):
+    server_time_ms = SHADOW_REPORT_MARKET_END_MS + 10
+    current_market_id = SHADOW_REPORT_MARKET_ID + 1
+
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == current_market_id
+        assert model_version == SHADOW_REPORT_MODEL
+        return ShadowEvaluationFetchResult(market_exists=False, rows=())
+
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: server_time_ms)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(f"{path}?model_version={SHADOW_REPORT_MODEL}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": 1,
+        "server_time_ms": server_time_ms,
+        "market": {
+            "market_id": current_market_id,
+            "market_start_ms": SHADOW_REPORT_MARKET_END_MS,
+            "market_end_ms": SHADOW_REPORT_MARKET_END_MS + 300_000,
+            "boundary": "[start_ms,end_ms)",
+        },
+        "model": {
+            "model_version": SHADOW_REPORT_MODEL,
+            "horizon_ms": 3_000,
+            "beta": "1",
+            "evaluation_cadence_ms": 500,
+            "selection_identities": [],
+        },
+        "coverage": {
+            "window_buckets": 600,
+            "market_window_elapsed": False,
+            "observed_buckets": 0,
+            "unobserved_buckets_as_of_response": None,
+            "attempts": 0,
+            "valid_forecasts": 0,
+            "scored": 0,
+            "invalid": 0,
+            "valid_without_actual": 0,
+        },
+        "points": [],
+    }
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_shadow_evaluations_unknown_historical_market_returns_404(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == SHADOW_REPORT_MARKET_ID - 1
+        assert model_version == SHADOW_REPORT_MODEL
+        return ShadowEvaluationFetchResult(market_exists=False, rows=())
+
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: SHADOW_REPORT_NOW_MS)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(
+        f"/markets/{SHADOW_REPORT_MARKET_ID - 1}/shadow-evaluations"
+        f"?model_version={SHADOW_REPORT_MODEL}"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": (
+            "no market found for "
+            f"market_id={SHADOW_REPORT_MARKET_ID - 1}"
+        )
+    }
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_shadow_evaluations_known_historical_market_can_have_no_retained_rows(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == SHADOW_REPORT_MARKET_ID
+        assert model_version == SHADOW_REPORT_MODEL
+        return ShadowEvaluationFetchResult(market_exists=True, rows=())
+
+    server_time_ms = SHADOW_REPORT_MARKET_END_MS + 1_000
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: server_time_ms)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations"
+        f"?model_version={SHADOW_REPORT_MODEL}"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["server_time_ms"] == server_time_ms
+    assert body["market"]["market_id"] == SHADOW_REPORT_MARKET_ID
+    assert body["model"]["horizon_ms"] == 3_000
+    assert body["model"]["selection_identities"] == []
+    assert body["coverage"] == {
+        "window_buckets": 600,
+        "market_window_elapsed": True,
+        "observed_buckets": 0,
+        "unobserved_buckets_as_of_response": 600,
+        "attempts": 0,
+        "valid_forecasts": 0,
+        "scored": 0,
+        "invalid": 0,
+        "valid_without_actual": 0,
+    }
+    assert body["points"] == []
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/markets/current/shadow-evaluations",
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations",
+    ),
+)
+@pytest.mark.parametrize("query", ("", "?model_version=unsupported_model"))
+def test_shadow_evaluation_routes_require_a_supported_model(
+    client,
+    monkeypatch,
+    path,
+    query,
+):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid request must not query PostgreSQL")
+
+    monkeypatch.setattr(
+        api,
+        "fetch_shadow_evaluation_chart_points",
+        unexpected_fetch,
+    )
+
+    response = client.get(f"{path}{query}")
+
+    assert response.status_code == 422
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+@pytest.mark.parametrize("failure", ("integrity", "row_limit"))
+def test_shadow_evaluation_reporting_failures_return_generic_500(
+    client,
+    monkeypatch,
+    failure,
+):
+    if failure == "integrity":
+        rows = (shadow_evaluation_chart_row(horizon_ms=3_500),)
+    else:
+        rows = (shadow_evaluation_chart_row(),) * 1_001
+
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        return ShadowEvaluationFetchResult(market_exists=True, rows=rows)
+
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: SHADOW_REPORT_NOW_MS)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(
+        "/markets/current/shadow-evaluations"
+        f"?model_version={SHADOW_REPORT_MODEL}"
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "shadow evaluation data inconsistent"
+    }
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_openapi_lists_both_shadow_evaluation_routes_and_required_model(client):
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    paths = response.json()["paths"]
+    current = paths["/markets/current/shadow-evaluations"]["get"]
+    by_id = paths["/markets/{market_id}/shadow-evaluations"]["get"]
+
+    current_model = next(
+        parameter
+        for parameter in current["parameters"]
+        if parameter["name"] == "model_version"
+    )
+    by_id_model = next(
+        parameter
+        for parameter in by_id["parameters"]
+        if parameter["name"] == "model_version"
+    )
+    market_id = next(
+        parameter
+        for parameter in by_id["parameters"]
+        if parameter["name"] == "market_id"
+    )
+
+    assert current_model["in"] == "query"
+    assert current_model["required"] is True
+    assert by_id_model["in"] == "query"
+    assert by_id_model["required"] is True
+    assert market_id["in"] == "path"
+    assert market_id["required"] is True
+    assert "500" in current["responses"]
+    assert "404" in by_id["responses"]
+    assert "500" in by_id["responses"]
+
+
+@pytest.mark.parametrize("market_id", ("-1", "not-an-integer", str(api.MAX_MARKET_ID + 1)))
+def test_shadow_evaluation_route_rejects_invalid_market_id_before_database(
+    client,
+    monkeypatch,
+    market_id,
+):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid market_id must not query PostgreSQL")
+
+    monkeypatch.setattr(
+        api,
+        "fetch_shadow_evaluation_chart_points",
+        unexpected_fetch,
+    )
+
+    response = client.get(
+        f"/markets/{market_id}/shadow-evaluations"
+        f"?model_version={SHADOW_REPORT_MODEL}"
+    )
+
+    assert response.status_code == 422
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0

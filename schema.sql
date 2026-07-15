@@ -417,9 +417,9 @@ CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
 CREATE INDEX IF NOT EXISTS binance_futures_oi_5m_effective_market_idx
     ON binance_futures_oi_5m_summaries (effective_market_id);
 
--- Matured shadow forecasts are internal model evidence. They are written by
--- the standalone shadow worker and are deliberately unavailable to the API
--- reader until a later read-only reporting contract is designed.
+-- Matured shadow forecasts are internal model evidence. The standalone shadow
+-- worker owns the base-table write path. The API reader receives only the
+-- narrow reporting view declared after this table.
 CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
     selection_schema_version INTEGER NOT NULL,
     selection_policy_version TEXT NOT NULL,
@@ -771,6 +771,46 @@ CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_market_model_idx
 REVOKE ALL ON TABLE shadow_signal_evaluations
     FROM PUBLIC, price_reader, price_writer;
 GRANT SELECT, INSERT, DELETE ON TABLE shadow_signal_evaluations TO price_writer;
+
+-- Dashboard reporting intentionally omits futures inputs, writer metadata,
+-- retention controls, and created_at. This remains an owner-rights view:
+-- security_invoker must not be enabled because price_reader has no base-table
+-- privilege. The API applies a one-market, one-model, 1,000-row bound.
+CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points
+WITH (security_barrier = true) AS
+SELECT
+    selection_fingerprint_sha256,
+    selection_artifact_sha256,
+    model_version,
+    beta,
+    generated_ms,
+    target_ms,
+    matured_ms,
+    horizon_ms,
+    valid,
+    status,
+    invalid_reasons,
+    state,
+    market_id AS forecast_market_id,
+    full_horizon_before_market_end
+        AS full_horizon_before_forecast_market_end,
+    chainlink_at_forecast,
+    projected_chainlink,
+    actual_chainlink,
+    actual_chainlink_source_timestamp_ms,
+    actual_chainlink_received_ms,
+    actual_chainlink_age_at_target_ms,
+    pending_move,
+    pending_move_bps,
+    direction,
+    forecast_error,
+    baseline_error
+FROM public.shadow_signal_evaluations;
+
+REVOKE ALL ON TABLE public.shadow_signal_evaluation_chart_points
+    FROM PUBLIC, price_reader, price_writer;
+GRANT SELECT ON TABLE public.shadow_signal_evaluation_chart_points
+    TO price_reader;
 
 -- High-resolution evidence is isolated from the public application schema.
 -- The writer may manage partitions only inside this schema; the API reader is

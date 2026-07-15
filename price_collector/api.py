@@ -2,9 +2,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
+import logging
 from typing import Any, Mapping, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from price_collector.collector import current_utc_epoch_ms
@@ -25,12 +26,21 @@ from price_collector.live_cache import (
     build_current_live_payload,
     create_live_cache,
 )
-from price_collector.market import market_for_sample_second
+from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.shadow_signal_reporting import (
+    MAX_MARKET_ID,
+    ShadowEvaluationModelVersion,
+    ShadowEvaluationReportingError,
+    build_shadow_evaluation_report,
+    fetch_shadow_evaluation_chart_points,
+    shadow_evaluation_market_window,
+)
 
 
 DEFAULT_PROVIDER = "binance_spot"
 DEFAULT_SYMBOL = "BTCUSDT"
 SERVICE_NAME = "price-api"
+LOGGER = logging.getLogger(__name__)
 DOWNLOAD_FLOW_FIELDS = (
     "taker_imbalance",
     "cvd_10s",
@@ -543,6 +553,48 @@ async def markets_current_live(
         raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
 
 
+@app.get(
+    "/markets/current/shadow-evaluations",
+    responses={
+        500: {"description": "Persisted evaluation data is inconsistent"},
+    },
+)
+async def markets_current_shadow_evaluations(
+    request: Request,
+    model_version: ShadowEvaluationModelVersion = Query(...),
+) -> dict[str, Any]:
+    server_time_ms = current_utc_epoch_ms()
+    sample_second_ms = (server_time_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+    return await shadow_evaluations_response(
+        request,
+        window=window,
+        server_time_ms=server_time_ms,
+        model_version=model_version.value,
+    )
+
+
+@app.get(
+    "/markets/{market_id}/shadow-evaluations",
+    responses={
+        404: {"description": "Unknown historical market"},
+        500: {"description": "Persisted evaluation data is inconsistent"},
+    },
+)
+async def markets_shadow_evaluations_by_id(
+    request: Request,
+    market_id: int = Path(..., ge=0, le=MAX_MARKET_ID),
+    model_version: ShadowEvaluationModelVersion = Query(...),
+) -> dict[str, Any]:
+    server_time_ms = current_utc_epoch_ms()
+    return await shadow_evaluations_response(
+        request,
+        window=shadow_evaluation_market_window(market_id),
+        server_time_ms=server_time_ms,
+        model_version=model_version.value,
+    )
+
+
 @app.get("/markets/{market_id}")
 async def markets_by_id(
     request: Request,
@@ -556,6 +608,48 @@ async def markets_by_id(
         symbol=symbol,
         market_id=market_id,
     )
+
+
+async def shadow_evaluations_response(
+    request: Request,
+    *,
+    window: MarketWindow,
+    server_time_ms: int,
+    model_version: str,
+) -> dict[str, Any]:
+    result = await fetch_shadow_evaluation_chart_points(
+        get_pool(request),
+        window=window,
+        model_version=model_version,
+    )
+
+    current_sample_second_ms = (server_time_ms // 1000) * 1000
+    current_window = market_for_sample_second(current_sample_second_ms)
+    if not result.market_exists and window.market_id != current_window.market_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no market found for market_id={window.market_id}",
+        )
+
+    try:
+        return build_shadow_evaluation_report(
+            window=window,
+            server_time_ms=server_time_ms,
+            model_version=model_version,
+            rows=result.rows,
+        )
+    except ShadowEvaluationReportingError as exc:
+        LOGGER.exception(
+            "shadow_evaluation_reporting_inconsistent",
+            extra={
+                "market_id": window.market_id,
+                "model_version": model_version,
+            },
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="shadow evaluation data inconsistent",
+        ) from exc
 
 
 async def market_by_id_response(

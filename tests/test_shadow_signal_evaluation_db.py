@@ -661,3 +661,62 @@ def test_schema_has_causal_internal_shadow_evaluation_table():
         "TO price_writer"
         in schema
     )
+
+
+def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
+    schema = (ROOT / "schema.sql").read_text()
+    start = schema.index(
+        "CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points"
+    )
+    end_marker = "FROM public.shadow_signal_evaluations;"
+    view = schema[start : schema.index(end_marker, start) + len(end_marker)]
+
+    assert "WITH (security_barrier = true)" in view
+    assert "security_invoker" not in view
+    for column in (
+        "selection_fingerprint_sha256",
+        "selection_artifact_sha256",
+        "model_version",
+        "beta",
+        "generated_ms",
+        "target_ms",
+        "matured_ms",
+        "horizon_ms",
+        "valid",
+        "status",
+        "invalid_reasons",
+        "state",
+        "market_id AS forecast_market_id",
+        "AS full_horizon_before_forecast_market_end",
+        "chainlink_at_forecast",
+        "projected_chainlink",
+        "actual_chainlink",
+        "actual_chainlink_source_timestamp_ms",
+        "actual_chainlink_received_ms",
+        "actual_chainlink_age_at_target_ms",
+        "pending_move",
+        "pending_move_bps",
+        "direction",
+        "forecast_error",
+        "baseline_error",
+    ):
+        assert column in view
+
+    for forbidden in (
+        "selection_policy_version",
+        "futures_now",
+        "futures_reference",
+        "created_at",
+    ):
+        assert forbidden not in view
+
+    assert (
+        "REVOKE ALL ON TABLE public.shadow_signal_evaluation_chart_points\n"
+        "    FROM PUBLIC, price_reader, price_writer;"
+        in schema
+    )
+    assert (
+        "GRANT SELECT ON TABLE public.shadow_signal_evaluation_chart_points\n"
+        "    TO price_reader;"
+        in schema
+    )

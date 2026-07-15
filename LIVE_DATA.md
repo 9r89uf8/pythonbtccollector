@@ -54,11 +54,13 @@ noncritical outcome path:
 
 Phases 4 and 5 deliberately kept both outputs out of FastAPI. Phase 6 now
 serializes only the short-lived Redis signal as the optional nested
-`signals.chainlink_catchup` field. Persisted evaluations remain internal and
-unexposed. PostgreSQL work runs behind a bounded nonblocking queue, so a
+`signals.chainlink_catchup` field. The later Phase 7 backend prerequisite
+exposes a restricted projection of persisted evaluations through separate,
+bounded PostgreSQL reporting routes; the base table remains internal.
+PostgreSQL evaluation writes run behind a bounded nonblocking queue, so a
 database outage, retry, or dropped evaluation cannot interrupt the Redis
-signal, either producer, or the live endpoint. Phase 6 contains no dashboard
-implementation; that remains Phase 7 work in a different repository.
+signal, either producer, or the live endpoint. This repository contains no
+dashboard implementation; that remains in a different repository.
 
 There are three live price sources, even though two of them are operated by
 Binance:
@@ -369,10 +371,12 @@ the evaluation rows. A reconnect slice must join by receive time to
 `raw_capture.feed_sessions`; materialize it before the separate 72-hour raw
 retention removes the required session evidence.
 
-The table and writer are internal evidence only. Phase 5 deliberately added no
-API response field or dashboard integration. It is also unrelated to, and does
-not validate, the separately deferred high-resolution raw-capture Phase 4
-partition and 72-hour-retention rollout.
+Phase 5 deliberately added no API response field or dashboard integration. A
+later read-only reporting layer exposes only selected chart columns through
+`shadow_signal_evaluation_chart_points`; the base table and writer remain
+internal. This is also unrelated to, and does not validate, the separately
+deferred high-resolution raw-capture Phase 4 partition and 72-hour-retention
+rollout.
 
 Phase 6 adds the shadow key to the live endpoint's existing Redis read. The API
 requests `btc:live:binance_spot`, `btc:live:chainlink`, `btc:live:futures`, and
@@ -389,9 +393,11 @@ otherwise readable actual prices. A well-formed `valid=false` signal remains a
 useful typed diagnostic and is returned as an object. The API adds only
 `signal_age_ms = max(0, server_time_ms - generated_ms)` to the cached payload.
 
-FastAPI does not query PostgreSQL, read `shadow_signal_evaluations`, import or
-run the model, or hold model state. Phase 6 is a Redis-only backend exposure;
-dashboard implementation remains Phase 7 work in a different repository.
+`GET /markets/current/live` does not query PostgreSQL, read evaluation rows,
+import or run the model, or hold model state. Phase 6 remains a Redis-only live
+exposure. The separate `/markets/.../shadow-evaluations` reporting routes use
+the API's PostgreSQL reader and restricted view without changing this live
+request path. Dashboard implementation remains in a different repository.
 
 ## Redis-Only Live Endpoint
 
@@ -636,7 +642,7 @@ from another machine.
 
 `GET /markets/current/live` does **not** return:
 
-- Persisted `shadow_signal_evaluations`, candidate rankings, or replay reports
+- Persisted evaluation history, candidate rankings, or replay reports
 - Polymarket Up/Down probabilities or resolution data
 - Futures mark price, index price, premium, or funding data
 - Open interest or open-interest notional
@@ -651,6 +657,16 @@ historical/current-window API, primarily `GET /markets/current/data` with its
 currently serialized by the dashboard API. These datasets are separate from
 the low-latency, Redis-only live response. The Polymarket probability collector
 is therefore not a fourth live price source or Redis key.
+
+Persisted shadow evaluations are intentionally not folded into `/data`.
+Request them through either dedicated, one-model, one-window reporting path:
+
+```text
+GET /markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100
+GET /markets/{market_id}/shadow-evaluations?model_version=catchup_ratio_l3000_b100
+```
+
+Those routes use PostgreSQL and remain separate from `/live`.
 
 For the complete frontend API contract and all historical response shapes, see
 [`FRONTEND_API.md`](FRONTEND_API.md).
@@ -677,6 +693,8 @@ For the complete frontend API contract and all historical response shapes, see
   — standalone epoch-aligned 100 ms Redis worker and Phase 5 integration
 - [`price_collector/shadow_signal_evaluation.py`](price_collector/shadow_signal_evaluation.py)
   — 500 ms scheduler, causal horizon maturation, and bounded async writer
+- [`price_collector/shadow_signal_reporting.py`](price_collector/shadow_signal_reporting.py)
+  — bounded read-only evaluation query and response validation
 - [`price_collector/db.py`](price_collector/db.py) — idempotent matured-evaluation
   batches and bounded retention deletion
 - [`price_collector/api.py`](price_collector/api.py) — FastAPI route

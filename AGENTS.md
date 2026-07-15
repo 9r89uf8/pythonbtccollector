@@ -207,7 +207,13 @@ The corresponding Python entry points are:
   existing `/markets/current/live` response at
   `signals.chainlink_catchup`. FastAPI must remain a serializer: it must not
   import or run the shadow engine, hold model state, query PostgreSQL on this
-  route, or expose persisted evaluation rows.
+  route, or expose persisted evaluation rows through the live response.
+- Phase 7 reporting exposes persisted evidence only through
+  `/markets/current/shadow-evaluations` and
+  `/markets/{market_id}/shadow-evaluations`. Require one supported V0
+  `model_version`, select the requested half-open window by `target_ms`, inspect
+  only its generation market and predecessor, and reject more than 1,000 rows.
+  Keep this PostgreSQL read path separate from `/markets/current/live`.
 - Read the three source-price keys and `btc:live:chainlink_shadow` with one
   four-key Redis `MGET`; do not issue a second `GET` for the shadow value.
   Decode the shadow value independently with its dedicated strict decoder,
@@ -280,6 +286,10 @@ The corresponding Python entry points are:
   `SELECT`, `INSERT`, and bounded-retention `DELETE`; explicitly revoke the API
   reader and `PUBLIC`. Preserve its primary key on
   `(model_version, generated_ms, horizon_ms)`.
+- Grant `price_reader` `SELECT` only on the owner-rights
+  `shadow_signal_evaluation_chart_points` view. Revoke that view from `PUBLIC`
+  and `price_writer`; do not expose futures inputs, writer metadata, or
+  `created_at` through it.
 
 ## Market Window Rule
 

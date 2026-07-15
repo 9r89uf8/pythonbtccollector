@@ -53,9 +53,15 @@ async function apiGet(path, query = {}) {
   }
 
   const response = await fetch(url, { headers: { Accept: "application/json" } });
-  const body = await response.json();
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
   if (!response.ok) {
-    throw new Error(body.detail ?? body.error ?? `HTTP ${response.status}`);
+    const detail = typeof body === "object" && body !== null
+      ? body.detail ?? body.error
+      : body;
+    throw new Error(detail || `HTTP ${response.status}`);
   }
   return body;
 }
@@ -94,6 +100,8 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/{market_id}/data` | Full series for one market | PostgreSQL |
 | `GET` | `/markets/current/download` | Download current market JSON | PostgreSQL |
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
+| `GET` | `/markets/current/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for the current target window | PostgreSQL |
+| `GET` | `/markets/{market_id}/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for one target window | PostgreSQL |
 | `GET` | `/markets/current/live` | Lowest-latency current prices and experimental Chainlink catch-up signal | Redis only |
 
 ## Health
@@ -880,6 +888,252 @@ window.location.assign(url);
 The download routes return HTTP `404` with the requested market ID in `detail`
 when the market window does not exist.
 
+## Persisted Shadow-Evaluation Chart Data
+
+The shadow-evaluation routes are:
+
+- `GET /markets/current/shadow-evaluations`
+- `GET /markets/{market_id}/shadow-evaluations`
+
+They return the persisted 500 ms forecast attempts and causal Chainlink
+outcomes for exactly one five-minute **target-time** window and one explicitly
+requested model. They read PostgreSQL through the API's reader connection and
+the restricted `shadow_signal_evaluation_chart_points` view. They do not read
+Redis, run a model, alter evaluation rows, or expose an arbitrary time-range
+query.
+
+These reporting routes are independent from `GET /markets/current/live`. The
+live route remains one Redis `MGET`, performs no PostgreSQL query, and continues
+to return only the newest short-lived primary projection.
+
+### Request
+
+Both routes require the same query parameter:
+
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `model_version` | enum string | none; required | Return exactly one supported persisted candidate |
+
+Supported values and their fixed report metadata are:
+
+| `model_version` | `horizon_ms` | `beta` |
+| --- | ---: | ---: |
+| `catchup_ratio_l3000_b100` | `3000` | `"1"` |
+| `catchup_ratio_l3500_b100` | `3500` | `"1"` |
+| `catchup_ratio_l4000_b100` | `4000` | `"1"` |
+
+There is no implicit default and the API does not choose or rerank a model for
+the caller. A dashboard should request its explicitly configured frozen
+primary and verify the returned selection identity rather than selecting the
+candidate with the best recent result.
+
+Calls:
+
+```bash
+curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
+curl "${API_BASE_URL}/markets/5946630/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
+```
+
+Browser example using the `apiGet` helper from the access section:
+
+```javascript
+const modelVersion = "catchup_ratio_l3000_b100";
+
+const currentEvaluations = await apiGet(
+  "/markets/current/shadow-evaluations",
+  { model_version: modelVersion },
+);
+
+const selectedEvaluations = await apiGet(
+  "/markets/5946630/shadow-evaluations",
+  { model_version: modelVersion },
+);
+```
+
+`market_id` must be a non-negative integer that can be represented safely by
+the PostgreSQL market-window calculation. FastAPI returns HTTP `422` before
+querying PostgreSQL when the ID, required model parameter, or supported-model
+enum is invalid.
+
+### Response
+
+Both routes use this response shape:
+
+```json
+{
+  "schema_version": 1,
+  "server_time_ms": 1783989010123,
+  "market": {
+    "market_id": 5946630,
+    "market_start_ms": 1783989000000,
+    "market_end_ms": 1783989300000,
+    "boundary": "[start_ms,end_ms)"
+  },
+  "model": {
+    "model_version": "catchup_ratio_l3000_b100",
+    "horizon_ms": 3000,
+    "beta": "1",
+    "evaluation_cadence_ms": 500,
+    "selection_identities": [
+      {
+        "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
+        "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
+      }
+    ]
+  },
+  "coverage": {
+    "window_buckets": 600,
+    "market_window_elapsed": false,
+    "observed_buckets": 1,
+    "unobserved_buckets_as_of_response": null,
+    "attempts": 1,
+    "valid_forecasts": 1,
+    "scored": 1,
+    "invalid": 0,
+    "valid_without_actual": 0
+  },
+  "points": [
+    {
+      "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
+      "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
+      "model_version": "catchup_ratio_l3000_b100",
+      "beta": "1.000000000000000000",
+      "generated_ms": 1783989000507,
+      "target_ms": 1783989003507,
+      "matured_ms": 1783989003512,
+      "horizon_ms": 3000,
+      "valid": true,
+      "status": "valid",
+      "invalid_reasons": [],
+      "state": "anchored",
+      "forecast_market_id": 5946630,
+      "full_horizon_before_forecast_market_end": true,
+      "chainlink_at_forecast": "64080.470000000000000000",
+      "projected_chainlink": "64103.070000000000000000",
+      "actual_chainlink": "64099.820000000000000000",
+      "actual_chainlink_source_timestamp_ms": 1783989003000,
+      "actual_chainlink_received_ms": 1783989003340,
+      "actual_chainlink_age_at_target_ms": 167,
+      "pending_move": "22.600000000000000000",
+      "pending_move_bps": "3.526815580472490292",
+      "direction": "up",
+      "forecast_error": "3.250000000000000000",
+      "baseline_error": "-19.350000000000000000"
+    }
+  ]
+}
+```
+
+The decimal strings can contain different amounts of trailing precision; their
+lexical scale is not a display-format guarantee. `model.beta`, point `beta`,
+prices, moves, basis points, and error values are fixed-point JSON strings or
+`null`. Keep the original strings and use a decimal library for calculations.
+Do not calculate chart errors with binary floating-point.
+
+`points` are sorted by `target_ms`, then `generated_ms`, then `horizon_ms`.
+For every point:
+
+```text
+target_ms = generated_ms + horizon_ms
+market_start_ms <= target_ms < market_end_ms
+```
+
+Plot `projected_chainlink` and its paired `actual_chainlink` at `target_ms`, not
+at `generated_ms` or `matured_ms`. `matured_ms` is the persistence time. The
+paired actual is the newest Chainlink cache observation the live evaluator had
+successfully observed with `actual_chainlink_received_ms <= target_ms`; it is
+the causal value used by the stored error calculation. Raw replay remains the
+event-complete authority for events overwritten between live evaluator polls.
+
+The requested market is selected by `target_ms`, not by
+`forecast_market_id`. `forecast_market_id` identifies the five-minute window
+containing `generated_ms`. A point generated in the preceding market's last
+four seconds can therefore appear at the beginning of the requested target
+window. `full_horizon_before_forecast_market_end` also refers to that
+generation-time market, not to the requested target window.
+
+Error signs are:
+
+```text
+forecast_error = projected_chainlink - actual_chainlink
+baseline_error = chainlink_at_forecast - actual_chainlink
+```
+
+An invalid attempt is still returned. It has `valid: false`, a non-`valid`
+`status`, at least one `invalid_reasons` entry, and null
+`projected_chainlink`, `pending_move`, `pending_move_bps`, `direction`, and
+`forecast_error`. Its current input, causal actual, and `baseline_error` fields
+can still be present when those individual values were available. Do not carry
+a preceding valid projection across such a point.
+
+A valid attempt always has a projection. It is counted as `scored` only when
+`actual_chainlink` is also present; otherwise the actual timing fields,
+`forecast_error`, and `baseline_error` are null and it contributes to
+`valid_without_actual`.
+
+### Coverage and bounds
+
+`window_buckets` is always `600` for the 300-second market and 500 ms
+evaluation cadence. `observed_buckets` counts distinct generation buckets
+represented by returned attempts. `attempts` is the number of returned rows;
+`valid_forecasts + invalid` equals `attempts`, and
+`scored + valid_without_actual` equals `valid_forecasts`.
+
+`market_window_elapsed` is calculated against `server_time_ms`. While the
+window is active, `unobserved_buckets_as_of_response` is `null` because future
+buckets have not occurred. Once the market has elapsed, it is
+`window_buckets - observed_buckets`. Missing buckets are not fabricated or
+backfilled.
+
+The database query is bounded to 1,001 rows so the API can reject rather than
+truncate an anomalous result. A successful response contains at most 1,000
+points and at most 600 distinct generation buckets. Exceeding either public
+invariant returns HTTP `500`; the response never silently drops excess rows.
+
+`model.selection_identities` is the sorted set of unique selection fingerprint
+and artifact pairs represented by the points. It is empty when `points` is
+empty and can contain more than one entry if persisted rows span a selection
+change. Consumers must not silently join different selection identities into
+one claimed-primary series.
+
+### Empty markets, current rollover, and errors
+
+A known market with no retained rows for the requested model returns HTTP
+`200` with the normal metadata, zero coverage counts, an empty
+`selection_identities` array, and `points: []`. This is normal before the first
+current-window evaluation is persisted and after derived-evidence retention
+has removed older rows.
+
+The current route snapshots `server_time_ms` and its corresponding market once
+before querying PostgreSQL. Its returned `market` object is authoritative for
+that response. Calls made on opposite sides of a five-minute boundary can
+therefore return adjacent market IDs. A dashboard that needs a stable window
+should read the returned ID and continue with the ID-addressed route.
+
+The current target window returns HTTP `200` even if it has not yet appeared in
+`market_windows`. The ID-addressed route uses the same behavior when the
+requested ID is the API server's current market. A non-current ID absent from
+`market_windows` returns HTTP `404`:
+
+```json
+{ "detail": "no market found for market_id=5946630" }
+```
+
+A missing or unsupported `model_version`, a negative or too-large market ID,
+or a non-integer market ID returns FastAPI's HTTP `422` validation response.
+
+If persisted rows violate the typed reporting invariants, including the
+1,000-point cap, the API logs the inconsistency and returns HTTP `500`:
+
+```json
+{ "detail": "shadow evaluation data inconsistent" }
+```
+
+A PostgreSQL read failure also returns HTTP `500` and can use the server's
+generic plain-text error body rather than the JSON `detail` shape. Treat either
+response as a reporting-path failure; it does not imply that the Redis-only
+live route or the standalone shadow worker has failed.
+
 ## Current Live Prices and Shadow Signal
 
 ### `GET /markets/current/live`
@@ -1055,19 +1309,25 @@ the unchanged `503 live cache unavailable` response.
 
 ## Common Errors
 
-Except for `/healthz`, FastAPI errors use this JSON shape:
+Application-raised FastAPI errors normally use this JSON shape:
 
 ```json
 { "detail": "human-readable message" }
 ```
 
+An unhandled internal HTTP `500`, including a PostgreSQL read failure on a
+shadow-evaluation route, can instead use a generic plain-text body. Clients
+should branch on HTTP status and tolerate either content type; the `apiGet`
+helper above does so.
+
 Expected statuses are:
 
 | Status | Meaning |
 | --- | --- |
-| `404` | The requested source or market has no stored data |
+| `404` | The requested source or historical market has no stored data; a current shadow-evaluation window and a known market with no retained evaluation points instead return HTTP `200` with `points: []` |
 | `405` | The route was called with a method other than `GET` |
-| `422` | A typed path/query value is invalid, such as a non-integer market ID or a discovery `limit` outside `1..50` |
+| `422` | A typed path/query value is invalid, such as a non-integer market ID, a discovery `limit` outside `1..50`, or a missing/unsupported shadow-evaluation `model_version` |
+| `500` | A PostgreSQL-backed shadow-evaluation request failed or its persisted result violated the public reporting invariants |
 | `503` | `/markets/current/live` cannot read Redis or one of its three actual source-price payloads is malformed, or `/healthz` cannot query PostgreSQL |
 
 The exact `detail` text is useful for logs but should not be treated as a stable

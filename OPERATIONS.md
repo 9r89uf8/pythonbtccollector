@@ -3100,6 +3100,269 @@ HTTP 200. A Redis read failure or malformed source-price payload retains the
 existing HTTP 503 behavior. Phase 7 dashboard work remains outside this
 repository and is not part of this rollout.
 
+## Shadow-Signal Evaluation Reporting API
+
+This is the backend prerequisite for the separate Phase 7 dashboard. It adds
+two PostgreSQL-backed, read-only routes while leaving
+`GET /markets/current/live` Redis-only:
+
+```text
+GET /markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100
+GET /markets/{market_id}/shadow-evaluations?model_version=catchup_ratio_l3000_b100
+```
+
+Apply `schema.sql` before restarting `price-api`; the new API code queries the
+restricted view and will fail until that view exists. No environment or systemd
+change is required.
+
+After the change is pushed to GitHub, deploy it with:
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector .venv/bin/python -m pytest \
+  tests/test_shadow_signal_reporting.py \
+  tests/test_shadow_signal_evaluation_db.py \
+  tests/test_api.py \
+  -q
+
+sudo -u postgres psql \
+  -X \
+  -v ON_ERROR_STOP=1 \
+  -d price_collector \
+  -f /opt/price-collector/schema.sql
+
+sudo systemctl restart price-api
+sudo systemctl status price-api --no-pager
+```
+
+Verify that the reader can select only the chart view:
+
+```bash
+sudo -u postgres psql \
+  -X \
+  -v ON_ERROR_STOP=1 \
+  -P pager=off \
+  -d price_collector <<'SQL'
+SELECT
+    to_regclass(
+        'public.shadow_signal_evaluation_chart_points'
+    ) AS reporting_view,
+    has_table_privilege(
+        'price_reader',
+        'public.shadow_signal_evaluation_chart_points',
+        'SELECT'
+    ) AS reader_can_select_view,
+    has_table_privilege(
+        'price_reader',
+        'public.shadow_signal_evaluations',
+        'SELECT'
+    ) AS reader_can_select_base,
+    has_table_privilege(
+        'price_writer',
+        'public.shadow_signal_evaluation_chart_points',
+        'SELECT'
+    ) AS writer_can_select_view;
+
+SELECT
+    grantee,
+    table_name,
+    privilege_type
+FROM information_schema.table_privileges
+WHERE table_schema = 'public'
+  AND table_name IN (
+      'shadow_signal_evaluations',
+      'shadow_signal_evaluation_chart_points'
+  )
+ORDER BY table_name, grantee, privilege_type;
+
+DO $$
+BEGIN
+    IF to_regclass(
+        'public.shadow_signal_evaluation_chart_points'
+    ) IS NULL THEN
+        RAISE EXCEPTION 'reporting view is missing';
+    END IF;
+    IF NOT has_table_privilege(
+        'price_reader',
+        'public.shadow_signal_evaluation_chart_points',
+        'SELECT'
+    ) THEN
+        RAISE EXCEPTION 'price_reader cannot select reporting view';
+    END IF;
+    IF has_table_privilege(
+        'price_reader',
+        'public.shadow_signal_evaluations',
+        'SELECT'
+    ) THEN
+        RAISE EXCEPTION 'price_reader can select internal evaluation table';
+    END IF;
+    IF has_table_privilege(
+        'price_writer',
+        'public.shadow_signal_evaluation_chart_points',
+        'SELECT'
+    ) THEN
+        RAISE EXCEPTION 'price_writer can select reporting view';
+    END IF;
+    IF NOT has_table_privilege(
+        'price_writer',
+        'public.shadow_signal_evaluations',
+        'SELECT'
+    ) OR NOT has_table_privilege(
+        'price_writer',
+        'public.shadow_signal_evaluations',
+        'INSERT'
+    ) OR NOT has_table_privilege(
+        'price_writer',
+        'public.shadow_signal_evaluations',
+        'DELETE'
+    ) OR has_table_privilege(
+        'price_writer',
+        'public.shadow_signal_evaluations',
+        'UPDATE'
+    ) THEN
+        RAISE EXCEPTION 'price_writer base-table privileges are incorrect';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.table_privileges
+        WHERE table_schema = 'public'
+          AND table_name IN (
+              'shadow_signal_evaluations',
+              'shadow_signal_evaluation_chart_points'
+          )
+          AND grantee = 'PUBLIC'
+    ) THEN
+        RAISE EXCEPTION 'PUBLIC has a shadow-evaluation relation privilege';
+    END IF;
+END
+$$;
+SQL
+```
+
+Expected values are `reporting_view` non-null,
+`reader_can_select_view = true`, `reader_can_select_base = false`, and
+`writer_can_select_view = false`. `price_writer` retains only `SELECT`,
+`INSERT`, and `DELETE` on the base table; `PUBLIC` has neither relation.
+
+Verify both endpoints and the unchanged live route:
+
+```bash
+set -euo pipefail
+API_BASE_URL="http://127.0.0.1:9000"
+MODEL_VERSION="catchup_ratio_l3000_b100"
+
+summarize_shadow_report() {
+  REPORT_MODEL_VERSION="${MODEL_VERSION}" python3 -c '
+import json
+import os
+import sys
+
+report = json.load(sys.stdin)
+points = report["points"]
+market = report["market"]
+model = report["model"]
+expected_model = os.environ["REPORT_MODEL_VERSION"]
+financial_fields = (
+    "beta",
+    "chainlink_at_forecast",
+    "projected_chainlink",
+    "actual_chainlink",
+    "pending_move",
+    "pending_move_bps",
+    "forecast_error",
+    "baseline_error",
+)
+assert len(points) <= 1000
+assert model["model_version"] == expected_model
+assert all(point["model_version"] == model["model_version"] for point in points)
+assert all(
+    market["market_start_ms"] <= point["target_ms"] < market["market_end_ms"]
+    for point in points
+)
+assert [
+    (point["target_ms"], point["generated_ms"], point["horizon_ms"])
+    for point in points
+] == sorted(
+    (point["target_ms"], point["generated_ms"], point["horizon_ms"])
+    for point in points
+)
+assert isinstance(model["beta"], str)
+assert all(
+    point[field] is None or isinstance(point[field], str)
+    for point in points
+    for field in financial_fields
+)
+print({
+    "market_id": market["market_id"],
+    "model_version": model["model_version"],
+    "points": len(points),
+    "coverage": report["coverage"],
+})
+'
+}
+
+MARKET_ID="$(
+  curl -fsS \
+    "${API_BASE_URL}/markets?limit=1&include_current=false" |
+  python3 -c '
+import json
+import sys
+print(json.load(sys.stdin)["markets"][0]["market_id"])
+'
+)"
+
+curl -fsS "${API_BASE_URL}/healthz"
+curl -fsS \
+  "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=${MODEL_VERSION}" |
+  summarize_shadow_report
+curl -fsS \
+  "${API_BASE_URL}/markets/${MARKET_ID}/shadow-evaluations?model_version=${MODEL_VERSION}" |
+  summarize_shadow_report
+curl -fsS "${API_BASE_URL}/markets/current/live" | python3 -m json.tool
+
+MISSING_MODEL_STATUS="$(
+  curl -sS -o /dev/null -w '%{http_code}' \
+    "${API_BASE_URL}/markets/${MARKET_ID}/shadow-evaluations"
+)"
+test "${MISSING_MODEL_STATUS}" = "422"
+printf 'missing_model_status=%s\n' "${MISSING_MODEL_STATUS}"
+
+sudo journalctl \
+  -u price-api \
+  --since '10 minutes ago' \
+  -n 200 \
+  --no-pager
+```
+
+Both reporting responses must contain at most 1,000 ordered points for only the
+requested model. Every `target_ms` must satisfy the returned half-open market
+boundary, and every financial value must be a JSON string or `null`. The
+missing-model request must return HTTP `422`. A known market with expired or no
+evaluation evidence returns HTTP `200` with `points: []`; an unknown
+non-current market returns HTTP `404`.
+
+To roll back, first push and deploy a revert that removes the API routes, then
+restart `price-api`. Only after the old API is active, remove the no-longer-used
+view:
+
+```bash
+sudo -u postgres psql \
+  -X \
+  -v ON_ERROR_STOP=1 \
+  -d price_collector <<'SQL'
+REVOKE ALL ON TABLE public.shadow_signal_evaluation_chart_points
+FROM PUBLIC, price_reader, price_writer;
+DROP VIEW public.shadow_signal_evaluation_chart_points;
+SQL
+```
+
+Do not drop or alter `shadow_signal_evaluations`; rollback must preserve the
+writer and its retained evidence.
+
 ## Redis Spot Checks
 
 Redis is the live-card cache only. PostgreSQL remains the historical source.
