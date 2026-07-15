@@ -52,12 +52,15 @@ def chainlink_sample(
     )
 
 
-def reader_settings():
+def reader_settings(*, idle_timeout_ms=10_000):
     return SimpleNamespace(
         POLYMARKET_RTDS_WS_URL="wss://example.test/rtds",
         POLYMARKET_CHAINLINK_TOPIC="crypto_prices_chainlink",
         POLYMARKET_CHAINLINK_RTD_SYMBOL="btc/usd",
         POLYMARKET_CHAINLINK_SYMBOL="BTCUSD",
+        POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=(
+            idle_timeout_ms
+        ),
     )
 
 
@@ -80,6 +83,25 @@ class ScriptedRtdsWebSocket:
         if self._index == 1 and self.second_message_gate is not None:
             await self.second_message_gate.wait()
         message = self.messages[self._index]
+        self._index += 1
+        return message
+
+
+class ControlAndMalformedRtdsWebSocket:
+    def __init__(self):
+        self.sent = []
+        self._index = 0
+
+    async def send(self, message):
+        self.sent.append(message)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(0.005)
+        messages = ("PONG", "not-json")
+        message = messages[self._index % len(messages)]
         self._index += 1
         return message
 
@@ -754,6 +776,166 @@ def test_pong_and_malformed_messages_are_counted_without_raw_events(monkeypatch)
     asyncio.run(scenario())
 
 
+def test_idle_reconnect_watchdog_ignores_non_price_frames_and_recovers(
+    monkeypatch,
+    caplog,
+):
+    async def scenario():
+        stale_websockets = [
+            ControlAndMalformedRtdsWebSocket(),
+            ControlAndMalformedRtdsWebSocket(),
+        ]
+        recovered_websocket = ScriptedRtdsWebSocket(
+            [json.dumps(valid_message(), default=str)]
+        )
+        websockets = [*stale_websockets, recovered_websocket]
+        state = collector.ChainlinkDeliveryState()
+        raw = RecordingRawCapture()
+        connect_calls = 0
+        reconnect_attempts = []
+
+        def connect(*args, **kwargs):
+            nonlocal connect_calls
+            websocket = websockets[min(connect_calls, len(websockets) - 1)]
+            connect_calls += 1
+            return WebSocketContext(websocket)
+
+        monkeypatch.setattr(collector.websockets, "connect", connect)
+
+        def reconnect_delay(attempt):
+            reconnect_attempts.append(attempt)
+            return 0
+
+        monkeypatch.setattr(
+            collector,
+            "reconnect_delay_seconds",
+            reconnect_delay,
+        )
+        caplog.set_level(
+            "WARNING",
+            logger="price_collector.polymarket_chainlink_collector",
+        )
+
+        task = asyncio.create_task(
+            collector.polymarket_chainlink_reader_loop(
+                reader_settings(idle_timeout_ms=100),
+                state,
+                raw_capture=raw,
+            )
+        )
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 1), timeout=1)
+
+        assert connect_calls == 3
+        assert reconnect_attempts == [1, 2]
+        timeout_records = [
+            record
+            for record in caplog.records
+            if getattr(record, "event", None)
+            == "polymarket_rtds_idle_reconnect_triggered"
+        ]
+        assert len(timeout_records) == 2
+        timeout_record = timeout_records[0]
+        assert timeout_record.idle_basis == "accepted_chainlink_tick"
+        assert timeout_record.idle_timeout_ms == 100
+        assert timeout_record.accepted_tick_idle_ms > 0
+        assert (
+            timeout_record.frame_idle_ms
+            < timeout_record.accepted_tick_idle_ms
+        )
+        assert timeout_record.connection_messages_received_total > 0
+        assert timeout_record.connection_messages_accepted_total == 0
+        assert timeout_record.connection_parse_errors_total > 0
+        assert timeout_record.idle_reconnects_total == 1
+        assert timeout_record.consecutive_idle_reconnects == 1
+        assert [
+            record.idle_reconnects_total for record in timeout_records
+        ] == [1, 2]
+        assert [
+            record.consecutive_idle_reconnects
+            for record in timeout_records
+        ] == [1, 2]
+
+        closed_sessions = [
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.FeedSessionRecord)
+            and record.close_reason is not None
+        ]
+        assert [record.close_reason for record in closed_sessions] == [
+            "proactive_reconnect",
+            "proactive_reconnect",
+        ]
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_idle_reconnect_watchdog_resets_only_after_accepted_ticks(
+    monkeypatch,
+    caplog,
+):
+    async def scenario():
+        allow_second_message = asyncio.Event()
+        websocket = ScriptedRtdsWebSocket(
+            [
+                json.dumps(valid_message(), default=str),
+                json.dumps(
+                    valid_message(
+                        timestamp=1_783_459_201_456,
+                        payload={
+                            "symbol": "btc/usd",
+                            "value": "123460.01",
+                            "timestamp": 1_783_459_201_123,
+                        },
+                    ),
+                    default=str,
+                ),
+            ],
+            second_message_gate=allow_second_message,
+        )
+        state = collector.ChainlinkDeliveryState()
+        connect_calls = 0
+
+        def connect(*args, **kwargs):
+            nonlocal connect_calls
+            connect_calls += 1
+            return WebSocketContext(websocket)
+
+        monkeypatch.setattr(collector.websockets, "connect", connect)
+        caplog.set_level(
+            "WARNING",
+            logger="price_collector.polymarket_chainlink_collector",
+        )
+
+        task = asyncio.create_task(
+            collector.polymarket_chainlink_reader_loop(
+                reader_settings(idle_timeout_ms=100),
+                state,
+            )
+        )
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 1), timeout=1)
+        await asyncio.sleep(0.06)
+        allow_second_message.set()
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 2), timeout=1)
+        await asyncio.sleep(0.06)
+
+        assert connect_calls == 1
+        assert not any(
+            getattr(record, "event", None)
+            == "polymarket_rtds_idle_reconnect_triggered"
+            for record in caplog.records
+        )
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
 def test_raw_offer_failure_does_not_stop_chainlink_delivery(monkeypatch):
     async def scenario():
         websocket = ScriptedRtdsWebSocket(
@@ -1006,6 +1188,7 @@ def chainlink_run_settings(*, raw_enabled):
         POLYMARKET_CHAINLINK_SYMBOL="BTCUSD",
         POLYMARKET_CHAINLINK_RTD_SYMBOL="btc/usd",
         POLYMARKET_CHAINLINK_TOPIC="crypto_prices_chainlink",
+        POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10_000,
         RAW_CHAINLINK_EVENTS_ENABLED=raw_enabled,
         RAW_FUTURES_TRACE_ENABLED=True,
         RAW_CAPTURE_RETENTION_HOURS=72,

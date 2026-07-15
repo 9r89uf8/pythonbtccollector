@@ -65,6 +65,9 @@ columns, and are serialized as strings by the API.
 - Writes Redis key `btc:live:chainlink` before historical storage.
 - Floors the source payload timestamp to its UTC second and upserts that second
   into PostgreSQL.
+- Proactively reconnects an active-but-unproductive RTDS socket when no valid
+  BTC/USD Chainlink event is accepted for 10 seconds by default. Control and
+  malformed frames do not reset that monotonic deadline.
 
 ### Binance USD-M Futures
 
@@ -546,6 +549,21 @@ environment files:
   no database credential. The Phase 5 migration adds `DATABASE_URL` only while
   matured evaluation is enabled; this file must never contain
   `READ_DATABASE_URL`.
+
+The Chainlink collector's accepted-event watchdog is configured in
+`collector.env`:
+
+```text
+POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000
+```
+
+The value must be between 5,000 and 60,000 ms. It is independent of
+`STALE_PRICE_MS` and of the frozen shadow model's Chainlink freshness gate.
+Only a successfully parsed and accepted `crypto_prices_chainlink` `btc/usd`
+event resets the monotonic timer. When it expires, the collector classifies the
+connection close as `proactive_reconnect`, applies the existing jittered
+backoff, and resubscribes without restarting the process. The last Redis value
+is left in place and continues aging until a fresh event arrives.
 
 The shadow example remains disabled. Enabling it requires exact, distinct
 selection and replay-report paths inside the trusted decision directory plus

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     POLYMARKET_CHAINLINK_SYMBOL: str = "BTCUSD"
     POLYMARKET_CHAINLINK_RTD_SYMBOL: str = "btc/usd"
     POLYMARKET_CHAINLINK_TOPIC: str = "crypto_prices_chainlink"
+    POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS: int = Field(
+        default=10_000,
+        ge=5_000,
+        le=60_000,
+    )
 
     POLYMARKET_GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_BASE_URL: str = "https://clob.polymarket.com"

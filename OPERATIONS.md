@@ -165,6 +165,147 @@ curl http://127.0.0.1:9000/markets/current/live
 For an update that changes the market data/download contract, repeat the
 completed-market API check from **Check Services** above.
 
+## Chainlink Accepted-Event Idle Watchdog
+
+The Chainlink RTDS connection can remain open while accepted BTC/USD price
+events stop. The collector now starts a monotonic deadline after subscription
+and resets it only when a valid expected-topic, expected-symbol Chainlink tick
+is accepted. PING/PONG, malformed JSON, and unrelated frames do not reset the
+deadline. At the default 10,000 ms threshold, the reader emits
+`polymarket_rtds_idle_reconnect_triggered`, closes that WebSocket as an existing
+`proactive_reconnect`, applies jittered backoff, and resubscribes inside the
+same process. Redis, PostgreSQL, the API, and the shadow worker are not
+restarted or reset.
+
+This is a code-only rollout. It changes no schema, dependency declaration,
+systemd unit, or API shape. After the change is pushed to GitHub, deploy it and
+restart only the Chainlink collector:
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector .venv/bin/python -m pytest \
+  tests/test_polymarket_chainlink_collector.py \
+  tests/test_config.py \
+  tests/test_deployment.py \
+  -q
+
+WATCHDOG_SETTING='POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000'
+if sudo grep -q \
+  '^POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=' \
+  /etc/price-collector/collector.env
+then
+  sudo sed -i \
+    's/^POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=.*/POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000/' \
+    /etc/price-collector/collector.env
+else
+  printf '%s\n' "$WATCHDOG_SETTING" | \
+    sudo tee -a /etc/price-collector/collector.env >/dev/null
+fi
+sudo grep -Fqx "$WATCHDOG_SETTING" \
+  /etc/price-collector/collector.env
+
+WATCHDOG_DEPLOY_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+sudo systemctl restart price-collector-polymarket-chainlink
+sudo systemctl status \
+  price-collector-polymarket-chainlink \
+  --no-pager
+```
+
+The supported timeout range is 5,000 through 60,000 ms. Do not replace the
+production environment file with the example. The explicit production value
+above matches the default and ensures the active policy is visible to
+operators.
+
+Verify startup configuration and advancing Chainlink receipt time:
+
+```bash
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  --since "$WATCHDOG_DEPLOY_UTC" \
+  -n 200 \
+  --no-pager
+
+curl -fsS http://127.0.0.1:9000/healthz
+redis-cli -h 127.0.0.1 -p 6379 PING
+
+for attempt in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:9000/markets/current/live |
+    python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+chainlink = (payload.get("prices") or {}).get("chainlink") or {}
+shadow = (payload.get("signals") or {}).get("chainlink_catchup") or {}
+age = chainlink.get("received_age_ms")
+print({
+    "chainlink_received_ms": chainlink.get("received_ms"),
+    "chainlink_received_age_ms": age,
+    "shadow_valid": shadow.get("valid"),
+    "shadow_status": shadow.get("status"),
+})
+raise SystemExit(0 if age is not None and age <= 2500 else 1)
+'
+  then
+    CHAINLINK_FRESH=1
+    break
+  fi
+  sleep 1
+done
+test "${CHAINLINK_FRESH:-0}" -eq 1
+
+redis-cli --raw PTTL btc:live:chainlink_shadow
+```
+
+A natural watchdog recovery later appears in the journal in this order:
+
+```text
+polymarket_rtds_idle_reconnect_triggered
+polymarket_rtds_reconnect_scheduled
+polymarket_rtds_connecting
+polymarket_rtds_subscribed
+```
+
+The idle event contains the accepted-tick and frame idle ages, connection
+message counters, total idle reconnect count, and consecutive idle reconnect
+count. Repeated connections that accept no tick use increasing jittered
+backoff. The next accepted tick resets that consecutive sequence. The raw
+session close reason remains the schema-compatible `proactive_reconnect`.
+
+Do not force an upstream outage to test this on production. When a natural
+event occurs, compare `MainPID`, `NRestarts`, and `ExecMainStartTimestamp`
+before and after the event to confirm that systemd did not restart the process.
+Then confirm that the public Chainlink value recovered:
+
+```bash
+systemctl show price-collector-polymarket-chainlink \
+  -p MainPID \
+  -p NRestarts \
+  -p ExecMainStartTimestamp
+
+CHAINLINK_START_UTC="$(systemctl show \
+  price-collector-polymarket-chainlink \
+  -p ExecMainStartTimestamp \
+  --value)"
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  --since "$CHAINLINK_START_UTC" \
+  -o cat \
+  --no-pager | \
+grep -E 'polymarket_rtds_(idle_reconnect_triggered|reconnect_scheduled|connecting|subscribed)' || true
+
+curl -fsS http://127.0.0.1:9000/markets/current/live
+```
+
+Do not delete Redis keys, evaluation rows, or immutable shadow decision files.
+The cached Chainlink value intentionally remains present and ages during the
+bounded reconnect interval.
+
 ## Phase 1 High-Resolution Capture Foundation
 
 Phase 1 installs only the private schema, configuration, and inactive capture

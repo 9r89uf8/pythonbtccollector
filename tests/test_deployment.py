@@ -41,6 +41,10 @@ def test_collector_env_example_contains_writer_credentials_only():
     assert "BINANCE_FUTURES_STORE_RAW_JSON=false" in lines
     assert "RAW_FUTURES_TRACE_ENABLED=false" in lines
     assert "RAW_CHAINLINK_EVENTS_ENABLED=false" in lines
+    assert (
+        "POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000"
+        in lines
+    )
     assert "RAW_FUTURES_BUCKET_MS=100" in lines
     assert "RAW_CAPTURE_QUEUE_MAX_EVENTS=5000" in lines
     assert "RAW_CAPTURE_BATCH_MAX_ROWS=500" in lines

@@ -1287,6 +1287,14 @@ stale, the collector leaves the last cached value in place and its ages keep
 growing. The dashboard should use both `source_age_ms` and `received_age_ms` to
 decide whether to display a stale indicator.
 
+The Chainlink producer also leaves its last cached value in place during a
+feed gap. If no valid expected BTC/USD Chainlink event is accepted for 10
+seconds by default, its monotonic accepted-event watchdog reconnects only the
+RTDS WebSocket. PING/PONG and malformed or unrelated frames do not reset that
+deadline. The response shape does not change during recovery: the Chainlink
+ages continue growing until a fresh accepted event overwrites the Redis value,
+after which the shadow worker re-anchors automatically.
+
 Redis connection/read failures return HTTP `503` with:
 
 ```json

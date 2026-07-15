@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import json
 import logging
 import signal
@@ -59,6 +58,10 @@ CHAINLINK_MAX_PROVIDER_EVENT_MS = (
 
 
 class RtdsParseError(ValueError):
+    pass
+
+
+class RtdsAcceptedEventIdleTimeout(TimeoutError):
     pass
 
 
@@ -1000,6 +1003,9 @@ async def polymarket_chainlink_reader_loop(
     raw_capture: Any = None,
 ) -> None:
     attempt = 0
+    connection_sequence = 0
+    idle_reconnects_total = 0
+    consecutive_idle_reconnects = 0
 
     while delivery_state.accepting:
         connection_id: Optional[UUID] = None
@@ -1022,7 +1028,19 @@ async def polymarket_chainlink_reader_loop(
                 ping_interval=None,
                 close_timeout=10,
             ) as websocket:
-                attempt = 0
+                connection_sequence += 1
+                loop = asyncio.get_running_loop()
+                connected_monotonic = loop.time()
+                last_frame_monotonic: Optional[float] = None
+                last_frame_received_ms: Optional[int] = None
+                last_accepted_received_ms: Optional[int] = None
+                last_provider_event_ms: Optional[int] = None
+                connection_messages_received_total = 0
+                connection_messages_accepted_total = 0
+                connection_parse_errors_total = 0
+                idle_timeout_ms = (
+                    settings.POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS
+                )
                 if raw_capture is not None:
                     try:
                         connection_id = uuid4()
@@ -1078,6 +1096,7 @@ async def polymarket_chainlink_reader_loop(
 
                 subscription = build_polymarket_chainlink_subscription(settings)
                 await websocket.send(json.dumps(subscription))
+                last_accepted_monotonic = loop.time()
                 if capture_session is not None:
                     try:
                         capture_session.mark_ready(
@@ -1109,13 +1128,123 @@ async def polymarket_chainlink_reader_loop(
                         "topic": settings.POLYMARKET_CHAINLINK_TOPIC,
                         "rtd_symbol": settings.POLYMARKET_CHAINLINK_RTD_SYMBOL,
                         "connection_id": connection_id,
+                        "connection_sequence": connection_sequence,
+                        "accepted_event_idle_timeout_ms": idle_timeout_ms,
                     },
                 )
 
                 ping_task = asyncio.create_task(rtds_ping_loop(websocket))
                 try:
-                    async for raw_message in websocket:
+                    message_iterator = websocket.__aiter__()
+                    while True:
+                        remaining_seconds = (
+                            last_accepted_monotonic
+                            + idle_timeout_ms / 1_000
+                            - loop.time()
+                        )
+                        try:
+                            if remaining_seconds <= 0:
+                                raise asyncio.TimeoutError
+                            raw_message = await asyncio.wait_for(
+                                message_iterator.__anext__(),
+                                timeout=remaining_seconds,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError as exc:
+                            timeout_monotonic = loop.time()
+                            accepted_tick_idle_ms = max(
+                                0,
+                                int(
+                                    (
+                                        timeout_monotonic
+                                        - last_accepted_monotonic
+                                    )
+                                    * 1_000
+                                ),
+                            )
+                            frame_idle_ms = max(
+                                0,
+                                int(
+                                    (
+                                        timeout_monotonic
+                                        - (
+                                            last_frame_monotonic
+                                            if last_frame_monotonic is not None
+                                            else connected_monotonic
+                                        )
+                                    )
+                                    * 1_000
+                                ),
+                            )
+                            idle_reconnects_total += 1
+                            consecutive_idle_reconnects += 1
+                            LOGGER.warning(
+                                "polymarket_rtds_idle_reconnect_triggered",
+                                extra={
+                                    "event": (
+                                        "polymarket_rtds_idle_reconnect_triggered"
+                                    ),
+                                    "source": "polymarket_chainlink_rtds",
+                                    "topic": settings.POLYMARKET_CHAINLINK_TOPIC,
+                                    "rtd_symbol": (
+                                        settings.POLYMARKET_CHAINLINK_RTD_SYMBOL
+                                    ),
+                                    "connection_id": connection_id,
+                                    "connection_sequence": connection_sequence,
+                                    "idle_basis": "accepted_chainlink_tick",
+                                    "idle_timeout_ms": idle_timeout_ms,
+                                    "accepted_tick_idle_ms": (
+                                        accepted_tick_idle_ms
+                                    ),
+                                    "frame_idle_ms": frame_idle_ms,
+                                    "connected_elapsed_ms": max(
+                                        0,
+                                        int(
+                                            (
+                                                timeout_monotonic
+                                                - connected_monotonic
+                                            )
+                                            * 1_000
+                                        ),
+                                    ),
+                                    "last_frame_received_ms": (
+                                        last_frame_received_ms
+                                    ),
+                                    "last_accepted_received_ms": (
+                                        last_accepted_received_ms
+                                    ),
+                                    "last_provider_event_ms": (
+                                        last_provider_event_ms
+                                    ),
+                                    "connection_messages_received_total": (
+                                        connection_messages_received_total
+                                    ),
+                                    "connection_messages_accepted_total": (
+                                        connection_messages_accepted_total
+                                    ),
+                                    "connection_parse_errors_total": (
+                                        connection_parse_errors_total
+                                    ),
+                                    "idle_reconnects_total": (
+                                        idle_reconnects_total
+                                    ),
+                                    "consecutive_idle_reconnects": (
+                                        consecutive_idle_reconnects
+                                    ),
+                                },
+                            )
+                            raise RtdsAcceptedEventIdleTimeout(
+                                "no accepted Chainlink price event for "
+                                f"{accepted_tick_idle_ms} ms"
+                            ) from exc
+
                         received_wall_ns = time.time_ns()
+                        last_frame_monotonic = loop.time()
+                        last_frame_received_ms = (
+                            received_wall_ns // 1_000_000
+                        )
+                        connection_messages_received_total += 1
                         stamp: Optional[ReceiveStamp] = None
                         if connection_id is not None:
                             try:
@@ -1204,6 +1333,7 @@ async def polymarket_chainlink_reader_loop(
                                 expected_topic=settings.POLYMARKET_CHAINLINK_TOPIC,
                             )
                         except (json.JSONDecodeError, RtdsParseError, TypeError) as exc:
+                            connection_parse_errors_total += 1
                             _mark_chainlink_session(
                                 capture_session,
                                 "mark_parse_error",
@@ -1227,6 +1357,12 @@ async def polymarket_chainlink_reader_loop(
                         )
                         item = delivery_state.update_latest(sample)
                         delivery_state.offer_history(item)
+                        connection_messages_accepted_total += 1
+                        last_accepted_monotonic = loop.time()
+                        last_accepted_received_ms = sample.received_ms
+                        last_provider_event_ms = sample.provider_event_ms
+                        consecutive_idle_reconnects = 0
+                        attempt = 0
 
                         if (
                             raw_capture is not None
@@ -1241,11 +1377,29 @@ async def polymarket_chainlink_reader_loop(
                             )
                 finally:
                     ping_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await ping_task
+                    ping_result = (
+                        await asyncio.gather(
+                            ping_task,
+                            return_exceptions=True,
+                        )
+                    )[0]
+                    if isinstance(ping_result, Exception) and not isinstance(
+                        ping_result,
+                        asyncio.CancelledError,
+                    ):
+                        LOGGER.warning(
+                            "polymarket_rtds_ping_task_failed",
+                            extra={
+                                "event": "polymarket_rtds_ping_task_failed",
+                                "error": repr(ping_result),
+                            },
+                        )
         except asyncio.CancelledError:
             close_reason = "cancelled"
             raise
+        except RtdsAcceptedEventIdleTimeout as exc:
+            close_reason = "proactive_reconnect"
+            reconnect_error = exc
         except Exception as exc:
             close_reason = "error"
             reconnect_error = exc
@@ -1366,6 +1520,9 @@ async def run_collector(settings: Settings) -> None:
             "rtd_symbol": settings.POLYMARKET_CHAINLINK_RTD_SYMBOL,
             "topic": settings.POLYMARKET_CHAINLINK_TOPIC,
             "raw_chainlink_events_enabled": settings.RAW_CHAINLINK_EVENTS_ENABLED,
+            "accepted_event_idle_timeout_ms": (
+                settings.POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS
+            ),
         },
     )
 

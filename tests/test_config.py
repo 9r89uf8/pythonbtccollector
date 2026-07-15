@@ -74,6 +74,10 @@ def test_settings_include_polymarket_chainlink_defaults(monkeypatch):
     monkeypatch.delenv("POLYMARKET_CHAINLINK_SYMBOL", raising=False)
     monkeypatch.delenv("POLYMARKET_CHAINLINK_RTD_SYMBOL", raising=False)
     monkeypatch.delenv("POLYMARKET_CHAINLINK_TOPIC", raising=False)
+    monkeypatch.delenv(
+        "POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS",
+        raising=False,
+    )
 
     settings = Settings()
 
@@ -82,6 +86,45 @@ def test_settings_include_polymarket_chainlink_defaults(monkeypatch):
     assert settings.POLYMARKET_CHAINLINK_SYMBOL == "BTCUSD"
     assert settings.POLYMARKET_CHAINLINK_RTD_SYMBOL == "btc/usd"
     assert settings.POLYMARKET_CHAINLINK_TOPIC == "crypto_prices_chainlink"
+    assert (
+        settings.POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS
+        == 10_000
+    )
+
+
+@pytest.mark.parametrize("idle_timeout_ms", (4_999, 60_001))
+def test_settings_reject_invalid_chainlink_accepted_event_idle_timeout(
+    monkeypatch,
+    idle_timeout_ms,
+):
+    monkeypatch.setenv(
+        "POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS",
+        str(idle_timeout_ms),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize("idle_timeout_ms", (5_000, 60_000))
+def test_settings_accept_chainlink_accepted_event_idle_timeout_bounds(
+    monkeypatch,
+    idle_timeout_ms,
+):
+    monkeypatch.setenv(
+        "POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS",
+        str(idle_timeout_ms),
+    )
+
+    settings = Settings()
+
+    assert (
+        settings.POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS
+        == idle_timeout_ms
+    )
 
 
 def test_settings_include_polymarket_probability_defaults(monkeypatch):

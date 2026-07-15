@@ -128,6 +128,18 @@ subscription; `filters` is a JSON-encoded string in the actual message:
 }
 ```
 
+After the subscription is sent, an accepted-event watchdog starts a monotonic
+deadline. Its default is 10,000 ms and its configured range is 5,000 through
+60,000 ms via
+`POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS`. Only a valid expected
+topic and `btc/usd` Chainlink tick resets the deadline. RTDS `PING`/`PONG`,
+malformed JSON, wrong-topic, and wrong-symbol frames do not prove price
+delivery and do not reset it. Expiry closes only the RTDS WebSocket, records a
+`polymarket_rtds_idle_reconnect_triggered` warning, and resubscribes through the
+existing jittered reconnect loop. The collector process, Redis, PostgreSQL,
+and shadow worker remain running; the last Redis Chainlink value simply ages
+until a fresh accepted tick replaces it.
+
 Immediately after each RTDS receive returns, the collector records local wall
 time before JSON parsing or validation. That wall timestamp, floored from
 nanoseconds to milliseconds, is the accepted tick's `received_ms`. When private

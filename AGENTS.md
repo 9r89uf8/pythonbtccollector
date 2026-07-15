@@ -98,6 +98,12 @@ The corresponding Python entry points are:
   for the sample key and market window.
 - Write Redis key `btc:live:chainlink` before PostgreSQL storage.
 - Duplicate source events in the same second must update the same row.
+- Start an accepted-event idle deadline after each RTDS subscription and reset
+  it only after a valid expected-topic, expected-symbol Chainlink tick is
+  accepted. PING/PONG, malformed, and unrelated frames must not reset it.
+- When the accepted-event deadline expires, close and reconnect only the RTDS
+  WebSocket using the existing jittered reconnect path. Preserve the cached
+  value so its receive age exposes the gap; do not fabricate a fallback.
 
 ### Binance Futures, Flow, and Book
 
