@@ -17,6 +17,14 @@ available. Redis is latest-value-only, so a state created and overwritten
 entirely between polls is not reconstructable; the raw replay remains the
 event-complete authority for model selection and sub-poll timing.
 
+For a schema-v3 decision, the worker additionally waits for a successful
+sequenced Chainlink cache observation at or after each cohort's maximum target.
+A missing or malformed value defers finalization for no more than two poll
+intervals. If confirmation is still absent at the deadline, the complete cohort
+is persisted as `integrity_invalid` with null actual/error fields and reason
+`chainlink_sequence_confirmation_timeout`. Schema-v2 decisions retain the
+earlier finalization behavior.
+
 The commands preserve the existing selection path, replay-configuration path,
 selection hash, and database password. Stop on any failed assertion. For an
 update from a pre-cohort-finalization release, stop the shadow worker before
@@ -591,7 +599,11 @@ event requires investigation.
 means outstanding targets across a polling gap were deliberately left without
 an actual. Sequence-gap, regression, publisher-epoch-change, and
 sequence-metadata-loss warnings likewise identify deliberately invalidated
-outcome history. `shadow_signal_evaluation_writer_closed` prints row and cohort
+outcome history.
+`shadow_signal_evaluation_chainlink_sequence_confirmation_timeout` means a v3
+cohort reached its bounded deadline without a successful sequenced Chainlink
+read at or after the maximum target; its actual and error fields were stored as
+null. `shadow_signal_evaluation_writer_closed` prints row and cohort
 offered, enqueued, persisted, rejected, deferred, dropped, queue-high-water,
 failure, cleanup, and active-batch counters. None of these conditions may stop
 `btc:live:chainlink_shadow` from refreshing.

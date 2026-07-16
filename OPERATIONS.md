@@ -3271,6 +3271,15 @@ remaining scoreable after an unobserved later reset without a multi-day table
 rewrite. The legacy labeling and filtered reader-view replacement commit in one
 database transaction, so the API cannot observe the half-applied contract.
 
+For schema-v3 decisions, cohort finalization also requires a successful
+sequenced Chainlink cache observation at or after the maximum target. Missing
+or malformed Chainlink reads defer the cohort for at most two poll intervals;
+expiration of that bound emits the whole cohort as `integrity_invalid` with
+reason `chainlink_sequence_confirmation_timeout`. The worker logs
+`shadow_signal_evaluation_chainlink_sequence_confirmation_timeout` without raw
+cache contents. This is a code-only behavior change: it requires no schema or
+environment-file update, and schema-v2 maturation is unchanged.
+
 If an already-enabled worker reports
 `shadow_signal_evaluations_check17`, disable evaluations immediately and use
 the dedicated `check17` recovery section in that migration guide. It preserves

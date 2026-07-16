@@ -60,6 +60,9 @@ OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS = (
 OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY = (
     "chainlink_sequence_metadata_recovery"
 )
+OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT = (
+    "chainlink_sequence_confirmation_timeout"
+)
 OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED = (
     "chainlink_startup_legacy_to_sequenced"
 )
@@ -535,6 +538,13 @@ class ShadowEvaluationScheduler:
                 max_observation_gap_ms,
                 "max_observation_gap_ms",
             )
+        if (
+            provenance.selection_schema_version >= 3
+            and max_observation_gap_ms is None
+        ):
+            raise ValueError(
+                "schema v3 evaluation requires a bounded observation gap"
+            )
 
         self.provenance = provenance
         self.cadence_ms = cadence_ms
@@ -557,6 +567,7 @@ class ShadowEvaluationScheduler:
         self._chainlink_received_watermark: Optional[int] = None
         self._last_chainlink_publisher_epoch: Optional[str] = None
         self._last_chainlink_accepted_event_sequence: Optional[int] = None
+        self._last_sequence_continuity_observed_ms: Optional[int] = None
         self._history_epoch = 0
         self._outcome_history_resets: Deque[tuple[int, str]] = deque()
         self._regression_count = 0
@@ -565,6 +576,7 @@ class ShadowEvaluationScheduler:
         self._chainlink_sequence_regression_count = 0
         self._chainlink_publisher_epoch_change_count = 0
         self._chainlink_sequence_metadata_loss_count = 0
+        self._chainlink_sequence_confirmation_timeout_count = 0
         self._chainlink_sequence_metadata_lost = False
         self._chainlink_sequence_ever_established = False
         self._chainlink_startup_legacy_observed = False
@@ -603,6 +615,10 @@ class ShadowEvaluationScheduler:
     @property
     def chainlink_sequence_metadata_loss_count(self) -> int:
         return self._chainlink_sequence_metadata_loss_count
+
+    @property
+    def chainlink_sequence_confirmation_timeout_count(self) -> int:
+        return self._chainlink_sequence_confirmation_timeout_count
 
     def observe(
         self,
@@ -654,6 +670,17 @@ class ShadowEvaluationScheduler:
             self._observation_gap_count += 1
         self._last_observation_ms = observation.generated_ms
 
+        if (
+            chainlink is not None
+            and chainlink.publisher_epoch is not None
+            and not self._chainlink_sequence_metadata_lost
+        ):
+            # Record the worker time of a successfully decoded sequenced
+            # cache read. Any recognized reset path clears this watermark.
+            self._last_sequence_continuity_observed_ms = (
+                observation.generated_ms
+            )
+
         self._ingest_chainlink(
             None if self._chainlink_sequence_metadata_lost else chainlink
         )
@@ -671,6 +698,7 @@ class ShadowEvaluationScheduler:
         _require_non_empty_string(reason, "reason")
         self._history_epoch += 1
         self._outcome_history_resets.append((self._history_epoch, reason))
+        self._last_sequence_continuity_observed_ms = None
         self._chainlink_history.clear()
         self._seen_chainlink_identities.clear()
         self._last_observed_chainlink_identity = None
@@ -862,12 +890,39 @@ class ShadowEvaluationScheduler:
     def _mature(self, matured_ms: int) -> tuple[ShadowEvaluationRecord, ...]:
         records: list[ShadowEvaluationRecord] = []
         while self._pending and self._pending[0][0] <= matured_ms:
-            _target_ms, _sequence, pending_cohort = heapq.heappop(
-                self._pending
-            )
+            _target_ms, _sequence, pending_cohort = self._pending[0]
             outcome_reasons = self._outcome_reset_reasons_since(
                 pending_cohort.history_epoch
             )
+            if (
+                self.provenance.selection_schema_version >= 3
+                and not outcome_reasons
+            ):
+                # V3 must observe sequenced cache continuity at or after the
+                # longest target. Reuse the configured two-poll gap bound so
+                # missing reads cannot leave pending cohorts unbounded.
+                assert self.max_observation_gap_ms is not None
+                confirmation_deadline_ms = (
+                    pending_cohort.maximum_target_ms
+                    + self.max_observation_gap_ms
+                )
+                confirmation_ms = (
+                    self._last_sequence_continuity_observed_ms
+                )
+                confirmed_in_time = (
+                    confirmation_ms is not None
+                    and confirmation_ms >= pending_cohort.maximum_target_ms
+                    and confirmation_ms <= confirmation_deadline_ms
+                )
+                if not confirmed_in_time:
+                    if matured_ms < confirmation_deadline_ms:
+                        break
+                    outcome_reasons = (
+                        OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT,
+                    )
+                    self._chainlink_sequence_confirmation_timeout_count += 1
+
+            heapq.heappop(self._pending)
             cohort_records: list[ShadowEvaluationRecord] = []
             for pending in pending_cohort.evaluations:
                 actual = (

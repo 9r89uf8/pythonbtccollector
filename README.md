@@ -388,13 +388,24 @@ missing events are not reconstructed. Sequence discontinuities that become
 visible invalidate the affected live evidence, while the raw replay remains
 the event-complete authority for selection.
 
+For schema v3, reaching the cohort's maximum target is necessary but not enough
+to finalize it. The evaluator also requires a successful Chainlink cache
+observation with sequence metadata at or after that target. A missing or
+malformed Chainlink value defers maturation for at most two configured poll
+intervals. Confirmation at or before that deadline permits normal causal target
+resolution; otherwise, the whole cohort is emitted with null actual/error
+fields, `outcome_status=integrity_invalid`, and
+`chainlink_sequence_confirmation_timeout`. Schema v2 retains its prior
+maturation behavior.
+
 No final evaluation row is constructed at a shorter target. If any outcome
 history reset occurs between generation and the maximum target, every row in
 that cohort has null actual/error fields, `outcome_status=integrity_invalid`,
 and the same explicit reset reasons. With intact continuity, each row is
 `available` when it has a causal actual or `unavailable` when it does not.
 Every row receives the common `matured_ms` at which the complete cohort became
-eligible for persistence. The cohort then enters a bounded nonblocking queue
+eligible for persistence, including any bounded v3 confirmation wait. The
+cohort then enters a bounded nonblocking queue
 and is batch-inserted into `shadow_signal_evaluations`. Database connection,
 retry, retention, and
 shutdown work never runs on the 100 ms publication path. If the queue fills

@@ -347,6 +347,9 @@ class ShadowSignalWorker:
                 "sequence_metadata_loss": (
                     scheduler.chainlink_sequence_metadata_loss_count
                 ),
+                "sequence_confirmation_timeout": (
+                    scheduler.chainlink_sequence_confirmation_timeout_count
+                ),
             }
             matured = scheduler.observe(
                 observation,
@@ -383,6 +386,14 @@ class ShadowSignalWorker:
                     "sequence_metadata_loss",
                     "shadow_signal_evaluation_chainlink_sequence_metadata_loss",
                     scheduler.chainlink_sequence_metadata_loss_count,
+                ),
+                (
+                    "sequence_confirmation_timeout",
+                    (
+                        "shadow_signal_evaluation_chainlink_"
+                        "sequence_confirmation_timeout"
+                    ),
+                    scheduler.chainlink_sequence_confirmation_timeout_count,
                 ),
             )
             for reason, event, count in discontinuities:

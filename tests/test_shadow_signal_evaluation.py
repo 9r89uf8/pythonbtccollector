@@ -21,6 +21,7 @@ from price_collector.shadow_signal_evaluation import (
     OUTCOME_REASON_CHAINLINK_OBSERVATION_GAP,
     OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE,
     OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY,
@@ -593,6 +594,236 @@ def test_sequence_gap_after_short_target_invalidates_entire_staged_cohort():
         == (OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,)
         for record in cohort
     )
+
+
+def test_v3_missing_chainlink_at_targets_never_scores_cached_history():
+    short_model, long_model = models(100, 200)
+    evaluator = ShadowEvaluationScheduler(
+        models=(short_model, long_model),
+        provenance=replace(
+            PROVENANCE,
+            selection_schema_version=3,
+            policy_version="chronological_holdout_v3",
+        ),
+        cadence_ms=500,
+        max_observation_gap_ms=200,
+    )
+    initial = price(
+        "100",
+        0,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+
+    assert evaluator.observe(
+        observation(100, (short_model, long_model)),
+        chainlink=None,
+    ) == ()
+    assert evaluator.observe(
+        observation(200, (short_model, long_model)),
+        chainlink=None,
+    ) == ()
+    assert evaluator.observe(
+        observation(399, (short_model, long_model)),
+        chainlink=None,
+    ) == ()
+    assert evaluator.pending_count == 2
+
+    matured = evaluator.observe(
+        observation(400, (short_model, long_model)),
+        chainlink=None,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.model_version for record in cohort] == [
+        short_model.version,
+        long_model.version,
+    ]
+    assert all(record.actual_chainlink is None for record in cohort)
+    assert all(
+        record.actual_chainlink_source_timestamp_ms is None
+        for record in cohort
+    )
+    assert all(record.actual_chainlink_received_ms is None for record in cohort)
+    assert all(record.forecast_error is None for record in cohort)
+    assert all(record.baseline_error is None for record in cohort)
+    assert all(record.matured_ms == 400 for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+        for record in cohort
+    )
+    assert all(
+        record.outcome_invalid_reasons
+        == (OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT,)
+        for record in cohort
+    )
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 1
+    assert evaluator.pending_count == 0
+
+
+@pytest.mark.parametrize("confirmation_ms", (200, 300, 400))
+def test_v3_sequenced_confirmation_at_or_before_deadline_scores_cohort(
+    confirmation_ms,
+):
+    short_model, long_model = models(100, 200)
+    evaluator = ShadowEvaluationScheduler(
+        models=(short_model, long_model),
+        provenance=replace(
+            PROVENANCE,
+            selection_schema_version=3,
+            policy_version="chronological_holdout_v3",
+        ),
+        cadence_ms=500,
+        max_observation_gap_ms=200,
+    )
+    initial = price(
+        "100",
+        0,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+    evaluator.observe(
+        observation(100, (short_model, long_model)),
+        chainlink=None,
+    )
+    if confirmation_ms > 200:
+        assert evaluator.observe(
+            observation(200, (short_model, long_model)),
+            chainlink=None,
+        ) == ()
+
+    matured = evaluator.observe(
+        observation(
+            confirmation_ms,
+            (short_model, long_model),
+            chainlink=initial,
+        ),
+        chainlink=initial,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.actual_chainlink for record in cohort] == [
+        Decimal("100"),
+        Decimal("100"),
+    ]
+    assert all(record.matured_ms == confirmation_ms for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_AVAILABLE
+        for record in cohort
+    )
+    assert all(record.outcome_invalid_reasons == () for record in cohort)
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 0
+
+
+def test_v3_sequenced_confirmation_after_deadline_cannot_score_cohort():
+    short_model, long_model = models(100, 200)
+    evaluator = ShadowEvaluationScheduler(
+        models=(short_model, long_model),
+        provenance=replace(
+            PROVENANCE,
+            selection_schema_version=3,
+            policy_version="chronological_holdout_v3",
+        ),
+        cadence_ms=500,
+        max_observation_gap_ms=200,
+    )
+    initial = price(
+        "100",
+        0,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+    assert evaluator.observe(
+        observation(200, (short_model, long_model)),
+        chainlink=None,
+    ) == ()
+
+    matured = evaluator.observe(
+        observation(401, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert len(cohort) == 2
+    assert all(record.actual_chainlink is None for record in cohort)
+    assert all(record.forecast_error is None for record in cohort)
+    assert all(record.baseline_error is None for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+        for record in cohort
+    )
+    assert all(
+        record.outcome_invalid_reasons
+        == (OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT,)
+        for record in cohort
+    )
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 1
+
+
+def test_v2_missing_chainlink_at_targets_retains_legacy_maturity_behavior():
+    short_model, long_model = models(100, 200)
+    evaluator = ShadowEvaluationScheduler(
+        models=(short_model, long_model),
+        provenance=PROVENANCE,
+        cadence_ms=500,
+        max_observation_gap_ms=200,
+    )
+    initial = price(
+        "100",
+        0,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+    evaluator.observe(
+        observation(100, (short_model, long_model)),
+        chainlink=None,
+    )
+    matured = evaluator.observe(
+        observation(200, (short_model, long_model)),
+        chainlink=None,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.actual_chainlink for record in cohort] == [
+        Decimal("100"),
+        Decimal("100"),
+    ]
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_AVAILABLE
+        for record in cohort
+    )
+    assert all(record.outcome_invalid_reasons == () for record in cohort)
+
+
+def test_v3_scheduler_requires_bounded_sequence_confirmation_timeout():
+    (candidate,) = models(100)
+
+    with pytest.raises(ValueError, match="requires a bounded observation gap"):
+        ShadowEvaluationScheduler(
+            models=(candidate,),
+            provenance=replace(
+                PROVENANCE,
+                selection_schema_version=3,
+                policy_version="chronological_holdout_v3",
+            ),
+            cadence_ms=500,
+        )
 
 
 def test_actual_is_latest_causal_value_and_excludes_after_target_update():

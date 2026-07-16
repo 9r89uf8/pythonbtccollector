@@ -565,6 +565,7 @@ class FakeEvaluationScheduler:
         self.chainlink_sequence_regression_count = 0
         self.chainlink_publisher_epoch_change_count = 0
         self.chainlink_sequence_metadata_loss_count = 0
+        self.chainlink_sequence_confirmation_timeout_count = 0
 
     def observe(self, observation, *, chainlink):
         self.calls.append(
@@ -660,6 +661,68 @@ def test_worker_logs_sequence_discontinuity_counter_without_payload(caplog):
 
     assert "shadow_signal_evaluation_chainlink_sequence_gap" in caplog.text
     assert "54321.98765" not in caplog.text
+
+
+def test_worker_logs_sequence_confirmation_timeout_without_payload(caplog):
+    class SequenceConfirmationTimeoutScheduler(FakeEvaluationScheduler):
+        def observe(self, observation, *, chainlink):
+            matured = super().observe(observation, chainlink=chainlink)
+            self.chainlink_sequence_confirmation_timeout_count += 1
+            return matured
+
+    redis = FakeRedis()
+    scheduler = SequenceConfirmationTimeoutScheduler()
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+    set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
+    set_price(redis, CHAINLINK_LIVE_KEY, "54321.98765", received_ms=BASE_MS)
+
+    caplog.set_level("WARNING", logger=collector.LOGGER.name)
+    run_once(worker, BASE_MS)
+
+    assert (
+        "shadow_signal_evaluation_chainlink_sequence_confirmation_timeout"
+        in caplog.text
+    )
+    assert "54321.98765" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "cached_chainlink",
+    (
+        None,
+        '{"value":"not-a-price","source_timestamp_ms":1,'
+        '"received_ms":1800000000000}',
+    ),
+)
+def test_missing_or_malformed_chainlink_reaches_evaluator_as_absent(
+    cached_chainlink,
+):
+    redis = FakeRedis()
+    scheduler = FakeEvaluationScheduler(redis=redis)
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+    set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
+    if cached_chainlink is not None:
+        redis.data[CHAINLINK_LIVE_KEY] = cached_chainlink
+
+    payload = run_once(worker, BASE_MS)
+
+    assert payload.status == "chainlink_unavailable"
+    assert scheduler.calls[0]["chainlink"] is None
+    assert scheduler.calls[0]["redis_writes_before_evaluation"] == 1
 
 
 def test_evaluation_failure_does_not_interrupt_live_publication():

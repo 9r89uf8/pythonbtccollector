@@ -61,6 +61,15 @@ history, `outcome_status` is `available` when a causal actual exists and
 `unavailable` otherwise. The common `matured_ms` is the time the full cohort
 became persistence-eligible, not the individual target time.
 
+For schema v3, the maximum target alone does not make the cohort eligible. A
+successful Chainlink cache observation carrying sequence metadata must occur at
+or after that target. Missing or malformed Chainlink reads defer the cohort for
+up to two poll intervals. If continuity is confirmed by the deadline, every
+target is resolved normally from retained history. If it is not, every row is
+stored with null actual/error fields, `outcome_status=integrity_invalid`, and
+`chainlink_sequence_confirmation_timeout`. This extra confirmation gate does
+not change schema-v2 maturation.
+
 Each row retains the five-minute market in which it was generated. Reporting
 windows are selected by `target_ms`, so a forecast generated immediately before
 a boundary can be scored in the following target window. The reporting query
