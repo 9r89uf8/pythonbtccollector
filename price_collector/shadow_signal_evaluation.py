@@ -63,6 +63,9 @@ OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY = (
 OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT = (
     "chainlink_sequence_confirmation_timeout"
 )
+OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED = (
+    "chainlink_sequence_not_established"
+)
 OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED = (
     "chainlink_startup_legacy_to_sequenced"
 )
@@ -497,6 +500,7 @@ class _PendingEvaluationCohort:
     sequence: int
     history_epoch: int
     evaluations: tuple[_PendingEvaluation, ...]
+    generation_outcome_invalid_reasons: tuple[str, ...] = ()
 
     @property
     def minimum_target_ms(self) -> int:
@@ -645,6 +649,7 @@ class ShadowEvaluationScheduler:
             self._regression_count += 1
             self._last_observation_ms = observation.generated_ms
             return ()
+        sequence_was_established = self._chainlink_sequence_ever_established
         sequence_continuity_available = (
             chainlink is not None
             and chainlink.publisher_epoch is not None
@@ -660,6 +665,12 @@ class ShadowEvaluationScheduler:
             > self.max_observation_gap_ms
             and not sequence_continuity_available
             and not sequence_discontinuity
+            and (
+                # V3 has no admitted outcome history before its first
+                # sequence, so a long startup wait is not a history gap.
+                self.provenance.selection_schema_version < 3
+                or sequence_was_established
+            )
         ):
             # A latest-value cache cannot reconstruct values overwritten while
             # it was not observed. Invalidate outstanding outcome history and
@@ -681,13 +692,25 @@ class ShadowEvaluationScheduler:
                 observation.generated_ms
             )
 
-        self._ingest_chainlink(
-            None if self._chainlink_sequence_metadata_lost else chainlink
-        )
+        chainlink_for_outcome = chainlink
+        if (
+            self._chainlink_sequence_metadata_lost
+            or self._v3_sequence_not_established()
+        ):
+            # Keep scheduling attempts for coverage, but never admit an
+            # unsequenced v3 startup value into causal target history.
+            chainlink_for_outcome = None
+        self._ingest_chainlink(chainlink_for_outcome)
         self._schedule_current_bucket(observation)
         matured = self._mature(observation.generated_ms)
         self._prune_history(observation.generated_ms)
         return matured
+
+    def _v3_sequence_not_established(self) -> bool:
+        return (
+            self.provenance.selection_schema_version >= 3
+            and not self._chainlink_sequence_ever_established
+        )
 
     def _reset_outcome_history(
         self,
@@ -860,6 +883,13 @@ class ShadowEvaluationScheduler:
             sequence=self._sequence,
             history_epoch=self._history_epoch,
             evaluations=tuple(pending_evaluations),
+            generation_outcome_invalid_reasons=(
+                # Capture this at generation so later sequence establishment
+                # cannot retroactively make the cohort scoreable.
+                (OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,)
+                if self._v3_sequence_not_established()
+                else ()
+            ),
         )
         heapq.heappush(
             self._pending,
@@ -891,8 +921,17 @@ class ShadowEvaluationScheduler:
         records: list[ShadowEvaluationRecord] = []
         while self._pending and self._pending[0][0] <= matured_ms:
             _target_ms, _sequence, pending_cohort = self._pending[0]
-            outcome_reasons = self._outcome_reset_reasons_since(
-                pending_cohort.history_epoch
+            # Generation-time quarantine and later history resets are both
+            # cohort-wide integrity failures; preserve each distinct cause.
+            outcome_reasons = tuple(
+                dict.fromkeys(
+                    (
+                        *pending_cohort.generation_outcome_invalid_reasons,
+                        *self._outcome_reset_reasons_since(
+                            pending_cohort.history_epoch
+                        ),
+                    )
+                )
             )
             if (
                 self.provenance.selection_schema_version >= 3

@@ -3271,14 +3271,24 @@ remaining scoreable after an unobserved later reset without a multi-day table
 rewrite. The legacy labeling and filtered reader-view replacement commit in one
 database transaction, so the API cannot observe the half-applied contract.
 
-For schema-v3 decisions, cohort finalization also requires a successful
-sequenced Chainlink cache observation at or after the maximum target. Missing
-or malformed Chainlink reads defer the cohort for at most two poll intervals;
+For otherwise outcome-eligible schema-v3 cohorts, finalization also requires a
+successful sequenced Chainlink cache observation at or after the maximum
+target. Missing or malformed Chainlink reads defer the cohort for at most two
+poll intervals;
 expiration of that bound emits the whole cohort as `integrity_invalid` with
 reason `chainlink_sequence_confirmation_timeout`. The worker logs
 `shadow_signal_evaluation_chainlink_sequence_confirmation_timeout` without raw
 cache contents. This is a code-only behavior change: it requires no schema or
 environment-file update, and schema-v2 maturation is unchanged.
+
+Before schema-v3 sequence metadata is first established, the evaluator retains
+no legacy Chainlink target history. It continues scheduling complete cadence
+cohorts for coverage, but stores them as `integrity_invalid` with reason
+`chainlink_sequence_not_established` and null actual/error fields. A later
+sequenced observation cannot validate an earlier cohort, and consumed cadence
+buckets are not backfilled. Schema v2 continues to allow legacy startup. This
+startup quarantine uses the existing outcome columns and requires no database
+migration.
 
 If an already-enabled worker reports
 `shadow_signal_evaluations_check17`, disable evaluations immediately and use

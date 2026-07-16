@@ -25,6 +25,7 @@ from price_collector.shadow_signal_evaluation import (
     OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION,
     OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED,
     OUTCOME_REASON_ENGINE_CLOCK_REGRESSION,
@@ -163,6 +164,24 @@ def scheduler(
     return ShadowEvaluationScheduler(
         models=candidate_models,
         provenance=PROVENANCE,
+        cadence_ms=cadence_ms,
+        max_observation_gap_ms=max_observation_gap_ms,
+    )
+
+
+def v3_scheduler(
+    candidate_models,
+    *,
+    cadence_ms=500,
+    max_observation_gap_ms=200,
+):
+    return ShadowEvaluationScheduler(
+        models=candidate_models,
+        provenance=replace(
+            PROVENANCE,
+            selection_schema_version=3,
+            policy_version="chronological_holdout_v3",
+        ),
         cadence_ms=cadence_ms,
         max_observation_gap_ms=max_observation_gap_ms,
     )
@@ -1303,7 +1322,170 @@ def test_startup_legacy_to_sequenced_transition_resets_actual_history():
     assert evaluator.chainlink_sequence_metadata_loss_count == 0
 
 
-def test_legacy_only_startup_keeps_gap_fallback_and_causal_actuals():
+def test_v3_startup_legacy_is_not_ingested_or_scoreable():
+    short_model, long_model = models(100, 200)
+    evaluator = v3_scheduler((short_model, long_model))
+    legacy = price("100", 0)
+
+    assert evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=legacy),
+        chainlink=legacy,
+    ) == ()
+    assert evaluator.history_size == 0
+    assert evaluator.pending_count == 2
+    assert evaluator.observe(
+        observation(100, (short_model, long_model), chainlink=legacy),
+        chainlink=legacy,
+    ) == ()
+
+    matured = evaluator.observe(
+        observation(200, (short_model, long_model), chainlink=legacy),
+        chainlink=legacy,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.model_version for record in cohort] == [
+        short_model.version,
+        long_model.version,
+    ]
+    assert all(record.actual_chainlink is None for record in cohort)
+    assert all(
+        record.actual_chainlink_source_timestamp_ms is None
+        for record in cohort
+    )
+    assert all(record.actual_chainlink_received_ms is None for record in cohort)
+    assert all(
+        record.actual_chainlink_age_at_target_ms is None
+        for record in cohort
+    )
+    assert all(record.forecast_error is None for record in cohort)
+    assert all(record.baseline_error is None for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+        for record in cohort
+    )
+    assert all(
+        record.outcome_invalid_reasons
+        == (OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,)
+        for record in cohort
+    )
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 0
+    assert evaluator.history_size == 0
+    assert evaluator.pending_count == 0
+
+
+def test_v3_first_sequence_cannot_retroactively_score_prior_cohort():
+    (candidate,) = models(200)
+    evaluator = v3_scheduler((candidate,))
+
+    evaluator.observe(
+        observation(0, (candidate,)),
+        chainlink=None,
+    )
+    first_sequenced = price(
+        "101",
+        100,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+    assert evaluator.observe(
+        observation(100, (candidate,), chainlink=first_sequenced),
+        chainlink=first_sequenced,
+    ) == ()
+    matured = evaluator.observe(
+        observation(200, (candidate,), chainlink=first_sequenced),
+        chainlink=first_sequenced,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink is None
+    assert record.forecast_error is None
+    assert record.baseline_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,
+    )
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 0
+    assert evaluator.history_size == 1
+    assert {item.generated_ms for item in matured} == {0}
+    assert evaluator.pending_count == 0
+
+
+def test_v3_first_sequenced_bucket_starts_clean_scoring():
+    (candidate,) = models(100)
+    evaluator = v3_scheduler((candidate,), cadence_ms=100)
+    legacy = price("100", 0)
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+    assert evaluator.history_size == 0
+
+    first_sequenced = price(
+        "100",
+        100,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+    first_matured = evaluator.observe(
+        observation(100, (candidate,), chainlink=first_sequenced),
+        chainlink=first_sequenced,
+    )
+
+    pre_sequence_record = next(
+        record for record in first_matured if record.generated_ms == 0
+    )
+    assert pre_sequence_record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert pre_sequence_record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,
+        OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED,
+    )
+    assert pre_sequence_record.actual_chainlink is None
+    assert evaluator.history_size == 1
+    assert evaluator.pending_count == 1
+
+    matured = evaluator.observe(
+        observation(200, (candidate,), chainlink=first_sequenced),
+        chainlink=first_sequenced,
+    )
+
+    first_scoreable_record = next(
+        record for record in matured if record.generated_ms == 100
+    )
+    assert first_scoreable_record.actual_chainlink == Decimal("100")
+    assert first_scoreable_record.outcome_status == OUTCOME_STATUS_AVAILABLE
+    assert first_scoreable_record.outcome_invalid_reasons == ()
+
+
+def test_v3_first_sequence_after_long_startup_is_not_an_observation_gap():
+    (candidate,) = models(100)
+    evaluator = v3_scheduler((candidate,))
+    evaluator.observe(
+        observation(0, (candidate,)),
+        chainlink=None,
+    )
+    first_sequenced = price(
+        "101",
+        500,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=1,
+    )
+
+    matured = evaluator.observe(
+        observation(500, (candidate,), chainlink=first_sequenced),
+        chainlink=first_sequenced,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,
+    )
+    assert evaluator.observation_gap_count == 0
+    assert evaluator.history_size == 1
+    assert evaluator.pending_count == 1
+
+
+def test_v2_legacy_only_startup_keeps_gap_fallback_and_causal_actuals():
     (candidate,) = models(300)
     evaluator = scheduler((candidate,), max_observation_gap_ms=200)
     initial = price("100", 0)

@@ -45,10 +45,15 @@ accepted-event sequence. If the evaluator observes a sequence jump,
 regression, producer restart, or loss of sequence metadata, it discards outcome
 history that crosses that discontinuity. It cannot reconstruct an overwritten
 latest-cache value, so affected evidence is invalidated rather than paired with
-an older, apparently eligible actual. Legacy-only startup remains supported,
-but the first sequenced value resets that history. Once sequence metadata has
-been established, losing it suppresses actual-outcome ingestion until a new
-sequenced value re-establishes continuity.
+an older, apparently eligible actual. Schema v2 continues to support
+legacy-only startup. Schema v3 retains no target history before the first
+complete producer-epoch/accepted-sequence pair. Candidate attempts are still
+scheduled, but every pre-establishment cohort is permanently marked
+`chainlink_sequence_not_established` and matures `integrity_invalid` with null
+actual/error fields. A later first sequence cannot retroactively validate those
+cohorts, and already entered cadence buckets are not backfilled. Once sequence
+metadata has been established, losing it suppresses actual-outcome ingestion
+until a new sequenced value re-establishes continuity.
 
 All candidates generated together remain one pending cohort until the longest
 candidate target has been reached. Only then does the evaluator resolve every
@@ -61,9 +66,10 @@ history, `outcome_status` is `available` when a causal actual exists and
 `unavailable` otherwise. The common `matured_ms` is the time the full cohort
 became persistence-eligible, not the individual target time.
 
-For schema v3, the maximum target alone does not make the cohort eligible. A
-successful Chainlink cache observation carrying sequence metadata must occur at
-or after that target. Missing or malformed Chainlink reads defer the cohort for
+For an otherwise outcome-eligible schema-v3 cohort, the maximum target alone
+does not make it eligible. A successful Chainlink cache observation carrying
+sequence metadata must occur at or after that target. Missing or malformed
+Chainlink reads defer the cohort for
 up to two poll intervals. If continuity is confirmed by the deadline, every
 target is resolved normally from retained history. If it is not, every row is
 stored with null actual/error fields, `outcome_status=integrity_invalid`, and

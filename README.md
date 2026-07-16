@@ -380,17 +380,26 @@ as an invalid evaluation rather than scored. The Chainlink producer includes a
 process epoch and monotonic accepted-event sequence in the same Redis value.
 The evaluator invalidates outcome history on a sequence jump or regression, a
 producer-epoch change, or metadata loss, then starts a new history epoch from
-the current value. A legacy-only startup retains the conservative gap check,
-but the first sequenced value resets that legacy history. Once sequencing has
-been established, metadata loss suppresses actual-outcome ingestion until a
-sequenced value recovers continuity. Redis is still latest-value-only, so
+the current value. Schema v2 retains legacy-only startup and its conservative
+gap check. Schema v3 does not admit any Chainlink value into outcome history
+until the first atomic producer-epoch/accepted-sequence pair is observed. It
+still schedules every candidate attempt for coverage, but cohorts generated
+before establishment are permanently unscoreable: they mature with null
+actual/error fields, `outcome_status=integrity_invalid`, and
+`chainlink_sequence_not_established`. Later sequence establishment cannot
+retroactively validate them, and consumed cadence buckets are not backfilled.
+The first newly entered bucket after establishment can score normally. Once
+sequencing has been established, metadata loss suppresses actual-outcome
+ingestion until a sequenced value recovers continuity. Redis is still
+latest-value-only, so
 missing events are not reconstructed. Sequence discontinuities that become
 visible invalidate the affected live evidence, while the raw replay remains
 the event-complete authority for selection.
 
-For schema v3, reaching the cohort's maximum target is necessary but not enough
-to finalize it. The evaluator also requires a successful Chainlink cache
-observation with sequence metadata at or after that target. A missing or
+For an otherwise outcome-eligible schema-v3 cohort, reaching the maximum target
+is necessary but not enough to finalize it. The evaluator also requires a
+successful Chainlink cache observation with sequence metadata at or after that
+target. A missing or
 malformed Chainlink value defers maturation for at most two configured poll
 intervals. Confirmation at or before that deadline permits normal causal target
 resolution; otherwise, the whole cohort is emitted with null actual/error

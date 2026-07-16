@@ -17,13 +17,23 @@ available. Redis is latest-value-only, so a state created and overwritten
 entirely between polls is not reconstructable; the raw replay remains the
 event-complete authority for model selection and sub-poll timing.
 
-For a schema-v3 decision, the worker additionally waits for a successful
-sequenced Chainlink cache observation at or after each cohort's maximum target.
-A missing or malformed value defers finalization for no more than two poll
+For an otherwise outcome-eligible schema-v3 cohort, the worker additionally
+waits for a successful sequenced Chainlink cache observation at or after its
+maximum target. A missing or malformed value defers finalization for no more
+than two poll
 intervals. If confirmation is still absent at the deadline, the complete cohort
 is persisted as `integrity_invalid` with null actual/error fields and reason
 `chainlink_sequence_confirmation_timeout`. Schema-v2 decisions retain the
 earlier finalization behavior.
+
+Schema v3 also quarantines evaluation startup until the first atomic Chainlink
+producer-epoch/accepted-sequence pair is observed. Legacy or absent startup
+values are not retained as target history. Every cadence attempt is still
+scheduled for honest coverage, but pre-establishment cohorts mature
+`integrity_invalid` with null actual/error fields and reason
+`chainlink_sequence_not_established`. The first sequence cannot retroactively
+make an older cohort scoreable, and skipped or already consumed cadence buckets
+are never backfilled. Schema v2 retains legacy startup behavior.
 
 The commands preserve the existing selection path, replay-configuration path,
 selection hash, and database password. Stop on any failed assertion. For an
