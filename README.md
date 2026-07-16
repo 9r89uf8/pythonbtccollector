@@ -366,11 +366,13 @@ normally.
 Shadow-signal Phase 5 retains that live contract and adds independently opt-in
 matured evaluations. Once per entered epoch-aligned 500 ms bucket, the worker
 schedules every configured candidate attempt, including invalid attempts. It
-does not backfill buckets missed while paused. Each candidate matures at its own
-`target_ms = generated_ms + horizon_ms` against the newest Chainlink
-observation whose `received_ms` is no later than the target. A Chainlink update
-received after the target is excluded even if it is visible by the maturation
-tick.
+does not backfill buckets missed while paused. The complete generated-time
+cohort remains pending until its maximum
+`target_ms = generated_ms + horizon_ms`. At that finalization tick, each
+candidate is resolved separately against the newest retained Chainlink
+observation whose `received_ms` is no later than that candidate's target. A
+Chainlink update received after a target is excluded even though the complete
+cohort is finalized later.
 
 `generated_ms` is captured immediately after the Redis `MGET`, so it represents
 when the forecast inputs are locally available. A future-dated input is stored
@@ -382,14 +384,19 @@ the current value. A legacy-only startup retains the conservative gap check,
 but the first sequenced value resets that legacy history. Once sequencing has
 been established, metadata loss suppresses actual-outcome ingestion until a
 sequenced value recovers continuity. Redis is still latest-value-only, so
-missing events are not reconstructed; they are detected and the affected live
-evidence fails closed. The raw replay remains the event-complete authority for
-selection.
+missing events are not reconstructed. Sequence discontinuities that become
+visible invalidate the affected live evidence, while the raw replay remains
+the event-complete authority for selection.
 
-Candidates retain their horizon-specific causal maturation time, but are held
-until every configured candidate from the same generation has matured. The
-complete cohort then enters a bounded nonblocking queue and is batch-inserted
-into `shadow_signal_evaluations`. Database connection, retry, retention, and
+No final evaluation row is constructed at a shorter target. If any outcome
+history reset occurs between generation and the maximum target, every row in
+that cohort has null actual/error fields, `outcome_status=integrity_invalid`,
+and the same explicit reset reasons. With intact continuity, each row is
+`available` when it has a causal actual or `unavailable` when it does not.
+Every row receives the common `matured_ms` at which the complete cohort became
+eligible for persistence. The cohort then enters a bounded nonblocking queue
+and is batch-inserted into `shadow_signal_evaluations`. Database connection,
+retry, retention, and
 shutdown work never runs on the 100 ms publication path. If the queue fills
 during an outage, whole oldest cohorts are dropped rather than individual
 candidate rows;
@@ -413,6 +420,12 @@ actual, signed `forecast_error` is
 `projected_chainlink - actual_chainlink` and signed
 `baseline_error` is the no-change result
 `chainlink_at_forecast - actual_chainlink`.
+
+The schema migration that introduced cohort-wide finalization quarantines
+pre-fix rows because their shorter-horizon actuals cannot be proven clean after
+the fact. It preserves the base rows, labels them `legacy_unverified` with
+`pre_cohort_integrity_fix_unverified` as the reason, and excludes them from the
+reader view so they cannot contribute to API reporting.
 
 Move-size, direction, expiry, and sampled-volatility slices can be derived from
 these rows. Reconnect slices require a receive-time join to

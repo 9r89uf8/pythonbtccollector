@@ -11,20 +11,24 @@ It adds no API field and no dashboard code.
 
 The live evaluator is causal over Chainlink cache states returned by successful
 100 ms worker polls. It stamps generation after `MGET`, rejects inputs received
-after that stamp, and fails outstanding outcomes closed across a gap longer
-than two poll intervals. Redis is latest-value-only, so a state created and
-overwritten entirely between polls is not reconstructable; the raw replay
-remains the event-complete authority for model selection and sub-poll timing.
+after that stamp, and fails outstanding outcomes closed across a worker-tick
+gap longer than two poll intervals when delivery-sequence continuity is not
+available. Redis is latest-value-only, so a state created and overwritten
+entirely between polls is not reconstructable; the raw replay remains the
+event-complete authority for model selection and sub-poll timing.
 
 The commands preserve the existing selection path, replay-configuration path,
-selection hash, and database password. Stop on any failed assertion.
+selection hash, and database password. Stop on any failed assertion. For an
+update from a pre-cohort-finalization release, stop the shadow worker before
+applying the schema: its old insert contract does not supply the two new
+non-null outcome columns.
 
 If the journal already reports a violation of
 `shadow_signal_evaluations_check17`, stop the normal rollout and use
 **Recover from the Phase 5 `check17` writer failure** at the end of this guide.
 Do not leave the failing writer enabled while its retry queue grows.
 
-## 1. Pull the code, install dependencies, and run focused tests
+## 1. Pull the code, install dependencies, run tests, and stop the worker
 
 ```bash
 set -euo pipefail
@@ -40,10 +44,12 @@ sudo -u pricecollector .venv/bin/python -m pytest \
   tests/test_config.py \
   tests/test_deployment.py \
   -q
+sudo systemctl stop price-collector-shadow-signal
+test "$(systemctl is-active price-collector-shadow-signal || true)" = inactive
 ```
 
-Do not restart the worker yet. The schema must exist before evaluations are
-enabled.
+Do not restart the worker yet. The schema must be upgraded before the new code
+can write evaluations.
 
 ## 2. Apply the schema before restarting the service
 
@@ -56,8 +62,19 @@ sudo -u postgres psql \
   -f /opt/price-collector/schema.sql
 ```
 
-The migration is idempotent. It creates `public.shadow_signal_evaluations`, its
-indexes and constraints, and the exact writer/reader grants.
+The migration is idempotent. It creates or upgrades
+`public.shadow_signal_evaluations`, its indexes and constraints, and the exact
+writer/reader grants. On an existing table, rows written before cohort-wide
+finalization are conservatively quarantined: forecast/provenance fields remain,
+the base rows are labeled `legacy_unverified`, and
+`outcome_invalid_reasons` records `pre_cohort_integrity_fix_unverified`. The
+reader view excludes those rows, so they cannot remain scoreable if a later
+sequence reset invalidated an already-staged shorter horizon. Constant
+fast-default columns avoid rewriting the multi-day table during this labeling
+step.
+
+The label and filtered reader-view replacement are committed in one PostgreSQL
+transaction, so `price-api` cannot read a half-applied outcome contract.
 
 ## 3. Verify the table, primary key, and least-privilege grants
 
@@ -69,6 +86,18 @@ SELECT pg_get_constraintdef(oid) AS primary_key
 FROM pg_constraint
 WHERE conrelid = 'public.shadow_signal_evaluations'::regclass
   AND contype = 'p';
+
+SELECT column_name, is_nullable, data_type
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'shadow_signal_evaluations'
+  AND column_name IN ('outcome_status', 'outcome_invalid_reasons')
+ORDER BY column_name;
+
+SELECT conname, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'public.shadow_signal_evaluations'::regclass
+  AND conname = 'shadow_signal_evaluations_outcome_consistency_check';
 
 SELECT
     has_table_privilege(
@@ -357,7 +386,12 @@ SELECT
     count(*) AS attempts,
     count(*) FILTER (WHERE valid) AS valid_attempts,
     count(*) FILTER (WHERE NOT valid) AS invalid_attempts,
-    count(*) FILTER (WHERE actual_chainlink IS NOT NULL) AS causal_actuals,
+    count(*) FILTER (WHERE outcome_status = 'available')
+        AS causal_actuals,
+    count(*) FILTER (WHERE outcome_status = 'unavailable')
+        AS unavailable_outcomes,
+    count(*) FILTER (WHERE outcome_status = 'integrity_invalid')
+        AS integrity_invalid_outcomes,
     min(generated_ms) AS first_generated_ms,
     max(generated_ms) AS last_generated_ms
 FROM shadow_signal_evaluations
@@ -399,6 +433,18 @@ SELECT
     count(*) FILTER (
         WHERE actual_chainlink_received_ms > target_ms
     ) AS post_target_actuals,
+    count(*) FILTER (
+        WHERE outcome_status = 'available'
+          AND actual_chainlink IS NULL
+    ) AS available_without_actual,
+    count(*) FILTER (
+        WHERE outcome_status IN ('unavailable', 'integrity_invalid')
+          AND (
+            actual_chainlink IS NOT NULL
+            OR forecast_error IS NOT NULL
+            OR baseline_error IS NOT NULL
+          )
+    ) AS untrusted_outcomes_with_scores,
     count(*) FILTER (
         WHERE valid
           AND (

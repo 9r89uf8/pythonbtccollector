@@ -3260,6 +3260,17 @@ Use the schema-first, copy/paste rollout and independent rollback in
 schema, installed the writer URL without replacing trusted artifact settings,
 and verified the exact table grants.
 
+When upgrading an existing evaluation deployment to the cohort-wide outcome
+contract, stop `price-collector-shadow-signal` before applying `schema.sql` and
+restart it only after the schema succeeds. The migration adds non-null
+`outcome_status` and `outcome_invalid_reasons` columns. It conservatively
+quarantines pre-fix outcomes by labeling the preserved base rows
+`legacy_unverified` with `pre_cohort_integrity_fix_unverified` and excluding
+them from the reader view; this prevents an already-staged short horizon from
+remaining scoreable after an unobserved later reset without a multi-day table
+rewrite. The legacy labeling and filtered reader-view replacement commit in one
+database transaction, so the API cannot observe the half-applied contract.
+
 If an already-enabled worker reports
 `shadow_signal_evaluations_check17`, disable evaluations immediately and use
 the dedicated `check17` recovery section in that migration guide. It preserves

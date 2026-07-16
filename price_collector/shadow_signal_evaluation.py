@@ -40,6 +40,39 @@ QUEUE_DROP_LOG_EVERY = 100
 REJECTION_LOG_EVERY = 100
 FORECAST_INPUT_AFTER_GENERATED = "forecast_input_after_generated"
 
+OUTCOME_STATUS_AVAILABLE = "available"
+OUTCOME_STATUS_UNAVAILABLE = "unavailable"
+OUTCOME_STATUS_INTEGRITY_INVALID = "integrity_invalid"
+
+OUTCOME_REASON_ENGINE_CLOCK_REGRESSION = "engine_clock_regression"
+OUTCOME_REASON_CHAINLINK_OBSERVATION_GAP = "chainlink_observation_gap"
+OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION = (
+    "chainlink_received_time_regression"
+)
+OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP = "chainlink_sequence_gap"
+OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION = "chainlink_sequence_regression"
+OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE = (
+    "chainlink_publisher_epoch_change"
+)
+OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS = (
+    "chainlink_sequence_metadata_loss"
+)
+OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY = (
+    "chainlink_sequence_metadata_recovery"
+)
+OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED = (
+    "chainlink_startup_legacy_to_sequenced"
+)
+OUTCOME_REASON_HISTORY_EPOCH_CHANGED = "outcome_history_epoch_changed"
+
+_OUTCOME_STATUSES = frozenset(
+    {
+        OUTCOME_STATUS_AVAILABLE,
+        OUTCOME_STATUS_UNAVAILABLE,
+        OUTCOME_STATUS_INTEGRITY_INVALID,
+    }
+)
+
 
 def _require_non_negative_int(value: object, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
@@ -124,6 +157,8 @@ class ShadowEvaluationRecord:
     status: str
     invalid_reasons: tuple[str, ...]
     state: str
+    outcome_status: str
+    outcome_invalid_reasons: tuple[str, ...]
 
     market_id: int
     market_start_ms: int
@@ -193,6 +228,7 @@ class ShadowEvaluationRecord:
         _require_non_empty_string(self.model_version, "model_version")
         _require_non_empty_string(self.status, "status")
         _require_non_empty_string(self.state, "state")
+        _require_non_empty_string(self.outcome_status, "outcome_status")
         if not isinstance(self.valid, bool):
             raise TypeError("valid must be boolean")
         if not isinstance(self.invalid_reasons, tuple) or not all(
@@ -200,6 +236,19 @@ class ShadowEvaluationRecord:
             for reason in self.invalid_reasons
         ):
             raise TypeError("invalid_reasons must be a tuple of non-empty strings")
+        if not isinstance(self.outcome_invalid_reasons, tuple) or not all(
+            isinstance(reason, str) and reason
+            for reason in self.outcome_invalid_reasons
+        ):
+            raise TypeError(
+                "outcome_invalid_reasons must be a tuple of non-empty strings"
+            )
+        if len(set(self.outcome_invalid_reasons)) != len(
+            self.outcome_invalid_reasons
+        ):
+            raise ValueError("outcome_invalid_reasons must not contain duplicates")
+        if self.outcome_status not in _OUTCOME_STATUSES:
+            raise ValueError("outcome_status is invalid")
         if self.direction not in (None, "up", "down", "flat"):
             raise ValueError("direction is invalid")
 
@@ -273,12 +322,43 @@ class ShadowEvaluationRecord:
             value is not None for value in actual_values
         ):
             raise ValueError("actual Chainlink value, receive time, and age are atomic")
+        if (
+            self.actual_chainlink is None
+            and self.actual_chainlink_source_timestamp_ms is not None
+        ):
+            raise ValueError(
+                "actual Chainlink source time requires an actual value"
+            )
         if self.actual_chainlink_received_ms is not None:
             if self.actual_chainlink_received_ms > self.target_ms:
                 raise ValueError("actual Chainlink cannot be received after target")
             expected_age = self.target_ms - self.actual_chainlink_received_ms
             if self.actual_chainlink_age_at_target_ms != expected_age:
                 raise ValueError("actual Chainlink target age is inconsistent")
+
+        if self.outcome_status == OUTCOME_STATUS_AVAILABLE:
+            if self.actual_chainlink is None:
+                raise ValueError("available outcome requires an actual value")
+            if self.outcome_invalid_reasons:
+                raise ValueError(
+                    "available outcome must not contain invalid reasons"
+                )
+        elif self.outcome_status == OUTCOME_STATUS_UNAVAILABLE:
+            if self.actual_chainlink is not None:
+                raise ValueError("unavailable outcome must not contain an actual")
+            if self.outcome_invalid_reasons:
+                raise ValueError(
+                    "unavailable outcome must not contain invalid reasons"
+                )
+        else:
+            if self.actual_chainlink is not None:
+                raise ValueError(
+                    "integrity-invalid outcome must not contain an actual"
+                )
+            if not self.outcome_invalid_reasons:
+                raise ValueError(
+                    "integrity-invalid outcome requires an explicit reason"
+                )
 
         expected_forecast_error = (
             self.projected_chainlink - self.actual_chainlink
@@ -399,8 +479,6 @@ class ShadowEvaluationCohort:
 
 @dataclass(frozen=True)
 class _PendingEvaluation:
-    sequence: int
-    history_epoch: int
     model: CatchupModel
     signal: ModelSignal
     market: MarketWindow
@@ -409,6 +487,25 @@ class _PendingEvaluation:
     @property
     def target_ms(self) -> int:
         return self.signal.generated_ms + self.signal.horizon_ms
+
+
+@dataclass(frozen=True)
+class _PendingEvaluationCohort:
+    sequence: int
+    history_epoch: int
+    evaluations: tuple[_PendingEvaluation, ...]
+
+    @property
+    def minimum_target_ms(self) -> int:
+        return min(evaluation.target_ms for evaluation in self.evaluations)
+
+    @property
+    def maximum_target_ms(self) -> int:
+        return max(evaluation.target_ms for evaluation in self.evaluations)
+
+    @property
+    def row_count(self) -> int:
+        return len(self.evaluations)
 
 
 class ShadowEvaluationScheduler:
@@ -443,11 +540,9 @@ class ShadowEvaluationScheduler:
         self.cadence_ms = cadence_ms
         self.max_observation_gap_ms = max_observation_gap_ms
         self._models_by_version = {model.version: model for model in self.models}
-        self._pending: list[tuple[int, int, _PendingEvaluation]] = []
-        self._matured_by_generated: dict[
-            int,
-            dict[str, ShadowEvaluationRecord],
-        ] = {}
+        self._pending: list[
+            tuple[int, int, _PendingEvaluationCohort]
+        ] = []
         self._sequence = 0
         self._last_scheduled_bucket: Optional[int] = None
         self._last_observation_ms: Optional[int] = None
@@ -463,6 +558,7 @@ class ShadowEvaluationScheduler:
         self._last_chainlink_publisher_epoch: Optional[str] = None
         self._last_chainlink_accepted_event_sequence: Optional[int] = None
         self._history_epoch = 0
+        self._outcome_history_resets: Deque[tuple[int, str]] = deque()
         self._regression_count = 0
         self._observation_gap_count = 0
         self._chainlink_sequence_gap_count = 0
@@ -475,7 +571,10 @@ class ShadowEvaluationScheduler:
 
     @property
     def pending_count(self) -> int:
-        return len(self._pending)
+        return sum(
+            cohort.row_count
+            for _target, _sequence, cohort in self._pending
+        )
 
     @property
     def history_size(self) -> int:
@@ -524,7 +623,9 @@ class ShadowEvaluationScheduler:
             # outcome epoch as well so pre-reset forecasts can never mature
             # against post-reset observations.  Keep the cadence watermark to
             # avoid emitting a second cohort for an already-entered bucket.
-            self._reset_outcome_history()
+            self._reset_outcome_history(
+                reason=OUTCOME_REASON_ENGINE_CLOCK_REGRESSION,
+            )
             self._regression_count += 1
             self._last_observation_ms = observation.generated_ms
             return ()
@@ -547,7 +648,9 @@ class ShadowEvaluationScheduler:
             # A latest-value cache cannot reconstruct values overwritten while
             # it was not observed. Invalidate outstanding outcome history and
             # restart it from the newly acquired cache state.
-            self._reset_outcome_history()
+            self._reset_outcome_history(
+                reason=OUTCOME_REASON_CHAINLINK_OBSERVATION_GAP,
+            )
             self._observation_gap_count += 1
         self._last_observation_ms = observation.generated_ms
 
@@ -562,9 +665,12 @@ class ShadowEvaluationScheduler:
     def _reset_outcome_history(
         self,
         *,
+        reason: str,
         reset_received_watermark: bool = False,
     ) -> None:
+        _require_non_empty_string(reason, "reason")
         self._history_epoch += 1
+        self._outcome_history_resets.append((self._history_epoch, reason))
         self._chainlink_history.clear()
         self._seen_chainlink_identities.clear()
         self._last_observed_chainlink_identity = None
@@ -583,7 +689,10 @@ class ShadowEvaluationScheduler:
                 return False
             if not self._chainlink_sequence_metadata_lost:
                 self._chainlink_sequence_metadata_loss_count += 1
-                self._reset_outcome_history(reset_received_watermark=True)
+                self._reset_outcome_history(
+                    reason=OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS,
+                    reset_received_watermark=True,
+                )
             self._chainlink_sequence_metadata_lost = True
             self._last_chainlink_publisher_epoch = None
             self._last_chainlink_accepted_event_sequence = None
@@ -603,7 +712,14 @@ class ShadowEvaluationScheduler:
                 # No sequence can prove what happened before continuity became
                 # available. Start a fresh outcome epoch at this sequenced
                 # value before scoring resumes.
-                self._reset_outcome_history(reset_received_watermark=True)
+                self._reset_outcome_history(
+                    reason=(
+                        OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY
+                        if recovered_from_metadata_loss
+                        else OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED
+                    ),
+                    reset_received_watermark=True,
+                )
             self._chainlink_sequence_metadata_lost = False
             self._chainlink_sequence_ever_established = True
             self._chainlink_startup_legacy_observed = False
@@ -614,27 +730,32 @@ class ShadowEvaluationScheduler:
                 or transitioned_from_startup_legacy
             )
 
-        discontinuity = False
+        discontinuity_reason: Optional[str] = None
         if publisher_epoch != previous_epoch:
             self._chainlink_publisher_epoch_change_count += 1
-            discontinuity = True
+            discontinuity_reason = (
+                OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE
+            )
         else:
             assert previous_sequence is not None
             if sequence < previous_sequence:
                 self._chainlink_sequence_regression_count += 1
-                discontinuity = True
+                discontinuity_reason = OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION
             elif sequence > previous_sequence + 1:
                 self._chainlink_sequence_gap_count += 1
-                discontinuity = True
+                discontinuity_reason = OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP
 
-        if discontinuity:
+        if discontinuity_reason is not None:
             # The current Redis value is trustworthy as a new starting point,
             # but outstanding forecasts must not use history that crossed a
             # proven overwrite, producer restart, or sequence regression.
-            self._reset_outcome_history(reset_received_watermark=True)
+            self._reset_outcome_history(
+                reason=discontinuity_reason,
+                reset_received_watermark=True,
+            )
         self._last_chainlink_publisher_epoch = publisher_epoch
         self._last_chainlink_accepted_event_sequence = sequence
-        return discontinuity
+        return discontinuity_reason is not None
 
     def _ingest_chainlink(self, chainlink: Optional[ObservedPrice]) -> None:
         if chainlink is None:
@@ -649,10 +770,10 @@ class ShadowEvaluationScheduler:
             # Clearing the history and advancing the epoch prevents an older
             # cached identity from being used as a target for any outstanding
             # forecast.  Recovery requires a value at or beyond the watermark.
-            self._history_epoch += 1
+            self._reset_outcome_history(
+                reason=OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION,
+            )
             self._regression_count += 1
-            self._chainlink_history.clear()
-            self._seen_chainlink_identities.clear()
             self._seen_chainlink_identities.add(identity)
             return
 
@@ -692,12 +813,9 @@ class ShadowEvaluationScheduler:
             prepared.append((model, signal))
 
         pending_evaluations: list[_PendingEvaluation] = []
-        for offset, (model, signal) in enumerate(prepared, start=1):
-            sequence = self._sequence + offset
+        for model, signal in prepared:
             pending_evaluations.append(
                 _PendingEvaluation(
-                    sequence=sequence,
-                    history_epoch=self._history_epoch,
                     model=model,
                     signal=signal,
                     market=observation.market,
@@ -709,12 +827,16 @@ class ShadowEvaluationScheduler:
         # has validated, so a malformed observation cannot consume a bucket or
         # leave a partial cohort behind.
         self._last_scheduled_bucket = bucket
-        self._sequence += len(pending_evaluations)
-        for pending in pending_evaluations:
-            heapq.heappush(
-                self._pending,
-                (pending.target_ms, pending.sequence, pending),
-            )
+        self._sequence += 1
+        cohort = _PendingEvaluationCohort(
+            sequence=self._sequence,
+            history_epoch=self._history_epoch,
+            evaluations=tuple(pending_evaluations),
+        )
+        heapq.heappush(
+            self._pending,
+            (cohort.maximum_target_ms, cohort.sequence, cohort),
+        )
 
     @staticmethod
     def _causal_evaluation_signal(signal: ModelSignal) -> ModelSignal:
@@ -740,52 +862,73 @@ class ShadowEvaluationScheduler:
     def _mature(self, matured_ms: int) -> tuple[ShadowEvaluationRecord, ...]:
         records: list[ShadowEvaluationRecord] = []
         while self._pending and self._pending[0][0] <= matured_ms:
-            _target_ms, _sequence, pending = heapq.heappop(self._pending)
-            actual = self._actual_for(pending)
-            record = self._record(
-                pending,
-                actual=actual,
-                matured_ms=matured_ms,
+            _target_ms, _sequence, pending_cohort = heapq.heappop(
+                self._pending
             )
-            cohort_records = self._matured_by_generated.setdefault(
-                record.generated_ms,
-                {},
+            outcome_reasons = self._outcome_reset_reasons_since(
+                pending_cohort.history_epoch
             )
-            if record.model_version in cohort_records:
-                raise RuntimeError("evaluation cohort contains a duplicate model")
-            cohort_records[record.model_version] = record
-            if len(cohort_records) != len(self.models):
-                continue
-
-            cohort = ShadowEvaluationCohort(
-                tuple(
-                    cohort_records[model.version]
-                    for model in self.models
+            cohort_records: list[ShadowEvaluationRecord] = []
+            for pending in pending_cohort.evaluations:
+                actual = (
+                    None
+                    if outcome_reasons
+                    else self._actual_at(pending.target_ms)
                 )
+                outcome_status = (
+                    OUTCOME_STATUS_INTEGRITY_INVALID
+                    if outcome_reasons
+                    else OUTCOME_STATUS_AVAILABLE
+                    if actual is not None
+                    else OUTCOME_STATUS_UNAVAILABLE
+                )
+                cohort_records.append(
+                    self._record(
+                        pending,
+                        actual=actual,
+                        matured_ms=matured_ms,
+                        outcome_status=outcome_status,
+                        outcome_invalid_reasons=outcome_reasons,
+                    )
+                )
+            cohort = ShadowEvaluationCohort(
+                tuple(cohort_records)
             )
             cohort.require_model_versions(
                 tuple(model.version for model in self.models)
             )
             records.extend(cohort.records)
-            del self._matured_by_generated[record.generated_ms]
         return tuple(records)
 
-    def _actual_for(
+    def _outcome_reset_reasons_since(
         self,
-        pending: _PendingEvaluation,
-    ) -> Optional[ObservedPrice]:
-        if pending.history_epoch != self._history_epoch:
-            return None
+        history_epoch: int,
+    ) -> tuple[str, ...]:
+        if history_epoch == self._history_epoch:
+            return ()
+        reasons = tuple(
+            dict.fromkeys(
+                reason
+                for reset_epoch, reason in self._outcome_history_resets
+                if reset_epoch > history_epoch
+            )
+        )
+        if reasons:
+            return reasons
+        return (OUTCOME_REASON_HISTORY_EPOCH_CHANGED,)
+
+    def _actual_at(self, target_ms: int) -> Optional[ObservedPrice]:
         for price in reversed(self._chainlink_history):
-            if price.received_ms <= pending.target_ms:
+            if price.received_ms <= target_ms:
                 return price
         return None
 
     def _prune_history(self, now_ms: int) -> None:
-        if len(self._chainlink_history) < 2:
-            return
         if self._pending:
-            cutoff_ms = self._pending[0][0]
+            cutoff_ms = min(
+                cohort.minimum_target_ms
+                for _target, _sequence, cohort in self._pending
+            )
         else:
             maximum_horizon = max(model.lag_ms for model in self.models)
             cutoff_ms = max(0, now_ms - maximum_horizon - self.cadence_ms)
@@ -799,12 +942,28 @@ class ShadowEvaluationScheduler:
             removed = self._chainlink_history.popleft()
             self._seen_chainlink_identities.discard(removed.identity)
 
+        if self._pending:
+            oldest_required_epoch = min(
+                cohort.history_epoch
+                for _target, _sequence, cohort in self._pending
+            )
+            while (
+                self._outcome_history_resets
+                and self._outcome_history_resets[0][0]
+                <= oldest_required_epoch
+            ):
+                self._outcome_history_resets.popleft()
+        else:
+            self._outcome_history_resets.clear()
+
     def _record(
         self,
         pending: _PendingEvaluation,
         *,
         actual: Optional[ObservedPrice],
         matured_ms: int,
+        outcome_status: str,
+        outcome_invalid_reasons: tuple[str, ...],
     ) -> ShadowEvaluationRecord:
         signal = pending.signal
         projection = signal.projection
@@ -846,6 +1005,8 @@ class ShadowEvaluationScheduler:
             status=signal.status,
             invalid_reasons=signal.invalid_reasons,
             state=signal.state,
+            outcome_status=outcome_status,
+            outcome_invalid_reasons=outcome_invalid_reasons,
             market_id=pending.market.market_id,
             market_start_ms=pending.market.market_start_ms,
             market_end_ms=pending.market.market_end_ms,

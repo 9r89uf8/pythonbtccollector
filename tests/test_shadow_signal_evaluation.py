@@ -18,6 +18,18 @@ from price_collector.shadow_signal import (
 )
 from price_collector.shadow_signal_evaluation import (
     FORECAST_INPUT_AFTER_GENERATED,
+    OUTCOME_REASON_CHAINLINK_OBSERVATION_GAP,
+    OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE,
+    OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION,
+    OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED,
+    OUTCOME_REASON_ENGINE_CLOCK_REGRESSION,
+    OUTCOME_STATUS_AVAILABLE,
+    OUTCOME_STATUS_INTEGRITY_INVALID,
+    OUTCOME_STATUS_UNAVAILABLE,
     ShadowEvaluationCohort,
     ShadowEvaluationProvenance,
     ShadowEvaluationScheduler,
@@ -274,6 +286,41 @@ def test_valid_evaluation_accepts_exact_flat_projection_contract():
     assert flat.direction == "flat"
 
 
+def test_outcome_state_contract_distinguishes_availability_from_integrity():
+    unavailable = matured_evaluation_record()
+    assert unavailable.outcome_status == OUTCOME_STATUS_UNAVAILABLE
+    assert unavailable.outcome_invalid_reasons == ()
+
+    with pytest.raises(ValueError, match="available outcome requires"):
+        replace(unavailable, outcome_status=OUTCOME_STATUS_AVAILABLE)
+    with pytest.raises(ValueError, match="requires an explicit reason"):
+        replace(
+            unavailable,
+            outcome_status=OUTCOME_STATUS_INTEGRITY_INVALID,
+        )
+    with pytest.raises(ValueError, match="must not contain invalid reasons"):
+        replace(
+            unavailable,
+            outcome_invalid_reasons=(OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,),
+        )
+
+    integrity_invalid = replace(
+        unavailable,
+        outcome_status=OUTCOME_STATUS_INTEGRITY_INVALID,
+        outcome_invalid_reasons=(OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,),
+    )
+    assert integrity_invalid.actual_chainlink is None
+
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        replace(
+            integrity_invalid,
+            outcome_invalid_reasons=(
+                OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
+                OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
+            ),
+        )
+
+
 def test_cadence_schedules_once_per_entered_bucket_without_backfill():
     candidate_models = models(10_000, 10_500, 11_000)
     evaluator = scheduler(candidate_models)
@@ -325,6 +372,8 @@ def test_all_candidates_and_invalid_signals_are_scheduled_for_coverage():
     assert invalid_record.projected_chainlink is None
     assert invalid_record.forecast_error is None
     assert invalid_record.baseline_error == Decimal("-1")
+    assert invalid_record.outcome_status == OUTCOME_STATUS_AVAILABLE
+    assert invalid_record.outcome_invalid_reasons == ()
 
 
 def test_post_generated_forecast_inputs_are_fail_closed_for_efficacy():
@@ -409,7 +458,141 @@ def test_pending_heap_stages_distinct_horizons_until_cohort_is_complete():
         record for record in second if record.generated_ms == 0
     ]
     assert generated_zero[0].matured_ms == 900
-    assert generated_zero[1].matured_ms == 300
+    assert generated_zero[1].matured_ms == 900
+
+
+def test_complete_cohort_resolves_each_target_from_retained_causal_history():
+    short_model, long_model = models(100, 200)
+    evaluator = scheduler((short_model, long_model))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+    short_actual = price(
+        "101",
+        90,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(90, (short_model, long_model), chainlink=short_actual),
+        chainlink=short_actual,
+    )
+    assert evaluator.observe(
+        observation(100, (short_model, long_model), chainlink=short_actual),
+        chainlink=short_actual,
+    ) == ()
+    long_actual = price(
+        "102",
+        150,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=3,
+    )
+    evaluator.observe(
+        observation(150, (short_model, long_model), chainlink=long_actual),
+        chainlink=long_actual,
+    )
+    matured = evaluator.observe(
+        observation(200, (short_model, long_model), chainlink=long_actual),
+        chainlink=long_actual,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.actual_chainlink for record in cohort] == [
+        Decimal("101"),
+        Decimal("102"),
+    ]
+    assert [record.actual_chainlink_received_ms for record in cohort] == [
+        90,
+        150,
+    ]
+    assert all(record.matured_ms == 200 for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_AVAILABLE
+        for record in cohort
+    )
+    assert all(record.outcome_invalid_reasons == () for record in cohort)
+
+
+def test_sequence_gap_after_short_target_invalidates_entire_staged_cohort():
+    short_model, long_model = models(100, 200)
+    evaluator = ShadowEvaluationScheduler(
+        models=(short_model, long_model),
+        provenance=replace(
+            PROVENANCE,
+            selection_schema_version=3,
+            policy_version="chronological_holdout_v3",
+        ),
+        cadence_ms=500,
+        max_observation_gap_ms=200,
+    )
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+
+    assert evaluator.observe(
+        observation(100, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    ) == ()
+
+    after_gap = price(
+        "102",
+        150,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=3,
+    )
+    assert evaluator.observe(
+        observation(150, (short_model, long_model), chainlink=after_gap),
+        chainlink=after_gap,
+    ) == ()
+    matured = evaluator.observe(
+        observation(200, (short_model, long_model), chainlink=after_gap),
+        chainlink=after_gap,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.model_version for record in cohort] == [
+        short_model.version,
+        long_model.version,
+    ]
+    assert evaluator.chainlink_sequence_gap_count == 1
+    assert all(record.actual_chainlink is None for record in cohort)
+    assert all(
+        record.actual_chainlink_source_timestamp_ms is None
+        for record in cohort
+    )
+    assert all(record.actual_chainlink_received_ms is None for record in cohort)
+    assert all(
+        record.actual_chainlink_age_at_target_ms is None
+        for record in cohort
+    )
+    assert all(record.forecast_error is None for record in cohort)
+    assert all(record.baseline_error is None for record in cohort)
+    assert all(record.matured_ms == 200 for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+        for record in cohort
+    )
+    assert all(
+        record.outcome_invalid_reasons
+        == (OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,)
+        for record in cohort
+    )
 
 
 def test_actual_is_latest_causal_value_and_excludes_after_target_update():
@@ -432,6 +615,8 @@ def test_actual_is_latest_causal_value_and_excludes_after_target_update():
     assert record.actual_chainlink == Decimal("101")
     assert record.actual_chainlink_received_ms == 900
     assert record.actual_chainlink_age_at_target_ms == 100
+    assert record.outcome_status == OUTCOME_STATUS_AVAILABLE
+    assert record.outcome_invalid_reasons == ()
 
 
 def test_same_price_refresh_is_a_distinct_actual_identity():
@@ -475,6 +660,8 @@ def test_no_causal_actual_leaves_actual_and_errors_null():
     assert record.actual_chainlink_age_at_target_ms is None
     assert record.forecast_error is None
     assert record.baseline_error is None
+    assert record.outcome_status == OUTCOME_STATUS_UNAVAILABLE
+    assert record.outcome_invalid_reasons == ()
 
 
 def test_received_time_regression_invalidates_outstanding_history_epoch():
@@ -501,6 +688,10 @@ def test_received_time_regression_invalidates_outstanding_history_epoch():
     assert evaluator.regression_count == 1
     assert record.actual_chainlink is None
     assert record.forecast_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION,
+    )
 
 
 def test_engine_clock_regression_invalidates_outstanding_history_epoch():
@@ -524,6 +715,10 @@ def test_engine_clock_regression_invalidates_outstanding_history_epoch():
     assert evaluator.regression_count == 1
     assert record.actual_chainlink is None
     assert record.forecast_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_ENGINE_CLOCK_REGRESSION,
+    )
 
 
 def test_live_observation_gap_fails_closed_for_outstanding_actuals():
@@ -558,6 +753,10 @@ def test_live_observation_gap_fails_closed_for_outstanding_actuals():
     assert evaluator.observation_gap_count == 1
     assert record.actual_chainlink is None
     assert record.forecast_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_OBSERVATION_GAP,
+    )
 
 
 def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
@@ -607,6 +806,7 @@ def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
         "next_epoch",
         "next_sequence",
         "counter_name",
+        "outcome_reason",
     ),
     (
         (
@@ -615,6 +815,7 @@ def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
             "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
             3,
             "chainlink_sequence_gap_count",
+            OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
         ),
         (
             "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
@@ -622,6 +823,7 @@ def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
             "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
             2,
             "chainlink_sequence_regression_count",
+            OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION,
         ),
         (
             "8b3f42da-8927-48f8-9c90-4f2ce84100d8",
@@ -629,6 +831,7 @@ def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
             "43cddae5-cf07-4e7c-948f-bfb4f0c945b7",
             1,
             "chainlink_publisher_epoch_change_count",
+            OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE,
         ),
     ),
 )
@@ -638,6 +841,7 @@ def test_chainlink_delivery_discontinuity_invalidates_old_actual_history(
     next_epoch,
     next_sequence,
     counter_name,
+    outcome_reason,
 ):
     (candidate,) = models(1_000)
     evaluator = scheduler(
@@ -672,6 +876,8 @@ def test_chainlink_delivery_discontinuity_invalidates_old_actual_history(
     record = next(record for record in matured if record.generated_ms == 0)
     assert record.actual_chainlink is None
     assert record.forecast_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (outcome_reason,)
     assert evaluator.history_size == 1
     assert getattr(evaluator, counter_name) == 1
     assert evaluator.observation_gap_count == 0
@@ -710,6 +916,10 @@ def test_sequence_metadata_downgrade_and_recovery_each_fail_closed():
 
     record = next(record for record in matured if record.generated_ms == 0)
     assert record.actual_chainlink is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS,
+    )
     assert evaluator.chainlink_sequence_metadata_loss_count == 1
     assert evaluator.observation_gap_count == 0
 
@@ -758,6 +968,8 @@ def test_sequence_metadata_loss_stays_fail_closed_until_recovery():
     record = next(record for record in matured if record.generated_ms == 500)
     assert record.actual_chainlink is None
     assert record.forecast_error is None
+    assert record.outcome_status == OUTCOME_STATUS_UNAVAILABLE
+    assert record.outcome_invalid_reasons == ()
     assert evaluator.history_size == 0
     assert evaluator.chainlink_sequence_metadata_loss_count == 1
 
@@ -772,6 +984,58 @@ def test_sequence_metadata_loss_stays_fail_closed_until_recovery():
         chainlink=recovered,
     )
     assert evaluator.history_size == 1
+
+
+def test_sequence_metadata_recovery_invalidates_cohort_started_during_loss():
+    (candidate,) = models(300)
+    evaluator = scheduler(
+        (candidate,),
+        cadence_ms=100,
+        max_observation_gap_ms=200,
+    )
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    sequenced = price(
+        "100",
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=sequenced),
+        chainlink=sequenced,
+    )
+    legacy = price("101", 100)
+    evaluator.observe(
+        observation(
+            100,
+            (candidate,),
+            chainlink=legacy,
+            projected_by_version={candidate.version: "101.5"},
+        ),
+        chainlink=legacy,
+    )
+    recovered = price(
+        "102",
+        200,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(200, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+    matured = evaluator.observe(
+        observation(400, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 100)
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY,
+    )
+    assert record.actual_chainlink is None
+    assert record.forecast_error is None
 
 
 def test_startup_legacy_to_sequenced_transition_resets_actual_history():
@@ -800,6 +1064,10 @@ def test_startup_legacy_to_sequenced_transition_resets_actual_history():
     record = next(record for record in matured if record.generated_ms == 0)
     assert record.actual_chainlink is None
     assert record.forecast_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_STARTUP_LEGACY_TO_SEQUENCED,
+    )
     assert evaluator.history_size == 1
     assert evaluator.chainlink_sequence_metadata_loss_count == 0
 

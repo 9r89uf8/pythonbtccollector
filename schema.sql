@@ -439,6 +439,8 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
     status TEXT NOT NULL,
     invalid_reasons TEXT[] NOT NULL,
     state TEXT NOT NULL,
+    outcome_status TEXT NOT NULL,
+    outcome_invalid_reasons TEXT[] NOT NULL,
 
     market_id BIGINT NOT NULL,
     market_start_ms BIGINT NOT NULL,
@@ -676,8 +678,171 @@ CREATE TABLE IF NOT EXISTS shadow_signal_evaluations (
                 baseline_error - (chainlink_at_forecast - actual_chainlink)
             ) <= 0.000000000000000002
         )
+    ),
+    CONSTRAINT shadow_signal_evaluations_outcome_consistency_check CHECK (
+        btrim(outcome_status) <> ''
+        AND array_position(outcome_invalid_reasons, NULL) IS NULL
+        AND array_position(outcome_invalid_reasons, '') IS NULL
+        AND (
+            (
+                outcome_status = 'available'
+                AND cardinality(outcome_invalid_reasons) = 0
+                AND actual_chainlink IS NOT NULL
+            )
+            OR (
+                outcome_status = 'unavailable'
+                AND cardinality(outcome_invalid_reasons) = 0
+                AND actual_chainlink IS NULL
+                AND actual_chainlink_source_timestamp_ms IS NULL
+                AND actual_chainlink_received_ms IS NULL
+                AND actual_chainlink_age_at_target_ms IS NULL
+                AND forecast_error IS NULL
+                AND baseline_error IS NULL
+            )
+            OR (
+                outcome_status = 'integrity_invalid'
+                AND cardinality(outcome_invalid_reasons) > 0
+                AND actual_chainlink IS NULL
+                AND actual_chainlink_source_timestamp_ms IS NULL
+                AND actual_chainlink_received_ms IS NULL
+                AND actual_chainlink_age_at_target_ms IS NULL
+                AND forecast_error IS NULL
+                AND baseline_error IS NULL
+            )
+            OR (
+                outcome_status = 'legacy_unverified'
+                AND outcome_invalid_reasons =
+                    ARRAY['pre_cohort_integrity_fix_unverified']::TEXT[]
+            )
+        )
     )
 );
+
+-- Rows written before cohort-wide outcome finalization cannot be proven clean:
+-- a short-horizon actual may have been staged before a later continuity reset.
+-- Label those rows without rewriting their large numeric payload, then exclude
+-- them from the reader view below. PostgreSQL fast-default column addition keeps
+-- this bounded on an existing multi-day evaluation table.
+-- The worker must be stopped while this migration is applied so the old insert
+-- contract cannot create another row with missing outcome metadata mid-migration.
+BEGIN;
+
+ALTER TABLE public.shadow_signal_evaluations
+    ADD COLUMN IF NOT EXISTS outcome_status TEXT NOT NULL
+        DEFAULT 'legacy_unverified';
+ALTER TABLE public.shadow_signal_evaluations
+    ADD COLUMN IF NOT EXISTS outcome_invalid_reasons TEXT[] NOT NULL
+        DEFAULT ARRAY['pre_cohort_integrity_fix_unverified']::TEXT[];
+
+UPDATE public.shadow_signal_evaluations
+SET outcome_status = 'legacy_unverified',
+    outcome_invalid_reasons =
+        ARRAY['pre_cohort_integrity_fix_unverified']::TEXT[]
+WHERE outcome_status IS NULL
+   OR outcome_invalid_reasons IS NULL;
+
+ALTER TABLE public.shadow_signal_evaluations
+    ALTER COLUMN outcome_status SET NOT NULL;
+ALTER TABLE public.shadow_signal_evaluations
+    ALTER COLUMN outcome_invalid_reasons SET NOT NULL;
+ALTER TABLE public.shadow_signal_evaluations
+    ALTER COLUMN outcome_status DROP DEFAULT;
+ALTER TABLE public.shadow_signal_evaluations
+    ALTER COLUMN outcome_invalid_reasons DROP DEFAULT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = to_regclass('public.shadow_signal_evaluations')
+          AND conname =
+            'shadow_signal_evaluations_outcome_consistency_check'
+    ) THEN
+        ALTER TABLE public.shadow_signal_evaluations
+            ADD CONSTRAINT
+                shadow_signal_evaluations_outcome_consistency_check
+            CHECK (
+                btrim(outcome_status) <> ''
+                AND array_position(outcome_invalid_reasons, NULL) IS NULL
+                AND array_position(outcome_invalid_reasons, '') IS NULL
+                AND (
+                    (
+                        outcome_status = 'available'
+                        AND cardinality(outcome_invalid_reasons) = 0
+                        AND actual_chainlink IS NOT NULL
+                    )
+                    OR (
+                        outcome_status = 'unavailable'
+                        AND cardinality(outcome_invalid_reasons) = 0
+                        AND actual_chainlink IS NULL
+                        AND actual_chainlink_source_timestamp_ms IS NULL
+                        AND actual_chainlink_received_ms IS NULL
+                        AND actual_chainlink_age_at_target_ms IS NULL
+                        AND forecast_error IS NULL
+                        AND baseline_error IS NULL
+                    )
+                    OR (
+                        outcome_status = 'integrity_invalid'
+                        AND cardinality(outcome_invalid_reasons) > 0
+                        AND actual_chainlink IS NULL
+                        AND actual_chainlink_source_timestamp_ms IS NULL
+                        AND actual_chainlink_received_ms IS NULL
+                        AND actual_chainlink_age_at_target_ms IS NULL
+                        AND forecast_error IS NULL
+                        AND baseline_error IS NULL
+                    )
+                    OR (
+                        outcome_status = 'legacy_unverified'
+                        AND outcome_invalid_reasons =
+                            ARRAY[
+                                'pre_cohort_integrity_fix_unverified'
+                            ]::TEXT[]
+                    )
+                )
+            );
+    END IF;
+END
+$$;
+
+-- Replace the reader boundary in the same transaction as legacy labeling.
+-- This remains an owner-rights view: security_invoker must not be enabled
+-- because price_reader has no base-table privilege. Dashboard reporting
+-- intentionally omits futures inputs, writer metadata, retention controls,
+-- created_at, and (until its separate contract checkpoint) outcome metadata.
+CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points
+WITH (security_barrier = true) AS
+SELECT
+    selection_fingerprint_sha256,
+    selection_artifact_sha256,
+    model_version,
+    beta,
+    generated_ms,
+    target_ms,
+    matured_ms,
+    horizon_ms,
+    valid,
+    status,
+    invalid_reasons,
+    state,
+    market_id AS forecast_market_id,
+    full_horizon_before_market_end
+        AS full_horizon_before_forecast_market_end,
+    chainlink_at_forecast,
+    projected_chainlink,
+    actual_chainlink,
+    actual_chainlink_source_timestamp_ms,
+    actual_chainlink_received_ms,
+    actual_chainlink_age_at_target_ms,
+    pending_move,
+    pending_move_bps,
+    direction,
+    forecast_error,
+    baseline_error
+FROM public.shadow_signal_evaluations
+WHERE outcome_status IN ('available', 'unavailable', 'integrity_invalid');
+
+COMMIT;
 
 -- Phase 5 initially shipped the projection consistency check without a name.
 -- PostgreSQL named that deployed constraint shadow_signal_evaluations_check17.
@@ -781,41 +946,6 @@ CREATE INDEX IF NOT EXISTS shadow_signal_evaluations_market_model_idx
 REVOKE ALL ON TABLE shadow_signal_evaluations
     FROM PUBLIC, price_reader, price_writer;
 GRANT SELECT, INSERT, DELETE ON TABLE shadow_signal_evaluations TO price_writer;
-
--- Dashboard reporting intentionally omits futures inputs, writer metadata,
--- retention controls, and created_at. This remains an owner-rights view:
--- security_invoker must not be enabled because price_reader has no base-table
--- privilege. The API applies a one-market, one-model, 1,000-row bound.
-CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points
-WITH (security_barrier = true) AS
-SELECT
-    selection_fingerprint_sha256,
-    selection_artifact_sha256,
-    model_version,
-    beta,
-    generated_ms,
-    target_ms,
-    matured_ms,
-    horizon_ms,
-    valid,
-    status,
-    invalid_reasons,
-    state,
-    market_id AS forecast_market_id,
-    full_horizon_before_market_end
-        AS full_horizon_before_forecast_market_end,
-    chainlink_at_forecast,
-    projected_chainlink,
-    actual_chainlink,
-    actual_chainlink_source_timestamp_ms,
-    actual_chainlink_received_ms,
-    actual_chainlink_age_at_target_ms,
-    pending_move,
-    pending_move_bps,
-    direction,
-    forecast_error,
-    baseline_error
-FROM public.shadow_signal_evaluations;
 
 REVOKE ALL ON TABLE public.shadow_signal_evaluation_chart_points
     FROM PUBLIC, price_reader, price_writer;

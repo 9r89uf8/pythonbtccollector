@@ -30,6 +30,8 @@ def evaluation_record(**overrides):
         "status": "valid",
         "invalid_reasons": (),
         "state": "anchored",
+        "outcome_status": "available",
+        "outcome_invalid_reasons": (),
         "market_id": 0,
         "market_start_ms": 0,
         "market_end_ms": 300_000,
@@ -202,9 +204,11 @@ def test_shadow_evaluation_row_is_fixed_and_preserves_decimal_values():
     row = db.shadow_signal_evaluation_row(record)
     mapped = dict(zip(db.SHADOW_SIGNAL_EVALUATION_COLUMNS, row))
 
-    assert len(row) == len(db.SHADOW_SIGNAL_EVALUATION_COLUMNS) == 43
+    assert len(row) == len(db.SHADOW_SIGNAL_EVALUATION_COLUMNS) == 45
     assert mapped["model_version"] == record.model_version
     assert mapped["invalid_reasons"] == ()
+    assert mapped["outcome_status"] == "available"
+    assert mapped["outcome_invalid_reasons"] == ()
     assert mapped["projected_chainlink"] is record.projected_chainlink
     assert mapped["forecast_error"] is record.forecast_error
     assert isinstance(mapped["baseline_error"], Decimal)
@@ -752,6 +756,8 @@ def test_schema_has_causal_internal_shadow_evaluation_table():
 
     assert "PRIMARY KEY (model_version, generated_ms, horizon_ms)" in table
     for column in (
+        "outcome_status TEXT NOT NULL",
+        "outcome_invalid_reasons TEXT[] NOT NULL",
         "chainlink_at_forecast NUMERIC(38, 18)",
         "projected_chainlink NUMERIC(38, 18)",
         "futures_now NUMERIC(38, 18)",
@@ -773,6 +779,10 @@ def test_schema_has_causal_internal_shadow_evaluation_table():
     assert "forecast_error - (projected_chainlink - actual_chainlink)" in table
     assert "baseline_error - (chainlink_at_forecast - actual_chainlink)" in table
     assert "valid = (status = 'valid')" in table
+    assert "shadow_signal_evaluations_outcome_consistency_check" in table
+    assert "outcome_status = 'available'" in table
+    assert "outcome_status = 'unavailable'" in table
+    assert "outcome_status = 'integrity_invalid'" in table
     assert "full_horizon_before_market_end = (target_ms <= market_end_ms)" in table
     assert "selection_fingerprint_sha256 ~ '^[0-9a-f]{64}$'" in table
     assert "selection_artifact_sha256 ~ '^[0-9a-f]{64}$'" in table
@@ -819,14 +829,62 @@ def test_schema_has_causal_internal_shadow_evaluation_table():
         in schema
     )
 
+    assert "ADD COLUMN IF NOT EXISTS outcome_status TEXT" in schema
+    assert "ADD COLUMN IF NOT EXISTS outcome_invalid_reasons TEXT[]" in schema
+    assert "pre_cohort_integrity_fix_unverified" in schema
+    migration_update_sql = schema[
+        schema.index("UPDATE public.shadow_signal_evaluations") :
+        schema.index(
+            "ALTER TABLE public.shadow_signal_evaluations\n"
+            "    ALTER COLUMN outcome_status SET NOT NULL"
+        )
+    ]
+    assert "DEFAULT 'legacy_unverified'" in schema
+    assert "DEFAULT ARRAY['pre_cohort_integrity_fix_unverified']" in schema
+    assert "outcome_status = 'legacy_unverified'" in migration_update_sql
+    for preserved_field_name in (
+        "actual_chainlink",
+        "actual_chainlink_source_timestamp_ms",
+        "actual_chainlink_received_ms",
+        "actual_chainlink_age_at_target_ms",
+        "forecast_error",
+        "baseline_error",
+    ):
+        assert f"{preserved_field_name} = NULL" not in migration_update_sql
+    assert (
+        "ALTER COLUMN outcome_invalid_reasons SET NOT NULL" in schema
+    )
+    assert "ALTER COLUMN outcome_status DROP DEFAULT" in schema
+    assert "ALTER COLUMN outcome_invalid_reasons DROP DEFAULT" in schema
+    assert "FROM pg_constraint" in schema
+    migration_comment = schema.index(
+        "-- Rows written before cohort-wide outcome finalization"
+    )
+    migration_begin = schema.index("BEGIN;", migration_comment)
+    migration_update = schema.index(
+        "UPDATE public.shadow_signal_evaluations",
+        migration_begin,
+    )
+    filtered_view = schema.index(
+        "CREATE OR REPLACE VIEW "
+        "public.shadow_signal_evaluation_chart_points",
+        migration_begin,
+    )
+    migration_commit = schema.index("COMMIT;", filtered_view)
+    assert migration_begin < migration_update < filtered_view < migration_commit
+
 
 def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
     schema = (ROOT / "schema.sql").read_text()
     start = schema.index(
         "CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points"
     )
-    end_marker = "FROM public.shadow_signal_evaluations;"
+    end_marker = (
+        "WHERE outcome_status IN "
+        "('available', 'unavailable', 'integrity_invalid');"
+    )
     view = schema[start : schema.index(end_marker, start) + len(end_marker)]
+    selected_columns = view[: view.index("FROM public.shadow_signal_evaluations")]
 
     assert "WITH (security_barrier = true)" in view
     assert "security_invoker" not in view
@@ -861,11 +919,15 @@ def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
 
     for forbidden in (
         "selection_policy_version",
+        "outcome_status",
+        "outcome_invalid_reasons",
         "futures_now",
         "futures_reference",
         "created_at",
     ):
-        assert forbidden not in view
+        assert forbidden not in selected_columns
+
+    assert end_marker in view
 
     assert (
         "REVOKE ALL ON TABLE public.shadow_signal_evaluation_chart_points\n"

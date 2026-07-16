@@ -50,6 +50,17 @@ but the first sequenced value resets that history. Once sequence metadata has
 been established, losing it suppresses actual-outcome ingestion until a new
 sequenced value re-establishes continuity.
 
+All candidates generated together remain one pending cohort until the longest
+candidate target has been reached. Only then does the evaluator resolve every
+target from retained history and construct the final rows. A history reset at
+any point before that common finalization invalidates the outcome for every row
+in the cohort, including a shorter target that passed before the reset. Those
+rows keep their forecast fields but store null actual/error fields with
+`outcome_status=integrity_invalid` and explicit reset reasons. With continuous
+history, `outcome_status` is `available` when a causal actual exists and
+`unavailable` otherwise. The common `matured_ms` is the time the full cohort
+became persistence-eligible, not the individual target time.
+
 Each row retains the five-minute market in which it was generated. Reporting
 windows are selected by `target_ms`, so a forecast generated immediately before
 a boundary can be scored in the following target window. The reporting query
@@ -110,7 +121,9 @@ Chainlink event arrives
         |
         +--> generate a Chainlink estimate for 3 seconds ahead
         |
-        +--> at the target, pair it with the causally available actual
+        +--> retain every candidate until the longest target
+        |
+        +--> resolve all targets from one unchanged outcome-history epoch
 ```
 
 ## How we arrived at the selected model
