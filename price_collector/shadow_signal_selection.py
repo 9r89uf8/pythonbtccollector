@@ -982,6 +982,12 @@ def _validate_configuration(configuration: Mapping[str, Any]) -> None:
         "rms_of_consecutive_raw_bucket_returns"
     ):
         raise SelectionInputError("unsupported configuration.volatility_measure")
+    if configuration.get("volatility_time_basis") != (
+        "worker_poll_visibility_ms"
+    ):
+        raise SelectionInputError(
+            "unsupported configuration.volatility_time_basis"
+        )
     if configuration.get("session_boundary_measure") != (
         "time_since_common_segment_start_and_until_segment_end"
     ):

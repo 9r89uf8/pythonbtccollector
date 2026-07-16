@@ -343,7 +343,8 @@ def test_load_activated_selection_binds_primary_models_and_runtime_config(tmp_pa
     assert activated.max_future_skew_ms == 250
 
 
-def test_load_activated_selection_accepts_strict_v3_evidence_pair(tmp_path):
+def test_activation_preserves_existing_markerless_v3_evidence_pair(tmp_path):
+    assert "volatility_time_basis" not in V3_CONFIGURATION
     selection_path, digest, replay_path, selection = write_valid_v3_artifacts(
         tmp_path
     )
@@ -365,6 +366,24 @@ def test_load_activated_selection_accepts_strict_v3_evidence_pair(tmp_path):
     assert activated.reference_max_gap_ms == 3_000
     assert activated.history_retention_ms == 10_000
     assert activated.max_future_skew_ms == 0
+
+
+def test_v3_activation_accepts_worker_visible_volatility_evidence(tmp_path):
+    configuration = {
+        **V3_CONFIGURATION,
+        "volatility_time_basis": "worker_poll_visibility_ms",
+    }
+    selection_path, digest, replay_path, _selection = (
+        write_valid_v3_artifacts(
+            tmp_path,
+            configuration=configuration,
+        )
+    )
+
+    activated = load(selection_path, digest, replay_path)
+
+    assert activated.selection_schema_version == 3
+    assert activated.policy_version == "chronological_holdout_v3"
 
 
 def test_v3_activation_contract_matches_the_selection_writer():

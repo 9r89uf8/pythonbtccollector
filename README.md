@@ -282,6 +282,17 @@ Redis publication completion. A timing study must run a preregistered delay and
 phase grid and compare the complete grid; it must not select whichever timing
 scenario makes a candidate look best.
 
+The volatility-regime slices use the same causal visibility boundary. A
+futures-bucket return enters the volatility series only on the worker poll that
+makes the delayed futures event visible, and the rolling lookback uses that
+worker-poll visibility time. New reports record this contract as
+`configuration.volatility_time_basis="worker_poll_visibility_ms"`. The v3
+selector rejects reports without that marker. Pre-fix timing-sensitive v3
+reports must be regenerated from retained raw events before they are selected
+or compared with post-fix reports. Existing immutable v2/v3 decision pairs
+remain loadable because this diagnostic does not affect projection or selection
+ranking; they are not valid inputs to a new post-fix selection.
+
 The command requires an explicit inclusive/exclusive UTC epoch-ms range and
 uses the writer `DATABASE_URL`, because the API reader cannot access
 `raw_capture`. A single report is limited to 24 hours and uses bounded

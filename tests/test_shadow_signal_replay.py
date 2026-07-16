@@ -454,6 +454,129 @@ def test_delayed_visibility_includes_exact_boundary_but_not_one_ns_after(
     ] == expected_model_error
 
 
+@pytest.mark.parametrize(
+    ("futures_offset_ns", "expected_regime_counts"),
+    [
+        (0, {"high": 3, "low": 2}),
+        (1, {"high": 2, "low": 3}),
+    ],
+)
+def test_delayed_futures_jump_changes_volatility_slice_only_when_visible(
+    futures_offset_ns,
+    expected_regime_counts,
+):
+    events = base_events()
+    jump_index = next(
+        index
+        for index, item in enumerate(events)
+        if item.kind == FUTURES_EVENT
+        and item.received_ms == ORIGIN_MS + 2_000
+    )
+    events[jump_index] = event(
+        FUTURES_EVENT,
+        ORIGIN_MS + 2_000,
+        "110",
+        received_offset_ns=futures_offset_ns,
+    )
+    events.sort(key=lambda item: item.sort_key)
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            futures_availability_delay_ms=1_000,
+            futures_stale_ms=5_000,
+            reference_max_gap_ms=500,
+            history_retention_ms=6_500,
+        ),
+    )
+    candidate = only_candidate(report)
+
+    assert candidate["scored"] == 5
+    assert {
+        regime: metrics["count"]
+        for regime, metrics in candidate["slices"][
+            "raw_bucket_return_rms_regime"
+        ].items()
+    } == expected_regime_counts
+
+
+def test_delayed_futures_return_lookback_starts_at_worker_poll_visibility():
+    events = base_events()
+    jump_index = next(
+        index
+        for index, item in enumerate(events)
+        if item.kind == FUTURES_EVENT
+        and item.received_ms == ORIGIN_MS + 2_000
+    )
+    events[jump_index] = event(
+        FUTURES_EVENT,
+        ORIGIN_MS + 2_000,
+        "110",
+        received_offset_ns=1,
+    )
+    events.sort(key=lambda item: item.sort_key)
+
+    report = replay_shadow_signals(
+        events=events,
+        sessions=sessions_for(events),
+        config=replay_config(
+            futures_availability_delay_ms=1_000,
+            futures_stale_ms=5_000,
+            reference_max_gap_ms=500,
+            history_retention_ms=6_500,
+            volatility_lookback_ms=400,
+        ),
+    )
+    candidate = only_candidate(report)
+
+    # The jump is available one nanosecond after the 3,000 ms poll, so the
+    # worker first sees it at 3,100 ms. It remains exactly on the 400 ms
+    # lookback boundary for the 3,500 ms forecast.
+    assert candidate["scored"] == 5
+    assert {
+        regime: metrics["count"]
+        for regime, metrics in candidate["slices"][
+            "raw_bucket_return_rms_regime"
+        ].items()
+    } == {"high": 1, "low": 3, "unknown": 1}
+
+
+def test_initial_futures_seeds_volatility_only_after_becoming_visible():
+    config = replay_config(futures_availability_delay_ms=100)
+    initial_futures = event(
+        FUTURES_EVENT,
+        ORIGIN_MS + 900,
+        "100",
+    )
+    segment = replay_module.ReplaySegment(
+        start_wall_ns=(ORIGIN_MS + 1_000) * replay_module.NS_PER_MS,
+        end_wall_ns=(ORIGIN_MS + 6_000) * replay_module.NS_PER_MS,
+        futures_session_id=FUTURES_CONNECTION_1,
+        chainlink_session_id=CHAINLINK_CONNECTION_1,
+    )
+    runtime = replay_module._SegmentRuntime(
+        segment=segment,
+        config=config,
+        accumulators={
+            model.version: replay_module._CandidateAccumulator(model, config)
+            for model in config.models
+        },
+        diagnostics=replay_module._EventDiagnostics(
+            sample_max=config.quantile_sample_max
+        ),
+        initial_futures=initial_futures,
+    )
+
+    assert runtime._last_futures_for_volatility is None
+    runtime._apply_visible_events(ORIGIN_MS + 999)
+    assert runtime._last_futures_for_volatility is None
+
+    runtime._apply_visible_events(ORIGIN_MS + 1_000)
+    assert runtime._last_futures_for_volatility == initial_futures
+    assert runtime._volatility_returns == deque()
+
+
 def test_source_delays_reorder_visibility_without_advancing_polls_early():
     events = sorted(
         [
@@ -1246,6 +1369,9 @@ def test_report_records_fixed_timing_sensitivity_assumptions():
     assert payload["configuration"]["futures_availability_delay_ms"] == 25
     assert payload["configuration"]["chainlink_availability_delay_ms"] == 50
     assert payload["configuration"]["evaluation_phase_offset_ms"] == 100
+    assert payload["configuration"]["volatility_time_basis"] == (
+        "worker_poll_visibility_ms"
+    )
     assert any(
         "not measured Redis publication-completion timing" in limitation
         for limitation in payload["data_quality"]["limitations"]

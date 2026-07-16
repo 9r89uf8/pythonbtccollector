@@ -1368,6 +1368,7 @@ class ReplayReport:
                 ),
                 "volatility_lookback_ms": self.config.volatility_lookback_ms,
                 "volatility_measure": "rms_of_consecutive_raw_bucket_returns",
+                "volatility_time_basis": "worker_poll_visibility_ms",
                 "near_expiry_ms": self.config.near_expiry_ms,
                 "near_reconnect_ms": self.config.near_reconnect_ms,
                 "session_boundary_measure": (
@@ -1404,6 +1405,7 @@ class ReplayReport:
                     "100 ms futures OHLC exposes only each bucket close at its last receive time.",
                     "Raw receive time precedes parsing and Redis publication latency.",
                     "Configured source visibility delays and evaluation phase are fixed sensitivity assumptions, not measured Redis publication-completion timing.",
+                    "Volatility returns enter diagnostic slices at the worker poll where each delayed futures event becomes visible, and the lookback uses that poll time.",
                     "Open sessions are excluded because their persisted counters are not final.",
                     "Cross-model comparisons must use the common-cohort "
                     "metrics; top-level metrics include horizon-specific "
@@ -1500,8 +1502,6 @@ class _SegmentRuntime:
         self.polls_processed = 0
         self.events_processed = 0
         self._last_futures_for_volatility: Optional[ReplayEvent] = None
-        if initial_futures is not None:
-            self._last_futures_for_volatility = initial_futures
         self._volatility_returns: Deque[tuple[int, Decimal]] = deque()
         self._volatility_square_sum = Decimal("0")
         diagnostics.reset_segment()
@@ -1520,8 +1520,6 @@ class _SegmentRuntime:
         self._advance_polls_before(event.received_wall_ns)
         self.events_processed += 1
         self.diagnostics.observe(event)
-        if event.kind == FUTURES_EVENT:
-            self._observe_volatility_event(event)
         self._queue_for_visibility(event)
 
     def _queue_for_visibility(self, event: ReplayEvent) -> None:
@@ -1547,6 +1545,7 @@ class _SegmentRuntime:
             )
             if event.kind == FUTURES_EVENT:
                 self.latest_futures = event
+                self._observe_volatility_event(event, visible_ms=tick_ms)
             else:
                 self.latest_chainlink = event
                 self._chainlink_history.append(event)
@@ -1718,14 +1717,19 @@ class _SegmentRuntime:
                 return event
         return None
 
-    def _observe_volatility_event(self, event: ReplayEvent) -> None:
+    def _observe_volatility_event(
+        self,
+        event: ReplayEvent,
+        *,
+        visible_ms: int,
+    ) -> None:
         previous = self._last_futures_for_volatility
         if previous is not None:
             return_bps = (
                 event.value / previous.value - Decimal("1")
             ) * BASIS_POINTS
             squared = return_bps * return_bps
-            self._volatility_returns.append((event.received_ms, squared))
+            self._volatility_returns.append((visible_ms, squared))
             with localcontext() as context:
                 context.prec = 50
                 self._volatility_square_sum += squared
@@ -1737,7 +1741,7 @@ class _SegmentRuntime:
             self._volatility_returns
             and self._volatility_returns[0][0] < cutoff_ms
         ):
-            _received_ms, squared = self._volatility_returns.popleft()
+            _visible_ms, squared = self._volatility_returns.popleft()
             with localcontext() as context:
                 context.prec = 50
                 self._volatility_square_sum -= squared
@@ -1750,7 +1754,7 @@ class _SegmentRuntime:
                 self._volatility_square_sum = sum(
                     (
                         squared
-                        for _received_ms, squared in self._volatility_returns
+                        for _visible_ms, squared in self._volatility_returns
                     ),
                     Decimal("0"),
                 )

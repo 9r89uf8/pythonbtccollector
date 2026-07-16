@@ -2531,7 +2531,11 @@ FastAPI, Redis, or systemd. It does not select the provisional primary model;
 that decision is a later shadow-signal checkpoint. The current command writes
 replay schema v3. V3 corrects the directional accounting, requires strict
 zero-future-skew evidence, and records explicit source-visibility-delay and
-evaluation-phase sensitivity assumptions.
+evaluation-phase sensitivity assumptions. Its volatility-regime returns enter
+the diagnostic series only on the worker poll where each delayed futures event
+becomes visible, and their lookback is keyed by that worker-poll visibility
+time. New reports identify this contract with
+`configuration.volatility_time_basis="worker_poll_visibility_ms"`.
 
 Prerequisites:
 
@@ -2642,6 +2646,7 @@ print("timing assumptions:", {
         "futures_availability_delay_ms",
         "chainlink_availability_delay_ms",
         "evaluation_phase_offset_ms",
+        "volatility_time_basis",
     )
 })
 print("session exclusions:", report["data_quality"]["sessions_excluded_by_reason"])
@@ -2730,9 +2735,19 @@ holdout was inspected, so that window and every other inspected window are now
 calibration-only. V3 cannot reconstruct its corrected directional matrix or
 timing sensitivity from a v1/v2 aggregate report: rerun any still-retained raw
 window with replay v3, or omit it if its raw events have expired. Never pass a
-v1/v2 selection artifact or replay report as v3 replay evidence. The following
-derives initial windows from the older of the latest completed futures and
-Chainlink sessions:
+v1/v2 selection artifact or replay report as v3 replay evidence. Pre-fix v3
+reports also used raw receipt timing for volatility slices and must be
+regenerated before timing-sensitive comparison or selection. The selector
+rejects any report that does not declare
+`configuration.volatility_time_basis="worker_poll_visibility_ms"`. The
+following derives initial windows from the older of the latest completed
+futures and Chainlink sessions:
+
+This offline code update does not require a service restart. Before any later
+timing-sensitive comparison or new selection, regenerate the relevant retained
+raw windows. Existing immutable schema-v2/v3 decision pairs remain loadable
+because volatility slices do not affect live projection or selection ranking;
+do not reuse their markerless reports as new post-fix evidence.
 
 ```bash
 END_MS="$(sudo -u postgres psql -At -d price_collector -c "
@@ -2810,9 +2825,9 @@ sudo -u pricecollector \
   '
 ```
 
-Confirm all inputs are successful schema-version-3 reports, then run the
-selector. `--calibration-report` may repeat; policy v3 requires exactly one
-strictly later `--holdout-report`.
+Confirm all inputs are successful schema-version-3 reports with the causal
+volatility-timing marker, then run the selector. `--calibration-report` may
+repeat; policy v3 requires exactly one strictly later `--holdout-report`.
 
 ```bash
 sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
@@ -2823,8 +2838,18 @@ import sys
 for path in sys.argv[1:]:
     with open(path, encoding="utf-8") as stream:
         report = json.load(stream)
-    print(path, "schema=", report["schema_version"], "status=", report["status"])
-    if report["schema_version"] != 3 or report["status"] != "ok":
+    volatility_time_basis = report["configuration"].get("volatility_time_basis")
+    print(
+        path,
+        "schema=", report["schema_version"],
+        "status=", report["status"],
+        "volatility_time_basis=", volatility_time_basis,
+    )
+    if (
+        report["schema_version"] != 3
+        or report["status"] != "ok"
+        or volatility_time_basis != "worker_poll_visibility_ms"
+    ):
         raise SystemExit(1)
 PY
 

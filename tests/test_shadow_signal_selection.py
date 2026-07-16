@@ -38,6 +38,7 @@ CONFIGURATION = {
     "volatility_thresholds_bps": ["0.5", "1.5"],
     "volatility_lookback_ms": 10_000,
     "volatility_measure": "rms_of_consecutive_raw_bucket_returns",
+    "volatility_time_basis": "worker_poll_visibility_ms",
     "near_expiry_ms": 10_000,
     "near_reconnect_ms": 10_000,
     "session_boundary_measure": (
@@ -910,6 +911,40 @@ def test_policy_v3_accepts_frozen_timing_sensitivity_configuration(tmp_path):
     )
 
     assert artifact.status == "selected"
+
+
+@pytest.mark.parametrize(
+    "volatility_time_basis",
+    (None, "raw_receive_ms", "configured_availability_wall_ns"),
+)
+def test_policy_v3_requires_worker_visible_volatility_time_basis(
+    tmp_path,
+    volatility_time_basis,
+):
+    invalid_payload = replay_payload(0, WINDOW_MS)
+    if volatility_time_basis is None:
+        del invalid_payload["configuration"]["volatility_time_basis"]
+    else:
+        invalid_payload["configuration"][
+            "volatility_time_basis"
+        ] = volatility_time_basis
+    calibration = write_report(
+        tmp_path / "calibration.json",
+        invalid_payload,
+    )
+    holdout = write_report(
+        tmp_path / "holdout.json",
+        replay_payload(WINDOW_MS, 2 * WINDOW_MS),
+    )
+
+    with pytest.raises(
+        SelectionInputError,
+        match="unsupported configuration.volatility_time_basis",
+    ):
+        select_provisional_primary(
+            calibration_report_paths=[calibration],
+            holdout_report_paths=[holdout],
+        )
 
 
 @pytest.mark.parametrize(
