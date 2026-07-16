@@ -587,6 +587,8 @@ class FakeEvaluationWriter:
     def __init__(self, **configuration):
         self.configuration = configuration
         self.records = []
+        self.record_calls = []
+        self.cohort_calls = []
         self.started = 0
         self.closed = 0
 
@@ -594,10 +596,13 @@ class FakeEvaluationWriter:
         self.started += 1
 
     def offer_nowait(self, record):
+        self.record_calls.append(record)
         self.records.append(record)
 
     def offer_cohort_nowait(self, records):
-        self.records.extend(records)
+        cohort = tuple(records)
+        self.cohort_calls.append(cohort)
+        self.records.extend(cohort)
 
     async def close(self):
         self.closed += 1
@@ -635,6 +640,45 @@ def test_worker_enqueues_matured_evaluations_after_live_publication():
     assert scheduler.calls[0]["chainlink"].accepted_event_sequence == 17
     assert scheduler.calls[0]["redis_writes_before_evaluation"] == 1
     assert writer.records == list(records)
+
+
+def test_worker_offers_multiple_matured_cohorts_separately_and_atomically():
+    redis = FakeRedis()
+    first_cohort = tuple(
+        (BASE_MS - 4_000, model.version) for model in MODELS
+    )
+    second_cohort = tuple(
+        (BASE_MS - 3_500, model.version) for model in MODELS
+    )
+    scheduler = FakeEvaluationScheduler(
+        matured=(*first_cohort, *second_cohort),
+        redis=redis,
+    )
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+    set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
+    set_price(
+        redis,
+        CHAINLINK_LIVE_KEY,
+        "50000",
+        received_ms=BASE_MS,
+        publisher_epoch="8b3f42da-8927-48f8-9c90-4f2ce84100d8",
+        accepted_event_sequence=17,
+    )
+
+    payload = run_once(worker, BASE_MS)
+
+    assert payload is not None
+    assert len(scheduler.calls) == 1
+    assert writer.record_calls == []
+    assert writer.cohort_calls == [first_cohort, second_cohort]
+    assert writer.records == [*first_cohort, *second_cohort]
 
 
 def test_worker_logs_sequence_discontinuity_counter_without_payload(caplog):
