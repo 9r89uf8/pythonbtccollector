@@ -15,6 +15,7 @@ from price_collector.live_cache import (
     LivePrice,
     LiveShadowSignal,
 )
+from price_collector.market import MARKET_MS
 from price_collector.shadow_signal_reporting import ShadowEvaluationFetchResult
 
 
@@ -1385,6 +1386,9 @@ def shadow_evaluation_chart_row(**overrides):
     generated_ms = 1_783_459_247_100
     target_ms = generated_ms + 3_000
     values = {
+        "selection_schema_version": 2,
+        "selection_policy_version": "chronological_holdout_v2",
+        "selection_evidence_end_ms": SHADOW_REPORT_MARKET_START_MS - MARKET_MS,
         "selection_fingerprint_sha256": "a" * 64,
         "selection_artifact_sha256": "b" * 64,
         "model_version": SHADOW_REPORT_MODEL,
@@ -1397,6 +1401,8 @@ def shadow_evaluation_chart_row(**overrides):
         "status": "valid",
         "invalid_reasons": (),
         "state": "anchored",
+        "outcome_status": "available",
+        "outcome_invalid_reasons": (),
         "forecast_market_id": SHADOW_REPORT_MARKET_ID,
         "full_horizon_before_forecast_market_end": True,
         "chainlink_at_forecast": Decimal("62000"),
@@ -1442,13 +1448,16 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == 2
     assert body["server_time_ms"] == SHADOW_REPORT_NOW_MS
     assert body["market"] == {
         "market_id": SHADOW_REPORT_MARKET_ID,
         "market_start_ms": SHADOW_REPORT_MARKET_START_MS,
         "market_end_ms": SHADOW_REPORT_MARKET_END_MS,
         "boundary": "[start_ms,end_ms)",
+    }
+    assert body["evaluation_semantics"] == {
+        "scored_input_max_future_skew_ms": 0,
     }
     assert body["model"] == {
         "model_version": SHADOW_REPORT_MODEL,
@@ -1457,6 +1466,11 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
         "evaluation_cadence_ms": 500,
         "selection_identities": [
             {
+                "schema_version": 2,
+                "policy_version": "chronological_holdout_v2",
+                "evidence_end_ms": (
+                    SHADOW_REPORT_MARKET_START_MS - MARKET_MS
+                ),
                 "fingerprint_sha256": "a" * 64,
                 "artifact_sha256": "b" * 64,
             }
@@ -1477,6 +1491,11 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
         "cohorts": [
             {
                 "selection_identity": {
+                    "schema_version": 2,
+                    "policy_version": "chronological_holdout_v2",
+                    "evidence_end_ms": (
+                        SHADOW_REPORT_MARKET_START_MS - MARKET_MS
+                    ),
                     "fingerprint_sha256": "a" * 64,
                     "artifact_sha256": "b" * 64,
                 },
@@ -1509,6 +1528,11 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
     }
     assert body["points"] == [
         {
+            "selection_schema_version": 2,
+            "selection_policy_version": "chronological_holdout_v2",
+            "selection_evidence_end_ms": (
+                SHADOW_REPORT_MARKET_START_MS - MARKET_MS
+            ),
             "selection_fingerprint_sha256": "a" * 64,
             "selection_artifact_sha256": "b" * 64,
             "model_version": SHADOW_REPORT_MODEL,
@@ -1521,6 +1545,8 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
             "status": "valid",
             "invalid_reasons": [],
             "state": "anchored",
+            "outcome_status": "available",
+            "outcome_invalid_reasons": [],
             "forecast_market_id": SHADOW_REPORT_MARKET_ID,
             "full_horizon_before_forecast_market_end": True,
             "chainlink_at_forecast": "62000",
@@ -1605,13 +1631,16 @@ def test_current_shadow_evaluation_window_is_known_before_market_row_exists(
 
     assert response.status_code == 200
     assert response.json() == {
-        "schema_version": 1,
+        "schema_version": 2,
         "server_time_ms": server_time_ms,
         "market": {
             "market_id": current_market_id,
             "market_start_ms": SHADOW_REPORT_MARKET_END_MS,
             "market_end_ms": SHADOW_REPORT_MARKET_END_MS + 300_000,
             "boundary": "[start_ms,end_ms)",
+        },
+        "evaluation_semantics": {
+            "scored_input_max_future_skew_ms": 0,
         },
         "model": {
             "model_version": SHADOW_REPORT_MODEL,

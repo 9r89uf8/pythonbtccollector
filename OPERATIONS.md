@@ -3372,8 +3372,11 @@ change is required.
 
 After the change is pushed to GitHub, deploy it with:
 
+Run these commands one at a time in the existing SSH session. Do not enable
+shell `errexit` for this interactive update; if one command fails, inspect it
+without terminating the session, then continue only after it succeeds.
+
 ```bash
-set -euo pipefail
 cd /opt/price-collector
 
 sudo -u pricecollector git pull --ff-only
@@ -3434,12 +3437,48 @@ WHERE table_schema = 'public'
   )
 ORDER BY table_name, grantee, privilege_type;
 
+SELECT
+    ordinal_position,
+    column_name
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'shadow_signal_evaluation_chart_points'
+  AND column_name IN (
+      'selection_schema_version',
+      'selection_policy_version',
+      'selection_evidence_end_ms',
+      'outcome_status',
+      'outcome_invalid_reasons'
+  )
+ORDER BY ordinal_position;
+
 DO $$
 BEGIN
     IF to_regclass(
         'public.shadow_signal_evaluation_chart_points'
     ) IS NULL THEN
         RAISE EXCEPTION 'reporting view is missing';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            VALUES
+                ('selection_schema_version'),
+                ('selection_policy_version'),
+                ('selection_evidence_end_ms'),
+                ('outcome_status'),
+                ('outcome_invalid_reasons')
+        ) AS required(column_name)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns AS present
+            WHERE present.table_schema = 'public'
+              AND present.table_name =
+                    'shadow_signal_evaluation_chart_points'
+              AND present.column_name = required.column_name
+        )
+    ) THEN
+        RAISE EXCEPTION 'reporting view provenance/outcome columns are missing';
     END IF;
     IF NOT has_table_privilege(
         'price_reader',
@@ -3501,12 +3540,13 @@ SQL
 Expected values are `reporting_view` non-null,
 `reader_can_select_view = true`, `reader_can_select_base = false`, and
 `writer_can_select_view = false`. `price_writer` retains only `SELECT`,
-`INSERT`, and `DELETE` on the base table; `PUBLIC` has neither relation.
+`INSERT`, and `DELETE` on the base table; `PUBLIC` has neither relation. The
+five selection-provenance and outcome-integrity columns must all be listed for
+the view.
 
 Verify both endpoints and the unchanged live route:
 
 ```bash
-set -euo pipefail
 API_BASE_URL="http://127.0.0.1:9000"
 MODEL_VERSION="catchup_ratio_l3000_b100"
 
@@ -3533,6 +3573,17 @@ financial_fields = (
     "forecast_error",
     "baseline_error",
 )
+identity_fields = {
+    "schema_version",
+    "policy_version",
+    "evidence_end_ms",
+    "fingerprint_sha256",
+    "artifact_sha256",
+}
+assert report["schema_version"] == 2
+assert report["evaluation_semantics"] == {
+    "scored_input_max_future_skew_ms": 0,
+}
 assert len(points) <= 1000
 assert model["model_version"] == expected_model
 assert all(point["model_version"] == model["model_version"] for point in points)
@@ -3552,6 +3603,34 @@ assert all(
     point[field] is None or isinstance(point[field], str)
     for point in points
     for field in financial_fields
+)
+assert all(
+    set(identity) == identity_fields
+    for identity in model["selection_identities"]
+)
+for point in points:
+    assert isinstance(point["selection_schema_version"], int)
+    assert point["selection_schema_version"] > 0
+    assert isinstance(point["selection_policy_version"], str)
+    assert point["selection_policy_version"]
+    assert 0 <= point["selection_evidence_end_ms"] <= point["generated_ms"]
+    outcome_status = point["outcome_status"]
+    outcome_reasons = point["outcome_invalid_reasons"]
+    assert outcome_status in {"available", "unavailable", "integrity_invalid"}
+    if outcome_status == "available":
+        assert point["actual_chainlink"] is not None
+        assert outcome_reasons == []
+    else:
+        assert point["actual_chainlink"] is None
+        assert point["actual_chainlink_source_timestamp_ms"] is None
+        assert point["actual_chainlink_received_ms"] is None
+        assert point["actual_chainlink_age_at_target_ms"] is None
+        assert point["forecast_error"] is None
+        assert point["baseline_error"] is None
+        assert bool(outcome_reasons) == (outcome_status == "integrity_invalid")
+assert coverage["scored"] == sum(
+    point["valid"] and point["outcome_status"] == "available"
+    for point in points
 )
 assert [
     cohort["selection_identity"] for cohort in performance_cohorts
@@ -3621,11 +3700,14 @@ sudo journalctl \
 
 Both reporting responses must contain at most 1,000 ordered points for only the
 requested model. Every `target_ms` must satisfy the returned half-open market
-boundary, and every point or derived financial value must be a JSON string or
-`null`. Performance cohorts must match the response selection identities, their
-scored counts must sum to `coverage.scored`, and each paired comparison must
-account for every scored point. The missing-model request must return HTTP
-`422`. A known market with expired or no
+boundary, report schema v2 must declare zero-skew scored-input semantics, and
+every point or derived financial value must be a JSON string or `null`.
+Available, unavailable, and integrity-invalid outcomes must satisfy their
+distinct value/reason contracts. Performance cohorts must match the full
+response selection identities, their scored counts must sum to
+`coverage.scored`, and each paired comparison must account for every scored
+point. The missing-model request must return HTTP `422`. A known market with
+expired or no
 evaluation evidence returns HTTP `200` with `points: []`; an unknown
 non-current market returns HTTP `404`.
 

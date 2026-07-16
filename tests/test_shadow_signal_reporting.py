@@ -52,6 +52,9 @@ def evaluation_row(
     )
 
     row = {
+        "selection_schema_version": 2,
+        "selection_policy_version": "chronological_holdout_v2",
+        "selection_evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
         "selection_fingerprint_sha256": fingerprint,
         "selection_artifact_sha256": artifact,
         "model_version": MODEL_VERSION,
@@ -64,6 +67,8 @@ def evaluation_row(
         "status": "valid" if valid else "chainlink_stale",
         "invalid_reasons": () if valid else ("chainlink_stale",),
         "state": "anchored",
+        "outcome_status": "available" if actual else "unavailable",
+        "outcome_invalid_reasons": (),
         "forecast_market_id": forecast_market_id,
         "full_horizon_before_forecast_market_end": (
             target_ms <= (forecast_market_id + 1) * MARKET_MS
@@ -220,6 +225,14 @@ def test_fetch_uses_restricted_view_target_bounds_predecessor_and_hard_limit():
         in normalized_sql
     )
     assert "LIMIT $5::INTEGER" in normalized_sql
+    for field_name in (
+        "selection_schema_version",
+        "selection_policy_version",
+        "selection_evidence_end_ms",
+        "outcome_status",
+        "outcome_invalid_reasons",
+    ):
+        assert field_name in normalized_sql
     assert SHADOW_EVALUATION_QUERY_LIMIT == SHADOW_EVALUATION_MAX_POINTS + 1
 
 
@@ -227,12 +240,15 @@ def test_report_serializes_exact_decimal_strings_without_rounding():
     report = build_report([evaluation_row()])
     point = report["points"][0]
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["market"] == {
         "market_id": WINDOW.market_id,
         "market_start_ms": WINDOW.market_start_ms,
         "market_end_ms": WINDOW.market_end_ms,
         "boundary": "[start_ms,end_ms)",
+    }
+    assert report["evaluation_semantics"] == {
+        "scored_input_max_future_skew_ms": 0,
     }
     assert report["model"]["model_version"] == MODEL_VERSION
     assert report["model"]["horizon_ms"] == HORIZON_MS
@@ -267,6 +283,9 @@ def test_performance_reports_exact_decimal_forecast_and_baseline_metrics():
         "cohorts": [
             {
                 "selection_identity": {
+                    "schema_version": 2,
+                    "policy_version": "chronological_holdout_v2",
+                    "evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
                     "fingerprint_sha256": "a" * 64,
                     "artifact_sha256": "b" * 64,
                 },
@@ -410,6 +429,9 @@ def test_invalid_and_valid_unscored_attempts_preserve_honest_null_contract():
         "cohorts": [
             {
                 "selection_identity": {
+                    "schema_version": 2,
+                    "policy_version": "chronological_holdout_v2",
+                    "evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
                     "fingerprint_sha256": "a" * 64,
                     "artifact_sha256": "b" * 64,
                 },
@@ -446,7 +468,120 @@ def test_empty_report_has_no_performance_cohorts():
     report = build_report([])
 
     assert report["coverage"]["scored"] == 0
+    assert report["evaluation_semantics"] == {
+        "scored_input_max_future_skew_ms": 0,
+    }
     assert report["performance"] == {"cohorts": []}
+
+
+def test_unavailable_and_integrity_invalid_outcomes_remain_distinguishable():
+    unavailable = evaluation_row(
+        generated_ms=WINDOW.market_start_ms + 1_000,
+        actual=False,
+    )
+    integrity_invalid = evaluation_row(
+        generated_ms=WINDOW.market_start_ms + 1_500,
+        actual=False,
+        outcome_status="integrity_invalid",
+        outcome_invalid_reasons=("chainlink_sequence_gap",),
+    )
+
+    report = build_report([unavailable, integrity_invalid])
+    first, second = report["points"]
+
+    assert first["outcome_status"] == "unavailable"
+    assert first["outcome_invalid_reasons"] == []
+    assert second["outcome_status"] == "integrity_invalid"
+    assert second["outcome_invalid_reasons"] == ["chainlink_sequence_gap"]
+    assert first["actual_chainlink"] is second["actual_chainlink"] is None
+    assert report["coverage"]["valid_without_actual"] == 2
+    assert report["performance"]["cohorts"][0]["scored_points"] == 0
+
+
+@pytest.mark.parametrize(
+    ("row_kwargs", "message"),
+    [
+        (
+            {"actual": False, "outcome_status": "available"},
+            "available outcome has no actual",
+        ),
+        (
+            {"outcome_invalid_reasons": ("unexpected",)},
+            "available outcome has invalid reasons",
+        ),
+        (
+            {"outcome_status": "unavailable"},
+            "unavailable outcome has an actual",
+        ),
+        (
+            {
+                "actual": False,
+                "outcome_status": "unavailable",
+                "outcome_invalid_reasons": ("unexpected",),
+            },
+            "unavailable outcome has invalid reasons",
+        ),
+        (
+            {
+                "outcome_status": "integrity_invalid",
+                "outcome_invalid_reasons": ("chainlink_sequence_gap",),
+            },
+            "integrity-invalid outcome has an actual",
+        ),
+        (
+            {"actual": False, "outcome_status": "integrity_invalid"},
+            "integrity-invalid outcome has no reason",
+        ),
+        (
+            {"actual": False, "outcome_status": "legacy_unverified"},
+            "outcome_status is unsupported",
+        ),
+    ],
+)
+def test_report_rejects_inconsistent_outcome_contract(row_kwargs, message):
+    with pytest.raises(ShadowEvaluationReportingError, match=message):
+        build_report([evaluation_row(**row_kwargs)])
+
+
+def test_selection_identity_does_not_merge_schema_or_policy_versions():
+    hashes = {
+        "fingerprint": "a" * 64,
+        "artifact": "b" * 64,
+    }
+    rows = [
+        evaluation_row(
+            generated_ms=WINDOW.market_start_ms + 1_000,
+            selection_schema_version=2,
+            selection_policy_version="chronological_holdout_v2",
+            **hashes,
+        ),
+        evaluation_row(
+            generated_ms=WINDOW.market_start_ms + 1_500,
+            selection_schema_version=3,
+            selection_policy_version="chronological_holdout_v3",
+            **hashes,
+        ),
+    ]
+
+    report = build_report(rows)
+
+    assert [
+        (
+            identity["schema_version"],
+            identity["policy_version"],
+        )
+        for identity in report["model"]["selection_identities"]
+    ] == [
+        (2, "chronological_holdout_v2"),
+        (3, "chronological_holdout_v3"),
+    ]
+    assert [
+        cohort["scored_points"]
+        for cohort in report["performance"]["cohorts"]
+    ] == [1, 1]
+    assert report["evaluation_semantics"][
+        "scored_input_max_future_skew_ms"
+    ] == 0
 
 
 def test_current_market_does_not_label_future_buckets_unobserved():
@@ -479,7 +614,7 @@ def test_completed_market_counts_duplicate_restart_attempts_in_one_bucket_once()
     assert report["coverage"]["scored"] == 2
 
 
-def test_selection_identity_uses_fingerprint_and_artifact_as_a_pair():
+def test_selection_identity_includes_versions_fingerprint_and_artifact():
     rows = [
         evaluation_row(
             generated_ms=WINDOW.market_start_ms + 2_000,
@@ -502,10 +637,16 @@ def test_selection_identity_uses_fingerprint_and_artifact_as_a_pair():
 
     assert report["model"]["selection_identities"] == [
         {
+            "schema_version": 2,
+            "policy_version": "chronological_holdout_v2",
+            "evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
             "fingerprint_sha256": "a" * 64,
             "artifact_sha256": "c" * 64,
         },
         {
+            "schema_version": 2,
+            "policy_version": "chronological_holdout_v2",
+            "evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
             "fingerprint_sha256": "b" * 64,
             "artifact_sha256": "d" * 64,
         },
@@ -516,6 +657,9 @@ def test_selection_identity_uses_fingerprint_and_artifact_as_a_pair():
     ] == [
         (
             {
+                "schema_version": 2,
+                "policy_version": "chronological_holdout_v2",
+                "evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
                 "fingerprint_sha256": "a" * 64,
                 "artifact_sha256": "c" * 64,
             },
@@ -523,6 +667,9 @@ def test_selection_identity_uses_fingerprint_and_artifact_as_a_pair():
         ),
         (
             {
+                "schema_version": 2,
+                "policy_version": "chronological_holdout_v2",
+                "evidence_end_ms": WINDOW.market_start_ms - MARKET_MS,
                 "fingerprint_sha256": "b" * 64,
                 "artifact_sha256": "d" * 64,
             },

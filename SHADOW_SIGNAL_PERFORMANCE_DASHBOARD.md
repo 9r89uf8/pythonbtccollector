@@ -182,14 +182,17 @@ renderForecastPerformance({
 });
 ```
 
-`schema_version` remains `1` because `performance` was additive. During
-rollout, an absent `performance` field means the dashboard reached an older
-backend. Show `API update required`; do not treat it as an empty market.
+Item 7 raises `schema_version` to `2` because selection provenance, outcome
+integrity, and evaluation-causality semantics change how rows are interpreted.
+During rollout, schema 1 or an absent `performance` field means the dashboard
+reached an older backend. Show `API update required`; do not treat it as an
+empty market.
 
 ## 3. Response Fields Used by the Panel
 
-Each entry in `performance.cohorts` covers one exact selection fingerprint and
-artifact pair. In the normal case there is one cohort.
+Each entry in `performance.cohorts` covers one full selection identity: schema
+version, policy version, evidence end, fingerprint, and artifact hash. In the
+normal case there is one cohort.
 
 | UI label | Response field |
 | --- | --- |
@@ -215,10 +218,16 @@ The performance sample includes only attempts where:
 
 ```text
 valid = true
-actual_chainlink is present
+outcome_status = available
 forecast_error is present
 baseline_error is present
 ```
+
+The report-level
+`evaluation_semantics.scored_input_max_future_skew_ms` must be `0`. It is a
+live-evaluator scoring rule independent of selection schema: v2-derived live
+rows still use zero-skew scoring and are not directly comparable to v2 replay
+evidence that allowed nonzero skew.
 
 Show the returned aggregate values. The backend calculated them with exact
 Decimal arithmetic from the persisted paired errors. The frontend should not
@@ -400,18 +409,24 @@ preceding market.
 ## 8. Selection Identity Rules
 
 Do not assume `performance.cohorts[0]` is the primary. Cohorts are sorted by
-hash, not ranked by quality.
+identity, not ranked by quality.
 
-Compare the complete pair:
+Compare the complete identity:
 
 ```text
+selection_identity.schema_version
+selection_identity.policy_version
+selection_identity.evidence_end_ms
 selection_identity.fingerprint_sha256
 selection_identity.artifact_sha256
 ```
 
-For Live mode, the verified pair is available from:
+For Live mode, the verified identity is available from:
 
 ```text
+signals.chainlink_catchup.selection_schema_version
+signals.chainlink_catchup.selection_policy_version
+signals.chainlink_catchup.selection_evidence_end_ms
 signals.chainlink_catchup.selection_fingerprint_sha256
 signals.chainlink_catchup.selection_artifact_sha256
 ```
@@ -472,7 +487,9 @@ Always place sample size next to performance:
 
 Map `valid without actual` to `coverage.valid_without_actual`. These matured
 attempts had a valid projection but no causal paired actual, so they remain
-unscored. They are not failed predictions or paired losses.
+unscored. Inspect each point's `outcome_status`: `unavailable` is ordinary
+absence, while `integrity_invalid` has one or more explicit
+`outcome_invalid_reasons`. Neither is a failed prediction or paired loss.
 
 Do not use `window_buckets` as the performance denominator. Restart duplicates
 can create more than one attempt in a 500 ms bucket. Use returned
@@ -513,7 +530,8 @@ state. It is response time, not the timestamp of the newest evaluation.
 Treat the endpoint as untrusted input at the browser boundary. Validate before
 rendering at least these invariants:
 
-- `schema_version === 1`;
+- `schema_version === 2`;
+- `evaluation_semantics.scored_input_max_future_skew_ms === 0`;
 - returned market ID equals the requested ID;
 - returned model version equals the configured model;
 - `performance.cohorts` exists and is an array;
@@ -522,6 +540,10 @@ rendering at least these invariants:
 - the market is a 300,000 ms half-open window;
 - every point satisfies `target_ms === generated_ms + horizon_ms` and its
   target belongs to the returned market window;
+- every point has complete selection schema/policy/evidence/hash provenance;
+- `available` outcomes have an actual and no outcome-invalid reasons,
+  `unavailable` outcomes have neither, and `integrity_invalid` outcomes have
+  no actual plus at least one explicit reason;
 - points are sorted by target time, generation time, then horizon;
 - financial metrics are finite decimal strings or `null`;
 - `points.length === coverage.attempts` and is at most 1,000;

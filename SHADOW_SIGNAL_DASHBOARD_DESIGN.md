@@ -136,16 +136,18 @@ catchup_ratio_l3000_b100
 The evaluation table does not contain an `is_primary` column. For the first
 dashboard, configure the model explicitly and verify that it matches
 `signals.chainlink_catchup.model_version` and
-both `selection_fingerprint_sha256` and `selection_artifact_sha256` whenever
-the live signal is available. The fingerprint identifies the frozen policy and
-inputs; the artifact hash identifies the complete selection decision.
+the reported selection schema version, policy version, evidence end,
+fingerprint, and artifact hash whenever the live signal is available. The
+fingerprint identifies the frozen policy and inputs; the artifact hash
+identifies the complete selection decision.
 Requiring `model_version` in the historical request is safer than pretending
 the database records which candidate was primary in every past deployment.
 
-Only call historical points the accepted primary when their one fingerprint
-and artifact-hash pair matches the currently verified live pair and the
-configured model matches the live model. When an older market has a different
-pair, label the line `Configured candidate — historical primary unverified`;
+Only call historical points the accepted primary when their full reported
+selection identity (schema, policy, evidence end, fingerprint, and artifact
+hash) matches the currently verified live identity and the configured model
+matches the live model. When an older market has a different identity, label
+the line `Configured candidate — historical primary unverified`;
 the existing table alone cannot prove the old identity-to-primary mapping. If
 one market contains more than one selection identity, fail closed to
 actual-only context instead of joining projections across a selection change.
@@ -164,13 +166,16 @@ this design without duplicating the performance contract.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1783989305000,
   "market": {
     "market_id": 5946630,
     "market_start_ms": 1783989000000,
     "market_end_ms": 1783989300000,
     "boundary": "[start_ms,end_ms)"
+  },
+  "evaluation_semantics": {
+    "scored_input_max_future_skew_ms": 0
   },
   "model": {
     "model_version": "catchup_ratio_l3000_b100",
@@ -179,6 +184,9 @@ this design without duplicating the performance contract.
     "evaluation_cadence_ms": 500,
     "selection_identities": [
       {
+        "schema_version": 2,
+        "policy_version": "chronological_holdout_v2",
+        "evidence_end_ms": 1783983205028,
         "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
         "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
       }
@@ -197,6 +205,9 @@ this design without duplicating the performance contract.
   },
   "points": [
     {
+      "selection_schema_version": 2,
+      "selection_policy_version": "chronological_holdout_v2",
+      "selection_evidence_end_ms": 1783983205028,
       "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
       "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
       "model_version": "catchup_ratio_l3000_b100",
@@ -209,6 +220,8 @@ this design without duplicating the performance contract.
       "status": "valid",
       "invalid_reasons": [],
       "state": "anchored",
+      "outcome_status": "available",
+      "outcome_invalid_reasons": [],
       "forecast_market_id": 5946630,
       "full_horizon_before_forecast_market_end": true,
       "chainlink_at_forecast": "64080.47",
@@ -232,12 +245,20 @@ All financial values remain JSON strings or `null`. A scored point requires:
 ```text
 valid = true
 projected_chainlink is not null
-actual_chainlink is not null
+outcome_status = available
 ```
 
-A valid forecast can remain unscored when no causal actual was available.
-Invalid attempts have `projected_chainlink`, `pending_move`, direction, and
-related projection fields set to `null`.
+A valid forecast can remain unscored with either `outcome_status=unavailable`
+or `outcome_status=integrity_invalid`. Both have a null actual, but only the
+integrity-invalid status carries explicit `outcome_invalid_reasons`; the
+dashboard must not conflate them. Invalid forecast attempts have
+`projected_chainlink`, `pending_move`, direction, and related projection fields
+set to `null`.
+
+`evaluation_semantics.scored_input_max_future_skew_ms=0` is a live-evaluator
+scoring rule, independent of selection provenance. A schema-v2 selection row
+still uses this stricter rule and is not directly comparable to historical v2
+replay evidence that allowed nonzero future skew.
 
 `full_horizon_before_forecast_market_end` is an API alias for the stored
 `full_horizon_before_market_end`. It describes the generation-time market, not
@@ -262,9 +283,9 @@ observation, not a finality claim. Absence can mean a skipped observation,
 restart, queue drop, rejected write, database delay, or retention.
 
 Every actual response also groups its derived per-market performance by the
-exact selection fingerprint and artifact pair. Cohorts use only valid points
-with causal actuals, their `scored_points` sum to `coverage.scored`, and an
-identity with no scored points has null metrics. With no retained points,
+full selection identity. Cohorts use only valid points with
+`outcome_status=available`, their `scored_points` sum to `coverage.scored`, and
+an identity with no scored points has null metrics. With no retained points,
 `performance.cohorts` is empty. A dashboard must never blend multiple
 selection identities into one claimed-primary score.
 

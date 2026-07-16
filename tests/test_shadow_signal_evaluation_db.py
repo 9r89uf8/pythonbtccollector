@@ -953,6 +953,9 @@ def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
     assert "WITH (security_barrier = true)" in view
     assert "security_invoker" not in view
     for column in (
+        "selection_schema_version",
+        "selection_policy_version",
+        "selection_evidence_end_ms",
         "selection_fingerprint_sha256",
         "selection_artifact_sha256",
         "model_version",
@@ -978,18 +981,36 @@ def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
         "direction",
         "forecast_error",
         "baseline_error",
+        "outcome_status",
+        "outcome_invalid_reasons",
     ):
         assert column in view
 
     for forbidden in (
-        "selection_policy_version",
-        "outcome_status",
-        "outcome_invalid_reasons",
         "futures_now",
         "futures_reference",
         "created_at",
     ):
         assert forbidden not in selected_columns
+
+    # PostgreSQL permits CREATE OR REPLACE VIEW to append columns, but not to
+    # reorder the deployed projection. Keep the item-7 additions after every
+    # pre-existing reader column so schema reruns remain in-place compatible.
+    assert selected_columns.index("baseline_error") < selected_columns.index(
+        "selection_schema_version"
+    )
+    assert selected_columns.index("selection_schema_version") < (
+        selected_columns.index("selection_policy_version")
+    )
+    assert selected_columns.index("selection_policy_version") < (
+        selected_columns.index("selection_evidence_end_ms")
+    )
+    assert selected_columns.index("selection_evidence_end_ms") < (
+        selected_columns.index("outcome_status")
+    )
+    assert selected_columns.index("outcome_status") < selected_columns.index(
+        "outcome_invalid_reasons"
+    )
 
     assert end_marker in view
 

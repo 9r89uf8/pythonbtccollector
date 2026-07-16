@@ -961,13 +961,16 @@ Both routes use this response shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1783989010123,
   "market": {
     "market_id": 5946630,
     "market_start_ms": 1783989000000,
     "market_end_ms": 1783989300000,
     "boundary": "[start_ms,end_ms)"
+  },
+  "evaluation_semantics": {
+    "scored_input_max_future_skew_ms": 0
   },
   "model": {
     "model_version": "catchup_ratio_l3000_b100",
@@ -976,6 +979,9 @@ Both routes use this response shape:
     "evaluation_cadence_ms": 500,
     "selection_identities": [
       {
+        "schema_version": 2,
+        "policy_version": "chronological_holdout_v2",
+        "evidence_end_ms": 1783983205028,
         "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
         "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
       }
@@ -996,6 +1002,9 @@ Both routes use this response shape:
     "cohorts": [
       {
         "selection_identity": {
+          "schema_version": 2,
+          "policy_version": "chronological_holdout_v2",
+          "evidence_end_ms": 1783983205028,
           "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
           "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
         },
@@ -1028,6 +1037,9 @@ Both routes use this response shape:
   },
   "points": [
     {
+      "selection_schema_version": 2,
+      "selection_policy_version": "chronological_holdout_v2",
+      "selection_evidence_end_ms": 1783983205028,
       "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
       "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
       "model_version": "catchup_ratio_l3000_b100",
@@ -1040,6 +1052,8 @@ Both routes use this response shape:
       "status": "valid",
       "invalid_reasons": [],
       "state": "anchored",
+      "outcome_status": "available",
+      "outcome_invalid_reasons": [],
       "forecast_market_id": 5946630,
       "full_horizon_before_forecast_market_end": true,
       "chainlink_at_forecast": "64080.470000000000000000",
@@ -1079,6 +1093,17 @@ successfully observed with `actual_chainlink_received_ms <= target_ms`; it is
 the causal value used by the stored error calculation. Raw replay remains the
 event-complete authority for events overwritten between live evaluator polls.
 
+`evaluation_semantics.scored_input_max_future_skew_ms` is the receive-time
+tolerance used when deciding whether a persisted live forecast can be scored.
+It is always `0`: forecast-time Chainlink and futures inputs received after
+`generated_ms` make that evaluation invalid. This field is independent of the
+selection artifact fields. In particular, a point with selection schema `2`
+and policy `chronological_holdout_v2` still uses this stricter zero-skew live
+evaluation rule; it is not directly comparable to historical v2 replay
+evidence that allowed nonzero future skew. The short-lived
+`/markets/current/live` projection continues to follow its activated artifact
+configuration and is not described by this reporting field.
+
 The requested market is selected by `target_ms`, not by
 `forecast_market_id`. `forecast_market_id` identifies the five-minute window
 containing `generated_ms`. A point generated in the preceding market's last
@@ -1093,16 +1118,27 @@ forecast_error = projected_chainlink - actual_chainlink
 baseline_error = chainlink_at_forecast - actual_chainlink
 ```
 
-An invalid attempt is still returned. It has `valid: false`, a non-`valid`
+Forecast validity and outcome integrity are independent axes. `valid`,
+`status`, and `invalid_reasons` describe the generation-time forecast. An
+invalid attempt is still returned. It has `valid: false`, a non-`valid`
 `status`, at least one `invalid_reasons` entry, and null
 `projected_chainlink`, `pending_move`, `pending_move_bps`, `direction`, and
 `forecast_error`. Its current input, causal actual, and `baseline_error` fields
 can still be present when those individual values were available. Do not carry
 a preceding valid projection across such a point.
 
-A valid attempt always has a projection. It is counted as `scored` only when
-`actual_chainlink` is also present; otherwise the actual timing fields,
-`forecast_error`, and `baseline_error` are null and it contributes to
+`outcome_status` and `outcome_invalid_reasons` describe target-time evidence:
+
+- `available` has an actual value and no outcome-invalid reasons.
+- `unavailable` has no actual value and no outcome-invalid reasons; no causal
+  target observation was available.
+- `integrity_invalid` has no actual value and at least one explicit reason,
+  such as a sequence gap or metadata-integrity failure.
+
+For both null-actual statuses, the actual timing and error fields are null.
+Never infer outcome integrity from `actual_chainlink: null`; inspect
+`outcome_status`. A valid attempt always has a projection. It is counted as
+`scored` only when `outcome_status` is `available`; otherwise it contributes to
 `valid_without_actual`.
 
 ### Per-market performance
@@ -1110,11 +1146,12 @@ A valid attempt always has a projection. It is counted as `scored` only when
 `performance` is calculated on demand from the same bounded rows returned in
 `points`; it does not add a query or persist a second accuracy record. Each
 cohort is scoped to the requested target-time market, requested model, and one
-exact `(selection_fingerprint_sha256, selection_artifact_sha256)` pair. Never
-combine cohorts when `model.selection_identities` contains more than one pair.
+exact selection identity: schema version, policy version, evidence end,
+selection fingerprint, and selection artifact hash. Never combine cohorts
+when `model.selection_identities` contains more than one identity.
 
-Only valid points with a causal `actual_chainlink` contribute. For every such
-point, the persisted signed errors are used directly:
+Only valid points whose `outcome_status` is `available` contribute. For every
+such point, the persisted signed errors are used directly:
 
 ```text
 forecast absolute error = abs(forecast_error)
@@ -1177,11 +1214,12 @@ truncate an anomalous result. A successful response contains at most 1,000
 points and at most 600 distinct generation buckets. Exceeding either public
 invariant returns HTTP `500`; the response never silently drops excess rows.
 
-`model.selection_identities` is the sorted set of unique selection fingerprint
-and artifact pairs represented by the points. It is empty when `points` is
-empty and can contain more than one entry if persisted rows span a selection
-change. Consumers must not silently join different selection identities into
-one claimed-primary series.
+`model.selection_identities` is the sorted set of unique full selection
+identities represented by the points. Each contains `schema_version`,
+`policy_version`, `evidence_end_ms`, `fingerprint_sha256`, and
+`artifact_sha256`. It is empty when `points` is empty and can contain more than
+one entry if persisted rows span a selection change. Consumers must not
+silently join different selection identities into one claimed-primary series.
 
 ### Empty markets, current rollover, and errors
 
@@ -1190,6 +1228,8 @@ A known market with no retained rows for the requested model returns HTTP
 `selection_identities` array, `performance: {"cohorts": []}`, and `points: []`.
 This is normal before the first current-window evaluation is persisted and
 after derived-evidence retention has removed older rows.
+`evaluation_semantics.scored_input_max_future_skew_ms` remains present and zero
+even when there are no points.
 
 The current route snapshots `server_time_ms` and its corresponding market once
 before querying PostgreSQL. Its returned `market` object is authoritative for

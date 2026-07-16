@@ -809,7 +809,9 @@ $$;
 -- This remains an owner-rights view: security_invoker must not be enabled
 -- because price_reader has no base-table privilege. Dashboard reporting
 -- intentionally omits futures inputs, writer metadata, retention controls,
--- created_at, and (until its separate contract checkpoint) outcome metadata.
+-- and created_at. Selection-version and outcome-integrity provenance are part
+-- of the reader contract so unavailable and integrity-invalid targets remain
+-- distinguishable without granting access to the base table.
 CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points
 WITH (security_barrier = true) AS
 SELECT
@@ -838,7 +840,14 @@ SELECT
     pending_move_bps,
     direction,
     forecast_error,
-    baseline_error
+    baseline_error,
+    -- New reader columns must remain append-only so CREATE OR REPLACE VIEW is
+    -- compatible with the already-deployed column order.
+    selection_schema_version,
+    selection_policy_version,
+    selection_evidence_end_ms,
+    outcome_status,
+    outcome_invalid_reasons
 FROM public.shadow_signal_evaluations
 WHERE outcome_status IN ('available', 'unavailable', 'integrity_invalid');
 

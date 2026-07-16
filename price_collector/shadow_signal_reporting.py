@@ -7,8 +7,9 @@ from typing import Any, Mapping, Optional, Sequence
 from price_collector.market import MARKET_MS, MarketWindow, market_for_sample_second
 
 
-SHADOW_EVALUATION_REPORT_SCHEMA_VERSION = 1
+SHADOW_EVALUATION_REPORT_SCHEMA_VERSION = 2
 SHADOW_EVALUATION_CADENCE_MS = 500
+SHADOW_EVALUATION_SCORED_INPUT_MAX_FUTURE_SKEW_MS = 0
 SHADOW_EVALUATION_MAX_POINTS = 1_000
 SHADOW_EVALUATION_QUERY_LIMIT = SHADOW_EVALUATION_MAX_POINTS + 1
 POSTGRES_BIGINT_MAX = (1 << 63) - 1
@@ -57,6 +58,9 @@ SHADOW_EVALUATION_MARKET_EXISTS_SQL = """
 
 SHADOW_EVALUATION_POINTS_SQL = """
     SELECT
+        selection_schema_version,
+        selection_policy_version,
+        selection_evidence_end_ms,
         selection_fingerprint_sha256,
         selection_artifact_sha256,
         model_version,
@@ -69,6 +73,8 @@ SHADOW_EVALUATION_POINTS_SQL = """
         status,
         invalid_reasons,
         state,
+        outcome_status,
+        outcome_invalid_reasons,
         forecast_market_id,
         full_horizon_before_forecast_market_end,
         chainlink_at_forecast,
@@ -195,16 +201,16 @@ def _decimal_string(value: Optional[Decimal]) -> Optional[str]:
     return None if value is None else format(value, "f")
 
 
-def _invalid_reasons(row: Mapping[str, Any]) -> list[str]:
-    value = row["invalid_reasons"]
+def _reason_list(row: Mapping[str, Any], field: str) -> list[str]:
+    value = row[field]
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise ShadowEvaluationReportingError(
-            "invalid_reasons must be a sequence"
+            f"{field} must be a sequence"
         )
     reasons = list(value)
     if any(not isinstance(reason, str) or not reason for reason in reasons):
         raise ShadowEvaluationReportingError(
-            "invalid_reasons must contain non-empty text"
+            f"{field} must contain non-empty text"
         )
     return reasons
 
@@ -244,6 +250,15 @@ def _serialize_shadow_evaluation_point(
     window: MarketWindow,
     spec: ShadowEvaluationModelSpec,
 ) -> dict[str, Any]:
+    selection_schema_version = _require_int(row, "selection_schema_version")
+    selection_policy_version = _require_string(
+        row,
+        "selection_policy_version",
+    )
+    selection_evidence_end_ms = _require_int(
+        row,
+        "selection_evidence_end_ms",
+    )
     fingerprint = _require_sha256(row, "selection_fingerprint_sha256")
     artifact = _require_sha256(row, "selection_artifact_sha256")
     model_version = _require_string(row, "model_version")
@@ -254,14 +269,30 @@ def _serialize_shadow_evaluation_point(
     horizon_ms = _require_int(row, "horizon_ms")
     valid = _require_bool(row, "valid")
     status = _require_string(row, "status")
-    invalid_reasons = _invalid_reasons(row)
+    invalid_reasons = _reason_list(row, "invalid_reasons")
     state = _require_string(row, "state")
+    outcome_status = _require_string(row, "outcome_status")
+    outcome_invalid_reasons = _reason_list(
+        row,
+        "outcome_invalid_reasons",
+    )
     forecast_market_id = _require_int(row, "forecast_market_id")
     full_horizon = _require_bool(
         row,
         "full_horizon_before_forecast_market_end",
     )
 
+    if selection_schema_version <= 0:
+        raise ShadowEvaluationReportingError(
+            "selection_schema_version must be positive"
+        )
+    if (
+        selection_evidence_end_ms < 0
+        or selection_evidence_end_ms > generated_ms
+    ):
+        raise ShadowEvaluationReportingError(
+            "selection_evidence_end_ms is inconsistent"
+        )
     if model_version != spec.model_version:
         raise ShadowEvaluationReportingError("model_version does not match request")
     if horizon_ms != spec.horizon_ms:
@@ -399,6 +430,36 @@ def _serialize_shadow_evaluation_point(
         ):
             raise ShadowEvaluationReportingError("actual age is inconsistent")
 
+    if outcome_status == "available":
+        if actual_chainlink is None:
+            raise ShadowEvaluationReportingError(
+                "available outcome has no actual"
+            )
+        if outcome_invalid_reasons:
+            raise ShadowEvaluationReportingError(
+                "available outcome has invalid reasons"
+            )
+    elif outcome_status == "unavailable":
+        if actual_chainlink is not None:
+            raise ShadowEvaluationReportingError(
+                "unavailable outcome has an actual"
+            )
+        if outcome_invalid_reasons:
+            raise ShadowEvaluationReportingError(
+                "unavailable outcome has invalid reasons"
+            )
+    elif outcome_status == "integrity_invalid":
+        if actual_chainlink is not None:
+            raise ShadowEvaluationReportingError(
+                "integrity-invalid outcome has an actual"
+            )
+        if not outcome_invalid_reasons:
+            raise ShadowEvaluationReportingError(
+                "integrity-invalid outcome has no reason"
+            )
+    else:
+        raise ShadowEvaluationReportingError("outcome_status is unsupported")
+
     _validate_error(
         field="forecast_error",
         observed=forecast_error,
@@ -413,6 +474,9 @@ def _serialize_shadow_evaluation_point(
     )
 
     return {
+        "selection_schema_version": selection_schema_version,
+        "selection_policy_version": selection_policy_version,
+        "selection_evidence_end_ms": selection_evidence_end_ms,
         "selection_fingerprint_sha256": fingerprint,
         "selection_artifact_sha256": artifact,
         "model_version": model_version,
@@ -425,6 +489,8 @@ def _serialize_shadow_evaluation_point(
         "status": status,
         "invalid_reasons": invalid_reasons,
         "state": state,
+        "outcome_status": outcome_status,
+        "outcome_invalid_reasons": outcome_invalid_reasons,
         "forecast_market_id": forecast_market_id,
         "full_horizon_before_forecast_market_end": full_horizon,
         "chainlink_at_forecast": _decimal_string(chainlink_at_forecast),
@@ -455,6 +521,9 @@ def _nearest_rank_p95(values: Sequence[Decimal]) -> Decimal:
 
 def _build_shadow_evaluation_performance_cohort(
     *,
+    selection_schema_version: int,
+    selection_policy_version: str,
+    selection_evidence_end_ms: int,
     selection_fingerprint_sha256: str,
     selection_artifact_sha256: str,
     observations: Sequence[tuple[Decimal, Decimal]],
@@ -463,6 +532,9 @@ def _build_shadow_evaluation_performance_cohort(
     if scored_points == 0:
         return {
             "selection_identity": {
+                "schema_version": selection_schema_version,
+                "policy_version": selection_policy_version,
+                "evidence_end_ms": selection_evidence_end_ms,
                 "fingerprint_sha256": selection_fingerprint_sha256,
                 "artifact_sha256": selection_artifact_sha256,
             },
@@ -556,6 +628,9 @@ def _build_shadow_evaluation_performance_cohort(
 
     return {
         "selection_identity": {
+            "schema_version": selection_schema_version,
+            "policy_version": selection_policy_version,
+            "evidence_end_ms": selection_evidence_end_ms,
             "fingerprint_sha256": selection_fingerprint_sha256,
             "artifact_sha256": selection_artifact_sha256,
         },
@@ -596,17 +671,20 @@ def _build_shadow_evaluation_performance(
     points: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     observations_by_identity: dict[
-        tuple[str, str],
+        tuple[int, str, int, str, str],
         list[tuple[Decimal, Decimal]],
     ] = {}
 
     for point in points:
         identity = (
+            point["selection_schema_version"],
+            point["selection_policy_version"],
+            point["selection_evidence_end_ms"],
             point["selection_fingerprint_sha256"],
             point["selection_artifact_sha256"],
         )
         observations = observations_by_identity.setdefault(identity, [])
-        if not point["valid"] or point["actual_chainlink"] is None:
+        if not point["valid"] or point["outcome_status"] != "available":
             continue
 
         forecast_error = point["forecast_error"]
@@ -622,11 +700,28 @@ def _build_shadow_evaluation_performance(
     return {
         "cohorts": [
             _build_shadow_evaluation_performance_cohort(
+                selection_schema_version=schema_version,
+                selection_policy_version=policy_version,
+                selection_evidence_end_ms=evidence_end_ms,
                 selection_fingerprint_sha256=fingerprint,
                 selection_artifact_sha256=artifact,
-                observations=observations_by_identity[(fingerprint, artifact)],
+                observations=observations_by_identity[
+                    (
+                        schema_version,
+                        policy_version,
+                        evidence_end_ms,
+                        fingerprint,
+                        artifact,
+                    )
+                ],
             )
-            for fingerprint, artifact in sorted(observations_by_identity)
+            for (
+                schema_version,
+                policy_version,
+                evidence_end_ms,
+                fingerprint,
+                artifact,
+            ) in sorted(observations_by_identity)
         ]
     }
 
@@ -673,7 +768,7 @@ def build_shadow_evaluation_report(
     valid_forecasts = sum(point["valid"] for point in points)
     invalid = len(points) - valid_forecasts
     scored = sum(
-        point["valid"] and point["actual_chainlink"] is not None
+        point["valid"] and point["outcome_status"] == "available"
         for point in points
     )
     valid_without_actual = valid_forecasts - scored
@@ -682,6 +777,9 @@ def build_shadow_evaluation_report(
     selection_identities = sorted(
         {
             (
+                point["selection_schema_version"],
+                point["selection_policy_version"],
+                point["selection_evidence_end_ms"],
                 point["selection_fingerprint_sha256"],
                 point["selection_artifact_sha256"],
             )
@@ -706,6 +804,11 @@ def build_shadow_evaluation_report(
             "market_end_ms": window.market_end_ms,
             "boundary": "[start_ms,end_ms)",
         },
+        "evaluation_semantics": {
+            "scored_input_max_future_skew_ms": (
+                SHADOW_EVALUATION_SCORED_INPUT_MAX_FUTURE_SKEW_MS
+            ),
+        },
         "model": {
             "model_version": spec.model_version,
             "horizon_ms": spec.horizon_ms,
@@ -713,10 +816,19 @@ def build_shadow_evaluation_report(
             "evaluation_cadence_ms": SHADOW_EVALUATION_CADENCE_MS,
             "selection_identities": [
                 {
+                    "schema_version": schema_version,
+                    "policy_version": policy_version,
+                    "evidence_end_ms": evidence_end_ms,
                     "fingerprint_sha256": fingerprint,
                     "artifact_sha256": artifact,
                 }
-                for fingerprint, artifact in selection_identities
+                for (
+                    schema_version,
+                    policy_version,
+                    evidence_end_ms,
+                    fingerprint,
+                    artifact,
+                ) in selection_identities
             ],
         },
         "coverage": {

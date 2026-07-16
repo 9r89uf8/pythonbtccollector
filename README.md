@@ -506,15 +506,26 @@ The Phase 7 backend prerequisite adds two separate PostgreSQL reporting routes:
 supported V0 `model_version`, select one five-minute window by forecast
 `target_ms`, include boundary-crossing forecasts generated in the predecessor
 market, and reject an anomalous result above 1,000 rows. Financial values remain
-exact JSON strings or `null`. Each response also derives per-market performance
-cohorts from its valid, causally scored points, separated by selection identity:
+exact JSON strings or `null`. Report schema v2 exposes the complete selection
+identity (schema, policy, evidence end, fingerprint, and artifact hash) and
+keeps generation-time forecast validity separate from target-time
+`outcome_status`. Consumers can therefore distinguish an ordinary
+`unavailable` target from `integrity_invalid` evidence and its explicit
+reasons. Each response also derives per-market performance cohorts from valid
+points with an `available` outcome, separated by the full selection identity:
 forecast MAE, median/p95/maximum absolute error, RMSE, signed bias, no-change
 baseline comparisons, skill, and paired wins/ties/losses. This calculation uses
 the already fetched rows and does not add storage or another query. The API
 reader still has no privilege on the base `shadow_signal_evaluations` table; it
 can select only the deliberately narrow
 `shadow_signal_evaluation_chart_points` view. `/markets/current/live` remains
-Redis-only and unchanged. No dashboard code is included in this repository.
+Redis-only and unchanged. Reporting also declares
+`evaluation_semantics.scored_input_max_future_skew_ms=0`: persisted live
+evaluations use zero-skew forecast inputs even when their selection provenance
+is schema v2, so those rows are not directly comparable to v2 replay evidence
+that allowed nonzero skew. This narrow causality rule does not relabel the
+selection or change the live Redis projection's activated configuration. No
+dashboard code is included in this repository.
 The Phase 7 product, chart semantics, laptop networking, and Vite build plan
 are specified in
 [`SHADOW_SIGNAL_DASHBOARD_DESIGN.md`](SHADOW_SIGNAL_DASHBOARD_DESIGN.md).
