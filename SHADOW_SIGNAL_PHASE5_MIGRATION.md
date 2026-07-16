@@ -35,6 +35,18 @@ scheduled for honest coverage, but pre-establishment cohorts mature
 make an older cohort scoreable, and skipped or already consumed cadence buckets
 are never backfilled. Schema v2 retains legacy startup behavior.
 
+For every sequenced evaluation, one publisher epoch and accepted sequence must
+retain one immutable `(source_timestamp_ms, received_ms, value)` identity.
+Identical cache repetitions are valid. A changed identity under the same
+sequence invalidates outstanding history with reason
+`chainlink_sequence_identity_mismatch` and quarantines that sequence. Neither
+disputed value is admitted to the new history epoch or accepted as target
+confirmation. Cadence cohorts remain scheduled during quarantine but are
+permanently integrity-invalid; only a newer sequence or publisher epoch
+recovers continuity. The last sequence binding is retained across a
+metadata-less read so recovery cannot redefine the same sequence. This
+invariant also applies to sequenced schema-v2 evaluations.
+
 The commands preserve the existing selection path, replay-configuration path,
 selection hash, and database password. Stop on any failed assertion. For an
 update from a pre-cohort-finalization release, stop the shadow worker before
@@ -610,6 +622,10 @@ means outstanding targets across a polling gap were deliberately left without
 an actual. Sequence-gap, regression, publisher-epoch-change, and
 sequence-metadata-loss warnings likewise identify deliberately invalidated
 outcome history.
+`shadow_signal_evaluation_chainlink_sequence_identity_mismatch` means one
+publisher epoch and sequence was observed with conflicting price/timestamp
+identities. The disputed sequence remains quarantined until a newer sequence or
+publisher epoch arrives; the warning never includes either cached value.
 `shadow_signal_evaluation_chainlink_sequence_confirmation_timeout` means a v3
 cohort reached its bounded deadline without a successful sequenced Chainlink
 read at or after the maximum target; its actual and error fields were stored as

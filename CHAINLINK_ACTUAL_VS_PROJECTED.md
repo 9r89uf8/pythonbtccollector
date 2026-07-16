@@ -45,10 +45,24 @@ accepted-event sequence. If the evaluator observes a sequence jump,
 regression, producer restart, or loss of sequence metadata, it discards outcome
 history that crosses that discontinuity. It cannot reconstruct an overwritten
 latest-cache value, so affected evidence is invalidated rather than paired with
-an older, apparently eligible actual. Schema v2 continues to support
-legacy-only startup. Schema v3 retains no target history before the first
-complete producer-epoch/accepted-sequence pair. Candidate attempts are still
-scheduled, but every pre-establishment cohort is permanently marked
+an older, apparently eligible actual.
+
+One accepted sequence within a publisher epoch must also identify exactly one
+source timestamp, receive timestamp, and price. Re-reading that identical event
+is valid continuity evidence. If the same sequence carries a different
+identity, the evaluator resets outstanding history and enters
+`chainlink_sequence_identity_mismatch` quarantine. It admits neither disputed
+identity to the new history epoch, does not let either confirm a target, and
+permanently invalidates cohorts generated during quarantine. Only a newer
+sequence or publisher epoch establishes a clean baseline. This invariant
+applies to every sequenced evaluation, including v2. The last sequence binding
+survives a metadata-less read, so metadata recovery cannot silently redefine
+that sequence.
+
+Schema v2 continues to support legacy-only startup. Schema v3 retains no target
+history before the first complete producer-epoch/accepted-sequence pair.
+Candidate attempts are still scheduled, but every pre-establishment cohort is
+permanently marked
 `chainlink_sequence_not_established` and matures `integrity_invalid` with null
 actual/error fields. A later first sequence cannot retroactively validate those
 cohorts, and already entered cadence buckets are not backfilled. Once sequence
@@ -69,9 +83,9 @@ became persistence-eligible, not the individual target time.
 For an otherwise outcome-eligible schema-v3 cohort, the maximum target alone
 does not make it eligible. A successful Chainlink cache observation carrying
 sequence metadata must occur at or after that target. Missing or malformed
-Chainlink reads defer the cohort for
-up to two poll intervals. If continuity is confirmed by the deadline, every
-target is resolved normally from retained history. If it is not, every row is
+Chainlink reads defer the cohort for up to two poll intervals. If continuity is
+confirmed by the deadline, every target is resolved normally from retained
+history. If it is not, every row is
 stored with null actual/error fields, `outcome_status=integrity_invalid`, and
 `chainlink_sequence_confirmation_timeout`. This extra confirmation gate does
 not change schema-v2 maturation.

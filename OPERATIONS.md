@@ -3290,6 +3290,18 @@ buckets are not backfilled. Schema v2 continues to allow legacy startup. This
 startup quarantine uses the existing outcome columns and requires no database
 migration.
 
+Within a publisher epoch, an accepted Chainlink sequence is immutable across
+its source timestamp, receive timestamp, and price. If the evaluator sees a
+different identity for the same sequence, it clears outcome history, records
+`chainlink_sequence_identity_mismatch`, and quarantines both disputed values.
+Attempts continue on cadence but cannot score until a newer sequence or
+publisher epoch establishes a clean baseline. The evaluator retains the last
+sequence binding through a metadata-less read so recovery cannot redefine that
+sequence. The worker logs
+`shadow_signal_evaluation_chainlink_sequence_identity_mismatch` without either
+price or raw cache contents. This uses the existing outcome columns and needs no
+schema, environment, publisher, or API change.
+
 If an already-enabled worker reports
 `shadow_signal_evaluations_check17`, disable evaluations immediately and use
 the dedicated `check17` recovery section in that migration guide. It preserves

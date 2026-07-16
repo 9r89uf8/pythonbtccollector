@@ -23,6 +23,7 @@ from price_collector.shadow_signal_evaluation import (
     OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_CONFIRMATION_TIMEOUT,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP,
+    OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_LOSS,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY,
     OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,
@@ -1049,6 +1050,434 @@ def test_sequenced_cache_repetition_and_next_event_survive_long_poll_gap():
     assert evaluator.chainlink_publisher_epoch_change_count == 0
 
 
+@pytest.mark.parametrize("next_sequence", (1, 2))
+def test_identical_event_identity_is_allowed_for_same_or_next_sequence(
+    next_sequence,
+):
+    (candidate,) = models(100)
+    evaluator = v3_scheduler((candidate,))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    repeated = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=next_sequence,
+    )
+
+    matured = evaluator.observe(
+        observation(100, (candidate,), chainlink=repeated),
+        chainlink=repeated,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink == Decimal("100")
+    assert record.outcome_status == OUTCOME_STATUS_AVAILABLE
+    assert record.outcome_invalid_reasons == ()
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 0
+    assert evaluator.history_size == 1
+
+
+@pytest.mark.parametrize(
+    ("conflicting_value", "conflicting_source_ms", "conflicting_received_ms"),
+    (
+        ("100.25", 80, 90),
+        ("100", 81, 90),
+        ("100", 80, 91),
+    ),
+)
+def test_same_sequence_identity_mismatch_invalidates_complete_v3_cohort(
+    conflicting_value,
+    conflicting_source_ms,
+    conflicting_received_ms,
+):
+    short_model, long_model = models(100, 200)
+    evaluator = v3_scheduler((short_model, long_model))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (short_model, long_model), chainlink=initial),
+        chainlink=initial,
+    )
+    accepted = price(
+        "100",
+        90,
+        80,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(90, (short_model, long_model), chainlink=accepted),
+        chainlink=accepted,
+    )
+    conflicting = price(
+        conflicting_value,
+        conflicting_received_ms,
+        conflicting_source_ms,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    assert evaluator.observe(
+        observation(150, (short_model, long_model), chainlink=conflicting),
+        chainlink=conflicting,
+    ) == ()
+
+    matured = evaluator.observe(
+        observation(200, (short_model, long_model), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+
+    cohort = [record for record in matured if record.generated_ms == 0]
+    assert [record.model_version for record in cohort] == [
+        short_model.version,
+        long_model.version,
+    ]
+    assert all(record.actual_chainlink is None for record in cohort)
+    assert all(
+        record.actual_chainlink_source_timestamp_ms is None
+        for record in cohort
+    )
+    assert all(record.actual_chainlink_received_ms is None for record in cohort)
+    assert all(
+        record.actual_chainlink_age_at_target_ms is None
+        for record in cohort
+    )
+    assert all(record.forecast_error is None for record in cohort)
+    assert all(record.baseline_error is None for record in cohort)
+    assert all(
+        record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+        for record in cohort
+    )
+    assert all(
+        record.outcome_invalid_reasons
+        == (OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH,)
+        for record in cohort
+    )
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+    assert evaluator.chainlink_sequence_gap_count == 0
+    assert evaluator.chainlink_sequence_regression_count == 0
+    assert evaluator.chainlink_publisher_epoch_change_count == 0
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 0
+    assert evaluator.history_size == 0
+
+
+def test_same_sequence_identity_mismatch_at_max_target_cannot_confirm():
+    (candidate,) = models(100)
+    evaluator = v3_scheduler((candidate,))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    conflicting = price(
+        "100.25",
+        100,
+        100,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+
+    matured = evaluator.observe(
+        observation(100, (candidate,), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink is None
+    assert record.forecast_error is None
+    assert record.baseline_error is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH,
+    )
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+    assert evaluator.chainlink_sequence_confirmation_timeout_count == 0
+
+
+def test_sequence_identity_mismatch_quarantines_until_newer_sequence():
+    (candidate,) = models(100)
+    evaluator = v3_scheduler((candidate,), cadence_ms=100)
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    conflicting = price(
+        "100",
+        50,
+        1,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(50, (candidate,), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+    conflict_matured = evaluator.observe(
+        observation(100, (candidate,), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+
+    pre_conflict_record = next(
+        record for record in conflict_matured if record.generated_ms == 0
+    )
+    assert pre_conflict_record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH,
+    )
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+    assert evaluator.history_size == 0
+
+    # Reverting to the other disputed identity cannot end quarantine.
+    assert evaluator.observe(
+        observation(150, (candidate,), chainlink=initial),
+        chainlink=initial,
+    ) == ()
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+    assert evaluator.history_size == 0
+
+    recovered = price(
+        "100",
+        200,
+        200,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    recovery_matured = evaluator.observe(
+        observation(200, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+
+    quarantined_record = next(
+        record for record in recovery_matured if record.generated_ms == 100
+    )
+    assert quarantined_record.actual_chainlink is None
+    assert quarantined_record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert quarantined_record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH,
+    )
+    assert evaluator.history_size == 1
+
+    matured = evaluator.observe(
+        observation(300, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+    recovered_record = next(
+        record for record in matured if record.generated_ms == 200
+    )
+    assert recovered_record.actual_chainlink == Decimal("100")
+    assert recovered_record.outcome_status == OUTCOME_STATUS_AVAILABLE
+    assert recovered_record.outcome_invalid_reasons == ()
+
+
+def test_metadata_loss_cannot_escape_sequence_identity_quarantine():
+    (candidate,) = models(1_000)
+    evaluator = v3_scheduler((candidate,))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    conflicting = price(
+        "100",
+        100,
+        1,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(100, (candidate,), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+    legacy = price("100", 200, 200)
+    evaluator.observe(
+        observation(200, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+
+    evaluator.observe(
+        observation(300, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+    assert evaluator.chainlink_sequence_metadata_loss_count == 1
+    assert evaluator.history_size == 0
+
+    recovered = price(
+        "100",
+        400,
+        400,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(400, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+
+    assert evaluator.history_size == 1
+
+
+def test_metadata_loss_preserves_identity_for_first_mismatch_detection():
+    (candidate,) = models(1_000)
+    evaluator = v3_scheduler((candidate,))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    legacy = price("100", 100, 100)
+    evaluator.observe(
+        observation(100, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+    conflicting = price(
+        "101",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(200, (candidate,), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+    evaluator.observe(
+        observation(300, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+    assert evaluator.chainlink_sequence_metadata_loss_count == 1
+    assert evaluator.history_size == 0
+
+    recovered = price(
+        "102",
+        400,
+        400,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=2,
+    )
+    evaluator.observe(
+        observation(400, (candidate,), chainlink=recovered),
+        chainlink=recovered,
+    )
+
+    assert evaluator.history_size == 1
+
+
+def test_metadata_loss_allows_exact_sequence_identity_recovery():
+    (candidate,) = models(1_000)
+    evaluator = v3_scheduler((candidate,))
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    legacy = price("100", 100, 100)
+    evaluator.observe(
+        observation(100, (candidate,), chainlink=legacy),
+        chainlink=legacy,
+    )
+    evaluator.observe(
+        observation(200, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 0
+    assert evaluator.chainlink_sequence_metadata_loss_count == 1
+    assert evaluator.history_size == 1
+
+
+def test_same_sequence_identity_mismatch_is_enforced_for_v2():
+    (candidate,) = models(100)
+    evaluator = scheduler((candidate,), max_observation_gap_ms=200)
+    publisher_epoch = "8b3f42da-8927-48f8-9c90-4f2ce84100d8"
+    initial = price(
+        "100",
+        0,
+        0,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+    evaluator.observe(
+        observation(0, (candidate,), chainlink=initial),
+        chainlink=initial,
+    )
+    conflicting = price(
+        "100.25",
+        100,
+        100,
+        publisher_epoch=publisher_epoch,
+        accepted_event_sequence=1,
+    )
+
+    matured = evaluator.observe(
+        observation(100, (candidate,), chainlink=conflicting),
+        chainlink=conflicting,
+    )
+
+    record = next(record for record in matured if record.generated_ms == 0)
+    assert record.actual_chainlink is None
+    assert record.outcome_status == OUTCOME_STATUS_INTEGRITY_INVALID
+    assert record.outcome_invalid_reasons == (
+        OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH,
+    )
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 1
+
+
 @pytest.mark.parametrize(
     (
         "first_epoch",
@@ -1130,6 +1559,7 @@ def test_chainlink_delivery_discontinuity_invalidates_old_actual_history(
     assert record.outcome_invalid_reasons == (outcome_reason,)
     assert evaluator.history_size == 1
     assert getattr(evaluator, counter_name) == 1
+    assert evaluator.chainlink_sequence_identity_mismatch_count == 0
     assert evaluator.observation_gap_count == 0
 
 

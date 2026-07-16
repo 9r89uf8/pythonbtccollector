@@ -51,6 +51,9 @@ OUTCOME_REASON_CHAINLINK_RECEIVED_TIME_REGRESSION = (
 )
 OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP = "chainlink_sequence_gap"
 OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION = "chainlink_sequence_regression"
+OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH = (
+    "chainlink_sequence_identity_mismatch"
+)
 OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE = (
     "chainlink_publisher_epoch_change"
 )
@@ -571,6 +574,9 @@ class ShadowEvaluationScheduler:
         self._chainlink_received_watermark: Optional[int] = None
         self._last_chainlink_publisher_epoch: Optional[str] = None
         self._last_chainlink_accepted_event_sequence: Optional[int] = None
+        self._last_chainlink_sequence_identity: Optional[
+            tuple[Optional[int], int, Decimal]
+        ] = None
         self._last_sequence_continuity_observed_ms: Optional[int] = None
         self._history_epoch = 0
         self._outcome_history_resets: Deque[tuple[int, str]] = deque()
@@ -578,10 +584,12 @@ class ShadowEvaluationScheduler:
         self._observation_gap_count = 0
         self._chainlink_sequence_gap_count = 0
         self._chainlink_sequence_regression_count = 0
+        self._chainlink_sequence_identity_mismatch_count = 0
         self._chainlink_publisher_epoch_change_count = 0
         self._chainlink_sequence_metadata_loss_count = 0
         self._chainlink_sequence_confirmation_timeout_count = 0
         self._chainlink_sequence_metadata_lost = False
+        self._chainlink_sequence_identity_conflicted = False
         self._chainlink_sequence_ever_established = False
         self._chainlink_startup_legacy_observed = False
 
@@ -611,6 +619,10 @@ class ShadowEvaluationScheduler:
     @property
     def chainlink_sequence_regression_count(self) -> int:
         return self._chainlink_sequence_regression_count
+
+    @property
+    def chainlink_sequence_identity_mismatch_count(self) -> int:
+        return self._chainlink_sequence_identity_mismatch_count
 
     @property
     def chainlink_publisher_epoch_change_count(self) -> int:
@@ -685,6 +697,7 @@ class ShadowEvaluationScheduler:
             chainlink is not None
             and chainlink.publisher_epoch is not None
             and not self._chainlink_sequence_metadata_lost
+            and not self._chainlink_sequence_identity_conflicted
         ):
             # Record the worker time of a successfully decoded sequenced
             # cache read. Any recognized reset path clears this watermark.
@@ -696,9 +709,11 @@ class ShadowEvaluationScheduler:
         if (
             self._chainlink_sequence_metadata_lost
             or self._v3_sequence_not_established()
+            or self._chainlink_sequence_identity_conflicted
         ):
             # Keep scheduling attempts for coverage, but never admit an
-            # unsequenced v3 startup value into causal target history.
+            # unsequenced v3 startup value or a disputed sequence identity
+            # into causal target history.
             chainlink_for_outcome = None
         self._ingest_chainlink(chainlink_for_outcome)
         self._schedule_current_bucket(observation)
@@ -711,6 +726,16 @@ class ShadowEvaluationScheduler:
             self.provenance.selection_schema_version >= 3
             and not self._chainlink_sequence_ever_established
         )
+
+    def _generation_outcome_invalid_reasons(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self._v3_sequence_not_established():
+            reasons.append(OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED)
+        if self._chainlink_sequence_identity_conflicted:
+            reasons.append(
+                OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH
+            )
+        return tuple(reasons)
 
     def _reset_outcome_history(
         self,
@@ -745,8 +770,10 @@ class ShadowEvaluationScheduler:
                     reset_received_watermark=True,
                 )
             self._chainlink_sequence_metadata_lost = True
-            self._last_chainlink_publisher_epoch = None
-            self._last_chainlink_accepted_event_sequence = None
+            # Metadata loss invalidates outcome continuity, but it must not
+            # erase the last immutable sequence binding. Otherwise the same
+            # epoch/sequence could return with changed event data and be
+            # mistaken for an ordinary metadata recovery.
             return True
         publisher_epoch = chainlink.publisher_epoch
         sequence = chainlink.accepted_event_sequence
@@ -754,6 +781,7 @@ class ShadowEvaluationScheduler:
 
         previous_epoch = self._last_chainlink_publisher_epoch
         previous_sequence = self._last_chainlink_accepted_event_sequence
+        previous_identity = self._last_chainlink_sequence_identity
         if previous_epoch is None:
             recovered_from_metadata_loss = self._chainlink_sequence_metadata_lost
             transitioned_from_startup_legacy = (
@@ -772,14 +800,49 @@ class ShadowEvaluationScheduler:
                     reset_received_watermark=True,
                 )
             self._chainlink_sequence_metadata_lost = False
+            self._chainlink_sequence_identity_conflicted = False
             self._chainlink_sequence_ever_established = True
             self._chainlink_startup_legacy_observed = False
             self._last_chainlink_publisher_epoch = publisher_epoch
             self._last_chainlink_accepted_event_sequence = sequence
+            self._last_chainlink_sequence_identity = chainlink.identity
             return (
                 recovered_from_metadata_loss
                 or transitioned_from_startup_legacy
             )
+
+        assert previous_sequence is not None
+        assert previous_identity is not None
+        recovered_from_metadata_loss = self._chainlink_sequence_metadata_lost
+
+        if self._chainlink_sequence_identity_conflicted:
+            recovery_reason: Optional[str] = None
+            if publisher_epoch != previous_epoch:
+                self._chainlink_publisher_epoch_change_count += 1
+                recovery_reason = (
+                    OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE
+                )
+            elif sequence > previous_sequence:
+                if sequence > previous_sequence + 1:
+                    self._chainlink_sequence_gap_count += 1
+                    recovery_reason = OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP
+            else:
+                # Neither disputed identity can re-establish what this
+                # sequence meant. Stay quarantined until the publisher moves
+                # forward or starts a new epoch.
+                return False
+
+            if recovery_reason is not None:
+                self._reset_outcome_history(
+                    reason=recovery_reason,
+                    reset_received_watermark=True,
+                )
+            self._chainlink_sequence_metadata_lost = False
+            self._chainlink_sequence_identity_conflicted = False
+            self._last_chainlink_publisher_epoch = publisher_epoch
+            self._last_chainlink_accepted_event_sequence = sequence
+            self._last_chainlink_sequence_identity = chainlink.identity
+            return recovery_reason is not None
 
         discontinuity_reason: Optional[str] = None
         if publisher_epoch != previous_epoch:
@@ -788,24 +851,40 @@ class ShadowEvaluationScheduler:
                 OUTCOME_REASON_CHAINLINK_PUBLISHER_EPOCH_CHANGE
             )
         else:
-            assert previous_sequence is not None
             if sequence < previous_sequence:
                 self._chainlink_sequence_regression_count += 1
                 discontinuity_reason = OUTCOME_REASON_CHAINLINK_SEQUENCE_REGRESSION
+            elif (
+                sequence == previous_sequence
+                and chainlink.identity != previous_identity
+            ):
+                self._chainlink_sequence_identity_mismatch_count += 1
+                self._chainlink_sequence_identity_conflicted = True
+                discontinuity_reason = (
+                    OUTCOME_REASON_CHAINLINK_SEQUENCE_IDENTITY_MISMATCH
+                )
             elif sequence > previous_sequence + 1:
                 self._chainlink_sequence_gap_count += 1
                 discontinuity_reason = OUTCOME_REASON_CHAINLINK_SEQUENCE_GAP
+            elif recovered_from_metadata_loss:
+                discontinuity_reason = (
+                    OUTCOME_REASON_CHAINLINK_SEQUENCE_METADATA_RECOVERY
+                )
 
         if discontinuity_reason is not None:
-            # The current Redis value is trustworthy as a new starting point,
-            # but outstanding forecasts must not use history that crossed a
-            # proven overwrite, producer restart, or sequence regression.
+            # Outstanding forecasts must not use history that crossed a proven
+            # overwrite, producer restart, sequence regression, or immutable
+            # sequence-identity violation. A conflicted sequence remains
+            # quarantined instead of seeding the fresh history epoch.
             self._reset_outcome_history(
                 reason=discontinuity_reason,
                 reset_received_watermark=True,
             )
-        self._last_chainlink_publisher_epoch = publisher_epoch
-        self._last_chainlink_accepted_event_sequence = sequence
+        if not self._chainlink_sequence_identity_conflicted:
+            self._chainlink_sequence_metadata_lost = False
+            self._last_chainlink_publisher_epoch = publisher_epoch
+            self._last_chainlink_accepted_event_sequence = sequence
+            self._last_chainlink_sequence_identity = chainlink.identity
         return discontinuity_reason is not None
 
     def _ingest_chainlink(self, chainlink: Optional[ObservedPrice]) -> None:
@@ -883,12 +962,10 @@ class ShadowEvaluationScheduler:
             sequence=self._sequence,
             history_epoch=self._history_epoch,
             evaluations=tuple(pending_evaluations),
+            # Capture quarantine at generation so later recovery cannot
+            # retroactively make the cohort scoreable.
             generation_outcome_invalid_reasons=(
-                # Capture this at generation so later sequence establishment
-                # cannot retroactively make the cohort scoreable.
-                (OUTCOME_REASON_CHAINLINK_SEQUENCE_NOT_ESTABLISHED,)
-                if self._v3_sequence_not_established()
-                else ()
+                self._generation_outcome_invalid_reasons()
             ),
         )
         heapq.heappush(

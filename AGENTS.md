@@ -180,6 +180,13 @@ The corresponding Python entry points are:
   stamp. If successful observations are separated by more than two configured
   poll intervals, invalidate outstanding actuals across that gap rather than
   pretending the latest-value cache preserves overwritten states.
+- Treat one Chainlink publisher epoch and accepted-event sequence as one
+  immutable `(source_timestamp_ms, received_ms, value)` identity. A different
+  identity under the same sequence invalidates outstanding cohorts and
+  quarantines both disputed values. Continue scheduling attempts as
+  integrity-invalid during quarantine; recover only on a newer sequence or
+  publisher epoch. Preserve the last immutable sequence binding across a
+  metadata-less read so recovery cannot redefine the same sequence.
 - The live evaluator is exact over cache states returned to its successful
   100 ms observations. Redis is latest-value-only, so an intermediate state
   overwritten entirely between polls is not reconstructable; keep raw replay

@@ -341,6 +341,9 @@ class ShadowSignalWorker:
                 "sequence_regression": (
                     scheduler.chainlink_sequence_regression_count
                 ),
+                "sequence_identity_mismatch": (
+                    scheduler.chainlink_sequence_identity_mismatch_count
+                ),
                 "publisher_epoch_change": (
                     scheduler.chainlink_publisher_epoch_change_count
                 ),
@@ -376,6 +379,14 @@ class ShadowSignalWorker:
                     "sequence_regression",
                     "shadow_signal_evaluation_chainlink_sequence_regression",
                     scheduler.chainlink_sequence_regression_count,
+                ),
+                (
+                    "sequence_identity_mismatch",
+                    (
+                        "shadow_signal_evaluation_chainlink_"
+                        "sequence_identity_mismatch"
+                    ),
+                    scheduler.chainlink_sequence_identity_mismatch_count,
                 ),
                 (
                     "publisher_epoch_change",

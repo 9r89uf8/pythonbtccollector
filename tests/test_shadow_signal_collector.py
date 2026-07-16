@@ -563,6 +563,7 @@ class FakeEvaluationScheduler:
         self.observation_gap_count = 0
         self.chainlink_sequence_gap_count = 0
         self.chainlink_sequence_regression_count = 0
+        self.chainlink_sequence_identity_mismatch_count = 0
         self.chainlink_publisher_epoch_change_count = 0
         self.chainlink_sequence_metadata_loss_count = 0
         self.chainlink_sequence_confirmation_timeout_count = 0
@@ -660,6 +661,36 @@ def test_worker_logs_sequence_discontinuity_counter_without_payload(caplog):
     run_once(worker, BASE_MS)
 
     assert "shadow_signal_evaluation_chainlink_sequence_gap" in caplog.text
+    assert "54321.98765" not in caplog.text
+
+
+def test_worker_logs_sequence_identity_mismatch_without_payload(caplog):
+    class SequenceIdentityMismatchScheduler(FakeEvaluationScheduler):
+        def observe(self, observation, *, chainlink):
+            matured = super().observe(observation, chainlink=chainlink)
+            self.chainlink_sequence_identity_mismatch_count += 1
+            return matured
+
+    redis = FakeRedis()
+    scheduler = SequenceIdentityMismatchScheduler()
+    writer = FakeEvaluationWriter()
+    worker = collector.ShadowSignalWorker(
+        live_cache=LiveCache(redis_client=redis),
+        activated=activated_selection(),
+        ttl_ms=2_000,
+        evaluation_scheduler=scheduler,
+        evaluation_writer=writer,
+    )
+    set_price(redis, FUTURES_LIVE_KEY, "60000", received_ms=BASE_MS)
+    set_price(redis, CHAINLINK_LIVE_KEY, "54321.98765", received_ms=BASE_MS)
+
+    caplog.set_level("WARNING", logger=collector.LOGGER.name)
+    run_once(worker, BASE_MS)
+
+    assert (
+        "shadow_signal_evaluation_chainlink_sequence_identity_mismatch"
+        in caplog.text
+    )
     assert "54321.98765" not in caplog.text
 
 
