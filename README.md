@@ -434,7 +434,10 @@ during an outage, whole oldest cohorts are dropped rather than individual
 candidate rows;
 a rate-limited warning is emitted on the first and every hundredth dropped
 cohort, and Redis signal generation continues. Batching, retry, permanent-error
-isolation, deferral, and retention also preserve whole cohorts. Transiently
+isolation, deferral, and retention also preserve whole cohorts. The database
+backend receives typed cohorts and returns exact, disjoint persisted, rejected,
+and deferred cohort identities; the writer fails and retries the complete batch
+if any identity is missing, unknown, or classified more than once. Transiently
 failed batches are requeued ahead of newer cohorts and retried safely because
 inserts are idempotent on
 `(model_version, generated_ms, horizon_ms)`, and the default derived-evidence

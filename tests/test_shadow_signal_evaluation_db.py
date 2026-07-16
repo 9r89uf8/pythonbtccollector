@@ -2,18 +2,27 @@ import asyncio
 from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 import price_collector.db as db
-from price_collector.shadow_signal_evaluation import ShadowEvaluationRecord
+from price_collector.shadow_signal_evaluation import (
+    ShadowEvaluationCohort,
+    ShadowEvaluationRecord,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def evaluation_record(**overrides):
+    generated_ms = overrides.get("generated_ms", 10_000)
+    horizon_ms = overrides.get("horizon_ms", 3_000)
+    target_ms = overrides.get("target_ms", generated_ms + horizon_ms)
+    market_start_ms = overrides.get("market_start_ms", 0)
+    market_end_ms = overrides.get("market_end_ms", 300_000)
+    pending_move = Decimal("1.0")
+    chainlink_at_forecast = Decimal("62000.0")
     values = {
         "selection_schema_version": 2,
         "selection_policy_version": "chronological_holdout_v2",
@@ -22,10 +31,10 @@ def evaluation_record(**overrides):
         "selection_evidence_end_ms": 5_000,
         "model_version": "catchup_ratio_l3000_b100",
         "beta": Decimal("1"),
-        "generated_ms": 10_000,
-        "target_ms": 13_000,
-        "matured_ms": 13_100,
-        "horizon_ms": 3_000,
+        "generated_ms": generated_ms,
+        "target_ms": target_ms,
+        "matured_ms": target_ms + 100,
+        "horizon_ms": horizon_ms,
         "valid": True,
         "status": "valid",
         "invalid_reasons": (),
@@ -33,36 +42,47 @@ def evaluation_record(**overrides):
         "outcome_status": "available",
         "outcome_invalid_reasons": (),
         "market_id": 0,
-        "market_start_ms": 0,
-        "market_end_ms": 300_000,
-        "ms_to_market_end": 290_000,
-        "full_horizon_before_market_end": True,
-        "chainlink_at_forecast": Decimal("62000.0"),
-        "chainlink_at_forecast_source_timestamp_ms": 9_000,
-        "chainlink_at_forecast_received_ms": 9_950,
+        "market_start_ms": market_start_ms,
+        "market_end_ms": market_end_ms,
+        "ms_to_market_end": market_end_ms - generated_ms,
+        "full_horizon_before_market_end": target_ms <= market_end_ms,
+        "chainlink_at_forecast": chainlink_at_forecast,
+        "chainlink_at_forecast_source_timestamp_ms": max(0, generated_ms - 1_000),
+        "chainlink_at_forecast_received_ms": max(0, generated_ms - 50),
         "projected_chainlink": Decimal("62001.0"),
-        "pending_move": Decimal("1.0"),
-        "pending_move_bps": Decimal("0.161290322580645161"),
+        "pending_move": pending_move,
+        "pending_move_bps": (
+            pending_move / chainlink_at_forecast * Decimal("10000")
+        ),
         "direction": "up",
         "futures_now": Decimal("62101.0"),
-        "futures_now_source_timestamp_ms": 9_900,
-        "futures_now_received_ms": 9_980,
+        "futures_now_source_timestamp_ms": max(0, generated_ms - 100),
+        "futures_now_received_ms": max(0, generated_ms - 20),
         "futures_reference": Decimal("62100.0"),
-        "futures_reference_source_timestamp_ms": 6_900,
-        "futures_reference_received_ms": 6_980,
-        "futures_reference_target_ms": 6_950,
+        "futures_reference_source_timestamp_ms": max(
+            0,
+            generated_ms - horizon_ms - 100,
+        ),
+        "futures_reference_received_ms": max(
+            0,
+            generated_ms - horizon_ms - 20,
+        ),
+        "futures_reference_target_ms": max(
+            0,
+            generated_ms - horizon_ms - 50,
+        ),
         "futures_reference_gap_ms": 30,
         "futures_received_age_ms": 20,
         "chainlink_received_age_ms": 50,
         "actual_chainlink": Decimal("62000.5"),
-        "actual_chainlink_source_timestamp_ms": 12_000,
-        "actual_chainlink_received_ms": 12_950,
+        "actual_chainlink_source_timestamp_ms": max(0, target_ms - 1_000),
+        "actual_chainlink_received_ms": target_ms - 50,
         "actual_chainlink_age_at_target_ms": 50,
         "forecast_error": Decimal("0.5"),
         "baseline_error": Decimal("-0.5"),
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return ShadowEvaluationRecord(**values)
 
 
 def evaluation_cohort(generated_ms):
@@ -86,7 +106,15 @@ def evaluation_cohort(generated_ms):
                 ),
             )
         )
-    return tuple(cohort)
+    return ShadowEvaluationCohort(tuple(cohort))
+
+
+def singleton_cohort(record):
+    return ShadowEvaluationCohort((record,))
+
+
+def cohort_ids(cohorts):
+    return frozenset(cohort.identity for cohort in cohorts)
 
 
 class FakeAcquire:
@@ -249,10 +277,11 @@ def test_database_column_contract_matches_typed_evaluation_record():
 
 
 def test_shadow_evaluation_row_rejects_float_financial_values():
+    record = evaluation_record()
+    object.__setattr__(record, "pending_move_bps", 0.1)
+
     with pytest.raises(TypeError, match="pending_move_bps must be Decimal"):
-        db.shadow_signal_evaluation_row(
-            evaluation_record(pending_move_bps=0.1)
-        )
+        db.shadow_signal_evaluation_row(record)
 
 
 def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
@@ -270,8 +299,9 @@ def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
         connect_timeout_seconds=2,
     )
     record = evaluation_record()
+    cohort = singleton_cohort(record)
 
-    result = asyncio.run(backend.write_evaluations([record]))
+    result = asyncio.run(backend.write_evaluation_cohorts([cohort]))
 
     assert pool.acquire_calls == [{"timeout": 2}]
     assert len(connection.calls) == 1
@@ -282,21 +312,46 @@ def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
         in query
     )
     assert rows == (db.shadow_signal_evaluation_row(record),)
-    assert result.persisted_count == 1
-    assert result.rejected_count == 0
-    assert result.deferred_records == ()
+    assert result.persisted_cohort_ids == frozenset((cohort.identity,))
+    assert result.rejected_cohort_ids == frozenset()
+    assert result.deferred_cohort_ids == frozenset()
 
 
 def test_shadow_evaluation_backend_skips_empty_batches_without_db_access():
     pool = FakePool(None)
     backend = db.AsyncpgShadowEvaluationBackend(pool)
 
-    result = asyncio.run(backend.write_evaluations([]))
+    result = asyncio.run(backend.write_evaluation_cohorts([]))
 
     assert pool.acquire_calls == []
-    assert result.persisted_count == 0
-    assert result.rejected_count == 0
-    assert result.deferred_records == ()
+    assert result.persisted_cohort_ids == frozenset()
+    assert result.rejected_cohort_ids == frozenset()
+    assert result.deferred_cohort_ids == frozenset()
+
+
+def test_shadow_evaluation_backend_rejects_non_cohort_input_before_db_access():
+    pool = FakePool(None)
+    backend = db.AsyncpgShadowEvaluationBackend(pool)
+
+    with pytest.raises(TypeError, match="requires evaluation cohorts"):
+        asyncio.run(
+            backend.write_evaluation_cohorts([evaluation_record()])
+        )
+
+    assert pool.acquire_calls == []
+
+
+def test_shadow_evaluation_backend_rejects_duplicate_cohort_identities():
+    pool = FakePool(None)
+    backend = db.AsyncpgShadowEvaluationBackend(pool)
+    cohort = singleton_cohort(evaluation_record())
+
+    with pytest.raises(ValueError, match="duplicate cohort identities"):
+        asyncio.run(
+            backend.write_evaluation_cohorts((cohort, cohort))
+        )
+
+    assert pool.acquire_calls == []
 
 
 @pytest.mark.parametrize(
@@ -338,17 +393,19 @@ def test_shadow_evaluation_backend_isolates_permanently_rejected_row(
     )
     connection = FakeConnection()
     backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
-    records = [
-        evaluation_record(generated_ms=10_000),
-        evaluation_record(generated_ms=20_000),
-        evaluation_record(generated_ms=30_000),
+    cohorts = [
+        singleton_cohort(evaluation_record(generated_ms=10_000)),
+        singleton_cohort(evaluation_record(generated_ms=20_000)),
+        singleton_cohort(evaluation_record(generated_ms=30_000)),
     ]
 
-    result = asyncio.run(backend.write_evaluations(records))
+    result = asyncio.run(backend.write_evaluation_cohorts(cohorts))
 
-    assert result.persisted_count == 2
-    assert result.rejected_count == 1
-    assert result.deferred_records == ()
+    assert result.persisted_cohort_ids == cohort_ids(
+        (cohorts[0], cohorts[2])
+    )
+    assert result.rejected_cohort_ids == cohort_ids((cohorts[1],))
+    assert result.deferred_cohort_ids == frozenset()
     assert connection.persisted_generated_ms == [10_000, 30_000]
     assert connection.calls == [
         [10_000, 20_000, 30_000],
@@ -403,13 +460,15 @@ def test_shadow_evaluation_backend_rejects_poison_only_at_cohort_boundary(
     good = evaluation_cohort(10_000)
     poison = evaluation_cohort(poison_generated_ms)
 
-    result = asyncio.run(backend.write_evaluations((*good, *poison)))
+    result = asyncio.run(
+        backend.write_evaluation_cohorts((good, poison))
+    )
 
-    assert result.persisted_count == 3
-    assert result.rejected_count == 3
-    assert result.deferred_records == ()
+    assert result.persisted_cohort_ids == cohort_ids((good,))
+    assert result.rejected_cohort_ids == cohort_ids((poison,))
+    assert result.deferred_cohort_ids == frozenset()
     assert connection.persisted == [
-        (record.generated_ms, record.model_version) for record in good
+        (record.generated_ms, record.model_version) for record in good.records
     ]
     poison_calls = [
         call
@@ -417,7 +476,8 @@ def test_shadow_evaluation_backend_rejects_poison_only_at_cohort_boundary(
         if any(generated_ms == poison_generated_ms for generated_ms, _ in call)
     ]
     assert poison_calls[-1] == [
-        (record.generated_ms, record.model_version) for record in poison
+        (record.generated_ms, record.model_version)
+        for record in poison.records
     ]
     assert not any(len(call) in (1, 2) for call in poison_calls)
     assert backend._permanent_rejections_total == 3
@@ -449,17 +509,17 @@ def test_shadow_evaluation_backend_bounds_all_poison_isolation(
     )
     connection = FakeConnection()
     backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
-    records = [
-        evaluation_record(generated_ms=index)
+    cohorts = [
+        singleton_cohort(evaluation_record(generated_ms=index))
         for index in range(500)
     ]
 
-    result = asyncio.run(backend.write_evaluations(records))
+    result = asyncio.run(backend.write_evaluation_cohorts(cohorts))
 
     events = [getattr(record, "event", None) for record in caplog.records]
-    assert result.persisted_count == 0
-    assert result.rejected_count == 8
-    assert len(result.deferred_records) == 492
+    assert result.persisted_cohort_ids == frozenset()
+    assert result.rejected_cohort_ids == cohort_ids(cohorts[:8])
+    assert result.deferred_cohort_ids == cohort_ids(cohorts[8:])
     assert connection.calls < 40
     assert events.count("shadow_evaluation_record_rejected") == 1
     assert events.count(
@@ -492,17 +552,12 @@ def test_shadow_evaluation_backend_defers_only_complete_cohorts_at_limit(
     ]
 
     result = asyncio.run(
-        backend.write_evaluations(
-            tuple(record for cohort in cohorts for record in cohort)
-        )
+        backend.write_evaluation_cohorts(cohorts)
     )
 
-    assert result.persisted_count == 0
-    assert result.rejected_count == 8 * 3
-    assert result.deferred_records == tuple(
-        record for cohort in cohorts[8:] for record in cohort
-    )
-    assert len(result.deferred_records) == 2 * 3
+    assert result.persisted_cohort_ids == frozenset()
+    assert result.rejected_cohort_ids == cohort_ids(cohorts[:8])
+    assert result.deferred_cohort_ids == cohort_ids(cohorts[8:])
 
 
 def test_shadow_evaluation_backend_defers_unprobed_good_rows(
@@ -533,21 +588,30 @@ def test_shadow_evaluation_backend_defers_unprobed_good_rows(
     )
     connection = FakeConnection()
     backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
-    records = [evaluation_record(generated_ms=index) for index in range(16)]
+    cohorts = [
+        singleton_cohort(evaluation_record(generated_ms=index))
+        for index in range(16)
+    ]
 
-    first = asyncio.run(backend.write_evaluations(records))
+    first = asyncio.run(backend.write_evaluation_cohorts(cohorts))
+    deferred = tuple(
+        cohort
+        for cohort in cohorts
+        if cohort.identity in first.deferred_cohort_ids
+    )
     second = asyncio.run(
-        backend.write_evaluations(first.deferred_records)
+        backend.write_evaluation_cohorts(deferred)
     )
 
-    assert first.persisted_count == 0
-    assert first.rejected_count == 8
-    assert [
-        record.generated_ms for record in first.deferred_records
-    ] == list(range(8, 16))
-    assert second.persisted_count == 8
-    assert second.rejected_count == 0
-    assert second.deferred_records == ()
+    assert first.persisted_cohort_ids == frozenset()
+    assert first.rejected_cohort_ids == cohort_ids(cohorts[:8])
+    assert first.deferred_cohort_ids == cohort_ids(cohorts[8:])
+    assert tuple(cohort.identity.generated_ms for cohort in deferred) == tuple(
+        range(8, 16)
+    )
+    assert second.persisted_cohort_ids == cohort_ids(cohorts[8:])
+    assert second.rejected_cohort_ids == frozenset()
+    assert second.deferred_cohort_ids == frozenset()
     assert connection.persisted_generated_ms == list(range(8, 16))
 
 
@@ -610,14 +674,14 @@ def test_shadow_evaluation_isolation_rolls_back_before_terminal_error(
     )
     connection = FakeConnection()
     backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
-    records = [
-        evaluation_record(generated_ms=10_000),
-        evaluation_record(generated_ms=20_000),
-        evaluation_record(generated_ms=30_000),
+    cohorts = [
+        singleton_cohort(evaluation_record(generated_ms=10_000)),
+        singleton_cohort(evaluation_record(generated_ms=20_000)),
+        singleton_cohort(evaluation_record(generated_ms=30_000)),
     ]
 
     with pytest.raises(type(terminal_error), match=message):
-        asyncio.run(backend.write_evaluations(records))
+        asyncio.run(backend.write_evaluation_cohorts(cohorts))
 
     assert connection.frames == []
     assert connection.committed == []
@@ -635,9 +699,10 @@ def test_shadow_evaluation_backend_does_not_retry_ambiguous_insert_failure():
 
     connection = FakeConnection()
     backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    cohort = singleton_cohort(evaluation_record())
 
     with pytest.raises(RuntimeError, match="ambiguous insert failure"):
-        asyncio.run(backend.write_evaluations([evaluation_record()]))
+        asyncio.run(backend.write_evaluation_cohorts([cohort]))
 
     assert connection.calls == 1
 
@@ -653,15 +718,14 @@ def test_shadow_evaluation_backend_does_not_bisect_transient_batch_failure():
 
     connection = FakeConnection()
     backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+    cohorts = [
+        singleton_cohort(evaluation_record(generated_ms=10_000)),
+        singleton_cohort(evaluation_record(generated_ms=20_000)),
+    ]
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         asyncio.run(
-            backend.write_evaluations(
-                [
-                    evaluation_record(generated_ms=10_000),
-                    evaluation_record(generated_ms=20_000),
-                ]
-            )
+            backend.write_evaluation_cohorts(cohorts)
         )
 
     assert connection.calls == 1

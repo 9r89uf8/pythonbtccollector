@@ -34,9 +34,9 @@ from price_collector.shadow_signal_evaluation import (
     OUTCOME_STATUS_INTEGRITY_INVALID,
     OUTCOME_STATUS_UNAVAILABLE,
     ShadowEvaluationCohort,
+    ShadowEvaluationCohortWriteResult,
     ShadowEvaluationProvenance,
     ShadowEvaluationScheduler,
-    ShadowEvaluationWriteResult,
     ShadowEvaluationWriterRuntime,
 )
 
@@ -2011,32 +2011,37 @@ class Backend:
         fail=False,
         hang=False,
         cleanup_error=False,
-        persisted_count=None,
+        persisted_cohort_count=None,
     ):
         self.fail = fail
         self.hang = hang
         self.cleanup_error = cleanup_error
-        self.persisted_count = persisted_count
+        self.persisted_cohort_count = persisted_cohort_count
         self.batches = []
         self.cleanup_calls = []
         self.closed = False
         self.entered = asyncio.Event()
 
-    async def write_evaluations(self, records):
+    async def write_evaluation_cohorts(self, cohorts):
         self.entered.set()
         if self.hang:
             await asyncio.Event().wait()
         if self.fail:
             raise RuntimeError("write failed")
-        self.batches.append(list(records))
-        persisted = (
-            len(records)
-            if self.persisted_count is None
-            else self.persisted_count
+        self.batches.append(list(cohorts))
+        persisted_count = (
+            len(cohorts)
+            if self.persisted_cohort_count is None
+            else self.persisted_cohort_count
         )
-        return ShadowEvaluationWriteResult(
-            persisted_count=persisted,
-            rejected_count=len(records) - persisted,
+        return ShadowEvaluationCohortWriteResult(
+            persisted_cohort_ids=frozenset(
+                cohort.identity for cohort in cohorts[:persisted_count]
+            ),
+            rejected_cohort_ids=frozenset(
+                cohort.identity for cohort in cohorts[persisted_count:]
+            ),
+            deferred_cohort_ids=frozenset(),
         )
 
     async def delete_expired(self, *, cutoff_generated_ms, limit):
@@ -2188,46 +2193,158 @@ def test_writer_batch_row_limit_never_splits_candidate_cohort():
         await wait_until(lambda: runtime.counters.records_persisted_total == 6)
         await runtime.close()
 
-        assert backend.batches == [list(first), list(second)]
-        assert [len(batch) for batch in backend.batches] == [3, 3]
+        assert backend.batches == [
+            [ShadowEvaluationCohort(first)],
+            [ShadowEvaluationCohort(second)],
+        ]
+        assert [
+            sum(cohort.row_count for cohort in batch)
+            for batch in backend.batches
+        ] == [3, 3]
         assert runtime.counters.cohorts_persisted_total == 2
 
     asyncio.run(scenario())
 
 
-def test_writer_retries_whole_batch_when_backend_splits_cohort_result():
-    class SplitResultBackend(Backend):
-        async def write_evaluations(self, records):
-            self.entered.set()
-            self.batches.append(list(records))
-            return ShadowEvaluationWriteResult(
-                persisted_count=2,
-                rejected_count=1,
-            )
-
+def test_writer_flushes_duplicate_cohort_identities_in_separate_batches():
     async def scenario():
-        backend = SplitResultBackend()
-        cohort = mature_cohort()
+        backend = Backend()
+        cohort = mature_cohort(generated_ms=0)
         runtime = writer(
             lambda: backend,
             candidate_model_versions=tuple(
                 record.model_version for record in cohort
             ),
-            queue_max_records=3,
-            batch_max_rows=3,
+            queue_max_records=6,
+            batch_max_rows=6,
+            flush_ms=2,
+        )
+        runtime.start()
+        runtime.offer_cohort_nowait(cohort)
+        runtime.offer_cohort_nowait(cohort)
+
+        await wait_until(lambda: runtime.counters.records_persisted_total == 6)
+        await runtime.close()
+
+        expected = [ShadowEvaluationCohort(cohort)]
+        assert backend.batches == [expected, expected]
+        assert runtime.counters.cohorts_persisted_total == 2
+        assert runtime.counters.batches_succeeded_total == 2
+        assert runtime.counters.batches_failed_total == 0
+
+    asyncio.run(scenario())
+
+
+def test_writer_counts_exact_mixed_multirow_cohort_dispositions():
+    class MixedDispositionBackend(Backend):
+        async def write_evaluation_cohorts(self, cohorts):
+            self.entered.set()
+            self.batches.append(list(cohorts))
+            return ShadowEvaluationCohortWriteResult(
+                persisted_cohort_ids=frozenset((cohorts[0].identity,)),
+                rejected_cohort_ids=frozenset((cohorts[1].identity,)),
+                deferred_cohort_ids=frozenset(),
+            )
+
+    async def scenario():
+        backend = MixedDispositionBackend()
+        first = mature_cohort(generated_ms=0)
+        second = mature_cohort(generated_ms=1_000)
+        runtime = writer(
+            lambda: backend,
+            candidate_model_versions=tuple(
+                record.model_version for record in first
+            ),
+            queue_max_records=6,
+            batch_max_rows=6,
+            flush_ms=2,
+        )
+        runtime.start()
+        runtime.offer_cohort_nowait(first)
+        runtime.offer_cohort_nowait(second)
+
+        await wait_until(lambda: runtime.counters.batches_succeeded_total == 1)
+        await runtime.close()
+
+        assert runtime.counters.records_persisted_total == 3
+        assert runtime.counters.records_rejected_total == 3
+        assert runtime.counters.records_dropped_total == 3
+        assert runtime.counters.cohorts_persisted_total == 1
+        assert runtime.counters.cohorts_rejected_total == 1
+        assert runtime.counters.cohorts_dropped_total == 1
+        assert runtime.counters.batches_failed_total == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("invalid_partition", ("overlap", "unknown", "omitted"))
+def test_writer_retries_batch_for_inexact_backend_cohort_id_partition(
+    invalid_partition,
+):
+    class SplitResultBackend(Backend):
+        async def write_evaluation_cohorts(self, cohorts):
+            self.entered.set()
+            self.batches.append(list(cohorts))
+            first_identity, second_identity = (
+                cohort.identity for cohort in cohorts
+            )
+            if invalid_partition == "overlap":
+                return ShadowEvaluationCohortWriteResult(
+                    persisted_cohort_ids=frozenset((first_identity,)),
+                    rejected_cohort_ids=frozenset((first_identity,)),
+                    deferred_cohort_ids=frozenset((second_identity,)),
+                )
+            if invalid_partition == "unknown":
+                unknown_identity = replace(
+                    second_identity,
+                    generated_ms=second_identity.generated_ms + 500,
+                )
+                return ShadowEvaluationCohortWriteResult(
+                    persisted_cohort_ids=frozenset((first_identity,)),
+                    rejected_cohort_ids=frozenset((second_identity,)),
+                    deferred_cohort_ids=frozenset((unknown_identity,)),
+                )
+            return ShadowEvaluationCohortWriteResult(
+                persisted_cohort_ids=frozenset((first_identity,)),
+                rejected_cohort_ids=frozenset(),
+                deferred_cohort_ids=frozenset(),
+            )
+
+    async def scenario():
+        backend = SplitResultBackend()
+        first = mature_cohort(generated_ms=0)
+        second = mature_cohort(generated_ms=1_000)
+        runtime = writer(
+            lambda: backend,
+            candidate_model_versions=tuple(
+                record.model_version for record in first
+            ),
+            queue_max_records=6,
+            batch_max_rows=6,
             flush_ms=2,
             retry_ms=50,
         )
         runtime.start()
-        runtime.offer_cohort_nowait(cohort)
+        runtime.offer_cohort_nowait(first)
+        runtime.offer_cohort_nowait(second)
 
         await wait_until(lambda: runtime.counters.batches_failed_total == 1)
-        assert runtime.queue_depth == 3
+        assert backend.batches == [
+            [ShadowEvaluationCohort(first), ShadowEvaluationCohort(second)]
+        ]
+        assert runtime.queue_depth == 6
+        assert runtime.queue_cohort_depth == 2
         assert runtime.counters.records_persisted_total == 0
         assert runtime.counters.records_rejected_total == 0
+        assert runtime.counters.records_deferred_total == 0
+        assert runtime.counters.cohorts_persisted_total == 0
+        assert runtime.counters.cohorts_rejected_total == 0
+        assert runtime.counters.cohorts_deferred_total == 0
+        assert runtime.counters.batches_succeeded_total == 0
         await runtime.close()
 
-        assert runtime.counters.records_dropped_total == 3
+        assert runtime.counters.records_dropped_total == 6
+        assert runtime.counters.cohorts_dropped_total == 2
 
     asyncio.run(scenario())
 
@@ -2282,8 +2399,12 @@ def test_writer_batches_records_and_flushes_partial_batch():
         await runtime.close()
 
         assert [len(batch) for batch in backend.batches] == [3, 1]
-        assert backend.batches[0] == records[:3]
-        assert backend.batches[1] == records[3:]
+        assert [
+            cohort.records[0] for cohort in backend.batches[0]
+        ] == records[:3]
+        assert [
+            cohort.records[0] for cohort in backend.batches[1]
+        ] == records[3:]
         assert runtime.counters.batches_succeeded_total == 2
         assert backend.closed is True
 
@@ -2292,7 +2413,7 @@ def test_writer_batches_records_and_flushes_partial_batch():
 
 def test_writer_counts_permanently_rejected_records_without_requeueing():
     async def scenario():
-        backend = Backend(persisted_count=2)
+        backend = Backend(persisted_cohort_count=2)
         runtime = writer(lambda: backend, batch_max_rows=3, flush_ms=5)
         runtime.start()
         records = [
@@ -2310,25 +2431,29 @@ def test_writer_counts_permanently_rejected_records_without_requeueing():
         assert runtime.counters.records_dropped_total == 1
         assert runtime.counters.batches_failed_total == 0
         assert runtime.queue_depth == 0
-        assert backend.batches == [records]
+        assert [
+            cohort.records[0] for cohort in backend.batches[0]
+        ] == records
 
     asyncio.run(scenario())
 
 
-def test_writer_requeues_only_deferred_records():
+def test_writer_requeues_only_deferred_cohorts():
     class DeferredOnceBackend(Backend):
-        async def write_evaluations(self, records):
+        async def write_evaluation_cohorts(self, cohorts):
             self.entered.set()
-            self.batches.append(list(records))
+            self.batches.append(list(cohorts))
+            cohort_ids = frozenset(cohort.identity for cohort in cohorts)
             if len(self.batches) == 1:
-                return ShadowEvaluationWriteResult(
-                    persisted_count=0,
-                    rejected_count=0,
-                    deferred_records=tuple(records),
+                return ShadowEvaluationCohortWriteResult(
+                    persisted_cohort_ids=frozenset(),
+                    rejected_cohort_ids=frozenset(),
+                    deferred_cohort_ids=cohort_ids,
                 )
-            return ShadowEvaluationWriteResult(
-                persisted_count=len(records),
-                rejected_count=0,
+            return ShadowEvaluationCohortWriteResult(
+                persisted_cohort_ids=cohort_ids,
+                rejected_cohort_ids=frozenset(),
+                deferred_cohort_ids=frozenset(),
             )
 
     async def scenario():
@@ -2345,7 +2470,8 @@ def test_writer_requeues_only_deferred_records():
         await wait_until(lambda: runtime.counters.records_persisted_total == 1)
         await runtime.close()
 
-        assert backend.batches == [[record], [record]]
+        cohort = ShadowEvaluationCohort((record,))
+        assert backend.batches == [[cohort], [cohort]]
         assert runtime.counters.records_deferred_total == 1
         assert runtime.counters.records_rejected_total == 0
         assert runtime.counters.records_dropped_total == 0
@@ -2361,16 +2487,18 @@ def test_writer_requeues_only_deferred_records():
         True,
         -1,
         2,
-        ShadowEvaluationWriteResult(0, 0),
-        ShadowEvaluationWriteResult(2, 0),
-        ShadowEvaluationWriteResult(0, 0, ("not-a-record",)),
+        ShadowEvaluationCohortWriteResult(
+            persisted_cohort_ids=frozenset(),
+            rejected_cohort_ids=frozenset(),
+            deferred_cohort_ids=frozenset(),
+        ),
     ),
 )
 def test_writer_retries_invalid_backend_results(invalid_result):
     class InvalidCountBackend(Backend):
-        async def write_evaluations(self, records):
+        async def write_evaluation_cohorts(self, cohorts):
             self.entered.set()
-            self.batches.append(list(records))
+            self.batches.append(list(cohorts))
             return invalid_result
 
     async def scenario():
@@ -2428,7 +2556,9 @@ def test_writer_recreates_backend_after_write_and_creation_failures():
         assert runtime.counters.backend_creation_failures_total == 1
         assert runtime.counters.records_dropped_total == 0
         assert failed_backend.closed is True
-        assert [batch[0].generated_ms for batch in good_backend.batches] == [
+        assert [
+            batch[0].identity.generated_ms for batch in good_backend.batches
+        ] == [
             0,
             1_000,
             2_000,

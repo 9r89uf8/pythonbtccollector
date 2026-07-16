@@ -10,7 +10,10 @@ import asyncpg
 
 from price_collector.market import MarketWindow
 from price_collector.shadow_signal_evaluation import (
-    ShadowEvaluationWriteResult,
+    ShadowEvaluationCohort,
+    ShadowEvaluationCohortIdentity,
+    ShadowEvaluationCohortWriteResult,
+    ShadowEvaluationRecord,
 )
 
 
@@ -838,59 +841,50 @@ class _ShadowEvaluationIsolationState:
     isolated_rejections: list[
         tuple["_ShadowEvaluationDatabaseCohort", Exception]
     ]
-    deferred_records: list[Any]
+    deferred_cohorts: list["_ShadowEvaluationDatabaseCohort"]
 
 
 @dataclass(frozen=True)
 class _ShadowEvaluationDatabaseCohort:
-    identity: tuple[Any, ...]
-    records: tuple[Any, ...]
+    identity: ShadowEvaluationCohortIdentity
+    records: tuple[ShadowEvaluationRecord, ...]
     rows: tuple[tuple[Any, ...], ...]
 
 
-def _shadow_evaluation_cohort_identity(record: Any) -> tuple[Any, ...]:
-    return (
-        record.selection_schema_version,
-        record.selection_policy_version,
-        record.selection_fingerprint_sha256,
-        record.selection_artifact_sha256,
-        record.selection_evidence_end_ms,
-        record.generated_ms,
-    )
-
-
 def _shadow_evaluation_database_cohorts(
-    records: Sequence[Any],
+    cohorts: Sequence[ShadowEvaluationCohort],
 ) -> tuple[_ShadowEvaluationDatabaseCohort, ...]:
-    grouped: dict[tuple[Any, ...], list[Any]] = {}
-    order: list[tuple[Any, ...]] = []
-    for record in records:
-        identity = _shadow_evaluation_cohort_identity(record)
-        if identity not in grouped:
-            grouped[identity] = []
-            order.append(identity)
-        grouped[identity].append(record)
-
-    cohorts = tuple(
+    cohort_batch = tuple(cohorts)
+    if not all(
+        isinstance(cohort, ShadowEvaluationCohort)
+        for cohort in cohort_batch
+    ):
+        raise TypeError(
+            "shadow evaluation backend requires evaluation cohorts"
+        )
+    identities = tuple(cohort.identity for cohort in cohort_batch)
+    if len(set(identities)) != len(identities):
+        raise ValueError(
+            "shadow evaluation batch contains duplicate cohort identities"
+        )
+    database_cohorts = tuple(
         _ShadowEvaluationDatabaseCohort(
-            identity=identity,
-            records=tuple(grouped[identity]),
+            identity=cohort.identity,
+            records=cohort.records,
             rows=tuple(
                 shadow_signal_evaluation_row(record)
-                for record in grouped[identity]
+                for record in cohort.records
             ),
         )
-        for identity in order
+        for cohort in cohort_batch
     )
-    if not cohorts:
+    if not database_cohorts:
         return ()
 
     expected_model_versions = tuple(
-        record.model_version for record in cohorts[0].records
+        record.model_version for record in database_cohorts[0].records
     )
-    if len(set(expected_model_versions)) != len(expected_model_versions):
-        raise ValueError("shadow evaluation cohort model versions must be unique")
-    for cohort in cohorts:
+    for cohort in database_cohorts:
         model_versions = tuple(
             record.model_version for record in cohort.records
         )
@@ -898,20 +892,7 @@ def _shadow_evaluation_database_cohorts(
             raise ValueError(
                 "shadow evaluation batch contains an incomplete candidate cohort"
             )
-        generation_markets = {
-            (
-                record.market_id,
-                record.market_start_ms,
-                record.market_end_ms,
-                record.ms_to_market_end,
-            )
-            for record in cohort.records
-        }
-        if len(generation_markets) != 1:
-            raise ValueError(
-                "shadow evaluation cohort has mixed generation-market fields"
-            )
-    return cohorts
+    return database_cohorts
 
 
 class AsyncpgShadowEvaluationBackend:
@@ -939,11 +920,10 @@ class AsyncpgShadowEvaluationBackend:
         connection: asyncpg.Connection,
         cohorts: Sequence[_ShadowEvaluationDatabaseCohort],
         state: _ShadowEvaluationIsolationState,
-    ) -> int:
+    ) -> frozenset[ShadowEvaluationCohortIdentity]:
         if state.remaining_rejections == 0:
-            for cohort in cohorts:
-                state.deferred_records.extend(cohort.records)
-            return 0
+            state.deferred_cohorts.extend(cohorts)
+            return frozenset()
         rows = tuple(
             row
             for cohort in cohorts
@@ -968,13 +948,13 @@ class AsyncpgShadowEvaluationBackend:
                     cohorts[midpoint:],
                     state,
                 )
-                return left + right
+                return left | right
 
             cohort = cohorts[0]
             state.remaining_rejections -= 1
             state.isolated_rejections.append((cohort, error))
-            return 0
-        return len(rows)
+            return frozenset()
+        return frozenset(cohort.identity for cohort in cohorts)
 
     def _log_permanent_rejections(
         self,
@@ -1014,7 +994,7 @@ class AsyncpgShadowEvaluationBackend:
                 },
             )
 
-        if state.deferred_records:
+        if state.deferred_cohorts:
             self._isolation_limit_events_total += 1
             occurrence = self._isolation_limit_events_total
             if (
@@ -1030,7 +1010,11 @@ class AsyncpgShadowEvaluationBackend:
                         "isolation_limit": (
                             SHADOW_EVALUATION_REJECTION_ISOLATION_LIMIT
                         ),
-                        "records_deferred": len(state.deferred_records),
+                        "records_deferred": sum(
+                            len(cohort.records)
+                            for cohort in state.deferred_cohorts
+                        ),
+                        "cohorts_deferred": len(state.deferred_cohorts),
                         "permanent_rejections_total": (
                             self._permanent_rejections_total
                         ),
@@ -1038,14 +1022,13 @@ class AsyncpgShadowEvaluationBackend:
                     },
                 )
 
-    async def write_evaluations(
+    async def write_evaluation_cohorts(
         self,
-        records: Sequence[Any],
-    ) -> ShadowEvaluationWriteResult:
-        record_batch = tuple(records)
-        cohorts = _shadow_evaluation_database_cohorts(record_batch)
+        cohorts: Sequence[ShadowEvaluationCohort],
+    ) -> ShadowEvaluationCohortWriteResult:
+        cohorts = _shadow_evaluation_database_cohorts(tuple(cohorts))
         if not cohorts:
-            return ShadowEvaluationWriteResult(0, 0)
+            return ShadowEvaluationCohortWriteResult()
         async with self._pool.acquire(
             timeout=self._connect_timeout_seconds
         ) as connection:
@@ -1054,10 +1037,10 @@ class AsyncpgShadowEvaluationBackend:
                     SHADOW_EVALUATION_REJECTION_ISOLATION_LIMIT
                 ),
                 isolated_rejections=[],
-                deferred_records=[],
+                deferred_cohorts=[],
             )
             async with connection.transaction():
-                persisted = (
+                persisted_cohort_ids = (
                     await self._write_cohorts_isolating_permanent_errors(
                         connection,
                         cohorts,
@@ -1065,21 +1048,16 @@ class AsyncpgShadowEvaluationBackend:
                     )
                 )
         self._log_permanent_rejections(state)
-        return ShadowEvaluationWriteResult(
-            persisted_count=persisted,
-            rejected_count=sum(
-                len(cohort.records)
+        return ShadowEvaluationCohortWriteResult(
+            persisted_cohort_ids=persisted_cohort_ids,
+            rejected_cohort_ids=frozenset(
+                cohort.identity
                 for cohort, _error in state.isolated_rejections
             ),
-            deferred_records=tuple(state.deferred_records),
+            deferred_cohort_ids=frozenset(
+                cohort.identity for cohort in state.deferred_cohorts
+            ),
         )
-
-    async def write(
-        self,
-        records: Sequence[Any],
-    ) -> ShadowEvaluationWriteResult:
-        """Compatibility alias for generic bounded batch writers."""
-        return await self.write_evaluations(records)
 
     async def delete_expired(
         self,

@@ -387,19 +387,6 @@ class ShadowEvaluationRecord:
             raise ValueError("baseline_error is inconsistent")
 
 
-@dataclass(frozen=True)
-class ShadowEvaluationWriteResult:
-    persisted_count: int
-    rejected_count: int
-    deferred_records: tuple[Any, ...] = ()
-
-    def __post_init__(self) -> None:
-        _require_non_negative_int(self.persisted_count, "persisted_count")
-        _require_non_negative_int(self.rejected_count, "rejected_count")
-        if not isinstance(self.deferred_records, tuple):
-            raise TypeError("deferred_records must be a tuple")
-
-
 @dataclass(frozen=True, order=True)
 class ShadowEvaluationCohortIdentity:
     """Existing persisted provenance plus generation time for one cohort."""
@@ -410,6 +397,54 @@ class ShadowEvaluationCohortIdentity:
     selection_artifact_sha256: str
     selection_evidence_end_ms: int
     generated_ms: int
+
+
+@dataclass(frozen=True)
+class ShadowEvaluationCohortWriteResult:
+    """Exact, mutually exclusive outcomes for a backend cohort batch."""
+
+    persisted_cohort_ids: frozenset[
+        ShadowEvaluationCohortIdentity
+    ] = frozenset()
+    rejected_cohort_ids: frozenset[
+        ShadowEvaluationCohortIdentity
+    ] = frozenset()
+    deferred_cohort_ids: frozenset[
+        ShadowEvaluationCohortIdentity
+    ] = frozenset()
+
+    def __post_init__(self) -> None:
+        classifications = (
+            ("persisted_cohort_ids", self.persisted_cohort_ids),
+            ("rejected_cohort_ids", self.rejected_cohort_ids),
+            ("deferred_cohort_ids", self.deferred_cohort_ids),
+        )
+        for field_name, cohort_ids in classifications:
+            if not isinstance(cohort_ids, frozenset):
+                raise TypeError(f"{field_name} must be a frozenset")
+            if not all(
+                isinstance(cohort_id, ShadowEvaluationCohortIdentity)
+                for cohort_id in cohort_ids
+            ):
+                raise TypeError(
+                    f"{field_name} must contain cohort identities"
+                )
+        if (
+            self.persisted_cohort_ids & self.rejected_cohort_ids
+            or self.persisted_cohort_ids & self.deferred_cohort_ids
+            or self.rejected_cohort_ids & self.deferred_cohort_ids
+        ):
+            raise ValueError(
+                "shadow evaluation cohort outcomes must be disjoint"
+            )
+
+    @property
+    def cohort_ids(self) -> frozenset[ShadowEvaluationCohortIdentity]:
+        return (
+            self.persisted_cohort_ids
+            | self.rejected_cohort_ids
+            | self.deferred_cohort_ids
+        )
 
 
 def shadow_evaluation_cohort_identity(
@@ -1246,10 +1281,10 @@ class ShadowEvaluationScheduler:
 
 
 class ShadowEvaluationBackend(Protocol):
-    async def write_evaluations(
+    async def write_evaluation_cohorts(
         self,
-        records: Sequence[ShadowEvaluationRecord],
-    ) -> ShadowEvaluationWriteResult:
+        cohorts: Sequence[ShadowEvaluationCohort],
+    ) -> ShadowEvaluationCohortWriteResult:
         ...
 
     async def delete_expired(
@@ -1703,9 +1738,11 @@ class ShadowEvaluationWriterRuntime:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._flush_seconds
         batch: list[ShadowEvaluationCohort] = []
+        batch_identities: set[ShadowEvaluationCohortIdentity] = set()
         batch_rows = 0
         try:
             while batch_rows < self._batch_max_rows:
+                duplicate_identity_blocked = False
                 while self._buffer:
                     next_cohort = self._buffer[0]
                     if (
@@ -1713,12 +1750,19 @@ class ShadowEvaluationWriterRuntime:
                         > self._batch_max_rows
                     ):
                         break
+                    # One exact identity partition cannot distinguish two
+                    # occurrences, so flush duplicates in separate calls.
+                    if next_cohort.identity in batch_identities:
+                        duplicate_identity_blocked = True
+                        break
                     batch.append(self._buffer.popleft())
+                    batch_identities.add(next_cohort.identity)
                     batch_rows += next_cohort.row_count
                     self._buffered_rows -= next_cohort.row_count
                 if (
                     batch_rows >= self._batch_max_rows
                     or self._stop_requested
+                    or duplicate_identity_blocked
                     or (
                         self._buffer
                         and batch_rows + self._buffer[0].row_count
@@ -1751,52 +1795,57 @@ class ShadowEvaluationWriterRuntime:
         self,
         batch: Sequence[ShadowEvaluationCohort],
     ) -> None:
-        records = tuple(
-            record
-            for cohort in batch
-            for record in cohort.records
-        )
-        self.counters.last_batch_rows = len(records)
+        batch_rows = sum(cohort.row_count for cohort in batch)
+        self.counters.last_batch_rows = batch_rows
         try:
+            batch_by_identity: dict[
+                ShadowEvaluationCohortIdentity,
+                ShadowEvaluationCohort,
+            ] = {}
+            for cohort in batch:
+                if cohort.identity in batch_by_identity:
+                    raise RuntimeError(
+                        "shadow evaluation batch contains duplicate cohort "
+                        "identities"
+                    )
+                batch_by_identity[cohort.identity] = cohort
             backend = await self._ensure_backend()
-            write_result = await backend.write_evaluations(records)
-            if not isinstance(write_result, ShadowEvaluationWriteResult):
+            write_result = await backend.write_evaluation_cohorts(batch)
+            if not isinstance(
+                write_result,
+                ShadowEvaluationCohortWriteResult,
+            ):
                 raise RuntimeError(
                     "shadow evaluation backend returned an invalid result"
                 )
-            persisted = write_result.persisted_count
-            rejected = write_result.rejected_count
-            deferred = write_result.deferred_records
-            if persisted + rejected + len(deferred) != len(records):
+            input_cohort_ids = frozenset(batch_by_identity)
+            if write_result.cohort_ids != input_cohort_ids:
                 raise RuntimeError(
                     "shadow evaluation backend result does not account "
-                    "for the complete batch"
+                    "exactly for the complete cohort batch"
                 )
-            if not all(
-                isinstance(record, ShadowEvaluationRecord)
-                for record in deferred
-            ):
-                raise RuntimeError(
-                    "shadow evaluation backend returned an invalid "
-                    "deferred record"
-                )
-            candidate_count = len(self._candidate_model_versions)
-            if persisted % candidate_count or rejected % candidate_count:
-                raise RuntimeError(
-                    "shadow evaluation backend split a cohort result"
-                )
-            deferred_cohorts = self._cohorts_from_records(deferred)
-            batch_by_identity = {cohort.identity: cohort for cohort in batch}
-            if any(
-                cohort.identity not in batch_by_identity
-                or cohort.records != batch_by_identity[cohort.identity].records
-                for cohort in deferred_cohorts
-            ):
-                raise RuntimeError(
-                    "shadow evaluation backend deferred an unknown cohort"
-                )
+            persisted_cohorts = tuple(
+                cohort
+                for cohort in batch
+                if cohort.identity in write_result.persisted_cohort_ids
+            )
+            rejected_cohorts = tuple(
+                cohort
+                for cohort in batch
+                if cohort.identity in write_result.rejected_cohort_ids
+            )
+            deferred_cohorts = tuple(
+                cohort
+                for cohort in batch
+                if cohort.identity in write_result.deferred_cohort_ids
+            )
+            persisted = sum(
+                cohort.row_count for cohort in persisted_cohorts
+            )
+            rejected = sum(cohort.row_count for cohort in rejected_cohorts)
+            deferred = sum(cohort.row_count for cohort in deferred_cohorts)
         except asyncio.CancelledError:
-            self.counters.records_dropped_total += len(records)
+            self.counters.records_dropped_total += batch_rows
             self.counters.cohorts_dropped_total += len(batch)
             raise
         except Exception:
@@ -1806,7 +1855,7 @@ class ShadowEvaluationWriterRuntime:
                 "shadow_evaluation_batch_failed",
                 extra={
                     "event": "shadow_evaluation_batch_failed",
-                    "batch_rows": len(records),
+                    "batch_rows": batch_rows,
                     "queue_depth": self._buffered_rows,
                     "records_dropped_total": (
                         self.counters.records_dropped_total
@@ -1823,13 +1872,12 @@ class ShadowEvaluationWriterRuntime:
         previous_rejected_total = self.counters.records_rejected_total
         self.counters.records_persisted_total += persisted
         self.counters.records_rejected_total += rejected
-        self.counters.records_deferred_total += len(deferred)
+        self.counters.records_deferred_total += deferred
         self.counters.records_dropped_total += rejected
-        candidate_count = len(self._candidate_model_versions)
-        self.counters.cohorts_persisted_total += persisted // candidate_count
-        self.counters.cohorts_rejected_total += rejected // candidate_count
+        self.counters.cohorts_persisted_total += len(persisted_cohorts)
+        self.counters.cohorts_rejected_total += len(rejected_cohorts)
         self.counters.cohorts_deferred_total += len(deferred_cohorts)
-        self.counters.cohorts_dropped_total += rejected // candidate_count
+        self.counters.cohorts_dropped_total += len(rejected_cohorts)
         if rejected and (
             previous_rejected_total == 0
             or (
@@ -1841,12 +1889,12 @@ class ShadowEvaluationWriterRuntime:
                 "shadow_evaluation_batch_records_rejected",
                 extra={
                     "event": "shadow_evaluation_batch_records_rejected",
-                    "batch_rows": len(records),
+                    "batch_rows": batch_rows,
                     "records_persisted": persisted,
                     "records_rejected": rejected,
-                    "records_deferred": len(deferred),
-                    "cohorts_persisted": persisted // candidate_count,
-                    "cohorts_rejected": rejected // candidate_count,
+                    "records_deferred": deferred,
+                    "cohorts_persisted": len(persisted_cohorts),
+                    "cohorts_rejected": len(rejected_cohorts),
                     "cohorts_deferred": len(deferred_cohorts),
                     "records_rejected_total": (
                         self.counters.records_rejected_total
@@ -1877,31 +1925,6 @@ class ShadowEvaluationWriterRuntime:
         self._update_queue_high_water()
         if self._available is not None and self._buffer:
             self._available.set()
-
-    def _cohorts_from_records(
-        self,
-        records: Sequence[ShadowEvaluationRecord],
-    ) -> tuple[ShadowEvaluationCohort, ...]:
-        if not records:
-            return ()
-        grouped: dict[
-            ShadowEvaluationCohortIdentity,
-            list[ShadowEvaluationRecord],
-        ] = {}
-        order: list[ShadowEvaluationCohortIdentity] = []
-        for record in records:
-            identity = shadow_evaluation_cohort_identity(record)
-            if identity not in grouped:
-                grouped[identity] = []
-                order.append(identity)
-            grouped[identity].append(record)
-        cohorts = tuple(
-            ShadowEvaluationCohort(tuple(grouped[identity]))
-            for identity in order
-        )
-        for cohort in cohorts:
-            cohort.require_model_versions(self._candidate_model_versions)
-        return cohorts
 
     def _requeue_deferred_cohorts(
         self,
