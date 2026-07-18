@@ -1253,6 +1253,19 @@ def test_chainlink_sigterm_handler_cancels_current_task_and_is_removable(
     ]
 
 
+def test_main_treats_collector_cancellation_as_clean_shutdown(monkeypatch):
+    settings = object()
+
+    def cancelled_run(coroutine):
+        coroutine.close()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(collector, "Settings", lambda: settings)
+    monkeypatch.setattr(collector.asyncio, "run", cancelled_run)
+
+    collector.main()
+
+
 def test_run_collector_disabled_uses_no_raw_resources_even_if_futures_flag_is_true(
     monkeypatch,
 ):

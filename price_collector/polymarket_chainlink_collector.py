@@ -1695,7 +1695,10 @@ async def run_collector(settings: Settings) -> None:
 
 def main() -> None:
     settings = Settings()
-    asyncio.run(run_collector(settings))
+    try:
+        asyncio.run(run_collector(settings))
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
 
 
 if __name__ == "__main__":
