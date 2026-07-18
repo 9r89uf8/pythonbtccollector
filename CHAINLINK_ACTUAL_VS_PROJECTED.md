@@ -349,6 +349,90 @@ durable exactly-once publication belongs to the later state-machine and locking
 work items. Production artifacts, services, data, and the selected live primary
 remain unchanged.
 
+## V4 causal replay checkpoint
+
+The second v4 implementation checkpoint adds an explicit offline causal-replay
+path without changing the schema-v3 replay defaults, report shape, database
+reader, or CLI. A `V4CausalReplayConfig` accepts only a validated
+`V4ExperimentContract`, one exact frozen timing cell, and a half-open scoring
+window. Candidate settings, identities, delays, phase, control resolution, and
+policy digests cannot be supplied again as replay overrides. The existing
+`ReplayConfig`, `ReplayReport`, and `replay_shadow_signals` path remains the
+legacy schema-v3 implementation.
+
+The v4 runner uses the global epoch-aligned 100 ms poll and 500 ms generation
+lattices even during a feed gap or an interval without a common clean session.
+It therefore retains every scheduled origin instead of compacting the evidence
+to healthy session intersections. The strict maximum-horizon tail rule is
+determined only from the scoring window. All-five generation eligibility is
+fixed at generation without consulting a later actual, session end, control
+value, or reset.
+
+Raw events use the frozen receive-time, source-kind, monotonic-time,
+source-sequence, and connection ordering. Each source's fixed sensitivity delay
+is added in nanoseconds and visibility is ceiling-aligned to the next poll.
+Events visible exactly at a poll are applied before observation; a value one
+nanosecond late waits for the next poll. Forecast state processes every newly
+visible raw event in deterministic order: intermediate Futures values remain
+available to causal reference selection, intermediate regressions are not
+hidden by a later cache winner, and only the final per-source event becomes the
+current cache-shaped observation. The established prior-Futures-history guard
+still applies to a same-poll Futures reference and Chainlink anchor. Chainlink
+actual history likewise retains the complete visible raw order needed for
+horizon-specific target resolution.
+
+Every selected anchor, current Futures value, Futures reference, and Chainlink
+actual preserves its Decimal value, exact wall and monotonic receipt times,
+floored receipt millisecond, assumed available time, visible poll, source
+timestamp, connection ID, and generic raw source sequence. Publisher epoch and
+accepted-event sequence are explicitly null and marked `not_captured`; the raw
+sequence is not relabeled as live Redis publisher metadata.
+
+Each origin is held through the 3,500 ms maximum target plus the frozen 200 ms
+continuity/finalization allowance. Every candidate resolves its own actual as
+the newest Chainlink observation whose visible poll and full nanosecond receipt
+are both at or before that candidate's target. An observation first visible
+after a shorter target cannot leak into that row merely because it exists by
+common-cohort finalization. A clean-session/connection reset through
+finalization invalidates all five candidates together without retroactively
+changing generation eligibility. A source-timestamp regression still resets
+forecast state and invalidates that poll's generation, but does not invalidate
+an already-pending cohort by itself.
+
+Any overlapping session that fails the strict raw/session-integrity checks
+aborts this loss-free replay path. Its final counters are never used to alter an
+earlier generation mask or to turn a corrupt interval into ordinary missing
+data.
+
+The replacement control is always stored under its full, separate
+`ModelIdentity`, including when it aliases the numerically identical v4 3,000 ms
+calculation. A distinct incumbent configuration with the same supported
+forecast implementation runs in an independent one-model state machine. If its
+forecast-code digest or declared forecast rules differ, replay fails closed
+until a manifest-verified reconstruction is available; it never substitutes the
+v4 implementation and calls that the operational control.
+
+At this checkpoint, the validated frozen experiment contract is the trust
+boundary for those forecast-code manifests. The replay runner does not claim to
+derive a manifest from its own local functions. The later experiment-tree and
+provenance work must verify the supplied component bytes and bind this replay
+implementation separately before any output can become efficacy or promotion
+evidence.
+
+The causal output contains forecast validity, causal inputs and actuals, the
+scheduled and target vectors, generation/common/decision masks, integrity
+epochs, and deterministic missing reasons. It does not calculate an error,
+loss, skill, ranking, bootstrap statistic, calibration winner, or holdout
+decision. `iter_v4_causal_origins` streams finalized origins with bounded replay
+state for a full-day evidence writer; `replay_v4_causal_signals` is the
+collection convenience used by bounded tests.
+
+This checkpoint remains offline and has no production importer. It does not
+publish canonical create-once artifacts, choose a calibration or holdout day,
+run seven-cell inference, inspect efficacy data, acquire an attempt-owner lock,
+or alter a production decision, service, database, Redis key, API, dependency,
+or deployment file. Those later work items remain untouched.
+
 ## How the model is used now
 
 The catch-up engine runs in the standalone

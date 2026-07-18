@@ -10,19 +10,57 @@ from collections import Counter, deque
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
 from pathlib import Path
-from typing import Any, AsyncIterator, Deque, Iterable, Mapping, Optional, Sequence
+from typing import (
+    Any,
+    AsyncIterator,
+    Deque,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+)
 from uuid import UUID
 
 import asyncpg
 
 from price_collector.shadow_signal import (
+    ANCHOR_HISTORY_MISSING,
+    ANCHOR_REFERENCE_GAP,
+    ANCHORED,
     BASIS_POINTS,
+    CHAINLINK_STALE,
+    CHAINLINK_UNAVAILABLE,
     CatchupModel,
     EngineObservation,
+    FUTURES_STALE,
+    FUTURES_UNAVAILABLE,
+    MODEL_ERROR,
     ModelSignal,
+    ModelAnchor,
     ObservedPrice,
     ShadowSignalEngine,
+    TIMESTAMP_REGRESSION,
+    VALID,
+    WAITING_FOR_NEW_CHAINLINK_ANCHOR,
+    WARMING_UP,
+    WARMING_UP_FUTURES_HISTORY,
     no_change_projection,
+    project_from_anchor,
+)
+from price_collector.shadow_signal_experiment import (
+    COMPARISON_LAGS_MS,
+    DAY_MS,
+    FINALIZATION_ALLOWANCE_MS,
+    GENERATION_INTERVAL_MS as V4_GENERATION_INTERVAL_MS,
+    POLL_MS as V4_POLL_MS,
+    ControlMode,
+    ForecastConfig,
+    ModelIdentity,
+    TimingCell,
+    V4ExperimentContract,
+    V4_TIMING_CELLS,
+    forecast_config_digest,
 )
 
 
@@ -48,6 +86,10 @@ MAX_CANDIDATE_QUANTILE_BUDGET = 150_000
 DEFAULT_LAGS_MS = (3_000, 3_500, 4_000)
 DEFAULT_BETA = Decimal("1")
 DIRECTION_LABELS = ("up", "neutral", "down")
+
+V4_CAUSAL_REPLAY_MODE = "chainlink_v4_causal_raw_replay"
+V4_REPLAY_SCHEMA_VERSION = 1
+V4_NOT_CAPTURED = "not_captured"
 
 
 class ReplayDataError(ValueError):
@@ -476,6 +518,436 @@ class ReplayEvent:
             self.sequence,
             str(self.connection_id),
         )
+
+
+@dataclass(frozen=True)
+class V4CausalReplayConfig:
+    """One frozen timing cell and scoring window for the isolated v4 replay.
+
+    Unlike :class:`ReplayConfig`, every forecast setting and timing assumption
+    comes from the already-validated experiment contract.  Keeping this as a
+    separate type prevents a five-lag legacy replay from being mistaken for v4
+    evidence.
+    """
+
+    scoring_start_ms: int
+    scoring_end_ms: int
+    contract: V4ExperimentContract
+    timing_cell: TimingCell
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int(self.scoring_start_ms, "scoring_start_ms")
+        _require_positive_int(self.scoring_end_ms, "scoring_end_ms")
+        if self.scoring_end_ms <= self.scoring_start_ms:
+            raise ValueError("scoring_end_ms must be greater than scoring_start_ms")
+        if self.scoring_end_ms - self.scoring_start_ms > DAY_MS:
+            raise ValueError("v4 scoring range cannot exceed one UTC day")
+        if not isinstance(self.contract, V4ExperimentContract):
+            raise TypeError("contract must be V4ExperimentContract")
+        if not isinstance(self.timing_cell, TimingCell):
+            raise TypeError("timing_cell must be TimingCell")
+        if self.timing_cell not in V4_TIMING_CELLS:
+            raise ValueError("timing_cell is not one of the frozen v4 cells")
+
+        candidates = self.contract.candidate_configs
+        if tuple(item.lag_ms for item in candidates) != COMPARISON_LAGS_MS:
+            raise ValueError("v4 replay contract has the wrong comparison family")
+        configurations = (*candidates, self.control_config)
+        if any(item.lag_ms != item.horizon_ms for item in configurations):
+            raise ValueError("v4 replay requires lag-aligned horizons")
+        if any(item.horizon_ms % V4_POLL_MS for item in configurations):
+            raise ValueError("every v4 replay target must be poll aligned")
+        if self.timing_cell.phase_offset_ms % V4_POLL_MS:
+            raise ValueError("v4 timing-cell phase must be poll aligned")
+
+    @property
+    def candidate_configs(self) -> tuple[ForecastConfig, ...]:
+        return self.contract.candidate_configs
+
+    @property
+    def control_config(self) -> ForecastConfig:
+        return self.contract.active_incumbent.forecast_config
+
+    @property
+    def maximum_horizon_ms(self) -> int:
+        return max(
+            *(item.horizon_ms for item in self.candidate_configs),
+            self.control_config.horizon_ms,
+        )
+
+    @property
+    def maximum_history_retention_ms(self) -> int:
+        return max(
+            *(item.history_retention_ms for item in self.candidate_configs),
+            self.control_config.history_retention_ms,
+        )
+
+    @property
+    def archive_input_start_ms(self) -> int:
+        return max(
+            0,
+            self.scoring_start_ms
+            - self.maximum_history_retention_ms
+            - V4_POLL_MS,
+        )
+
+    @property
+    def archive_input_end_ms(self) -> int:
+        return (
+            self.scoring_end_ms
+            + self.maximum_horizon_ms
+            + FINALIZATION_ALLOWANCE_MS
+        )
+
+
+@dataclass(frozen=True)
+class V4VisibleObservation:
+    """A raw observation plus its simulated worker-visibility identity."""
+
+    kind: str
+    value: Decimal
+    received_wall_ns: int
+    received_monotonic_ns: int
+    available_wall_ns: int
+    visible_ms: int
+    source_timestamp_ms: int
+    connection_id: UUID
+    source_sequence: int
+    publisher_epoch: None = None
+    accepted_event_sequence: None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in (FUTURES_EVENT, CHAINLINK_EVENT):
+            raise ValueError("invalid v4 observation kind")
+        _require_finite_decimal(self.value, "value")
+        if self.value <= 0:
+            raise ValueError("value must be positive")
+        _require_positive_int(self.received_wall_ns, "received_wall_ns")
+        _require_positive_int(
+            self.received_monotonic_ns,
+            "received_monotonic_ns",
+        )
+        _require_positive_int(self.available_wall_ns, "available_wall_ns")
+        _require_non_negative_int(self.visible_ms, "visible_ms")
+        _require_positive_int(self.source_timestamp_ms, "source_timestamp_ms")
+        if not isinstance(self.connection_id, UUID):
+            raise TypeError("connection_id must be UUID")
+        _require_non_negative_int(self.source_sequence, "source_sequence")
+        if self.available_wall_ns < self.received_wall_ns:
+            raise ValueError("available_wall_ns cannot precede raw receipt")
+        poll_ns = V4_POLL_MS * NS_PER_MS
+        expected_visible_ms = (
+            (self.available_wall_ns + poll_ns - 1) // poll_ns
+        ) * V4_POLL_MS
+        if self.visible_ms != expected_visible_ms:
+            raise ValueError("visible_ms does not match the frozen ceiling rule")
+        if self.publisher_epoch is not None:
+            raise ValueError("raw v4 replay did not capture publisher_epoch")
+        if self.accepted_event_sequence is not None:
+            raise ValueError(
+                "raw v4 replay did not capture accepted_event_sequence"
+            )
+
+    @property
+    def received_ms(self) -> int:
+        return self.received_wall_ns // NS_PER_MS
+
+    @property
+    def raw_order(self) -> tuple[int, int, int, int, str]:
+        kind_order = 0 if self.kind == FUTURES_EVENT else 1
+        return (
+            self.received_wall_ns,
+            kind_order,
+            self.received_monotonic_ns,
+            self.source_sequence,
+            str(self.connection_id),
+        )
+
+    @property
+    def identity(self) -> tuple[Any, ...]:
+        return (
+            self.kind,
+            self.value,
+            self.received_wall_ns,
+            self.received_monotonic_ns,
+            self.available_wall_ns,
+            self.visible_ms,
+            self.source_timestamp_ms,
+            self.connection_id,
+            self.source_sequence,
+            self.publisher_epoch,
+            self.accepted_event_sequence,
+        )
+
+    @property
+    def observed_price(self) -> ObservedPrice:
+        return ObservedPrice(
+            value=self.value,
+            source_timestamp_ms=self.source_timestamp_ms,
+            received_ms=self.received_ms,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "value": self.value,
+            "received_wall_ns": self.received_wall_ns,
+            "received_ms": self.received_ms,
+            "received_monotonic_ns": self.received_monotonic_ns,
+            "available_wall_ns": self.available_wall_ns,
+            "visible_ms": self.visible_ms,
+            "source_timestamp_ms": self.source_timestamp_ms,
+            "connection_id": str(self.connection_id),
+            "source_sequence": self.source_sequence,
+            "publisher_epoch": None,
+            "accepted_event_sequence": None,
+            "publisher_epoch_capture": V4_NOT_CAPTURED,
+            "accepted_event_sequence_capture": V4_NOT_CAPTURED,
+        }
+
+
+@dataclass(frozen=True)
+class V4ForecastAttempt:
+    identity: ModelIdentity
+    lag_ms: int
+    horizon_ms: int
+    beta: Decimal
+    generated_ms: int
+    target_ms: int
+    valid: bool
+    status: str
+    invalid_reasons: tuple[str, ...]
+    chainlink_anchor: Optional[V4VisibleObservation]
+    futures_now: Optional[V4VisibleObservation]
+    futures_reference: Optional[V4VisibleObservation]
+    futures_reference_target_ms: Optional[int]
+    futures_reference_gap_ms: Optional[int]
+    projected_chainlink: Optional[Decimal]
+    matched_no_change_prediction: Optional[Decimal]
+    actual_chainlink: Optional[V4VisibleObservation] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ModelIdentity):
+            raise TypeError("identity must be ModelIdentity")
+        _require_positive_int(self.lag_ms, "lag_ms")
+        _require_positive_int(self.horizon_ms, "horizon_ms")
+        _require_finite_decimal(self.beta, "beta")
+        _require_non_negative_int(self.generated_ms, "generated_ms")
+        if self.target_ms != self.generated_ms + self.horizon_ms:
+            raise ValueError("target_ms must equal generated_ms plus horizon_ms")
+        if not isinstance(self.valid, bool):
+            raise TypeError("valid must be bool")
+        if not isinstance(self.status, str) or not self.status:
+            raise ValueError("status must be a non-empty string")
+        if not isinstance(self.invalid_reasons, tuple) or not all(
+            isinstance(item, str) and item for item in self.invalid_reasons
+        ):
+            raise TypeError("invalid_reasons must be a tuple of strings")
+        for field_name in (
+            "chainlink_anchor",
+            "futures_now",
+            "futures_reference",
+            "actual_chainlink",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, V4VisibleObservation):
+                raise TypeError(f"{field_name} must be V4VisibleObservation or None")
+        if self.valid:
+            if self.status != VALID or self.invalid_reasons:
+                raise ValueError("valid v4 forecast has inconsistent status")
+            required = (
+                self.chainlink_anchor,
+                self.futures_now,
+                self.futures_reference,
+                self.futures_reference_target_ms,
+                self.futures_reference_gap_ms,
+                self.projected_chainlink,
+                self.matched_no_change_prediction,
+            )
+            if any(item is None for item in required):
+                raise ValueError("valid v4 forecast is missing forecast inputs")
+        else:
+            if self.status == VALID or not self.invalid_reasons:
+                raise ValueError("invalid v4 forecast has inconsistent status")
+            if self.projected_chainlink is not None:
+                raise ValueError("invalid v4 forecast cannot expose a projection")
+            if self.matched_no_change_prediction is not None:
+                raise ValueError("invalid v4 forecast cannot expose a baseline")
+        for field_name in ("projected_chainlink", "matched_no_change_prediction"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _require_finite_decimal(value, field_name)
+        if self.futures_reference_gap_ms is not None:
+            _require_non_negative_int(
+                self.futures_reference_gap_ms,
+                "futures_reference_gap_ms",
+            )
+        for observation in (
+            self.chainlink_anchor,
+            self.futures_now,
+            self.futures_reference,
+        ):
+            if observation is not None and observation.visible_ms > self.generated_ms:
+                raise ValueError("forecast input was not visible by generation")
+        if self.actual_chainlink is not None:
+            if self.actual_chainlink.kind != CHAINLINK_EVENT:
+                raise ValueError("forecast actual must be a Chainlink observation")
+            if self.actual_chainlink.visible_ms > self.target_ms:
+                raise ValueError("forecast actual was not visible by its target")
+            if self.actual_chainlink.received_wall_ns > self.target_ms * NS_PER_MS:
+                raise ValueError("forecast actual arrived after its exact target")
+
+    def with_actual(
+        self,
+        actual: Optional[V4VisibleObservation],
+    ) -> V4ForecastAttempt:
+        return replace(self, actual_chainlink=actual)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identity": self.identity.to_dict(),
+            "lag_ms": self.lag_ms,
+            "horizon_ms": self.horizon_ms,
+            "beta": self.beta,
+            "generated_ms": self.generated_ms,
+            "target_ms": self.target_ms,
+            "valid": self.valid,
+            "status": self.status,
+            "invalid_reasons": list(self.invalid_reasons),
+            "chainlink_anchor": (
+                None
+                if self.chainlink_anchor is None
+                else self.chainlink_anchor.to_dict()
+            ),
+            "futures_now": (
+                None if self.futures_now is None else self.futures_now.to_dict()
+            ),
+            "futures_reference": (
+                None
+                if self.futures_reference is None
+                else self.futures_reference.to_dict()
+            ),
+            "futures_reference_target_ms": self.futures_reference_target_ms,
+            "futures_reference_gap_ms": self.futures_reference_gap_ms,
+            "projected_chainlink": self.projected_chainlink,
+            "matched_no_change_prediction": self.matched_no_change_prediction,
+            "actual_chainlink": (
+                None
+                if self.actual_chainlink is None
+                else self.actual_chainlink.to_dict()
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class V4OriginCohort:
+    cell_id: str
+    generated_ms: int
+    finalization_ms: int
+    target_eligible: bool
+    generation_eligible: bool
+    common_scored: bool
+    decision_eligible: bool
+    candidate_attempts: tuple[V4ForecastAttempt, ...]
+    control_attempt: V4ForecastAttempt
+    integrity_epoch_at_generation: int
+    integrity_epoch_at_finalization: int
+    integrity_reset_before_finalization: bool
+    structural_exclusion_reason: Optional[str]
+    missing_reasons: tuple[str, ...]
+    causal_violation_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cell_id, str) or not self.cell_id:
+            raise ValueError("cell_id must be a non-empty string")
+        _require_non_negative_int(self.generated_ms, "generated_ms")
+        _require_non_negative_int(self.finalization_ms, "finalization_ms")
+        if self.finalization_ms < self.generated_ms:
+            raise ValueError("finalization_ms cannot precede generation")
+        for field_name in (
+            "target_eligible",
+            "generation_eligible",
+            "common_scored",
+            "decision_eligible",
+            "integrity_reset_before_finalization",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError(f"{field_name} must be bool")
+        if self.generation_eligible and not self.target_eligible:
+            raise ValueError("generation eligibility requires target eligibility")
+        if self.common_scored and not self.generation_eligible:
+            raise ValueError("common scoring requires generation eligibility")
+        if self.decision_eligible and not self.common_scored:
+            raise ValueError("decision eligibility requires common scoring")
+        if self.common_scored and self.integrity_reset_before_finalization:
+            raise ValueError("an integrity-reset cohort cannot be common scored")
+        if len(self.candidate_attempts) != len(COMPARISON_LAGS_MS):
+            raise ValueError("v4 cohort must contain all five candidates")
+        if not all(
+            isinstance(item, V4ForecastAttempt)
+            for item in self.candidate_attempts
+        ):
+            raise TypeError("candidate_attempts must contain v4 forecasts")
+        if not isinstance(self.control_attempt, V4ForecastAttempt):
+            raise TypeError("control_attempt must be V4ForecastAttempt")
+        if self.common_scored and any(
+            not item.valid or item.actual_chainlink is None
+            for item in self.candidate_attempts
+        ):
+            raise ValueError("common-scored cohort is missing candidate evidence")
+        if self.decision_eligible and (
+            not self.control_attempt.valid
+            or self.control_attempt.actual_chainlink is None
+        ):
+            raise ValueError("decision-eligible cohort is missing control evidence")
+        _require_non_negative_int(
+            self.integrity_epoch_at_generation,
+            "integrity_epoch_at_generation",
+        )
+        _require_non_negative_int(
+            self.integrity_epoch_at_finalization,
+            "integrity_epoch_at_finalization",
+        )
+        if self.integrity_reset_before_finalization != (
+            self.integrity_epoch_at_generation
+            != self.integrity_epoch_at_finalization
+        ):
+            raise ValueError("integrity reset flag differs from the epoch change")
+        if self.structural_exclusion_reason is not None and self.target_eligible:
+            raise ValueError("target-eligible origin cannot be structurally excluded")
+        if not isinstance(self.missing_reasons, tuple) or tuple(
+            sorted(set(self.missing_reasons))
+        ) != self.missing_reasons:
+            raise ValueError("missing_reasons must be sorted and unique")
+        _require_non_negative_int(
+            self.causal_violation_count,
+            "causal_violation_count",
+        )
+        if self.causal_violation_count:
+            raise ValueError("v4 causal replay cannot publish a causal violation")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cell_id": self.cell_id,
+            "generated_ms": self.generated_ms,
+            "finalization_ms": self.finalization_ms,
+            "target_eligible": self.target_eligible,
+            "generation_eligible": self.generation_eligible,
+            "common_scored": self.common_scored,
+            "decision_eligible": self.decision_eligible,
+            "candidate_attempts": [
+                item.to_dict() for item in self.candidate_attempts
+            ],
+            "control_attempt": self.control_attempt.to_dict(),
+            "integrity_epoch_at_generation": self.integrity_epoch_at_generation,
+            "integrity_epoch_at_finalization": self.integrity_epoch_at_finalization,
+            "integrity_reset_before_finalization": (
+                self.integrity_reset_before_finalization
+            ),
+            "structural_exclusion_reason": self.structural_exclusion_reason,
+            "missing_reasons": list(self.missing_reasons),
+            "causal_violation_count": self.causal_violation_count,
+        }
 
 
 @dataclass(frozen=True)
@@ -1949,6 +2421,1229 @@ def replay_shadow_signals(
     for event in events:
         runner.consume(event)
     return runner.finish()
+
+
+@dataclass(frozen=True)
+class _V4Anchor:
+    chainlink: V4VisibleObservation
+    futures_reference: V4VisibleObservation
+
+
+class _V4ForecastMachine:
+    """Event-complete v4 forecast state for one compatible config family."""
+
+    def __init__(
+        self,
+        models: Sequence[tuple[ForecastConfig, ModelIdentity]],
+    ) -> None:
+        self.models = tuple(models)
+        if not self.models:
+            raise ValueError("v4 forecast machine requires at least one model")
+        for config, identity in self.models:
+            if not isinstance(config, ForecastConfig):
+                raise TypeError("v4 model config must be ForecastConfig")
+            if not isinstance(identity, ModelIdentity):
+                raise TypeError("v4 model identity must be ModelIdentity")
+            if identity.model_version != f"catchup_ratio_l{config.lag_ms}_b100":
+                raise ReplayDataError("v4 model identity differs from its config")
+            if identity.forecast_config_digest != forecast_config_digest(config):
+                raise ReplayDataError(
+                    "v4 model identity has the wrong forecast-config digest"
+                )
+        if len({identity for _config, identity in self.models}) != len(
+            self.models
+        ):
+            raise ReplayDataError("v4 forecast machine identities must be unique")
+        policy_digests = {
+            identity.offline_evaluation_policy_digest
+            for _config, identity in self.models
+        }
+        if len(policy_digests) != 1:
+            raise ReplayDataError(
+                "v4 forecast machine identities mix evaluation policies"
+            )
+        non_lag_settings = {
+            (
+                item.futures_stale_ms,
+                item.chainlink_stale_ms,
+                item.reference_max_gap_ms,
+                item.history_retention_ms,
+                item.max_future_skew_ms,
+                item.anchor_rule,
+                item.futures_reference_rule,
+                item.same_poll_reference_rule,
+                item.projection_rule,
+                item.forecast_validity_rule,
+            )
+            for item, _identity in self.models
+        }
+        if len(non_lag_settings) != 1:
+            raise ReplayDataError(
+                "one v4 forecast machine cannot mix non-lag settings"
+            )
+        first = self.models[0][0]
+        self.futures_stale_ms = first.futures_stale_ms
+        self.chainlink_stale_ms = first.chainlink_stale_ms
+        self.reference_max_gap_ms = first.reference_max_gap_ms
+        self.history_retention_ms = first.history_retention_ms
+        self.max_future_skew_ms = first.max_future_skew_ms
+        minimum_retention_ms = (
+            max(config.lag_ms for config, _identity in self.models)
+            + self.chainlink_stale_ms
+            + self.reference_max_gap_ms
+        )
+        if self.history_retention_ms < minimum_retention_ms:
+            raise ReplayDataError(
+                "history_retention_ms cannot support this v4 forecast machine"
+            )
+        self.reset()
+
+    def reset(self) -> None:
+        self._futures_history: Deque[V4VisibleObservation] = deque()
+        self._last_futures_identity: Optional[tuple[Any, ...]] = None
+        self._last_chainlink_identity: Optional[tuple[Any, ...]] = None
+        self._last_futures_received_ms: Optional[int] = None
+        self._last_chainlink_received_ms: Optional[int] = None
+        self._futures_source_timestamp_watermark: Optional[int] = None
+        self._chainlink_source_timestamp_watermark: Optional[int] = None
+        self._anchors: dict[ModelIdentity, _V4Anchor] = {}
+        self._anchor_targets: dict[ModelIdentity, int] = {}
+        self._anchor_gaps: dict[ModelIdentity, int] = {}
+        self._anchor_failures: dict[ModelIdentity, str] = {}
+        self._poll_regression_sources: tuple[str, ...] = ()
+
+    def apply_poll(
+        self,
+        *,
+        futures_events: Sequence[V4VisibleObservation],
+        chainlink_events: Sequence[V4VisibleObservation],
+        now_ms: int,
+    ) -> None:
+        _require_non_negative_int(now_ms, "now_ms")
+        if any(item.kind != FUTURES_EVENT for item in futures_events):
+            raise ReplayDataError("futures poll batch contains another source")
+        if any(item.kind != CHAINLINK_EVENT for item in chainlink_events):
+            raise ReplayDataError("Chainlink poll batch contains another source")
+        for item in (*futures_events, *chainlink_events):
+            if item.visible_ms > now_ms:
+                raise ReplayDataError("v4 poll applied an event before visibility")
+
+        history_existed_before_poll = bool(self._futures_history)
+        regression_sources: list[str] = []
+        futures_regressed = False
+        for observation in futures_events:
+            if observation.identity == self._last_futures_identity:
+                continue
+            if self._timestamps_regress(
+                observation,
+                last_received_ms=self._last_futures_received_ms,
+                source_timestamp_watermark=(
+                    self._futures_source_timestamp_watermark
+                ),
+            ):
+                self._reset_for_futures_regression(observation)
+                futures_regressed = True
+                if FUTURES_EVENT not in regression_sources:
+                    regression_sources.append(FUTURES_EVENT)
+                continue
+            self._ingest_futures(observation, now_ms=now_ms)
+        self._prune_futures(now_ms)
+
+        chainlink_regressed = False
+        for observation in chainlink_events:
+            if observation.identity == self._last_chainlink_identity:
+                continue
+            if self._timestamps_regress(
+                observation,
+                last_received_ms=self._last_chainlink_received_ms,
+                source_timestamp_watermark=(
+                    self._chainlink_source_timestamp_watermark
+                ),
+            ):
+                self._reset_for_chainlink_regression(observation)
+                chainlink_regressed = True
+                if CHAINLINK_EVENT not in regression_sources:
+                    regression_sources.append(CHAINLINK_EVENT)
+                continue
+            if futures_regressed or chainlink_regressed:
+                self._quarantine_chainlink(observation)
+                continue
+            self._ingest_chainlink(
+                observation,
+                now_ms=now_ms,
+                history_existed_before_poll=history_existed_before_poll,
+            )
+        self._poll_regression_sources = tuple(regression_sources)
+
+    @staticmethod
+    def _timestamps_regress(
+        observation: V4VisibleObservation,
+        *,
+        last_received_ms: Optional[int],
+        source_timestamp_watermark: Optional[int],
+    ) -> bool:
+        if (
+            last_received_ms is not None
+            and observation.received_ms < last_received_ms
+        ):
+            return True
+        return (
+            source_timestamp_watermark is not None
+            and observation.source_timestamp_ms < source_timestamp_watermark
+        )
+
+    def _ingest_futures(
+        self,
+        observation: V4VisibleObservation,
+        *,
+        now_ms: int,
+    ) -> None:
+        self._last_futures_identity = observation.identity
+        self._last_futures_received_ms = observation.received_ms
+        self._futures_source_timestamp_watermark = max(
+            observation.source_timestamp_ms,
+            self._futures_source_timestamp_watermark
+            if self._futures_source_timestamp_watermark is not None
+            else observation.source_timestamp_ms,
+        )
+        if self._received_age_ms(observation, now_ms) <= self.futures_stale_ms:
+            self._futures_history.append(observation)
+
+    def _ingest_chainlink(
+        self,
+        observation: V4VisibleObservation,
+        *,
+        now_ms: int,
+        history_existed_before_poll: bool,
+    ) -> None:
+        self._last_chainlink_identity = observation.identity
+        self._last_chainlink_received_ms = observation.received_ms
+        self._chainlink_source_timestamp_watermark = max(
+            observation.source_timestamp_ms,
+            self._chainlink_source_timestamp_watermark
+            if self._chainlink_source_timestamp_watermark is not None
+            else observation.source_timestamp_ms,
+        )
+        is_fresh = (
+            self._received_age_ms(observation, now_ms)
+            <= self.chainlink_stale_ms
+        )
+        for config, identity in self.models:
+            self._clear_anchor(identity)
+            if not is_fresh:
+                continue
+            target_ms = observation.received_ms - config.lag_ms
+            self._anchor_targets[identity] = target_ms
+            if not history_existed_before_poll:
+                self._anchor_failures[identity] = ANCHOR_HISTORY_MISSING
+                continue
+            reference, gap_ms = self._find_reference(target_ms)
+            if reference is None:
+                self._anchor_failures[identity] = ANCHOR_HISTORY_MISSING
+                continue
+            self._anchor_gaps[identity] = gap_ms
+            if gap_ms > config.reference_max_gap_ms:
+                self._anchor_failures[identity] = ANCHOR_REFERENCE_GAP
+                continue
+            self._anchors[identity] = _V4Anchor(
+                chainlink=observation,
+                futures_reference=reference,
+            )
+            self._anchor_failures.pop(identity, None)
+
+    def _quarantine_chainlink(self, observation: V4VisibleObservation) -> None:
+        self._last_chainlink_identity = observation.identity
+        self._last_chainlink_received_ms = observation.received_ms
+        self._chainlink_source_timestamp_watermark = max(
+            observation.source_timestamp_ms,
+            self._chainlink_source_timestamp_watermark
+            if self._chainlink_source_timestamp_watermark is not None
+            else observation.source_timestamp_ms,
+        )
+
+    def _reset_for_futures_regression(
+        self,
+        observation: V4VisibleObservation,
+    ) -> None:
+        self._futures_history.clear()
+        self._clear_all_anchors()
+        self._last_futures_identity = observation.identity
+        self._last_futures_received_ms = observation.received_ms
+        self._futures_source_timestamp_watermark = (
+            observation.source_timestamp_ms
+        )
+
+    def _reset_for_chainlink_regression(
+        self,
+        observation: V4VisibleObservation,
+    ) -> None:
+        self._clear_all_anchors()
+        self._last_chainlink_identity = observation.identity
+        self._last_chainlink_received_ms = observation.received_ms
+        self._chainlink_source_timestamp_watermark = (
+            observation.source_timestamp_ms
+        )
+
+    def _find_reference(
+        self,
+        target_ms: int,
+    ) -> tuple[Optional[V4VisibleObservation], int]:
+        for observation in reversed(self._futures_history):
+            if observation.received_ms <= target_ms:
+                return observation, target_ms - observation.received_ms
+        return None, 0
+
+    def _history_is_ready(self, config: ForecastConfig, now_ms: int) -> bool:
+        reference, gap_ms = self._find_reference(now_ms - config.lag_ms)
+        return reference is not None and gap_ms <= config.reference_max_gap_ms
+
+    def _prune_futures(self, now_ms: int) -> None:
+        cutoff_ms = now_ms - self.history_retention_ms
+        while (
+            self._futures_history
+            and self._futures_history[0].received_ms < cutoff_ms
+        ):
+            self._futures_history.popleft()
+
+    def _clear_anchor(self, identity: ModelIdentity) -> None:
+        self._anchors.pop(identity, None)
+        self._anchor_targets.pop(identity, None)
+        self._anchor_gaps.pop(identity, None)
+        self._anchor_failures.pop(identity, None)
+
+    def _clear_all_anchors(self) -> None:
+        self._anchors.clear()
+        self._anchor_targets.clear()
+        self._anchor_gaps.clear()
+        self._anchor_failures.clear()
+
+    @staticmethod
+    def _received_age_ms(
+        observation: V4VisibleObservation,
+        now_ms: int,
+    ) -> int:
+        return max(0, now_ms - observation.received_ms)
+
+    def forecast_attempts(
+        self,
+        *,
+        latest_futures: Optional[V4VisibleObservation],
+        latest_chainlink: Optional[V4VisibleObservation],
+        generated_ms: int,
+    ) -> tuple[V4ForecastAttempt, ...]:
+        return tuple(
+            self._forecast_attempt(
+                config=config,
+                identity=identity,
+                latest_futures=latest_futures,
+                latest_chainlink=latest_chainlink,
+                generated_ms=generated_ms,
+            )
+            for config, identity in self.models
+        )
+
+    def _forecast_attempt(
+        self,
+        *,
+        config: ForecastConfig,
+        identity: ModelIdentity,
+        latest_futures: Optional[V4VisibleObservation],
+        latest_chainlink: Optional[V4VisibleObservation],
+        generated_ms: int,
+    ) -> V4ForecastAttempt:
+        anchor = self._anchors.get(identity)
+        state = (
+            ANCHORED
+            if anchor is not None
+            else (
+                WAITING_FOR_NEW_CHAINLINK_ANCHOR
+                if self._history_is_ready(config, generated_ms)
+                else WARMING_UP_FUTURES_HISTORY
+            )
+        )
+        regression_sources = list(self._poll_regression_sources)
+        for kind, observation in (
+            (FUTURES_EVENT, latest_futures),
+            (CHAINLINK_EVENT, latest_chainlink),
+        ):
+            if (
+                observation is not None
+                and observation.received_ms - generated_ms
+                > config.max_future_skew_ms
+                and kind not in regression_sources
+            ):
+                regression_sources.append(kind)
+        if regression_sources:
+            return self._invalid_attempt(
+                config=config,
+                identity=identity,
+                generated_ms=generated_ms,
+                status=TIMESTAMP_REGRESSION,
+                reasons=(TIMESTAMP_REGRESSION,),
+                anchor=anchor,
+                latest_futures=latest_futures,
+            )
+
+        reasons: list[str] = []
+        if latest_chainlink is None:
+            reasons.append(CHAINLINK_UNAVAILABLE)
+        elif (
+            self._received_age_ms(latest_chainlink, generated_ms)
+            > config.chainlink_stale_ms
+        ):
+            reasons.append(CHAINLINK_STALE)
+        if latest_futures is None:
+            reasons.append(FUTURES_UNAVAILABLE)
+        elif (
+            self._received_age_ms(latest_futures, generated_ms)
+            > config.futures_stale_ms
+        ):
+            reasons.append(FUTURES_STALE)
+        if anchor is None:
+            anchor_reason = self._anchor_failures.get(identity, state)
+            if anchor_reason not in reasons:
+                reasons.append(anchor_reason)
+        if reasons:
+            return self._invalid_attempt(
+                config=config,
+                identity=identity,
+                generated_ms=generated_ms,
+                status=self._status_for_reasons(reasons),
+                reasons=tuple(reasons),
+                anchor=anchor,
+                latest_futures=latest_futures,
+            )
+        if latest_futures is None or anchor is None:
+            raise ReplayDataError("valid v4 state is missing forecast inputs")
+        try:
+            projection = project_from_anchor(
+                model=CatchupModel(
+                    version=identity.model_version,
+                    lag_ms=config.lag_ms,
+                    beta=config.beta,
+                ),
+                anchor=ModelAnchor(
+                    chainlink=anchor.chainlink.observed_price,
+                    futures_reference=anchor.futures_reference.observed_price,
+                ),
+                futures_now=latest_futures.observed_price,
+            )
+        except (ArithmeticError, ValueError):
+            return self._invalid_attempt(
+                config=config,
+                identity=identity,
+                generated_ms=generated_ms,
+                status=MODEL_ERROR,
+                reasons=(MODEL_ERROR,),
+                anchor=anchor,
+                latest_futures=latest_futures,
+            )
+        return V4ForecastAttempt(
+            identity=identity,
+            lag_ms=config.lag_ms,
+            horizon_ms=config.horizon_ms,
+            beta=config.beta,
+            generated_ms=generated_ms,
+            target_ms=generated_ms + config.horizon_ms,
+            valid=True,
+            status=VALID,
+            invalid_reasons=(),
+            chainlink_anchor=anchor.chainlink,
+            futures_now=latest_futures,
+            futures_reference=anchor.futures_reference,
+            futures_reference_target_ms=self._anchor_targets[identity],
+            futures_reference_gap_ms=self._anchor_gaps[identity],
+            projected_chainlink=projection.projected_chainlink,
+            matched_no_change_prediction=anchor.chainlink.value,
+        )
+
+    def _invalid_attempt(
+        self,
+        *,
+        config: ForecastConfig,
+        identity: ModelIdentity,
+        generated_ms: int,
+        status: str,
+        reasons: tuple[str, ...],
+        anchor: Optional[_V4Anchor],
+        latest_futures: Optional[V4VisibleObservation],
+    ) -> V4ForecastAttempt:
+        return V4ForecastAttempt(
+            identity=identity,
+            lag_ms=config.lag_ms,
+            horizon_ms=config.horizon_ms,
+            beta=config.beta,
+            generated_ms=generated_ms,
+            target_ms=generated_ms + config.horizon_ms,
+            valid=False,
+            status=status,
+            invalid_reasons=reasons,
+            chainlink_anchor=None if anchor is None else anchor.chainlink,
+            futures_now=latest_futures,
+            futures_reference=(
+                None if anchor is None else anchor.futures_reference
+            ),
+            futures_reference_target_ms=self._anchor_targets.get(identity),
+            futures_reference_gap_ms=self._anchor_gaps.get(identity),
+            projected_chainlink=None,
+            matched_no_change_prediction=None,
+        )
+
+    @staticmethod
+    def _status_for_reasons(reasons: Sequence[str]) -> str:
+        for status in (
+            MODEL_ERROR,
+            CHAINLINK_UNAVAILABLE,
+            FUTURES_UNAVAILABLE,
+            CHAINLINK_STALE,
+            FUTURES_STALE,
+            ANCHOR_HISTORY_MISSING,
+            ANCHOR_REFERENCE_GAP,
+        ):
+            if status in reasons:
+                return status
+        return WARMING_UP
+
+
+def _select_v4_replay_sessions(
+    sessions: Sequence[ReplaySession],
+    config: V4CausalReplayConfig,
+) -> SessionSelection:
+    total_by_source: Counter[str] = Counter()
+    eligible_by_source: Counter[str] = Counter()
+    excluded_by_reason: Counter[str] = Counter()
+    excluded_raw_rows = 0
+    eligible: dict[str, list[ReplaySession]] = {
+        FUTURES_SESSION_SOURCE: [],
+        CHAINLINK_SESSION_SOURCE: [],
+    }
+
+    class _StrictSessionPolicy:
+        exclude_parse_error_sessions = True
+
+    input_start_ns = config.archive_input_start_ms * NS_PER_MS
+    input_end_ns = config.archive_input_end_ms * NS_PER_MS
+    for session in sessions:
+        if not isinstance(session, ReplaySession):
+            raise TypeError("sessions must contain ReplaySession values")
+        total_by_source[session.source] += 1
+        potential_start_ns = (
+            session.ready_wall_ns
+            if session.ready_wall_ns is not None
+            else session.connected_wall_ns
+        )
+        potential_end_ns = (
+            session.disconnected_wall_ns
+            if session.disconnected_wall_ns is not None
+            else input_end_ns
+        )
+        if (
+            potential_start_ns >= input_end_ns
+            or potential_end_ns <= input_start_ns
+        ):
+            continue
+        reasons = session.exclusion_reasons(
+            _StrictSessionPolicy()  # type: ignore[arg-type]
+        )
+        if reasons:
+            excluded_by_reason.update(reasons)
+            excluded_raw_rows += session.raw_row_count or 0
+            raise ReplayDataError(
+                "v4 overlapping session failed loss-free archive quality: "
+                + ",".join(sorted(reasons))
+            )
+        eligible[session.source].append(session)
+        eligible_by_source[session.source] += 1
+
+    for source_sessions in eligible.values():
+        source_sessions.sort(key=lambda item: item.ready_wall_ns or 0)
+        for previous, current in zip(source_sessions, source_sessions[1:]):
+            if previous.disconnected_wall_ns > current.ready_wall_ns:
+                raise ReplayDataError("eligible sessions overlap for one source")
+
+    segments: list[ReplaySegment] = []
+    futures_sessions = eligible[FUTURES_SESSION_SOURCE]
+    chainlink_sessions = eligible[CHAINLINK_SESSION_SOURCE]
+    futures_index = 0
+    chainlink_index = 0
+    while (
+        futures_index < len(futures_sessions)
+        and chainlink_index < len(chainlink_sessions)
+    ):
+        futures_session = futures_sessions[futures_index]
+        chainlink_session = chainlink_sessions[chainlink_index]
+        start_wall_ns = max(
+            futures_session.ready_wall_ns,
+            chainlink_session.ready_wall_ns,
+            input_start_ns,
+        )
+        end_wall_ns = min(
+            futures_session.disconnected_wall_ns,
+            chainlink_session.disconnected_wall_ns,
+            input_end_ns,
+        )
+        if start_wall_ns < end_wall_ns:
+            segments.append(
+                ReplaySegment(
+                    start_wall_ns=start_wall_ns,
+                    end_wall_ns=end_wall_ns,
+                    futures_session_id=futures_session.connection_id,
+                    chainlink_session_id=chainlink_session.connection_id,
+                )
+            )
+        if (
+            futures_session.disconnected_wall_ns
+            <= chainlink_session.disconnected_wall_ns
+        ):
+            futures_index += 1
+        else:
+            chainlink_index += 1
+
+    eligible_session_ids = frozenset(
+        connection_id
+        for segment in segments
+        for connection_id in (
+            segment.futures_session_id,
+            segment.chainlink_session_id,
+        )
+    )
+    return SessionSelection(
+        segments=tuple(segments),
+        eligible_session_ids=eligible_session_ids,
+        total_by_source=dict(total_by_source),
+        eligible_by_source=dict(eligible_by_source),
+        excluded_by_reason=dict(excluded_by_reason),
+        excluded_integrity_scope_raw_rows=excluded_raw_rows,
+    )
+
+
+@dataclass(frozen=True)
+class _PendingV4Origin:
+    generated_ms: int
+    finalization_ms: int
+    target_eligible: bool
+    candidate_attempts: tuple[V4ForecastAttempt, ...]
+    control_attempt: V4ForecastAttempt
+    generation_eligible: bool
+    integrity_epoch: int
+    session_available_at_generation: bool
+
+
+class V4CausalReplayRunner:
+    """Streaming, loss-free causal replay for exactly one frozen v4 cell."""
+
+    def __init__(
+        self,
+        *,
+        config: V4CausalReplayConfig,
+        sessions: Sequence[ReplaySession],
+    ) -> None:
+        if not isinstance(config, V4CausalReplayConfig):
+            raise TypeError("config must be V4CausalReplayConfig")
+        self.config = config
+        self.session_selection = _select_v4_replay_sessions(sessions, config)
+        self._segments = self.session_selection.segments
+        candidate_models = tuple(
+            (
+                forecast_config,
+                config.contract.candidate_identity(forecast_config.lag_ms),
+            )
+            for forecast_config in config.candidate_configs
+        )
+        self._candidate_machine = _V4ForecastMachine(candidate_models)
+        self._control_alias = (
+            config.contract.replacement_control.mode
+            is ControlMode.V4_3000_ALIAS
+        )
+        v4_3000_config = config.candidate_configs[
+            COMPARISON_LAGS_MS.index(3_000)
+        ]
+        supported_control_rules = (
+            "anchor_rule",
+            "futures_reference_rule",
+            "same_poll_reference_rule",
+            "projection_rule",
+            "forecast_validity_rule",
+        )
+        if (
+            not self._control_alias
+            and (
+                config.contract.replacement_control.active_code_digest
+                != config.contract.replacement_control.v4_code_digest
+                or any(
+                    getattr(config.control_config, field_name)
+                    != getattr(v4_3000_config, field_name)
+                    for field_name in supported_control_rules
+                )
+            )
+        ):
+            raise ReplayDataError(
+                "the distinct operational control has unsupported forecast "
+                "code or rules; "
+                "a manifest-verified reconstructed executor is required"
+            )
+        self._control_machine = (
+            None
+            if self._control_alias
+            else _V4ForecastMachine(
+                ((config.control_config, config.contract.control_identity),)
+            )
+        )
+        self._active_segment: Optional[ReplaySegment] = None
+        self._poll_segment_index = 0
+        self._raw_segment_index = 0
+        self._integrity_epoch = 0
+        self._visibility_pending: list[
+            tuple[int, tuple[int, int, int, int, str], ReplayEvent]
+        ] = []
+        self._latest_futures: Optional[V4VisibleObservation] = None
+        self._latest_chainlink: Optional[V4VisibleObservation] = None
+        self._chainlink_actual_history: Deque[V4VisibleObservation] = deque()
+        self._pending_origins: list[tuple[int, int, _PendingV4Origin]] = []
+        self._pending_sequence = 0
+        self._last_sort_key: Optional[tuple[int, int, int, int, str]] = None
+        self.next_poll_ms = _ceil_to_multiple(
+            config.archive_input_start_ms,
+            V4_POLL_MS,
+        )
+        self.input_events = 0
+        self.ignored_events = 0
+        self.polls_processed = 0
+        self.origins_finalized = 0
+
+    def consume(self, event: ReplayEvent) -> Iterator[V4OriginCohort]:
+        if not isinstance(event, ReplayEvent):
+            raise TypeError("event must be ReplayEvent")
+        if self._last_sort_key is not None and event.sort_key <= self._last_sort_key:
+            raise ReplayDataError(
+                "v4 replay events are duplicated or not in raw chronological order"
+            )
+        self._last_sort_key = event.sort_key
+        self.input_events += 1
+        yield from self._iter_polls_before(event.received_wall_ns)
+
+        input_start_ns = self.config.archive_input_start_ms * NS_PER_MS
+        input_end_ns = self.config.archive_input_end_ms * NS_PER_MS
+        if not input_start_ns <= event.received_wall_ns < input_end_ns:
+            self.ignored_events += 1
+            return
+        segment = self._segment_for_raw_event(event.received_wall_ns)
+        if segment is None or event.connection_id != self._connection_for_kind(
+            segment,
+            event.kind,
+        ):
+            self.ignored_events += 1
+            return
+        delay_ms = (
+            self.config.timing_cell.futures_delay_ms
+            if event.kind == FUTURES_EVENT
+            else self.config.timing_cell.chainlink_delay_ms
+        )
+        available_wall_ns = event.received_wall_ns + delay_ms * NS_PER_MS
+        heapq.heappush(
+            self._visibility_pending,
+            (available_wall_ns, event.sort_key, event),
+        )
+
+    def finish(self) -> Iterator[V4OriginCohort]:
+        yield from self._iter_polls_before(
+            self.config.archive_input_end_ms * NS_PER_MS,
+        )
+        if self._pending_origins:
+            raise ReplayDataError(
+                "v4 pending cohorts remain after the archive finalization tail"
+            )
+
+    def _iter_polls_before(
+        self,
+        exclusive_wall_ns: int,
+    ) -> Iterator[V4OriginCohort]:
+        input_end_ns = self.config.archive_input_end_ms * NS_PER_MS
+        while (
+            self.next_poll_ms * NS_PER_MS < exclusive_wall_ns
+            and self.next_poll_ms * NS_PER_MS < input_end_ns
+        ):
+            finalized = self._poll(self.next_poll_ms)
+            self.next_poll_ms += V4_POLL_MS
+            yield from finalized
+
+    def _poll(self, tick_ms: int) -> tuple[V4OriginCohort, ...]:
+        self.polls_processed += 1
+        self._transition_segment(tick_ms * NS_PER_MS)
+        futures_events, chainlink_events = self._apply_visible_events(tick_ms)
+        self._candidate_machine.apply_poll(
+            futures_events=futures_events,
+            chainlink_events=chainlink_events,
+            now_ms=tick_ms,
+        )
+        if self._control_machine is not None:
+            self._control_machine.apply_poll(
+                futures_events=futures_events,
+                chainlink_events=chainlink_events,
+                now_ms=tick_ms,
+            )
+        finalized = self._finalize_due(tick_ms)
+        if self._is_generation_tick(tick_ms):
+            self._generate(tick_ms)
+        self._prune_actual_history(tick_ms)
+        return finalized
+
+    def _transition_segment(self, tick_wall_ns: int) -> None:
+        while (
+            self._poll_segment_index < len(self._segments)
+            and self._segments[self._poll_segment_index].end_wall_ns
+            <= tick_wall_ns
+        ):
+            self._poll_segment_index += 1
+        next_segment = None
+        if self._poll_segment_index < len(self._segments):
+            candidate = self._segments[self._poll_segment_index]
+            if candidate.start_wall_ns <= tick_wall_ns < candidate.end_wall_ns:
+                next_segment = candidate
+        if next_segment == self._active_segment:
+            return
+        self._active_segment = next_segment
+        self._integrity_epoch += 1
+        self._candidate_machine.reset()
+        if self._control_machine is not None:
+            self._control_machine.reset()
+        self._latest_futures = None
+        self._latest_chainlink = None
+        self._chainlink_actual_history.clear()
+        if next_segment is None:
+            self.ignored_events += len(self._visibility_pending)
+            self._visibility_pending.clear()
+            return
+        retained_pending = [
+            item
+            for item in self._visibility_pending
+            if (
+                next_segment.start_wall_ns
+                <= item[2].received_wall_ns
+                < next_segment.end_wall_ns
+                and item[2].connection_id
+                == self._connection_for_kind(next_segment, item[2].kind)
+            )
+        ]
+        self.ignored_events += len(self._visibility_pending) - len(retained_pending)
+        self._visibility_pending = retained_pending
+        heapq.heapify(self._visibility_pending)
+
+    def _apply_visible_events(
+        self,
+        tick_ms: int,
+    ) -> tuple[tuple[V4VisibleObservation, ...], tuple[V4VisibleObservation, ...]]:
+        tick_wall_ns = tick_ms * NS_PER_MS
+        futures_events: list[V4VisibleObservation] = []
+        chainlink_events: list[V4VisibleObservation] = []
+        while (
+            self._visibility_pending
+            and self._visibility_pending[0][0] <= tick_wall_ns
+        ):
+            available_wall_ns, _sort_key, event = heapq.heappop(
+                self._visibility_pending
+            )
+            if self._active_segment is None or (
+                event.connection_id
+                != self._connection_for_kind(self._active_segment, event.kind)
+            ):
+                self.ignored_events += 1
+                continue
+            visible_tick_index = (
+                available_wall_ns + V4_POLL_MS * NS_PER_MS - 1
+            ) // (V4_POLL_MS * NS_PER_MS)
+            observation = V4VisibleObservation(
+                kind=event.kind,
+                value=event.value,
+                received_wall_ns=event.received_wall_ns,
+                received_monotonic_ns=event.received_monotonic_ns,
+                available_wall_ns=available_wall_ns,
+                visible_ms=visible_tick_index * V4_POLL_MS,
+                source_timestamp_ms=event.source_timestamp_ms,
+                connection_id=event.connection_id,
+                source_sequence=event.sequence,
+            )
+            if observation.visible_ms != tick_ms:
+                raise ReplayDataError("v4 visibility queue escaped its poll tick")
+            if event.kind == FUTURES_EVENT:
+                self._latest_futures = observation
+                futures_events.append(observation)
+            else:
+                self._latest_chainlink = observation
+                self._chainlink_actual_history.append(observation)
+                chainlink_events.append(observation)
+        return tuple(futures_events), tuple(chainlink_events)
+
+    def _is_generation_tick(self, tick_ms: int) -> bool:
+        if not (
+            self.config.scoring_start_ms
+            <= tick_ms
+            < self.config.scoring_end_ms
+        ):
+            return False
+        return (
+            tick_ms % V4_GENERATION_INTERVAL_MS
+            == self.config.timing_cell.phase_offset_ms
+        )
+
+    def _generate(self, generated_ms: int) -> None:
+        candidate_attempts = self._candidate_machine.forecast_attempts(
+            latest_futures=self._latest_futures,
+            latest_chainlink=self._latest_chainlink,
+            generated_ms=generated_ms,
+        )
+        expected_identities = tuple(
+            self.config.contract.candidate_identity(lag_ms)
+            for lag_ms in COMPARISON_LAGS_MS
+        )
+        if tuple(item.identity for item in candidate_attempts) != expected_identities:
+            raise ReplayDataError("v4 candidate attempts have the wrong identities")
+        if self._control_alias:
+            candidate_3000 = candidate_attempts[
+                COMPARISON_LAGS_MS.index(self.config.control_config.lag_ms)
+            ]
+            control_attempt = replace(
+                candidate_3000,
+                identity=self.config.contract.control_identity,
+            )
+        else:
+            if self._control_machine is None:
+                raise ReplayDataError("distinct v4 control machine is missing")
+            (control_attempt,) = self._control_machine.forecast_attempts(
+                latest_futures=self._latest_futures,
+                latest_chainlink=self._latest_chainlink,
+                generated_ms=generated_ms,
+            )
+        if control_attempt.identity != self.config.contract.control_identity:
+            raise ReplayDataError("v4 control attempt has the wrong identity")
+
+        target_eligible = (
+            generated_ms + max(COMPARISON_LAGS_MS)
+            < self.config.scoring_end_ms
+        )
+        generation_eligible = target_eligible and all(
+            item.valid for item in candidate_attempts
+        )
+        finalization_ms = (
+            generated_ms
+            + max(COMPARISON_LAGS_MS)
+            + FINALIZATION_ALLOWANCE_MS
+        )
+        pending = _PendingV4Origin(
+            generated_ms=generated_ms,
+            finalization_ms=finalization_ms,
+            target_eligible=target_eligible,
+            candidate_attempts=candidate_attempts,
+            control_attempt=control_attempt,
+            generation_eligible=generation_eligible,
+            integrity_epoch=self._integrity_epoch,
+            session_available_at_generation=self._active_segment is not None,
+        )
+        self._pending_sequence += 1
+        heapq.heappush(
+            self._pending_origins,
+            (finalization_ms, self._pending_sequence, pending),
+        )
+
+    def _finalize_due(self, tick_ms: int) -> tuple[V4OriginCohort, ...]:
+        finalized: list[V4OriginCohort] = []
+        while self._pending_origins and self._pending_origins[0][0] <= tick_ms:
+            _finalization_ms, _sequence, pending = heapq.heappop(
+                self._pending_origins
+            )
+            finalized.append(self._finalize_origin(pending))
+            self.origins_finalized += 1
+        return tuple(finalized)
+
+    def _finalize_origin(self, pending: _PendingV4Origin) -> V4OriginCohort:
+        integrity_reset = pending.integrity_epoch != self._integrity_epoch
+        if pending.target_eligible and not integrity_reset:
+            candidate_attempts = tuple(
+                item.with_actual(self._actual_chainlink_at(item.target_ms))
+                for item in pending.candidate_attempts
+            )
+            control_attempt = pending.control_attempt.with_actual(
+                self._actual_chainlink_at(pending.control_attempt.target_ms)
+            )
+        else:
+            candidate_attempts = pending.candidate_attempts
+            control_attempt = pending.control_attempt
+
+        common_scored = (
+            pending.generation_eligible
+            and not integrity_reset
+            and all(item.actual_chainlink is not None for item in candidate_attempts)
+        )
+        decision_eligible = (
+            common_scored
+            and control_attempt.valid
+            and control_attempt.actual_chainlink is not None
+        )
+        missing_reasons: list[str] = []
+        structural_reason = None
+        if not pending.target_eligible:
+            structural_reason = "maximum_horizon_tail"
+        else:
+            if not pending.session_available_at_generation:
+                missing_reasons.append("session_unavailable_at_generation")
+            for item in candidate_attempts:
+                if not item.valid:
+                    missing_reasons.append(
+                        "candidate_forecast_invalid:"
+                        f"{item.identity.model_version}:{item.status}"
+                    )
+            if integrity_reset:
+                missing_reasons.append("integrity_reset_before_finalization")
+            else:
+                for item in candidate_attempts:
+                    if item.valid and item.actual_chainlink is None:
+                        missing_reasons.append(
+                            "candidate_actual_missing:"
+                            f"{item.identity.model_version}"
+                        )
+            if not control_attempt.valid:
+                missing_reasons.append(
+                    f"control_forecast_invalid:{control_attempt.status}"
+                )
+            elif not integrity_reset and control_attempt.actual_chainlink is None:
+                missing_reasons.append("control_actual_missing")
+
+        return V4OriginCohort(
+            cell_id=self.config.timing_cell.cell_id,
+            generated_ms=pending.generated_ms,
+            finalization_ms=pending.finalization_ms,
+            target_eligible=pending.target_eligible,
+            generation_eligible=pending.generation_eligible,
+            common_scored=common_scored,
+            decision_eligible=decision_eligible,
+            candidate_attempts=candidate_attempts,
+            control_attempt=control_attempt,
+            integrity_epoch_at_generation=pending.integrity_epoch,
+            integrity_epoch_at_finalization=self._integrity_epoch,
+            integrity_reset_before_finalization=integrity_reset,
+            structural_exclusion_reason=structural_reason,
+            missing_reasons=tuple(sorted(set(missing_reasons))),
+        )
+
+    def _actual_chainlink_at(
+        self,
+        target_ms: int,
+    ) -> Optional[V4VisibleObservation]:
+        target_wall_ns = target_ms * NS_PER_MS
+        for observation in reversed(self._chainlink_actual_history):
+            if (
+                observation.visible_ms <= target_ms
+                and observation.received_wall_ns <= target_wall_ns
+            ):
+                return observation
+        return None
+
+    def _prune_actual_history(self, now_ms: int) -> None:
+        cutoff_visible_ms = (
+            now_ms
+            - max(COMPARISON_LAGS_MS)
+            - FINALIZATION_ALLOWANCE_MS
+            - V4_POLL_MS
+        )
+        while (
+            len(self._chainlink_actual_history) > 1
+            and self._chainlink_actual_history[1].visible_ms < cutoff_visible_ms
+        ):
+            self._chainlink_actual_history.popleft()
+
+    def _segment_for_raw_event(
+        self,
+        received_wall_ns: int,
+    ) -> Optional[ReplaySegment]:
+        while (
+            self._raw_segment_index < len(self._segments)
+            and self._segments[self._raw_segment_index].end_wall_ns
+            <= received_wall_ns
+        ):
+            self._raw_segment_index += 1
+        if self._raw_segment_index >= len(self._segments):
+            return None
+        segment = self._segments[self._raw_segment_index]
+        if segment.start_wall_ns <= received_wall_ns < segment.end_wall_ns:
+            return segment
+        return None
+
+    @staticmethod
+    def _connection_for_kind(segment: ReplaySegment, kind: str) -> UUID:
+        if kind == FUTURES_EVENT:
+            return segment.futures_session_id
+        if kind == CHAINLINK_EVENT:
+            return segment.chainlink_session_id
+        raise ReplayDataError("invalid v4 event kind")
+
+
+@dataclass(frozen=True)
+class V4CausalReplayResult:
+    config: V4CausalReplayConfig
+    session_selection: SessionSelection
+    origins: tuple[V4OriginCohort, ...]
+    polls_processed: int
+    input_events: int
+    ignored_events: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, V4CausalReplayConfig):
+            raise TypeError("config must be V4CausalReplayConfig")
+        if not isinstance(self.session_selection, SessionSelection):
+            raise TypeError("session_selection must be SessionSelection")
+        if not isinstance(self.origins, tuple) or not all(
+            isinstance(item, V4OriginCohort) for item in self.origins
+        ):
+            raise TypeError("origins must be a tuple of V4OriginCohort values")
+        generated = tuple(item.generated_ms for item in self.origins)
+        if generated != tuple(sorted(generated)) or len(set(generated)) != len(
+            generated
+        ):
+            raise ValueError("v4 origins must be unique and generation ordered")
+        for field_name in ("polls_processed", "input_events", "ignored_events"):
+            _require_non_negative_int(getattr(self, field_name), field_name)
+
+    @property
+    def scheduled_origin_vector(self) -> tuple[int, ...]:
+        return tuple(item.generated_ms for item in self.origins)
+
+    @property
+    def target_eligible_mask(self) -> tuple[bool, ...]:
+        return tuple(item.target_eligible for item in self.origins)
+
+    @property
+    def target_eligible_origin_vector(self) -> tuple[int, ...]:
+        return tuple(
+            item.generated_ms for item in self.origins if item.target_eligible
+        )
+
+    @property
+    def generation_eligible_mask(self) -> tuple[bool, ...]:
+        return tuple(
+            item.generation_eligible
+            for item in self.origins
+            if item.target_eligible
+        )
+
+    @property
+    def common_scored_mask(self) -> tuple[bool, ...]:
+        return tuple(
+            item.common_scored for item in self.origins if item.target_eligible
+        )
+
+    @property
+    def decision_eligible_mask(self) -> tuple[bool, ...]:
+        return tuple(
+            item.decision_eligible for item in self.origins if item.target_eligible
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        target_origins = [item for item in self.origins if item.target_eligible]
+        return {
+            "schema_version": V4_REPLAY_SCHEMA_VERSION,
+            "mode": V4_CAUSAL_REPLAY_MODE,
+            "selection_performed": False,
+            "losses_materialized": False,
+            "cell": self.config.timing_cell.to_dict(),
+            "contract_digest": self.config.contract.digest,
+            "offline_evaluation_policy_digest": (
+                self.config.contract.offline_evaluation_policy_digest
+            ),
+            "scoring_range": {
+                "start_ms": self.config.scoring_start_ms,
+                "end_ms": self.config.scoring_end_ms,
+                "boundary": "[start_ms,end_ms)",
+            },
+            "archive_input_range": {
+                "start_ms": self.config.archive_input_start_ms,
+                "end_ms": self.config.archive_input_end_ms,
+                "boundary": "[start_ms,end_ms)",
+            },
+            "scheduled_origin_vector": list(self.scheduled_origin_vector),
+            "target_eligible_mask": list(self.target_eligible_mask),
+            "target_eligible_origin_vector": list(
+                self.target_eligible_origin_vector
+            ),
+            "generation_eligible_mask": list(self.generation_eligible_mask),
+            "common_scored_mask": list(self.common_scored_mask),
+            "decision_eligible_mask": list(self.decision_eligible_mask),
+            "counts": {
+                "scheduled": len(self.origins),
+                "target_eligible": len(target_origins),
+                "generation_eligible": sum(
+                    item.generation_eligible for item in target_origins
+                ),
+                "common_scored": sum(item.common_scored for item in target_origins),
+                "decision_eligible": sum(
+                    item.decision_eligible for item in target_origins
+                ),
+                "cohort_classified": len(target_origins),
+                "causal_violations": sum(
+                    item.causal_violation_count for item in target_origins
+                ),
+            },
+            "missing_reasons_by_origin": {
+                str(item.generated_ms): list(item.missing_reasons)
+                for item in target_origins
+                if item.missing_reasons
+            },
+            "session_quality": {
+                "policy": "completed_clean_integrity_checked_parse_strict",
+                "common_healthy_segments": len(
+                    self.session_selection.segments
+                ),
+                "sessions_total_by_source": dict(
+                    self.session_selection.total_by_source
+                ),
+                "sessions_eligible_by_source": dict(
+                    self.session_selection.eligible_by_source
+                ),
+                "sessions_excluded_by_reason": dict(
+                    self.session_selection.excluded_by_reason
+                ),
+            },
+            "polls_processed": self.polls_processed,
+            "input_events": self.input_events,
+            "ignored_events": self.ignored_events,
+            "origins": [item.to_dict() for item in self.origins],
+        }
+
+
+def iter_v4_causal_origins(
+    *,
+    events: Iterable[ReplayEvent],
+    sessions: Sequence[ReplaySession],
+    config: V4CausalReplayConfig,
+) -> Iterable[V4OriginCohort]:
+    """Yield finalized v4 origins without retaining a full-day rich ledger."""
+
+    runner = V4CausalReplayRunner(config=config, sessions=sessions)
+    for event in events:
+        yield from runner.consume(event)
+    yield from runner.finish()
+
+
+def replay_v4_causal_signals(
+    *,
+    events: Iterable[ReplayEvent],
+    sessions: Sequence[ReplaySession],
+    config: V4CausalReplayConfig,
+) -> V4CausalReplayResult:
+    """Collect a bounded v4 replay; use the iterator for full-day ledgers."""
+
+    runner = V4CausalReplayRunner(config=config, sessions=sessions)
+    origins: list[V4OriginCohort] = []
+    for event in events:
+        origins.extend(runner.consume(event))
+    origins.extend(runner.finish())
+    return V4CausalReplayResult(
+        config=config,
+        session_selection=runner.session_selection,
+        origins=tuple(origins),
+        polls_processed=runner.polls_processed,
+        input_events=runner.input_events,
+        ignored_events=runner.ignored_events,
+    )
 
 
 SESSION_SQL = """
