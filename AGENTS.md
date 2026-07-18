@@ -227,6 +227,12 @@ The corresponding Python entry points are:
   `model_version`, select the requested half-open window by `target_ms`, inspect
   only its generation market and predecessor, and reject more than 1,000 rows.
   Keep this PostgreSQL read path separate from `/markets/current/live`.
+  Expose the persisted forecast-time cache snapshots only as
+  `chainlink_at_forecast`, `chainlink_at_forecast_source_timestamp_ms`,
+  `chainlink_at_forecast_received_ms`, `futures_at_forecast`,
+  `futures_at_forecast_source_timestamp_ms`, and
+  `futures_at_forecast_received_ms`. These fields belong to `generated_ms`;
+  `projected_chainlink` and `actual_chainlink` belong to `target_ms`.
 - Read the three source-price keys and `btc:live:chainlink_shadow` with one
   four-key Redis `MGET`; do not issue a second `GET` for the shadow value.
   Decode the shadow value independently with its dedicated strict decoder,
@@ -301,8 +307,10 @@ The corresponding Python entry points are:
   `(model_version, generated_ms, horizon_ms)`.
 - Grant `price_reader` `SELECT` only on the owner-rights
   `shadow_signal_evaluation_chart_points` view. Revoke that view from `PUBLIC`
-  and `price_writer`; do not expose futures inputs, writer metadata, or
-  `created_at` through it.
+  and `price_writer`. Its only forecast-input surface is the six narrowly
+  approved Chainlink/futures-at-forecast value and timestamp fields above. Do
+  not expose `futures_reference` or any of its metadata, worker age/internal
+  fields, writer metadata, or `created_at` through it.
 
 ## Market Window Rule
 

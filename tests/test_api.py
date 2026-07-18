@@ -1406,6 +1406,11 @@ def shadow_evaluation_chart_row(**overrides):
         "forecast_market_id": SHADOW_REPORT_MARKET_ID,
         "full_horizon_before_forecast_market_end": True,
         "chainlink_at_forecast": Decimal("62000"),
+        "chainlink_at_forecast_source_timestamp_ms": generated_ms - 1_000,
+        "chainlink_at_forecast_received_ms": generated_ms - 100,
+        "futures_at_forecast": Decimal("62101"),
+        "futures_at_forecast_source_timestamp_ms": generated_ms - 50,
+        "futures_at_forecast_received_ms": generated_ms - 10,
         "projected_chainlink": Decimal("62001"),
         "actual_chainlink": Decimal("62000.5"),
         "actual_chainlink_source_timestamp_ms": target_ms - 1_100,
@@ -1550,6 +1555,11 @@ def test_current_shadow_evaluations_returns_exact_typed_point_without_redis(
             "forecast_market_id": SHADOW_REPORT_MARKET_ID,
             "full_horizon_before_forecast_market_end": True,
             "chainlink_at_forecast": "62000",
+            "chainlink_at_forecast_source_timestamp_ms": 1_783_459_246_100,
+            "chainlink_at_forecast_received_ms": 1_783_459_247_000,
+            "futures_at_forecast": "62101",
+            "futures_at_forecast_source_timestamp_ms": 1_783_459_247_050,
+            "futures_at_forecast_received_ms": 1_783_459_247_090,
             "projected_chainlink": "62001",
             "actual_chainlink": "62000.5",
             "actual_chainlink_source_timestamp_ms": 1_783_459_249_000,
@@ -1598,6 +1608,9 @@ def test_shadow_evaluations_by_id_returns_completed_market_report(
     assert body["coverage"]["observed_buckets"] == 1
     assert body["coverage"]["unobserved_buckets_as_of_response"] == 599
     assert body["performance"]["cohorts"][0]["scored_points"] == 1
+    assert body["schema_version"] == 2
+    assert body["points"][0]["chainlink_at_forecast"] == "62000"
+    assert body["points"][0]["futures_at_forecast"] == "62101"
     assert body["points"][0]["projected_chainlink"] == "62001"
     assert client.fake_live_cache.requested_keys == []
     assert client.fake_pool.acquire_calls == 0

@@ -808,10 +808,11 @@ $$;
 -- Replace the reader boundary in the same transaction as legacy labeling.
 -- This remains an owner-rights view: security_invoker must not be enabled
 -- because price_reader has no base-table privilege. Dashboard reporting
--- intentionally omits futures inputs, writer metadata, retention controls,
--- and created_at. Selection-version and outcome-integrity provenance are part
--- of the reader contract so unavailable and integrity-invalid targets remain
--- distinguishable without granting access to the base table.
+-- exposes only the current futures observation captured with each forecast;
+-- it still omits the model's futures reference, writer metadata, retention
+-- controls, and created_at. Selection-version and outcome-integrity provenance
+-- remain part of the reader contract so unavailable and integrity-invalid
+-- targets stay distinguishable without granting access to the base table.
 CREATE OR REPLACE VIEW public.shadow_signal_evaluation_chart_points
 WITH (security_barrier = true) AS
 SELECT
@@ -847,7 +848,13 @@ SELECT
     selection_policy_version,
     selection_evidence_end_ms,
     outcome_status,
-    outcome_invalid_reasons
+    outcome_invalid_reasons,
+    chainlink_at_forecast_source_timestamp_ms,
+    chainlink_at_forecast_received_ms,
+    futures_now AS futures_at_forecast,
+    futures_now_source_timestamp_ms
+        AS futures_at_forecast_source_timestamp_ms,
+    futures_now_received_ms AS futures_at_forecast_received_ms
 FROM public.shadow_signal_evaluations
 WHERE outcome_status IN ('available', 'unavailable', 'integrity_invalid');
 

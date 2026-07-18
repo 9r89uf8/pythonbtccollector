@@ -823,14 +823,19 @@ def test_schema_has_causal_internal_shadow_evaluation_table():
         "outcome_status TEXT NOT NULL",
         "outcome_invalid_reasons TEXT[] NOT NULL",
         "chainlink_at_forecast NUMERIC(38, 18)",
+        "chainlink_at_forecast_source_timestamp_ms BIGINT",
+        "chainlink_at_forecast_received_ms BIGINT",
         "projected_chainlink NUMERIC(38, 18)",
         "futures_now NUMERIC(38, 18)",
+        "futures_now_source_timestamp_ms BIGINT",
+        "futures_now_received_ms BIGINT",
         "futures_reference NUMERIC(38, 18)",
         "actual_chainlink NUMERIC(38, 18)",
         "forecast_error NUMERIC(38, 18)",
         "baseline_error NUMERIC(38, 18)",
     ):
         assert column in table
+    assert "futures_at_forecast" not in table
 
     assert "CHECK (generated_ms >= 0)" in table
     assert "generated_ms % 500" not in table
@@ -949,6 +954,7 @@ def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
     )
     view = schema[start : schema.index(end_marker, start) + len(end_marker)]
     selected_columns = view[: view.index("FROM public.shadow_signal_evaluations")]
+    normalized_view = " ".join(view.split())
 
     assert "WITH (security_barrier = true)" in view
     assert "security_invoker" not in view
@@ -983,15 +989,28 @@ def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
         "baseline_error",
         "outcome_status",
         "outcome_invalid_reasons",
+        "chainlink_at_forecast_source_timestamp_ms",
+        "chainlink_at_forecast_received_ms",
+        "futures_now AS futures_at_forecast",
+        (
+            "futures_now_source_timestamp_ms "
+            "AS futures_at_forecast_source_timestamp_ms"
+        ),
+        (
+            "futures_now_received_ms "
+            "AS futures_at_forecast_received_ms"
+        ),
     ):
-        assert column in view
+        assert column in normalized_view
 
     for forbidden in (
-        "futures_now",
         "futures_reference",
         "created_at",
     ):
         assert forbidden not in selected_columns
+    assert "futures_now AS futures_at_forecast" in selected_columns
+    assert "futures_now_source_timestamp_ms" in selected_columns
+    assert "futures_now_received_ms" in selected_columns
 
     # PostgreSQL permits CREATE OR REPLACE VIEW to append columns, but not to
     # reorder the deployed projection. Keep the item-7 additions after every
@@ -1011,6 +1030,23 @@ def test_schema_exposes_only_the_restricted_shadow_evaluation_chart_view():
     assert selected_columns.index("outcome_status") < selected_columns.index(
         "outcome_invalid_reasons"
     )
+    assert selected_columns.index("outcome_invalid_reasons") < (
+        selected_columns.index("chainlink_at_forecast_source_timestamp_ms")
+    )
+    assert selected_columns.index(
+        "chainlink_at_forecast_source_timestamp_ms"
+    ) < selected_columns.index("chainlink_at_forecast_received_ms")
+    assert selected_columns.index(
+        "chainlink_at_forecast_received_ms"
+    ) < selected_columns.index("futures_now AS futures_at_forecast")
+    assert selected_columns.index(
+        "futures_now AS futures_at_forecast"
+    ) < selected_columns.index(
+        "futures_now_source_timestamp_ms"
+    )
+    assert selected_columns.index(
+        "futures_now_source_timestamp_ms"
+    ) < selected_columns.index("futures_now_received_ms")
 
     assert end_marker in view
 

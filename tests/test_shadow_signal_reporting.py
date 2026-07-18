@@ -74,6 +74,11 @@ def evaluation_row(
             target_ms <= (forecast_market_id + 1) * MARKET_MS
         ),
         "chainlink_at_forecast": chainlink_at_forecast,
+        "chainlink_at_forecast_source_timestamp_ms": generated_ms - 200,
+        "chainlink_at_forecast_received_ms": generated_ms - 100,
+        "futures_at_forecast": Decimal("100.500000000000000000"),
+        "futures_at_forecast_source_timestamp_ms": generated_ms - 150,
+        "futures_at_forecast_received_ms": generated_ms - 50,
         "projected_chainlink": projected_chainlink,
         "actual_chainlink": actual_chainlink,
         "actual_chainlink_source_timestamp_ms": (
@@ -231,6 +236,11 @@ def test_fetch_uses_restricted_view_target_bounds_predecessor_and_hard_limit():
         "selection_evidence_end_ms",
         "outcome_status",
         "outcome_invalid_reasons",
+        "chainlink_at_forecast_source_timestamp_ms",
+        "chainlink_at_forecast_received_ms",
+        "futures_at_forecast",
+        "futures_at_forecast_source_timestamp_ms",
+        "futures_at_forecast_received_ms",
     ):
         assert field_name in normalized_sql
     assert SHADOW_EVALUATION_QUERY_LIMIT == SHADOW_EVALUATION_MAX_POINTS + 1
@@ -255,12 +265,124 @@ def test_report_serializes_exact_decimal_strings_without_rounding():
     assert report["model"]["beta"] == "1"
     assert point["beta"] == "1.000000000000000000"
     assert point["chainlink_at_forecast"] == "100.000000000000000000"
+    assert point["chainlink_at_forecast_source_timestamp_ms"] == (
+        WINDOW.market_start_ms + 800
+    )
+    assert point["chainlink_at_forecast_received_ms"] == (
+        WINDOW.market_start_ms + 900
+    )
+    assert point["futures_at_forecast"] == "100.500000000000000000"
+    assert point["futures_at_forecast_source_timestamp_ms"] == (
+        WINDOW.market_start_ms + 850
+    )
+    assert point["futures_at_forecast_received_ms"] == (
+        WINDOW.market_start_ms + 950
+    )
     assert point["projected_chainlink"] == "101.250000000000000000"
     assert point["actual_chainlink"] == "100.750000000000000000"
     assert point["pending_move"] == "1.250000000000000000"
     assert point["pending_move_bps"] == "125.000000000000000000"
     assert point["forecast_error"] == "0.500000000000000000"
     assert point["baseline_error"] == "-0.750000000000000000"
+
+
+def test_report_preserves_optional_source_timestamps_as_null():
+    report = build_report(
+        [
+            evaluation_row(
+                chainlink_at_forecast_source_timestamp_ms=None,
+                futures_at_forecast_source_timestamp_ms=None,
+            )
+        ]
+    )
+    point = report["points"][0]
+
+    assert point["chainlink_at_forecast_source_timestamp_ms"] is None
+    assert point["chainlink_at_forecast_received_ms"] is not None
+    assert point["futures_at_forecast_source_timestamp_ms"] is None
+    assert point["futures_at_forecast_received_ms"] is not None
+
+
+def test_invalid_attempt_preserves_null_and_future_skew_forecast_inputs():
+    generated_ms = WINDOW.market_start_ms + 1_000
+    null_inputs = evaluation_row(
+        generated_ms=generated_ms,
+        valid=False,
+        actual=False,
+        chainlink_at_forecast=None,
+        chainlink_at_forecast_source_timestamp_ms=None,
+        chainlink_at_forecast_received_ms=None,
+        futures_at_forecast=None,
+        futures_at_forecast_source_timestamp_ms=None,
+        futures_at_forecast_received_ms=None,
+    )
+    future_skew = evaluation_row(
+        generated_ms=generated_ms + 500,
+        valid=False,
+        actual=False,
+        chainlink_at_forecast_received_ms=generated_ms + 501,
+        futures_at_forecast_received_ms=generated_ms + 502,
+    )
+
+    report = build_report([null_inputs, future_skew])
+    null_point, future_skew_point = report["points"]
+
+    for field_name in (
+        "chainlink_at_forecast",
+        "chainlink_at_forecast_source_timestamp_ms",
+        "chainlink_at_forecast_received_ms",
+        "futures_at_forecast",
+        "futures_at_forecast_source_timestamp_ms",
+        "futures_at_forecast_received_ms",
+    ):
+        assert null_point[field_name] is None
+    assert future_skew_point["valid"] is False
+    assert future_skew_point["chainlink_at_forecast_received_ms"] == (
+        future_skew_point["generated_ms"] + 1
+    )
+    assert future_skew_point["futures_at_forecast_received_ms"] == (
+        future_skew_point["generated_ms"] + 2
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"chainlink_at_forecast": None},
+        {"chainlink_at_forecast_received_ms": None},
+        {"chainlink_at_forecast_source_timestamp_ms": -1},
+        {"futures_at_forecast": None},
+        {"futures_at_forecast_received_ms": None},
+        {"futures_at_forecast_source_timestamp_ms": -1},
+        {"futures_at_forecast": Decimal("0")},
+    ),
+)
+def test_report_rejects_inconsistent_forecast_input_tuples(overrides):
+    with pytest.raises(ShadowEvaluationReportingError):
+        build_report([evaluation_row(**overrides)])
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "chainlink_at_forecast_received_ms",
+        "futures_at_forecast_received_ms",
+    ),
+)
+def test_valid_report_rejects_forecast_inputs_received_after_generation(
+    field_name,
+):
+    generated_ms = WINDOW.market_start_ms + 1_000
+
+    with pytest.raises(ShadowEvaluationReportingError, match="received time"):
+        build_report(
+            [
+                evaluation_row(
+                    generated_ms=generated_ms,
+                    **{field_name: generated_ms + 1},
+                )
+            ]
+        )
 
 
 def test_performance_reports_exact_decimal_forecast_and_baseline_metrics():

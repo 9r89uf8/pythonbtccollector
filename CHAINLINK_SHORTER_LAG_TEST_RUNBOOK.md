@@ -45,8 +45,8 @@ load the raw-capture flags.
 ## 3. Enable the required raw capture
 
 The original July 18 calibration window is invalid because both raw-capture
-flags were `false`. Complete this step before `2026-07-19 00:00:00 UTC`; the
-replacement calibration window starts then.
+flags were `false`. Raw capture was subsequently enabled and verified. The
+replacement calibration window starts at `2026-07-19 00:00:00 UTC`.
 
 First confirm that the three raw-capture tables exist and check available disk
 space:
@@ -126,16 +126,15 @@ After about one minute, verify that both products are writing current raw data:
 VERIFY_SINCE_MS="$(( $(date -u +%s%3N) - 120000 ))"
 VERIFY_SINCE_NS="$(( VERIFY_SINCE_MS * 1000000 ))"
 
-sudo -u postgres psql -v ON_ERROR_STOP=1 \
-  -v verify_since_ns="$VERIFY_SINCE_NS" -d price_collector -c "
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "
 SELECT
     (SELECT count(*)
        FROM raw_capture.binance_futures_price_trace_100ms
-      WHERE last_received_wall_ns >= :'verify_since_ns'::bigint)
+      WHERE last_received_wall_ns >= ${VERIFY_SINCE_NS})
         AS futures_rows_last_two_minutes,
     (SELECT count(*)
        FROM raw_capture.chainlink_price_events
-      WHERE received_wall_ns >= :'verify_since_ns'::bigint)
+      WHERE received_wall_ns >= ${VERIFY_SINCE_NS})
         AS chainlink_rows_last_two_minutes;
 
 SELECT

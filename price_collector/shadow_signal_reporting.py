@@ -78,6 +78,11 @@ SHADOW_EVALUATION_POINTS_SQL = """
         forecast_market_id,
         full_horizon_before_forecast_market_end,
         chainlink_at_forecast,
+        chainlink_at_forecast_source_timestamp_ms,
+        chainlink_at_forecast_received_ms,
+        futures_at_forecast,
+        futures_at_forecast_source_timestamp_ms,
+        futures_at_forecast_received_ms,
         projected_chainlink,
         actual_chainlink,
         actual_chainlink_source_timestamp_ms,
@@ -199,6 +204,60 @@ def _decimal_value(
 
 def _decimal_string(value: Optional[Decimal]) -> Optional[str]:
     return None if value is None else format(value, "f")
+
+
+def _optional_non_negative_int(
+    row: Mapping[str, Any],
+    field: str,
+) -> Optional[int]:
+    value = row[field]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ShadowEvaluationReportingError(
+            f"{field} must be a non-negative integer or null"
+        )
+    return value
+
+
+def _forecast_observation(
+    row: Mapping[str, Any],
+    *,
+    value_field: str,
+    source_timestamp_field: str,
+    received_field: str,
+    generated_ms: int,
+    required: bool,
+) -> tuple[Optional[Decimal], Optional[int], Optional[int]]:
+    value = _decimal_value(row, value_field)
+    source_timestamp_ms = _optional_non_negative_int(
+        row,
+        source_timestamp_field,
+    )
+    received_ms = _optional_non_negative_int(row, received_field)
+
+    if value is None:
+        if source_timestamp_ms is not None or received_ms is not None:
+            raise ShadowEvaluationReportingError(
+                f"null {value_field} has timing metadata"
+            )
+        if required:
+            raise ShadowEvaluationReportingError(
+                f"valid row has null {value_field}"
+            )
+        return None, None, None
+
+    if value <= 0:
+        raise ShadowEvaluationReportingError(f"{value_field} must be positive")
+    if received_ms is None:
+        raise ShadowEvaluationReportingError(
+            f"{value_field} has no received timestamp"
+        )
+    if required and received_ms > generated_ms:
+        raise ShadowEvaluationReportingError(
+            f"{value_field} received time is after generated_ms"
+        )
+    return value, source_timestamp_ms, received_ms
 
 
 def _reason_list(row: Mapping[str, Any], field: str) -> list[str]:
@@ -323,7 +382,30 @@ def _serialize_shadow_evaluation_point(
     if not valid and not invalid_reasons:
         raise ShadowEvaluationReportingError("invalid row has no reason")
 
-    chainlink_at_forecast = _decimal_value(row, "chainlink_at_forecast")
+    (
+        chainlink_at_forecast,
+        chainlink_at_forecast_source_ms,
+        chainlink_at_forecast_received_ms,
+    ) = _forecast_observation(
+        row,
+        value_field="chainlink_at_forecast",
+        source_timestamp_field="chainlink_at_forecast_source_timestamp_ms",
+        received_field="chainlink_at_forecast_received_ms",
+        generated_ms=generated_ms,
+        required=valid,
+    )
+    (
+        futures_at_forecast,
+        futures_at_forecast_source_ms,
+        futures_at_forecast_received_ms,
+    ) = _forecast_observation(
+        row,
+        value_field="futures_at_forecast",
+        source_timestamp_field="futures_at_forecast_source_timestamp_ms",
+        received_field="futures_at_forecast_received_ms",
+        generated_ms=generated_ms,
+        required=valid,
+    )
     projected_chainlink = _decimal_value(row, "projected_chainlink")
     actual_chainlink = _decimal_value(row, "actual_chainlink")
     pending_move = _decimal_value(row, "pending_move")
@@ -337,7 +419,6 @@ def _serialize_shadow_evaluation_point(
 
     if valid:
         for field, value in (
-            ("chainlink_at_forecast", chainlink_at_forecast),
             ("projected_chainlink", projected_chainlink),
             ("pending_move", pending_move),
             ("pending_move_bps", pending_move_bps),
@@ -494,6 +575,15 @@ def _serialize_shadow_evaluation_point(
         "forecast_market_id": forecast_market_id,
         "full_horizon_before_forecast_market_end": full_horizon,
         "chainlink_at_forecast": _decimal_string(chainlink_at_forecast),
+        "chainlink_at_forecast_source_timestamp_ms": (
+            chainlink_at_forecast_source_ms
+        ),
+        "chainlink_at_forecast_received_ms": chainlink_at_forecast_received_ms,
+        "futures_at_forecast": _decimal_string(futures_at_forecast),
+        "futures_at_forecast_source_timestamp_ms": (
+            futures_at_forecast_source_ms
+        ),
+        "futures_at_forecast_received_ms": futures_at_forecast_received_ms,
         "projected_chainlink": _decimal_string(projected_chainlink),
         "actual_chainlink": _decimal_string(actual_chainlink),
         "actual_chainlink_source_timestamp_ms": actual_source_ms,

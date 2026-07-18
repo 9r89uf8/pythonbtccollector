@@ -895,16 +895,21 @@ The shadow-evaluation routes are:
 - `GET /markets/current/shadow-evaluations`
 - `GET /markets/{market_id}/shadow-evaluations`
 
-They return the persisted 500 ms forecast attempts and causal Chainlink
-outcomes for exactly one five-minute **target-time** window and one explicitly
-requested model. They read PostgreSQL through the API's reader connection and
-the restricted `shadow_signal_evaluation_chart_points` view. They do not read
+They return the persisted 500 ms forecast attempts, the Chainlink and futures
+cache snapshots used at forecast time, and causal Chainlink outcomes for
+exactly one five-minute **target-time** window and one explicitly requested
+model. They read PostgreSQL through the API's reader connection and the
+restricted `shadow_signal_evaluation_chart_points` view. They do not read
 Redis, run a model, alter evaluation rows, or expose an arbitrary time-range
 query.
 
 These reporting routes are independent from `GET /markets/current/live`. The
 live route remains one Redis `MGET`, performs no PostgreSQL query, and continues
 to return only the newest short-lived primary projection.
+
+The reporting point exposes only the current Chainlink/futures snapshots for
+the forecast attempt. It does not expose the model's `futures_reference`, its
+anchor metadata, worker-age diagnostics, or database-writer metadata.
 
 ### Request
 
@@ -1057,6 +1062,11 @@ Both routes use this response shape:
       "forecast_market_id": 5946630,
       "full_horizon_before_forecast_market_end": true,
       "chainlink_at_forecast": "64080.470000000000000000",
+      "chainlink_at_forecast_source_timestamp_ms": 1783989000000,
+      "chainlink_at_forecast_received_ms": 1783989000330,
+      "futures_at_forecast": "64121.300000000000000000",
+      "futures_at_forecast_source_timestamp_ms": 1783989000420,
+      "futures_at_forecast_received_ms": 1783989000475,
       "projected_chainlink": "64103.070000000000000000",
       "actual_chainlink": "64099.820000000000000000",
       "actual_chainlink_source_timestamp_ms": 1783989003000,
@@ -1074,9 +1084,10 @@ Both routes use this response shape:
 
 The decimal strings can contain different amounts of trailing precision; their
 lexical scale is not a display-format guarantee. `model.beta`, point `beta`,
-prices, moves, basis points, and error values are fixed-point JSON strings or
-`null`. Keep the original strings and use a decimal library for calculations.
-Do not calculate chart errors with binary floating-point.
+`chainlink_at_forecast`, `futures_at_forecast`, projected/actual prices, moves,
+basis points, and error values are fixed-point JSON strings or `null`. Keep the
+original strings and use a decimal library for calculations. Do not calculate
+chart errors with binary floating-point.
 
 `points` are sorted by `target_ms`, then `generated_ms`, then `horizon_ms`.
 For every point:
@@ -1086,12 +1097,35 @@ target_ms = generated_ms + horizon_ms
 market_start_ms <= target_ms < market_end_ms
 ```
 
-Plot `projected_chainlink` and its paired `actual_chainlink` at `target_ms`, not
-at `generated_ms` or `matured_ms`. `matured_ms` is the persistence time. The
-paired actual is the newest Chainlink cache observation the live evaluator had
-successfully observed with `actual_chainlink_received_ms <= target_ms`; it is
-the causal value used by the stored error calculation. Raw replay remains the
-event-complete authority for events overwritten between live evaluator polls.
+The point's price fields have two distinct chart times:
+
+| Fields | Chart time | Meaning |
+| --- | ---: | --- |
+| `chainlink_at_forecast`, `futures_at_forecast` | `generated_ms` | Persisted cache snapshots read for the forecast attempt |
+| `projected_chainlink`, `actual_chainlink` | `target_ms` | Predicted and causal observed Chainlink values for the forecast target |
+
+For a projection/futures/Chainlink chart, plot `futures_at_forecast` at
+`generated_ms`, and plot `projected_chainlink` and `actual_chainlink` at
+`target_ms`. If the no-change baseline is also shown, plot
+`chainlink_at_forecast` at `generated_ms`. Do not move a forecast-time snapshot
+to `target_ms`: the response does not contain a target-time futures outcome.
+`matured_ms` is the persistence time, not a chart time.
+
+The forecast-time `*_source_timestamp_ms` fields identify the provider events;
+they can be `null` when that metadata was unavailable. The corresponding
+`*_received_ms` fields identify the local cache observations. For a valid
+forecast they never exceed `generated_ms`. An invalid attempt deliberately can
+retain a snapshot received after `generated_ms`; that timing exposes the
+zero-skew violation that invalidated the attempt. A null forecast-time price
+has null source and receive timing metadata. A valid forecast has both
+forecast-time prices; an invalid attempt can retain either snapshot when that
+individual input was available.
+
+The paired actual is the newest Chainlink cache observation the live evaluator
+had successfully observed with `actual_chainlink_received_ms <= target_ms`; it
+is the causal value used by the stored error calculation. Raw replay remains
+the event-complete authority for events overwritten between live evaluator
+polls.
 
 `evaluation_semantics.scored_input_max_future_skew_ms` is the receive-time
 tolerance used when deciding whether a persisted live forecast can be scored.
@@ -1123,9 +1157,9 @@ Forecast validity and outcome integrity are independent axes. `valid`,
 invalid attempt is still returned. It has `valid: false`, a non-`valid`
 `status`, at least one `invalid_reasons` entry, and null
 `projected_chainlink`, `pending_move`, `pending_move_bps`, `direction`, and
-`forecast_error`. Its current input, causal actual, and `baseline_error` fields
-can still be present when those individual values were available. Do not carry
-a preceding valid projection across such a point.
+`forecast_error`. Its forecast-time snapshots, causal actual, and
+`baseline_error` fields can still be present when those individual values were
+available. Do not carry a preceding valid projection across such a point.
 
 `outcome_status` and `outcome_invalid_reasons` describe target-time evidence:
 

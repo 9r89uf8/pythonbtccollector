@@ -3366,6 +3366,12 @@ GET /markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100
 GET /markets/{market_id}/shadow-evaluations?model_version=catchup_ratio_l3000_b100
 ```
 
+Each chart point includes the persisted Chainlink and futures snapshots from
+`generated_ms`, with their provider and local-receive timestamps, alongside
+the projected and causal actual Chainlink values for `target_ms`. The
+restricted view does not expose `futures_reference` or other internal/writer
+metadata.
+
 Apply `schema.sql` before restarting `price-api`; the new API code queries the
 restricted view and will fail until that view exists. No environment or systemd
 change is required.
@@ -3447,6 +3453,12 @@ WHERE table_schema = 'public'
       'selection_schema_version',
       'selection_policy_version',
       'selection_evidence_end_ms',
+      'chainlink_at_forecast',
+      'chainlink_at_forecast_source_timestamp_ms',
+      'chainlink_at_forecast_received_ms',
+      'futures_at_forecast',
+      'futures_at_forecast_source_timestamp_ms',
+      'futures_at_forecast_received_ms',
       'outcome_status',
       'outcome_invalid_reasons'
   )
@@ -3466,6 +3478,12 @@ BEGIN
                 ('selection_schema_version'),
                 ('selection_policy_version'),
                 ('selection_evidence_end_ms'),
+                ('chainlink_at_forecast'),
+                ('chainlink_at_forecast_source_timestamp_ms'),
+                ('chainlink_at_forecast_received_ms'),
+                ('futures_at_forecast'),
+                ('futures_at_forecast_source_timestamp_ms'),
+                ('futures_at_forecast_received_ms'),
                 ('outcome_status'),
                 ('outcome_invalid_reasons')
         ) AS required(column_name)
@@ -3478,7 +3496,26 @@ BEGIN
               AND present.column_name = required.column_name
         )
     ) THEN
-        RAISE EXCEPTION 'reporting view provenance/outcome columns are missing';
+        RAISE EXCEPTION 'required reporting view columns are missing';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'shadow_signal_evaluation_chart_points'
+          AND (
+              column_name LIKE 'futures_reference%'
+              OR column_name IN (
+                  'futures_now',
+                  'futures_now_source_timestamp_ms',
+                  'futures_now_received_ms',
+                  'futures_received_age_ms',
+                  'chainlink_received_age_ms',
+                  'created_at'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'reporting view exposes forbidden internal columns';
     END IF;
     IF NOT has_table_privilege(
         'price_reader',
@@ -3541,8 +3578,10 @@ Expected values are `reporting_view` non-null,
 `reader_can_select_view = true`, `reader_can_select_base = false`, and
 `writer_can_select_view = false`. `price_writer` retains only `SELECT`,
 `INSERT`, and `DELETE` on the base table; `PUBLIC` has neither relation. The
-five selection-provenance and outcome-integrity columns must all be listed for
-the view.
+five selection-provenance/outcome-integrity columns and all six approved
+forecast-time snapshot columns must be listed for the view. The internal
+`futures_now` names, all `futures_reference*` fields, worker-age fields, and
+`created_at` must remain absent.
 
 Verify both endpoints and the unchanged live route:
 
@@ -3566,6 +3605,7 @@ expected_model = os.environ["REPORT_MODEL_VERSION"]
 financial_fields = (
     "beta",
     "chainlink_at_forecast",
+    "futures_at_forecast",
     "projected_chainlink",
     "actual_chainlink",
     "pending_move",
@@ -3604,6 +3644,42 @@ assert all(
     for point in points
     for field in financial_fields
 )
+forecast_snapshots = (
+    "chainlink_at_forecast",
+    "futures_at_forecast",
+)
+for point in points:
+    for value_field in forecast_snapshots:
+        source_field = f"{value_field}_source_timestamp_ms"
+        received_field = f"{value_field}_received_ms"
+        value = point[value_field]
+        source_ms = point[source_field]
+        received_ms = point[received_field]
+        if value is None:
+            assert source_ms is None
+            assert received_ms is None
+        else:
+            assert source_ms is None or (
+                type(source_ms) is int and source_ms >= 0
+            )
+            assert type(received_ms) is int
+            assert received_ms >= 0
+            if point["valid"]:
+                assert received_ms <= point["generated_ms"]
+forbidden_point_fields = {
+    "futures_now",
+    "futures_now_source_timestamp_ms",
+    "futures_now_received_ms",
+    "futures_reference",
+    "futures_reference_source_timestamp_ms",
+    "futures_reference_received_ms",
+    "futures_reference_target_ms",
+    "futures_reference_gap_ms",
+    "futures_received_age_ms",
+    "chainlink_received_age_ms",
+    "created_at",
+}
+assert all(forbidden_point_fields.isdisjoint(point) for point in points)
 assert all(
     set(identity) == identity_fields
     for identity in model["selection_identities"]
@@ -3701,15 +3777,17 @@ sudo journalctl \
 Both reporting responses must contain at most 1,000 ordered points for only the
 requested model. Every `target_ms` must satisfy the returned half-open market
 boundary, report schema v2 must declare zero-skew scored-input semantics, and
-every point or derived financial value must be a JSON string or `null`.
-Available, unavailable, and integrity-invalid outcomes must satisfy their
-distinct value/reason contracts. Performance cohorts must match the full
-response selection identities, their scored counts must sum to
-`coverage.scored`, and each paired comparison must account for every scored
-point. The missing-model request must return HTTP `422`. A known market with
-expired or no
-evaluation evidence returns HTTP `200` with `points: []`; an unknown
-non-current market returns HTTP `404`.
+every point or derived financial value must be a JSON string or `null`. Each
+present forecast-time snapshot must have local receive metadata; for valid
+forecasts it must be no later than `generated_ms`, while invalid rows preserve
+future-skew evidence. The narrow public point must not contain
+anchor/reference or worker/writer metadata. Available, unavailable, and
+integrity-invalid outcomes must satisfy their distinct value/reason contracts.
+Performance cohorts must match the full response selection identities, their
+scored counts must sum to `coverage.scored`, and each paired comparison must
+account for every scored point. The missing-model request must return HTTP
+`422`. A known market with expired or no evaluation evidence returns HTTP
+`200` with `points: []`; an unknown non-current market returns HTTP `404`.
 
 To roll back, first push and deploy a revert that removes the API routes, then
 restart `price-api`. Only after the old API is active, remove the no-longer-used
