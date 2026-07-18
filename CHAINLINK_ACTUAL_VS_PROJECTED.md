@@ -255,6 +255,100 @@ is now development/calibration data for that future expanded family. Its policy
 must be preregistered and frozen before collecting a genuinely later untouched
 holdout.
 
+## V4 pretest contract checkpoint
+
+The first v4 implementation checkpoint now defines the offline experiment
+contract, but it does not run calibration or inspect a holdout. The contract
+fixes the ordered `1500`, `2000`, `2500`, `3000`, and `3500` ms comparison
+family, permits only the three shorter members to challenge, keeps 3000 ms as
+the incumbent-aligned comparator, and treats 3500 ms as a non-promotable
+guardrail. It also fixes the canonical timing cell plus the six rejection-only
+delay/phase cells. Only the canonical cell may rank or support promotion.
+
+Forecast configuration, forecast implementation, and offline evaluation policy
+have separate canonical digests. Within the full/non-lag forecast-configuration
+pair, only the full digest retains lag and horizon; changing a shared rule also
+changes the non-lag digest. The evaluation-policy digest separately binds the
+ordered family and its forecast-config identities, matched baselines, cohort
+rules, timing lattice, tie order, target resolution, continuity rules, and seven
+cells. Model identity includes role, version, forecast-configuration digest, and
+evaluation-policy digest, so a v4 3000 ms candidate cannot be confused with a
+distinct operational control merely because their version strings match.
+
+The contract requires the active-primary freeze to bind a 3000 ms, beta-1 rule,
+its loaded and installed runtime identities, and the supporting selection,
+configuration, code-manifest, and reconstruction artifacts. The later
+provenance checkpoint must obtain those bindings from the deployed system. The
+incumbent aliases the v4 3000 ms replay control only when both its complete
+forecast configuration and forecast-code digest match. Otherwise, the test must
+replay it as a separate non-selectable control. In that case the eventual
+question is whether to replace the complete current forecast configuration with
+the complete v4 challenger configuration, not which lag alone is better.
+
+The plan fixes the v4 reference gap at 250 ms and future skew at zero, but it
+does not state the Futures-staleness, Chainlink-staleness, or history-retention
+values. The contract therefore requires those values explicitly when a lineage
+is created and binds them cryptographically; it does not inherit a legacy or
+deployed default silently.
+
+Strict schemas now fail closed on altered policy/configuration fields,
+non-canonical Decimal values, role-only control identities, unknown artifact
+fields, invalid stage/marker combinations, changes relative to a supplied frozen
+preregistration or bound anchor artifact, or terminal results that expose
+efficacy values under `insufficient_evidence`. Forecast-code manifests are
+self-describing schema-v1 artifacts: they record four component hashes and
+recompute the derived forecast-code digest from those identities; construction
+from implementation bytes is available to the later provenance loader. A
+holdout selection anchor is not accepted from a timestamp claim alone:
+preregistration validation also requires the canonical raw completion-marker or
+retry-eligibility artifact and its authorization, verifies both bound hashes,
+and reads the anchor timestamp from that hashed source.
+
+Terminal result validation is decision-derived rather than label-derived. It
+checks the stage-specific marker matrix, closed failure-reason vocabulary,
+bounded retry state, parent ancestry, candidate-ledger binding, exact seven-cell
+quality counts/masks/report bindings, calibration ranking summaries, and every
+conjunctive holdout promotion gate. `promotion_eligible` is valid only when all
+point, bootstrap, RMSE, and six-cell robustness gates recompute to true; a 3000
+or 3500 ms calibration winner remains `retain_incumbent` without a shorter
+runner-up substitution.
+
+Previously inspected evidence now uses an authoritative scoped inventory rather
+than artifact-name heuristics. Each entry binds the artifact identity, source
+lineage and experiment identifiers, half-open evidence window, inspection role,
+and evidence scope. This permits an old holdout artifact to be declared honestly
+as historical calibration input while rejecting an attempt to relabel current
+holdout-quality evidence as calibration-only. Calibration and holdout successor
+authorizations bind the selected-window/freeze identity where applicable,
+candidate-day ledger, provenance root, and exhausted post-allocation retry
+budget in addition to the parent and retry-eligibility hashes.
+
+The pushed-preregistration path is also transitive. The preregistration freezes
+the authoritative remote ref and remote-URL digest. A canonical pushed receipt
+then binds the preregistration and sidecar hashes, pushed commit, observed ref,
+and verification time; its canonical deadline check binds the expected and
+observed ref/commit, presence and timeliness booleans, and check time. Terminal
+validation requires the raw receipt/check bytes and recomputes those bindings.
+The efficacy-completion marker inventories the preregistration, receipt,
+deadline check, raw manifest, and pre-efficacy provenance gate alongside its
+start marker and immutable efficacy artifacts, so changing receipt evidence
+also changes the completion identity. Completed holdout efficacy cannot predate
+the frozen archive input tail.
+
+The fixed contract is structurally feasible at construction time. This
+checkpoint therefore rejects any `structural_gate_infeasibility` claim unless a
+later work item supplies an independently derived feasibility proof; it does not
+let a failed day masquerade as proof that every permitted successor is
+impossible. The durable proof publisher and lineage-closing reducer remain part
+of the later state-machine work.
+
+This checkpoint does not yet add the v4 causal replay mode, create-once file
+publisher, lineage/day chooser, retry reducer, or attempt-owner lock. In
+particular, the in-memory duplicate-result check is validation defense only;
+durable exactly-once publication belongs to the later state-machine and locking
+work items. Production artifacts, services, data, and the selected live primary
+remain unchanged.
+
 ## How the model is used now
 
 The catch-up engine runs in the standalone
