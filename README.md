@@ -502,14 +502,18 @@ backend-only.
 
 The Phase 7 backend prerequisite adds PostgreSQL reporting routes at
 `GET /markets/current/shadow-evaluations` and
-`GET /markets/{market_id}/shadow-evaluations`, plus exact-payload JSON
-attachment variants ending in `/download`. All four require one explicitly
+`GET /markets/{market_id}/shadow-evaluations`, plus rounded JSON attachment
+variants ending in `/download`. All four require one explicitly
 supported V0 `model_version`, select one five-minute window by forecast
 `target_ms`, include boundary-crossing forecasts generated in the predecessor
 market, and reject an anomalous result above 1,000 rows. Financial values remain
-exact JSON strings or `null`. Evaluation persistence defaults to seven days;
-an export contains only rows still retained when it is requested. Every point
-carries its persisted forecast-time
+Decimal-derived JSON strings or `null`. The reporting routes retain full
+precision. Downloads round only after validation and performance calculation:
+USD prices, moves, errors, and USD metrics use two decimal places; basis points,
+beta, skills, and rates use four. Their `export` object records this lossy
+policy, and attachment filenames end in `_rounded.json`. Evaluation persistence
+defaults to seven days; an export contains only rows still retained when it is
+requested. Every point carries its persisted forecast-time
 Chainlink and futures cache snapshots: `chainlink_at_forecast` and
 `futures_at_forecast`, each with source and local-receive timestamps. Those
 snapshots correspond to `generated_ms`; `projected_chainlink` and the causal

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1616,6 +1617,143 @@ def test_shadow_evaluations_by_id_returns_completed_market_report(
     assert client.fake_pool.acquire_calls == 0
 
 
+def test_serialize_shadow_evaluation_download_payload_rounds_known_fields_only():
+    payload = {
+        "schema_version": 2,
+        "server_time_ms": 123,
+        "model": {
+            "model_version": SHADOW_REPORT_MODEL,
+            "beta": "1.000000000000000000",
+        },
+        "performance": {
+            "cohorts": [
+                {
+                    "forecast": {
+                        "mean_absolute_error_usd": (
+                            "2.8978376726887863308547794117647058823529"
+                        ),
+                        "median_absolute_error_usd": "2.0565",
+                        "p95_absolute_error_usd": "8.825",
+                        "maximum_absolute_error_usd": "18.562",
+                        "root_mean_squared_error_usd": "4.1905",
+                        "mean_signed_error_usd": "-0.295",
+                    },
+                    "no_change_baseline": {
+                        "mean_absolute_error_usd": "2.688",
+                        "root_mean_squared_error_usd": "4.225",
+                    },
+                    "mean_absolute_advantage_usd": "-0.205",
+                    "mae_skill_vs_no_change": "-0.077896039442535667",
+                    "rmse_skill_vs_no_change": "0.007376144460456536",
+                    "paired_comparison": {
+                        "wins": 202,
+                        "ties": 114,
+                        "losses": 228,
+                        "win_rate": "0.37135",
+                        "tie_rate": "0.20955",
+                        "loss_rate": "0.41915",
+                    },
+                }
+            ]
+        },
+        "points": [
+            {
+                "beta": "1.000000000000000000",
+                "chainlink_at_forecast": "64381.765",
+                "futures_at_forecast": "64399.900000000000000000",
+                "projected_chainlink": "64381.427940530536696941",
+                "actual_chainlink": None,
+                "pending_move": "-0.005",
+                "pending_move_bps": "-0.015527950310559006",
+                "forecast_error": "-0.004",
+                "baseline_error": "1.235",
+                "direction": "down",
+                "unmapped_decimal_string": "0.12345678901234567890",
+            }
+        ],
+    }
+    original = deepcopy(payload)
+
+    exported = api.serialize_shadow_evaluation_download_payload(payload)
+
+    assert payload == original
+    assert exported is not payload
+    assert exported["model"] is not payload["model"]
+    assert exported["points"] is not payload["points"]
+    assert exported["model"]["beta"] == "1.0000"
+    assert exported["performance"]["cohorts"][0] == {
+        "forecast": {
+            "mean_absolute_error_usd": "2.90",
+            "median_absolute_error_usd": "2.06",
+            "p95_absolute_error_usd": "8.83",
+            "maximum_absolute_error_usd": "18.56",
+            "root_mean_squared_error_usd": "4.19",
+            "mean_signed_error_usd": "-0.30",
+        },
+        "no_change_baseline": {
+            "mean_absolute_error_usd": "2.69",
+            "root_mean_squared_error_usd": "4.23",
+        },
+        "mean_absolute_advantage_usd": "-0.21",
+        "mae_skill_vs_no_change": "-0.0779",
+        "rmse_skill_vs_no_change": "0.0074",
+        "paired_comparison": {
+            "wins": 202,
+            "ties": 114,
+            "losses": 228,
+            "win_rate": "0.3714",
+            "tie_rate": "0.2096",
+            "loss_rate": "0.4192",
+        },
+    }
+    assert exported["points"][0] == {
+        "beta": "1.0000",
+        "chainlink_at_forecast": "64381.77",
+        "futures_at_forecast": "64399.90",
+        "projected_chainlink": "64381.43",
+        "actual_chainlink": None,
+        "pending_move": "-0.01",
+        "pending_move_bps": "-0.0155",
+        "forecast_error": "0.00",
+        "baseline_error": "1.24",
+        "direction": "down",
+        "unmapped_decimal_string": "0.12345678901234567890",
+    }
+    assert exported["export"] == {
+        "schema_version": 1,
+        "variant": "rounded_download",
+        "source_report_schema_version": 2,
+        "decimal_encoding": "fixed_point_string",
+        "rounding_mode": "ROUND_HALF_UP",
+        "precision_policy": "shadow_evaluation_download_v1",
+        "decimal_places": {
+            "usd_price_move_error": 2,
+            "basis_points": 4,
+            "unitless_beta_rate_skill": 4,
+        },
+        "derived_metrics_computed_before_rounding": True,
+        "classifications_computed_before_rounding": True,
+    }
+
+
+@pytest.mark.parametrize("value", (Decimal("1"), "NaN", "Infinity"))
+def test_shadow_download_rejects_non_string_or_non_finite_decimal(value):
+    payload = {
+        "schema_version": 2,
+        "model": {"beta": value},
+        "performance": {"cohorts": []},
+        "points": [],
+    }
+
+    with pytest.raises(ValueError):
+        api.serialize_shadow_evaluation_download_payload(payload)
+
+
+def test_shadow_download_rejects_unknown_source_report_schema():
+    with pytest.raises(ValueError, match="schema_version"):
+        api.serialize_shadow_evaluation_download_payload({"schema_version": 3})
+
+
 @pytest.mark.parametrize(
     "path",
     (
@@ -1647,7 +1785,7 @@ def test_shadow_evaluation_download_returns_compact_json_attachment(
     assert response.headers["content-disposition"] == (
         'attachment; filename="'
         f"btc_5m_market_{SHADOW_REPORT_MARKET_ID}_shadow_evaluations_"
-        f'{SHADOW_REPORT_MODEL}.json"'
+        f'{SHADOW_REPORT_MODEL}_rounded.json"'
     )
     assert b"\n" not in response.content
     body = response.json()
@@ -1655,15 +1793,40 @@ def test_shadow_evaluation_download_returns_compact_json_attachment(
     assert body["server_time_ms"] == SHADOW_REPORT_NOW_MS
     assert body["market"]["market_id"] == SHADOW_REPORT_MARKET_ID
     assert body["model"]["model_version"] == SHADOW_REPORT_MODEL
-    assert body["points"][0]["futures_at_forecast"] == "62101"
-    assert body["points"][0]["projected_chainlink"] == "62001"
-    assert body["points"][0]["actual_chainlink"] == "62000.5"
+    assert body["model"]["beta"] == "1.0000"
+    assert body["points"][0]["beta"] == "1.0000"
+    assert body["points"][0]["futures_at_forecast"] == "62101.00"
+    assert body["points"][0]["projected_chainlink"] == "62001.00"
+    assert body["points"][0]["actual_chainlink"] == "62000.50"
+    assert body["points"][0]["pending_move_bps"] == "0.1613"
+    assert body["performance"]["cohorts"][0]["forecast"][
+        "mean_absolute_error_usd"
+    ] == "0.50"
+    assert body["performance"]["cohorts"][0]["paired_comparison"] == {
+        "wins": 0,
+        "ties": 1,
+        "losses": 0,
+        "win_rate": "0.0000",
+        "tie_rate": "1.0000",
+        "loss_rate": "0.0000",
+    }
+    assert body["export"]["precision_policy"] == (
+        "shadow_evaluation_download_v1"
+    )
 
     report_response = client.get(
         f"{path.removesuffix('/download')}?model_version={SHADOW_REPORT_MODEL}"
     )
     assert report_response.status_code == 200
-    assert body == report_response.json()
+    report_body = report_response.json()
+    assert "export" not in report_body
+    assert report_body["model"]["beta"] == "1"
+    assert report_body["points"][0]["futures_at_forecast"] == "62101"
+    assert report_body["points"][0]["projected_chainlink"] == "62001"
+    assert report_body["points"][0]["actual_chainlink"] == "62000.5"
+    assert report_body["points"][0]["pending_move_bps"] == (
+        "0.1612903225806451612903225806"
+    )
     assert client.fake_live_cache.requested_keys == []
     assert client.fake_pool.acquire_calls == 0
 

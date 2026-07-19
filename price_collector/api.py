@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 import json
 import logging
 from typing import Any, Mapping, Optional
@@ -29,6 +29,7 @@ from price_collector.live_cache import (
 from price_collector.market import MarketWindow, market_for_sample_second
 from price_collector.shadow_signal_reporting import (
     MAX_MARKET_ID,
+    SHADOW_EVALUATION_REPORT_SCHEMA_VERSION,
     ShadowEvaluationModelVersion,
     ShadowEvaluationReportingError,
     build_shadow_evaluation_report,
@@ -52,6 +53,30 @@ DOWNLOAD_BOOK_FIELDS = (
     "book_imbalance",
     "microprice",
 )
+SHADOW_DOWNLOAD_DECIMAL_FORMATS = {
+    "beta": "0.0000",
+    "chainlink_at_forecast": "0.01",
+    "futures_at_forecast": "0.01",
+    "projected_chainlink": "0.01",
+    "actual_chainlink": "0.01",
+    "pending_move": "0.01",
+    "pending_move_bps": "0.0001",
+    "forecast_error": "0.01",
+    "baseline_error": "0.01",
+    "mean_absolute_error_usd": "0.01",
+    "median_absolute_error_usd": "0.01",
+    "p95_absolute_error_usd": "0.01",
+    "maximum_absolute_error_usd": "0.01",
+    "root_mean_squared_error_usd": "0.01",
+    "mean_signed_error_usd": "0.01",
+    "mean_absolute_advantage_usd": "0.01",
+    "mae_skill_vs_no_change": "0.0000",
+    "rmse_skill_vs_no_change": "0.0000",
+    "win_rate": "0.0000",
+    "tie_rate": "0.0000",
+    "loss_rate": "0.0000",
+}
+SHADOW_DOWNLOAD_DECIMAL_PRECISION = 100
 
 
 def utc_datetime_to_z(value: datetime) -> str:
@@ -262,6 +287,80 @@ def serialize_download_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         else:
             exported[key] = value
 
+    return exported
+
+
+def _serialize_shadow_download_value(
+    value: Any,
+    *,
+    field_name: Optional[str] = None,
+) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _serialize_shadow_download_value(
+                child,
+                field_name=key,
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _serialize_shadow_download_value(
+                child,
+                field_name=field_name,
+            )
+            for child in value
+        ]
+
+    places = SHADOW_DOWNLOAD_DECIMAL_FORMATS.get(field_name)
+    if places is None:
+        return value
+    if value is None:
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"shadow download field {field_name!r} must be a decimal string or null"
+        )
+    with localcontext() as context:
+        context.prec = max(SHADOW_DOWNLOAD_DECIMAL_PRECISION, len(value) + 8)
+        decimal_value = Decimal(value)
+        if not decimal_value.is_finite():
+            raise ValueError(
+                f"shadow download field {field_name!r} must be finite"
+            )
+        quantized = decimal_value.quantize(
+            Decimal(places),
+            rounding=ROUND_HALF_UP,
+        )
+    if quantized == 0:
+        quantized = quantized.copy_abs()
+    return format(quantized, "f")
+
+
+def serialize_shadow_evaluation_download_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    if payload.get("schema_version") != SHADOW_EVALUATION_REPORT_SCHEMA_VERSION:
+        raise ValueError("unsupported shadow evaluation report schema_version")
+    exported = {
+        key: _serialize_shadow_download_value(value, field_name=key)
+        for key, value in payload.items()
+    }
+    exported["export"] = {
+        "schema_version": 1,
+        "variant": "rounded_download",
+        "source_report_schema_version": payload.get("schema_version"),
+        "decimal_encoding": "fixed_point_string",
+        "rounding_mode": "ROUND_HALF_UP",
+        "precision_policy": "shadow_evaluation_download_v1",
+        "decimal_places": {
+            "usd_price_move_error": 2,
+            "basis_points": 4,
+            "unitless_beta_rate_skill": 4,
+        },
+        "derived_metrics_computed_before_rounding": True,
+        "classifications_computed_before_rounding": True,
+    }
     return exported
 
 
@@ -709,10 +808,11 @@ async def shadow_evaluations_download_response(
     )
     filename = (
         f"btc_5m_market_{window.market_id}_shadow_evaluations_"
-        f"{model_version}.json"
+        f"{model_version}_rounded.json"
     )
+    download_payload = serialize_shadow_evaluation_download_payload(payload)
     return Response(
-        content=json.dumps(payload, separators=(",", ":")),
+        content=json.dumps(download_payload, separators=(",", ":")),
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

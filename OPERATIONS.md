@@ -3358,7 +3358,7 @@ repository and is not part of this rollout.
 ## Shadow-Signal Evaluation Reporting API
 
 This is the backend prerequisite for the separate Phase 7 dashboard. It adds
-two PostgreSQL-backed, read-only reporting routes and two exact-payload JSON
+two PostgreSQL-backed, read-only reporting routes and two rounded JSON
 attachment routes while leaving `GET /markets/current/live` Redis-only:
 
 ```text
@@ -3374,9 +3374,12 @@ the projected and causal actual Chainlink values for `target_ms`. The
 restricted view does not expose `futures_reference` or other internal/writer
 metadata.
 
-The attachment routes return the same schema-v2 body and add a deterministic
-`Content-Disposition` filename. Evaluation retention defaults to seven days.
-They cannot include the dashboard's browser-buffered target-time
+The attachment routes preserve the schema-v2 report structure, round its
+Decimal strings only after exact validation and metric calculation, add a
+versioned `export` object, and use deterministic `_rounded.json`
+`Content-Disposition` filenames. USD values use two decimal places; basis
+points, beta, skills, and rates use four. Evaluation retention defaults to
+seven days. Downloads cannot include the dashboard's browser-buffered target-time
 `actual_futures`; only the persisted `futures_at_forecast` snapshot at
 `generated_ms` is available through this reader path.
 
@@ -3776,7 +3779,70 @@ curl -fsS \
   -o "${DOWNLOAD_BODY}" \
   "${API_BASE_URL}/markets/${MARKET_ID}/shadow-evaluations/download?model_version=${MODEL_VERSION}"
 grep -i '^content-disposition: attachment;' "${DOWNLOAD_HEADERS}"
+grep -i '_rounded\.json"' "${DOWNLOAD_HEADERS}"
 summarize_shadow_report < "${DOWNLOAD_BODY}"
+python3 - "${DOWNLOAD_BODY}" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+
+export = payload["export"]
+assert export == {
+    "schema_version": 1,
+    "variant": "rounded_download",
+    "source_report_schema_version": 2,
+    "decimal_encoding": "fixed_point_string",
+    "rounding_mode": "ROUND_HALF_UP",
+    "precision_policy": "shadow_evaluation_download_v1",
+    "decimal_places": {
+        "usd_price_move_error": 2,
+        "basis_points": 4,
+        "unitless_beta_rate_skill": 4,
+    },
+    "derived_metrics_computed_before_rounding": True,
+    "classifications_computed_before_rounding": True,
+}
+two_places = re.compile(r"^-?\d+\.\d{2}$")
+four_places = re.compile(r"^-?\d+\.\d{4}$")
+
+def fixed(value, pattern):
+    assert value is None or pattern.fullmatch(value)
+    assert value not in {"-0.00", "-0.0000"}
+
+point_usd_fields = (
+    "chainlink_at_forecast",
+    "futures_at_forecast",
+    "projected_chainlink",
+    "actual_chainlink",
+    "pending_move",
+    "forecast_error",
+    "baseline_error",
+)
+for point in payload["points"]:
+    fixed(point["beta"], four_places)
+    fixed(point["pending_move_bps"], four_places)
+    for field in point_usd_fields:
+        fixed(point[field], two_places)
+
+fixed(payload["model"]["beta"], four_places)
+for cohort in payload["performance"]["cohorts"]:
+    for value in cohort["forecast"].values():
+        fixed(value, two_places)
+    for value in cohort["no_change_baseline"].values():
+        fixed(value, two_places)
+    fixed(cohort["mean_absolute_advantage_usd"], two_places)
+    fixed(cohort["mae_skill_vs_no_change"], four_places)
+    fixed(cohort["rmse_skill_vs_no_change"], four_places)
+    comparison = cohort["paired_comparison"]
+    fixed(comparison["win_rate"], four_places)
+    fixed(comparison["tie_rate"], four_places)
+    fixed(comparison["loss_rate"], four_places)
+
+print({"rounded_download": "ok", "points": len(payload["points"])})
+PY
 rm -f -- "${DOWNLOAD_HEADERS}" "${DOWNLOAD_BODY}"
 
 curl -fsS "${API_BASE_URL}/markets/current/live" | python3 -m json.tool
@@ -3799,7 +3865,9 @@ All reporting and attachment responses must contain at most 1,000 ordered
 points for only the requested model. Every `target_ms` must satisfy the returned
 half-open market boundary, report schema v2 must declare zero-skew scored-input
 semantics, and every point or derived financial value must be a JSON string or
-`null`. Each
+`null`. Canonical reporting responses retain full precision. Attachments must
+declare rounded export policy v1 and use the fixed two-/four-place scales above;
+do not recompute exact identities from rounded values. Each
 present forecast-time snapshot must have local receive metadata; for valid
 forecasts it must be no later than `generated_ms`, while invalid rows preserve
 future-skew evidence. The narrow public point must not contain

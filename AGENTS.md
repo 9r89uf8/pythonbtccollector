@@ -223,8 +223,14 @@ The corresponding Python entry points are:
   route, or expose persisted evaluation rows through the live response.
 - Phase 7 reporting exposes persisted evidence only through the JSON routes
   `/markets/current/shadow-evaluations` and
-  `/markets/{market_id}/shadow-evaluations`, plus their exact-payload attachment
-  variants ending in `/download`. Require one supported V0 `model_version`,
+  `/markets/{market_id}/shadow-evaluations`, plus their rounded attachment
+  variants ending in `/download`. Keep the reporting routes at full Decimal
+  precision. Format only the completed download payload using fixed
+  `ROUND_HALF_UP` strings: two decimal places for USD prices, moves, errors,
+  and USD performance metrics; four for basis points, beta, skills, and rates.
+  Preserve nulls and canonicalize rounded zero as unsigned. Include the
+  versioned `export` metadata and `_rounded.json` filename so the lossy artifact
+  cannot be mistaken for canonical evidence. Require one supported V0 `model_version`,
   select the requested half-open window by `target_ms`, inspect only its
   generation market and predecessor, and reject more than 1,000 rows.
   Keep this PostgreSQL read path separate from `/markets/current/live`.

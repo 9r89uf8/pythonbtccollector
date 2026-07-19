@@ -102,8 +102,8 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
 | `GET` | `/markets/current/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for the current target window | PostgreSQL |
 | `GET` | `/markets/{market_id}/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for one target window | PostgreSQL |
-| `GET` | `/markets/current/shadow-evaluations/download` | Download current-window shadow evaluations as JSON | PostgreSQL |
-| `GET` | `/markets/{market_id}/shadow-evaluations/download` | Download one target window's shadow evaluations as JSON | PostgreSQL |
+| `GET` | `/markets/current/shadow-evaluations/download` | Download rounded current-window shadow evaluations as JSON | PostgreSQL |
+| `GET` | `/markets/{market_id}/shadow-evaluations/download` | Download one target window's rounded shadow evaluations as JSON | PostgreSQL |
 | `GET` | `/markets/current/live` | Lowest-latency current prices and experimental Chainlink catch-up signal | Redis only |
 
 ## Health
@@ -897,7 +897,7 @@ The shadow-evaluation JSON reporting routes are:
 - `GET /markets/current/shadow-evaluations`
 - `GET /markets/{market_id}/shadow-evaluations`
 
-The exact-payload attachment routes are:
+The rounded attachment routes are:
 
 - `GET /markets/current/shadow-evaluations/download`
 - `GET /markets/{market_id}/shadow-evaluations/download`
@@ -908,8 +908,10 @@ for exactly one five-minute **target-time** window and one explicitly requested
 model. They read PostgreSQL through the API's reader connection and the
 restricted `shadow_signal_evaluation_chart_points` view. They do not read
 Redis, run a model, alter evaluation rows, or expose an arbitrary time-range
-query. The attachment variants add only a download filename; their JSON body
-and validation semantics are identical to the corresponding reporting route.
+query. The attachment variants preserve the report structure but round its
+Decimal strings for readability after all validation, classifications, and
+performance calculations are complete. They also add versioned `export`
+metadata. The reporting routes remain the canonical full-precision source.
 
 These reporting routes are independent from `GET /markets/current/live`. The
 live route remains one Redis `MGET`, performs no PostgreSQL query, and continues
@@ -982,9 +984,9 @@ anchor.click();
 ```
 
 The server filename is
-`btc_5m_market_{market_id}_shadow_evaluations_{model_version}.json`. Prefer the
-ID-addressed route after a market ends; a current-window download is a partial
-snapshot and can resolve to an adjacent market if requested across a
+`btc_5m_market_{market_id}_shadow_evaluations_{model_version}_rounded.json`.
+Prefer the ID-addressed route after a market ends; a current-window download is
+a partial snapshot and can resolve to an adjacent market if requested across a
 five-minute boundary.
 
 `market_id` must be a non-negative integer that can be represented safely by
@@ -994,7 +996,9 @@ enum is invalid.
 
 ### Response
 
-All reporting and attachment routes use this response shape:
+The reporting routes use this canonical full-precision response shape. The
+attachment routes retain these fields and add the rounded-export metadata
+described below.
 
 ```json
 {
@@ -1114,12 +1118,59 @@ All reporting and attachment routes use this response shape:
 }
 ```
 
-The decimal strings can contain different amounts of trailing precision; their
-lexical scale is not a display-format guarantee. `model.beta`, point `beta`,
-`chainlink_at_forecast`, `futures_at_forecast`, projected/actual prices, moves,
-basis points, and error values are fixed-point JSON strings or `null`. Keep the
-original strings and use a decimal library for calculations. Do not calculate
-chart errors with binary floating-point.
+On the reporting routes, decimal strings can contain different amounts of
+trailing precision; their lexical scale is not a display-format guarantee.
+`model.beta`, point `beta`, `chainlink_at_forecast`, `futures_at_forecast`,
+projected/actual prices, moves, basis points, and error values are fixed-point
+JSON strings or `null`. Keep those original strings and use a decimal library
+for exact calculations. Do not calculate chart errors with binary
+floating-point.
+
+#### Rounded attachment format
+
+The `/download` routes apply this fixed-scale policy with `ROUND_HALF_UP`:
+
+| Decimal places | Download fields |
+| ---: | --- |
+| 2 | Point `chainlink_at_forecast`, `futures_at_forecast`, `projected_chainlink`, `actual_chainlink`, `pending_move`, `forecast_error`, and `baseline_error`; all forecast/no-change USD performance metrics; `mean_absolute_advantage_usd` |
+| 4 | Model and point `beta`; point `pending_move_bps`; `mae_skill_vs_no_change`, `rmse_skill_vs_no_change`, and paired win/tie/loss rates |
+
+Fixed trailing zeros are intentional, so a download uses strings such as
+`"64399.90"`, `"0.0155"`, and `"1.0000"`. JSON `null` remains `null`, and a
+value that rounds to zero is emitted without a negative sign. All timestamps,
+counts, booleans, statuses, reasons, hashes, direction values, and market/model
+identifiers remain unchanged.
+
+Each attachment adds:
+
+```json
+{
+  "export": {
+    "schema_version": 1,
+    "variant": "rounded_download",
+    "source_report_schema_version": 2,
+    "decimal_encoding": "fixed_point_string",
+    "rounding_mode": "ROUND_HALF_UP",
+    "precision_policy": "shadow_evaluation_download_v1",
+    "decimal_places": {
+      "usd_price_move_error": 2,
+      "basis_points": 4,
+      "unitless_beta_rate_skill": 4
+    },
+    "derived_metrics_computed_before_rounding": true,
+    "classifications_computed_before_rounding": true
+  }
+}
+```
+
+The top-level `schema_version: 2` still identifies the source report contract;
+`export.schema_version: 1` versions the rounded representation. Rounding is
+lossy and happens independently for each final field. Consequently, rounded
+errors need not exactly equal subtraction of rounded prices, a non-flat
+direction can accompany `pending_move: "0.00"`, and rounded rates need not sum
+lexically to `1.0000`. Exact classifications and counts remain authoritative.
+Use the non-download reporting route for recomputation, audit evidence, or any
+calculation requiring full precision.
 
 `points` are sorted by `target_ms`, then `generated_ms`, then `horizon_ms`.
 For every point:
