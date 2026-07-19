@@ -3358,12 +3358,14 @@ repository and is not part of this rollout.
 ## Shadow-Signal Evaluation Reporting API
 
 This is the backend prerequisite for the separate Phase 7 dashboard. It adds
-two PostgreSQL-backed, read-only routes while leaving
-`GET /markets/current/live` Redis-only:
+two PostgreSQL-backed, read-only reporting routes and two exact-payload JSON
+attachment routes while leaving `GET /markets/current/live` Redis-only:
 
 ```text
 GET /markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100
 GET /markets/{market_id}/shadow-evaluations?model_version=catchup_ratio_l3000_b100
+GET /markets/current/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100
+GET /markets/{market_id}/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100
 ```
 
 Each chart point includes the persisted Chainlink and futures snapshots from
@@ -3372,9 +3374,17 @@ the projected and causal actual Chainlink values for `target_ms`. The
 restricted view does not expose `futures_reference` or other internal/writer
 metadata.
 
-Apply `schema.sql` before restarting `price-api`; the new API code queries the
-restricted view and will fail until that view exists. No environment or systemd
-change is required.
+The attachment routes return the same schema-v2 body and add a deterministic
+`Content-Disposition` filename. Evaluation retention defaults to seven days.
+They cannot include the dashboard's browser-buffered target-time
+`actual_futures`; only the persisted `futures_at_forecast` snapshot at
+`generated_ms` is available through this reader path.
+
+For an initial reporting deployment, apply `schema.sql` before restarting
+`price-api`; the API queries the restricted view and will fail until that view
+exists. Adding only the attachment routes to an installation where the
+reporting endpoints already work requires no schema application. No environment
+or systemd change is required.
 
 After the change is pushed to GitHub, deploy it with:
 
@@ -3758,6 +3768,17 @@ curl -fsS \
 curl -fsS \
   "${API_BASE_URL}/markets/${MARKET_ID}/shadow-evaluations?model_version=${MODEL_VERSION}" |
   summarize_shadow_report
+
+DOWNLOAD_HEADERS="$(mktemp)"
+DOWNLOAD_BODY="$(mktemp)"
+curl -fsS \
+  -D "${DOWNLOAD_HEADERS}" \
+  -o "${DOWNLOAD_BODY}" \
+  "${API_BASE_URL}/markets/${MARKET_ID}/shadow-evaluations/download?model_version=${MODEL_VERSION}"
+grep -i '^content-disposition: attachment;' "${DOWNLOAD_HEADERS}"
+summarize_shadow_report < "${DOWNLOAD_BODY}"
+rm -f -- "${DOWNLOAD_HEADERS}" "${DOWNLOAD_BODY}"
+
 curl -fsS "${API_BASE_URL}/markets/current/live" | python3 -m json.tool
 
 MISSING_MODEL_STATUS="$(
@@ -3774,10 +3795,11 @@ sudo journalctl \
   --no-pager
 ```
 
-Both reporting responses must contain at most 1,000 ordered points for only the
-requested model. Every `target_ms` must satisfy the returned half-open market
-boundary, report schema v2 must declare zero-skew scored-input semantics, and
-every point or derived financial value must be a JSON string or `null`. Each
+All reporting and attachment responses must contain at most 1,000 ordered
+points for only the requested model. Every `target_ms` must satisfy the returned
+half-open market boundary, report schema v2 must declare zero-skew scored-input
+semantics, and every point or derived financial value must be a JSON string or
+`null`. Each
 present forecast-time snapshot must have local receive metadata; for valid
 forecasts it must be no later than `generated_ms`, while invalid rows preserve
 future-skew evidence. The narrow public point must not contain

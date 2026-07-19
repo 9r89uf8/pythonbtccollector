@@ -575,6 +575,27 @@ async def markets_current_shadow_evaluations(
 
 
 @app.get(
+    "/markets/current/shadow-evaluations/download",
+    responses={
+        500: {"description": "Persisted evaluation data is inconsistent"},
+    },
+)
+async def markets_current_shadow_evaluations_download(
+    request: Request,
+    model_version: ShadowEvaluationModelVersion = Query(...),
+) -> Response:
+    server_time_ms = current_utc_epoch_ms()
+    sample_second_ms = (server_time_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+    return await shadow_evaluations_download_response(
+        request,
+        window=window,
+        server_time_ms=server_time_ms,
+        model_version=model_version.value,
+    )
+
+
+@app.get(
     "/markets/{market_id}/shadow-evaluations",
     responses={
         404: {"description": "Unknown historical market"},
@@ -588,6 +609,27 @@ async def markets_shadow_evaluations_by_id(
 ) -> dict[str, Any]:
     server_time_ms = current_utc_epoch_ms()
     return await shadow_evaluations_response(
+        request,
+        window=shadow_evaluation_market_window(market_id),
+        server_time_ms=server_time_ms,
+        model_version=model_version.value,
+    )
+
+
+@app.get(
+    "/markets/{market_id}/shadow-evaluations/download",
+    responses={
+        404: {"description": "Unknown historical market"},
+        500: {"description": "Persisted evaluation data is inconsistent"},
+    },
+)
+async def markets_shadow_evaluations_download_by_id(
+    request: Request,
+    market_id: int = Path(..., ge=0, le=MAX_MARKET_ID),
+    model_version: ShadowEvaluationModelVersion = Query(...),
+) -> Response:
+    server_time_ms = current_utc_epoch_ms()
+    return await shadow_evaluations_download_response(
         request,
         window=shadow_evaluation_market_window(market_id),
         server_time_ms=server_time_ms,
@@ -650,6 +692,30 @@ async def shadow_evaluations_response(
             status_code=500,
             detail="shadow evaluation data inconsistent",
         ) from exc
+
+
+async def shadow_evaluations_download_response(
+    request: Request,
+    *,
+    window: MarketWindow,
+    server_time_ms: int,
+    model_version: str,
+) -> Response:
+    payload = await shadow_evaluations_response(
+        request,
+        window=window,
+        server_time_ms=server_time_ms,
+        model_version=model_version,
+    )
+    filename = (
+        f"btc_5m_market_{window.market_id}_shadow_evaluations_"
+        f"{model_version}.json"
+    )
+    return Response(
+        content=json.dumps(payload, separators=(",", ":")),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 async def market_by_id_response(

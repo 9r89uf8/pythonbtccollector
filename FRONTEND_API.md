@@ -102,6 +102,8 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
 | `GET` | `/markets/current/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for the current target window | PostgreSQL |
 | `GET` | `/markets/{market_id}/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for one target window | PostgreSQL |
+| `GET` | `/markets/current/shadow-evaluations/download` | Download current-window shadow evaluations as JSON | PostgreSQL |
+| `GET` | `/markets/{market_id}/shadow-evaluations/download` | Download one target window's shadow evaluations as JSON | PostgreSQL |
 | `GET` | `/markets/current/live` | Lowest-latency current prices and experimental Chainlink catch-up signal | Redis only |
 
 ## Health
@@ -890,18 +892,24 @@ when the market window does not exist.
 
 ## Persisted Shadow-Evaluation Chart Data
 
-The shadow-evaluation routes are:
+The shadow-evaluation JSON reporting routes are:
 
 - `GET /markets/current/shadow-evaluations`
 - `GET /markets/{market_id}/shadow-evaluations`
 
-They return the persisted 500 ms forecast attempts, the Chainlink and futures
-cache snapshots used at forecast time, and causal Chainlink outcomes for
-exactly one five-minute **target-time** window and one explicitly requested
+The exact-payload attachment routes are:
+
+- `GET /markets/current/shadow-evaluations/download`
+- `GET /markets/{market_id}/shadow-evaluations/download`
+
+All four return the persisted 500 ms forecast attempts, the Chainlink and
+futures cache snapshots used at forecast time, and causal Chainlink outcomes
+for exactly one five-minute **target-time** window and one explicitly requested
 model. They read PostgreSQL through the API's reader connection and the
 restricted `shadow_signal_evaluation_chart_points` view. They do not read
 Redis, run a model, alter evaluation rows, or expose an arbitrary time-range
-query.
+query. The attachment variants add only a download filename; their JSON body
+and validation semantics are identical to the corresponding reporting route.
 
 These reporting routes are independent from `GET /markets/current/live`. The
 live route remains one Redis `MGET`, performs no PostgreSQL query, and continues
@@ -913,7 +921,7 @@ anchor metadata, worker-age diagnostics, or database-writer metadata.
 
 ### Request
 
-Both routes require the same query parameter:
+All four routes require the same query parameter:
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -937,6 +945,8 @@ Calls:
 ```bash
 curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
 curl "${API_BASE_URL}/markets/5946630/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
+curl -OJ "${API_BASE_URL}/markets/current/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
+curl -OJ "${API_BASE_URL}/markets/5946630/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
 ```
 
 Browser example using the `apiGet` helper from the access section:
@@ -955,6 +965,28 @@ const selectedEvaluations = await apiGet(
 );
 ```
 
+Browser download example:
+
+```javascript
+const marketId = 5946630;
+const modelVersion = "catchup_ratio_l3000_b100";
+const url = new URL(
+  `${API_BASE_URL}/markets/${marketId}/shadow-evaluations/download`,
+  window.location.origin,
+);
+url.searchParams.set("model_version", modelVersion);
+
+const anchor = document.createElement("a");
+anchor.href = url.toString();
+anchor.click();
+```
+
+The server filename is
+`btc_5m_market_{market_id}_shadow_evaluations_{model_version}.json`. Prefer the
+ID-addressed route after a market ends; a current-window download is a partial
+snapshot and can resolve to an adjacent market if requested across a
+five-minute boundary.
+
 `market_id` must be a non-negative integer that can be represented safely by
 the PostgreSQL market-window calculation. FastAPI returns HTTP `422` before
 querying PostgreSQL when the ID, required model parameter, or supported-model
@@ -962,7 +994,7 @@ enum is invalid.
 
 ### Response
 
-Both routes use this response shape:
+All reporting and attachment routes use this response shape:
 
 ```json
 {
@@ -1109,7 +1141,9 @@ For a projection/futures/Chainlink chart, plot `futures_at_forecast` at
 `target_ms`. If the no-change baseline is also shown, plot
 `chainlink_at_forecast` at `generated_ms`. Do not move a forecast-time snapshot
 to `target_ms`: the response does not contain a target-time futures outcome.
-`matured_ms` is the persistence time, not a chart time.
+The dashboard's browser-buffered `actual_futures` and `futures_received_ms` are
+therefore not present in a later backend download and cannot be reconstructed
+from latest-only Redis. `matured_ms` is the persistence time, not a chart time.
 
 The forecast-time `*_source_timestamp_ms` fields identify the provider events;
 they can be `null` when that metadata was unavailable. The corresponding
@@ -1265,14 +1299,21 @@ after derived-evidence retention has removed older rows.
 `evaluation_semantics.scored_input_max_future_skew_ms` remains present and zero
 even when there are no points.
 
-The current route snapshots `server_time_ms` and its corresponding market once
-before querying PostgreSQL. Its returned `market` object is authoritative for
-that response. Calls made on opposite sides of a five-minute boundary can
-therefore return adjacent market IDs. A dashboard that needs a stable window
-should read the returned ID and continue with the ID-addressed route.
+Derived evaluation retention defaults to `168` hours (seven days), not seven
+minutes, although the production environment can configure a different value
+of at least 24 hours. Cleanup is bounded and asynchronous, and queue loss or a
+disabled evaluator can create gaps, so a download is a snapshot of retained
+evidence rather than a completeness guarantee or permanent archive.
+
+Each current route snapshots `server_time_ms` and its corresponding market once
+before querying PostgreSQL. Its returned `market` object and attachment
+filename are authoritative for that response. Calls made on opposite sides of
+a five-minute boundary can therefore return adjacent market IDs. A dashboard
+that needs a stable window should read the returned ID and continue with an
+ID-addressed route.
 
 The current target window returns HTTP `200` even if it has not yet appeared in
-`market_windows`. The ID-addressed route uses the same behavior when the
+`market_windows`. An ID-addressed route uses the same behavior when the
 requested ID is the API server's current market. A non-current ID absent from
 `market_windows` returns HTTP `404`:
 

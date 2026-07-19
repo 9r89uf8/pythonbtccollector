@@ -500,19 +500,24 @@ PostgreSQL query and neither runs nor imports model execution or model state.
 The shadow worker remains isolated in its standalone service. Phase 6 is
 backend-only.
 
-The Phase 7 backend prerequisite adds two separate PostgreSQL reporting routes:
+The Phase 7 backend prerequisite adds PostgreSQL reporting routes at
 `GET /markets/current/shadow-evaluations` and
-`GET /markets/{market_id}/shadow-evaluations`. Both require one explicitly
+`GET /markets/{market_id}/shadow-evaluations`, plus exact-payload JSON
+attachment variants ending in `/download`. All four require one explicitly
 supported V0 `model_version`, select one five-minute window by forecast
 `target_ms`, include boundary-crossing forecasts generated in the predecessor
 market, and reject an anomalous result above 1,000 rows. Financial values remain
-exact JSON strings or `null`. Every point carries its persisted forecast-time
+exact JSON strings or `null`. Evaluation persistence defaults to seven days;
+an export contains only rows still retained when it is requested. Every point
+carries its persisted forecast-time
 Chainlink and futures cache snapshots: `chainlink_at_forecast` and
 `futures_at_forecast`, each with source and local-receive timestamps. Those
 snapshots correspond to `generated_ms`; `projected_chainlink` and the causal
 `actual_chainlink` correspond to `target_ms`. This makes chart rows
 self-contained without reconstructing forecast-time futures history from the
-latest-only live cache.
+latest-only live cache. The backend does not persist the dashboard's
+target-aligned `actual_futures`, so that browser-computed field is not present
+in either reporting or download responses.
 
 Report schema v2 exposes the complete selection identity (schema, policy,
 evidence end, fingerprint, and artifact hash) and keeps generation-time
@@ -569,15 +574,17 @@ Current routes:
 - `GET /markets/current/live`
 - `GET /markets/current/shadow-evaluations?model_version=...`
 - `GET /markets/{market_id}/shadow-evaluations?model_version=...`
+- `GET /markets/current/shadow-evaluations/download?model_version=...`
+- `GET /markets/{market_id}/shadow-evaluations/download?model_version=...`
 
 The data and download routes accept optional `include_probabilities`,
 `include_futures`, `include_oi`, `include_flow`, `include_book`, `fill_display`,
 and `max_carry_forward_ms` query parameters. `/markets/current/live` reads the
 three source prices plus the optional shadow signal from Redis with one four-key
 `MGET`; the historical and aggregate routes read PostgreSQL.
-The shadow-evaluation reporting routes also read PostgreSQL, but only through
-their restricted view and only for one explicit model and five-minute target
-window. They do not alter the Redis-only live request path.
+The shadow-evaluation reporting and attachment routes also read PostgreSQL, but
+only through their restricted view and only for one explicit model and
+five-minute target window. They do not alter the Redis-only live request path.
 
 The data and download responses use schema version `2` and always include
 `market.chainlink_resolution` and `market.resolution`, independently of the

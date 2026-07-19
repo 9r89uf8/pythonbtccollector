@@ -221,11 +221,12 @@ The corresponding Python entry points are:
   `signals.chainlink_catchup`. FastAPI must remain a serializer: it must not
   import or run the shadow engine, hold model state, query PostgreSQL on this
   route, or expose persisted evaluation rows through the live response.
-- Phase 7 reporting exposes persisted evidence only through
+- Phase 7 reporting exposes persisted evidence only through the JSON routes
   `/markets/current/shadow-evaluations` and
-  `/markets/{market_id}/shadow-evaluations`. Require one supported V0
-  `model_version`, select the requested half-open window by `target_ms`, inspect
-  only its generation market and predecessor, and reject more than 1,000 rows.
+  `/markets/{market_id}/shadow-evaluations`, plus their exact-payload attachment
+  variants ending in `/download`. Require one supported V0 `model_version`,
+  select the requested half-open window by `target_ms`, inspect only its
+  generation market and predecessor, and reject more than 1,000 rows.
   Keep this PostgreSQL read path separate from `/markets/current/live`.
   Expose the persisted forecast-time cache snapshots only as
   `chainlink_at_forecast`, `chainlink_at_forecast_source_timestamp_ms`,

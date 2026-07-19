@@ -1619,6 +1619,58 @@ def test_shadow_evaluations_by_id_returns_completed_market_report(
 @pytest.mark.parametrize(
     "path",
     (
+        "/markets/current/shadow-evaluations/download",
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations/download",
+    ),
+)
+def test_shadow_evaluation_download_returns_compact_json_attachment(
+    client,
+    monkeypatch,
+    path,
+):
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == SHADOW_REPORT_MARKET_ID
+        assert model_version == SHADOW_REPORT_MODEL
+        return ShadowEvaluationFetchResult(
+            market_exists=True,
+            rows=(shadow_evaluation_chart_row(),),
+        )
+
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: SHADOW_REPORT_NOW_MS)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(f"{path}?model_version={SHADOW_REPORT_MODEL}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="'
+        f"btc_5m_market_{SHADOW_REPORT_MARKET_ID}_shadow_evaluations_"
+        f'{SHADOW_REPORT_MODEL}.json"'
+    )
+    assert b"\n" not in response.content
+    body = response.json()
+    assert body["schema_version"] == 2
+    assert body["server_time_ms"] == SHADOW_REPORT_NOW_MS
+    assert body["market"]["market_id"] == SHADOW_REPORT_MARKET_ID
+    assert body["model"]["model_version"] == SHADOW_REPORT_MODEL
+    assert body["points"][0]["futures_at_forecast"] == "62101"
+    assert body["points"][0]["projected_chainlink"] == "62001"
+    assert body["points"][0]["actual_chainlink"] == "62000.5"
+
+    report_response = client.get(
+        f"{path.removesuffix('/download')}?model_version={SHADOW_REPORT_MODEL}"
+    )
+    assert report_response.status_code == 200
+    assert body == report_response.json()
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
         "/markets/current/shadow-evaluations",
         "/markets/5944865/shadow-evaluations",
     ),
@@ -1680,9 +1732,17 @@ def test_current_shadow_evaluation_window_is_known_before_market_row_exists(
     assert client.fake_pool.acquire_calls == 0
 
 
+@pytest.mark.parametrize(
+    "path_suffix",
+    (
+        "shadow-evaluations",
+        "shadow-evaluations/download",
+    ),
+)
 def test_shadow_evaluations_unknown_historical_market_returns_404(
     client,
     monkeypatch,
+    path_suffix,
 ):
     async def fake_fetch(pool, *, window, model_version):
         assert pool is client.fake_pool
@@ -1694,7 +1754,7 @@ def test_shadow_evaluations_unknown_historical_market_returns_404(
     monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
 
     response = client.get(
-        f"/markets/{SHADOW_REPORT_MARKET_ID - 1}/shadow-evaluations"
+        f"/markets/{SHADOW_REPORT_MARKET_ID - 1}/{path_suffix}"
         f"?model_version={SHADOW_REPORT_MODEL}"
     )
 
@@ -1709,9 +1769,14 @@ def test_shadow_evaluations_unknown_historical_market_returns_404(
     assert client.fake_pool.acquire_calls == 0
 
 
+@pytest.mark.parametrize(
+    "path_suffix",
+    ("shadow-evaluations", "shadow-evaluations/download"),
+)
 def test_shadow_evaluations_known_historical_market_can_have_no_retained_rows(
     client,
     monkeypatch,
+    path_suffix,
 ):
     async def fake_fetch(pool, *, window, model_version):
         assert pool is client.fake_pool
@@ -1724,7 +1789,7 @@ def test_shadow_evaluations_known_historical_market_can_have_no_retained_rows(
     monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
 
     response = client.get(
-        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations"
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/{path_suffix}"
         f"?model_version={SHADOW_REPORT_MODEL}"
     )
 
@@ -1747,6 +1812,8 @@ def test_shadow_evaluations_known_historical_market_can_have_no_retained_rows(
     }
     assert body["performance"] == {"cohorts": []}
     assert body["points"] == []
+    if path_suffix.endswith("/download"):
+        assert response.headers["content-disposition"].startswith("attachment;")
     assert client.fake_live_cache.requested_keys == []
     assert client.fake_pool.acquire_calls == 0
 
@@ -1755,7 +1822,9 @@ def test_shadow_evaluations_known_historical_market_can_have_no_retained_rows(
     "path",
     (
         "/markets/current/shadow-evaluations",
+        "/markets/current/shadow-evaluations/download",
         f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations",
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations/download",
     ),
 )
 @pytest.mark.parametrize("query", ("", "?model_version=unsupported_model"))
@@ -1782,10 +1851,18 @@ def test_shadow_evaluation_routes_require_a_supported_model(
 
 
 @pytest.mark.parametrize("failure", ("integrity", "row_limit"))
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/markets/current/shadow-evaluations",
+        "/markets/current/shadow-evaluations/download",
+    ),
+)
 def test_shadow_evaluation_reporting_failures_return_generic_500(
     client,
     monkeypatch,
     failure,
+    path,
 ):
     if failure == "integrity":
         rows = (shadow_evaluation_chart_row(horizon_ms=3_500),)
@@ -1799,10 +1876,7 @@ def test_shadow_evaluation_reporting_failures_return_generic_500(
     monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: SHADOW_REPORT_NOW_MS)
     monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
 
-    response = client.get(
-        "/markets/current/shadow-evaluations"
-        f"?model_version={SHADOW_REPORT_MODEL}"
-    )
+    response = client.get(f"{path}?model_version={SHADOW_REPORT_MODEL}")
 
     assert response.status_code == 500
     assert response.json() == {
@@ -1812,46 +1886,53 @@ def test_shadow_evaluation_reporting_failures_return_generic_500(
     assert client.fake_pool.acquire_calls == 0
 
 
-def test_openapi_lists_both_shadow_evaluation_routes_and_required_model(client):
+def test_openapi_lists_shadow_evaluation_routes_and_required_model(client):
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
     paths = response.json()["paths"]
-    current = paths["/markets/current/shadow-evaluations"]["get"]
-    by_id = paths["/markets/{market_id}/shadow-evaluations"]["get"]
-
-    current_model = next(
-        parameter
-        for parameter in current["parameters"]
-        if parameter["name"] == "model_version"
+    current_paths = (
+        "/markets/current/shadow-evaluations",
+        "/markets/current/shadow-evaluations/download",
     )
-    by_id_model = next(
-        parameter
-        for parameter in by_id["parameters"]
-        if parameter["name"] == "model_version"
-    )
-    market_id = next(
-        parameter
-        for parameter in by_id["parameters"]
-        if parameter["name"] == "market_id"
+    by_id_paths = (
+        "/markets/{market_id}/shadow-evaluations",
+        "/markets/{market_id}/shadow-evaluations/download",
     )
 
-    assert current_model["in"] == "query"
-    assert current_model["required"] is True
-    assert by_id_model["in"] == "query"
-    assert by_id_model["required"] is True
-    assert market_id["in"] == "path"
-    assert market_id["required"] is True
-    assert "500" in current["responses"]
-    assert "404" in by_id["responses"]
-    assert "500" in by_id["responses"]
+    for path in (*current_paths, *by_id_paths):
+        operation = paths[path]["get"]
+        model_parameter = next(
+            parameter
+            for parameter in operation["parameters"]
+            if parameter["name"] == "model_version"
+        )
+        assert model_parameter["in"] == "query"
+        assert model_parameter["required"] is True
+        assert "500" in operation["responses"]
+
+    for path in by_id_paths:
+        operation = paths[path]["get"]
+        market_id = next(
+            parameter
+            for parameter in operation["parameters"]
+            if parameter["name"] == "market_id"
+        )
+        assert market_id["in"] == "path"
+        assert market_id["required"] is True
+        assert "404" in operation["responses"]
 
 
 @pytest.mark.parametrize("market_id", ("-1", "not-an-integer", str(api.MAX_MARKET_ID + 1)))
+@pytest.mark.parametrize(
+    "path_suffix",
+    ("shadow-evaluations", "shadow-evaluations/download"),
+)
 def test_shadow_evaluation_route_rejects_invalid_market_id_before_database(
     client,
     monkeypatch,
     market_id,
+    path_suffix,
 ):
     async def unexpected_fetch(*args, **kwargs):
         raise AssertionError("invalid market_id must not query PostgreSQL")
@@ -1863,7 +1944,7 @@ def test_shadow_evaluation_route_rejects_invalid_market_id_before_database(
     )
 
     response = client.get(
-        f"/markets/{market_id}/shadow-evaluations"
+        f"/markets/{market_id}/{path_suffix}"
         f"?model_version={SHADOW_REPORT_MODEL}"
     )
 
