@@ -279,6 +279,7 @@ class ReplayConfig:
     near_reconnect_ms: int = 10_000
     quantile_sample_max: int = DEFAULT_QUANTILE_SAMPLE_MAX
     exclude_parse_error_sessions: bool = False
+    allowed_chainlink_parse_error_totals: tuple[int, ...] = (0,)
 
     def __post_init__(self) -> None:
         _require_non_negative_int(self.start_ms, "start_ms")
@@ -398,6 +399,29 @@ class ReplayConfig:
         )
         if not isinstance(self.exclude_parse_error_sessions, bool):
             raise TypeError("exclude_parse_error_sessions must be bool")
+        if not isinstance(self.allowed_chainlink_parse_error_totals, tuple):
+            raise TypeError("allowed_chainlink_parse_error_totals must be tuple")
+        if not self.allowed_chainlink_parse_error_totals:
+            raise ValueError(
+                "allowed_chainlink_parse_error_totals must not be empty"
+            )
+        for parse_errors_total in self.allowed_chainlink_parse_error_totals:
+            _require_non_negative_int(
+                parse_errors_total,
+                "allowed_chainlink_parse_error_totals",
+            )
+        if self.allowed_chainlink_parse_error_totals not in ((0,), (0, 2)):
+            raise ValueError(
+                "allowed_chainlink_parse_error_totals must be (0,) or the "
+                "incident-specific recovery policy (0, 2)"
+            )
+        if (
+            self.allowed_chainlink_parse_error_totals != (0,)
+            and not self.exclude_parse_error_sessions
+        ):
+            raise ValueError(
+                "a Chainlink parse-error allowance requires strict session filtering"
+            )
 
     @staticmethod
     def _validate_threshold_pair(
@@ -554,7 +578,13 @@ class ReplaySession:
         if self.records_dropped_total:
             reasons.append("records_dropped")
         if config.exclude_parse_error_sessions and self.parse_errors_total:
-            reasons.append("parse_errors")
+            is_allowed_chainlink_total = (
+                self.source == CHAINLINK_SESSION_SOURCE
+                and self.parse_errors_total
+                in config.allowed_chainlink_parse_error_totals
+            )
+            if not is_allowed_chainlink_total:
+                reasons.append("parse_errors")
         if not self.integrity_checked:
             reasons.append("integrity_unverified")
         else:
@@ -593,6 +623,8 @@ class SessionSelection:
     eligible_by_source: Mapping[str, int]
     excluded_by_reason: Mapping[str, int]
     excluded_integrity_scope_raw_rows: int
+    parse_error_totals_by_source: Mapping[str, Mapping[str, int]]
+    parse_error_exception_applied_by_source: Mapping[str, int]
 
 
 def select_replay_sessions(
@@ -602,6 +634,11 @@ def select_replay_sessions(
     total_by_source: Counter[str] = Counter()
     eligible_by_source: Counter[str] = Counter()
     excluded_by_reason: Counter[str] = Counter()
+    parse_error_totals_by_source: dict[str, Counter[str]] = {
+        FUTURES_SESSION_SOURCE: Counter(),
+        CHAINLINK_SESSION_SOURCE: Counter(),
+    }
+    parse_error_exception_applied_by_source: Counter[str] = Counter()
     excluded_raw_rows = 0
     eligible: dict[str, list[ReplaySession]] = {
         FUTURES_SESSION_SOURCE: [],
@@ -610,7 +647,17 @@ def select_replay_sessions(
 
     for session in sessions:
         total_by_source[session.source] += 1
+        parse_error_totals_by_source[session.source][
+            str(session.parse_errors_total)
+        ] += 1
         reasons = session.exclusion_reasons(config)
+        if (
+            config.allowed_chainlink_parse_error_totals == (0, 2)
+            and session.source == CHAINLINK_SESSION_SOURCE
+            and session.parse_errors_total == 2
+            and "parse_errors" not in reasons
+        ):
+            parse_error_exception_applied_by_source[session.source] += 1
         if reasons:
             excluded_by_reason.update(reasons)
             excluded_raw_rows += session.raw_row_count or 0
@@ -683,6 +730,13 @@ def select_replay_sessions(
         eligible_by_source=dict(eligible_by_source),
         excluded_by_reason=dict(excluded_by_reason),
         excluded_integrity_scope_raw_rows=excluded_raw_rows,
+        parse_error_totals_by_source={
+            source: dict(sorted(counts.items()))
+            for source, counts in parse_error_totals_by_source.items()
+        },
+        parse_error_exception_applied_by_source=dict(
+            parse_error_exception_applied_by_source
+        ),
     )
 
 
@@ -1378,9 +1432,25 @@ class ReplayReport:
                 "exclude_parse_error_sessions": (
                     self.config.exclude_parse_error_sessions
                 ),
+                **(
+                    {
+                        "allowed_chainlink_parse_error_totals": list(
+                            self.config.allowed_chainlink_parse_error_totals
+                        )
+                    }
+                    if self.config.allowed_chainlink_parse_error_totals != (0,)
+                    else {}
+                ),
             },
             "data_quality": {
-                "session_policy": "completed_clean_integrity_checked",
+                "session_policy": (
+                    "completed_clean_integrity_checked"
+                    if self.config.allowed_chainlink_parse_error_totals == (0,)
+                    else (
+                        "completed_integrity_checked_with_exact_chainlink_"
+                        "parse_error_allowlist"
+                    )
+                ),
                 "conservative_reset_at_common_session_boundary": True,
                 "sessions_total_by_source": dict(
                     self.session_selection.total_by_source
@@ -1393,6 +1463,19 @@ class ReplayReport:
                 ),
                 "excluded_integrity_scope_raw_rows": (
                     self.session_selection.excluded_integrity_scope_raw_rows
+                ),
+                **(
+                    {
+                        "parse_error_totals_by_source": dict(
+                            self.session_selection.parse_error_totals_by_source
+                        ),
+                        "parse_error_exception_applied_by_source": dict(
+                            self.session_selection
+                            .parse_error_exception_applied_by_source
+                        ),
+                    }
+                    if self.config.allowed_chainlink_parse_error_totals == (0, 2)
+                    else {}
                 ),
                 "common_healthy_segments": len(
                     self.session_selection.segments
@@ -1411,6 +1494,16 @@ class ReplayReport:
                     "metrics; top-level metrics include horizon-specific "
                     "edge rows.",
                     "Phase 4 raw-retention behavior remains unproven in production.",
+                    *(
+                        [
+                            "The incident-specific Chainlink parse-error exception "
+                            "is based on persisted per-session counters; rejected "
+                            "frame bodies were not stored for per-session verification."
+                        ]
+                        if self.config.allowed_chainlink_parse_error_totals
+                        == (0, 2)
+                        else []
+                    ),
                 ],
             },
             "candidates": list(self.candidate_summaries),

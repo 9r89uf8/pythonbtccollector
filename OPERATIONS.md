@@ -170,8 +170,12 @@ completed-market API check from **Check Services** above.
 The Chainlink RTDS connection can remain open while accepted BTC/USD price
 events stop. The collector now starts a monotonic deadline after subscription
 and resets it only when a valid expected-topic, expected-symbol Chainlink tick
-is accepted. PING/PONG, malformed JSON, and unrelated frames do not reset the
-deadline. At the default 10,000 ms threshold, the reader emits
+is accepted. Before that first accepted tick, an empty RTDS bootstrap frame and
+a strictly shaped `crypto_prices` subscription-history dump for `btc/usd` are
+counted as received-only startup frames instead of parse errors. They, PING/PONG,
+malformed JSON, and unrelated frames do not reset the deadline. After a live
+tick has been accepted, the same empty or startup-shaped frame is a parse error.
+At the default 10,000 ms threshold, the reader emits
 `polymarket_rtds_idle_reconnect_triggered`, closes that WebSocket as an existing
 `proactive_reconnect`, applies jittered backoff, and resubscribes inside the
 same process. Redis, PostgreSQL, the API, and the shadow worker are not

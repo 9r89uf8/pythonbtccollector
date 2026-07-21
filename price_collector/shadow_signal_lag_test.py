@@ -255,6 +255,7 @@ def _replay_config(
     futures_stale_ms: int,
     chainlink_stale_ms: int,
     history_retention_ms: int,
+    allowed_chainlink_parse_error_totals: tuple[int, ...],
 ) -> ReplayConfig:
     return ReplayConfig(
         start_ms=start_ms,
@@ -272,6 +273,9 @@ def _replay_config(
         chainlink_availability_delay_ms=100,
         evaluation_phase_offset_ms=0,
         exclude_parse_error_sessions=True,
+        allowed_chainlink_parse_error_totals=(
+            allowed_chainlink_parse_error_totals
+        ),
     )
 
 
@@ -286,6 +290,7 @@ async def run_lag_test(
     chainlink_stale_ms: int = 5_000,
     history_retention_ms: int = 10_000,
     chunk_ms: int = DEFAULT_DATABASE_CHUNK_MS,
+    allowed_chainlink_parse_error_totals: tuple[int, ...] = (0,),
     replay: Optional[ReplayRunner] = None,
 ) -> dict[str, Any]:
     if not isinstance(database_url, str) or not database_url:
@@ -304,6 +309,9 @@ async def run_lag_test(
         futures_stale_ms=futures_stale_ms,
         chainlink_stale_ms=chainlink_stale_ms,
         history_retention_ms=history_retention_ms,
+        allowed_chainlink_parse_error_totals=(
+            allowed_chainlink_parse_error_totals
+        ),
     )
     holdout_range_config = _replay_config(
         start_ms=holdout_start_ms,
@@ -312,6 +320,9 @@ async def run_lag_test(
         futures_stale_ms=futures_stale_ms,
         chainlink_stale_ms=chainlink_stale_ms,
         history_retention_ms=history_retention_ms,
+        allowed_chainlink_parse_error_totals=(
+            allowed_chainlink_parse_error_totals
+        ),
     )
     calibration_report = await replay_runner(
         database_url=database_url,
@@ -349,6 +360,15 @@ async def run_lag_test(
             "chainlink_availability_delay_ms": 100,
             "evaluation_phase_offset_ms": 0,
             "exclude_parse_error_sessions": True,
+            **(
+                {
+                    "allowed_chainlink_parse_error_totals": list(
+                        allowed_chainlink_parse_error_totals
+                    )
+                }
+                if allowed_chainlink_parse_error_totals != (0,)
+                else {}
+            ),
             "minimum_common_scored": MIN_COMMON_SCORED,
             "minimum_common_valid_coverage": MIN_COMMON_VALID_COVERAGE,
             "minimum_common_maturation_coverage": (

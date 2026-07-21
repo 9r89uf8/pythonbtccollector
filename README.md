@@ -66,8 +66,11 @@ columns, and are serialized as strings by the API.
 - Floors the source payload timestamp to its UTC second and upserts that second
   into PostgreSQL.
 - Proactively reconnects an active-but-unproductive RTDS socket when no valid
-  BTC/USD Chainlink event is accepted for 10 seconds by default. Control and
-  malformed frames do not reset that monotonic deadline.
+  BTC/USD Chainlink event is accepted for 10 seconds by default. Before the
+  first accepted tick, the empty RTDS bootstrap frame and the narrowly validated
+  `crypto_prices` subscription-history dump are received-only startup frames,
+  not parse errors. They, control frames, and malformed frames do not reset that
+  monotonic deadline.
 
 ### Binance USD-M Futures
 

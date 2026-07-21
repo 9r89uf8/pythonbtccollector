@@ -1163,6 +1163,81 @@ def test_parse_error_sessions_can_be_included_explicitly():
     assert selection.eligible_by_source[FUTURES_SESSION_SOURCE] == 1
 
 
+def test_exact_chainlink_parse_error_allowlist_keeps_other_strict_gates():
+    config = replay_config(
+        exclude_parse_error_sessions=True,
+        allowed_chainlink_parse_error_totals=(0, 2),
+    )
+    sessions = [
+        clean_session(
+            FUTURES_SESSION_SOURCE,
+            FUTURES_CONNECTION_1,
+            parse_errors=2,
+        ),
+        clean_session(
+            CHAINLINK_SESSION_SOURCE,
+            CHAINLINK_CONNECTION_1,
+            parse_errors=2,
+        ),
+        clean_session(
+            CHAINLINK_SESSION_SOURCE,
+            CHAINLINK_CONNECTION_2,
+            parse_errors=1,
+        ),
+    ]
+
+    selection = select_replay_sessions(sessions, config)
+
+    assert selection.segments == ()
+    assert selection.eligible_by_source[CHAINLINK_SESSION_SOURCE] == 1
+    assert selection.excluded_by_reason["parse_errors"] == 2
+
+
+def test_chainlink_parse_error_allowlist_is_explicit_in_report():
+    report = replay_shadow_signals(
+        events=[],
+        sessions=[],
+        config=replay_config(
+            exclude_parse_error_sessions=True,
+            allowed_chainlink_parse_error_totals=(0, 2),
+        ),
+    ).to_dict()
+
+    assert report["configuration"][
+        "allowed_chainlink_parse_error_totals"
+    ] == [0, 2]
+    assert report["data_quality"]["session_policy"] == (
+        "completed_integrity_checked_with_exact_chainlink_parse_error_allowlist"
+    )
+
+
+@pytest.mark.parametrize(
+    "allowed_totals",
+    [(0, 1), (0, 2, 3), (2,), [0, 2]],
+)
+def test_chainlink_parse_error_allowlist_is_incident_specific(allowed_totals):
+    with pytest.raises((TypeError, ValueError)):
+        replay_config(
+            exclude_parse_error_sessions=True,
+            allowed_chainlink_parse_error_totals=allowed_totals,
+        )
+
+
+def test_chainlink_parse_exception_does_not_bypass_other_integrity_gates():
+    config = replay_config(
+        exclude_parse_error_sessions=True,
+        allowed_chainlink_parse_error_totals=(0, 2),
+    )
+    chainlink = clean_session(
+        CHAINLINK_SESSION_SOURCE,
+        CHAINLINK_CONNECTION_1,
+        parse_errors=2,
+        dropped=1,
+    )
+
+    assert chainlink.exclusion_reasons(config) == ("records_dropped",)
+
+
 def test_session_intersections_create_separate_reconnect_segments():
     sessions = [
         clean_session(

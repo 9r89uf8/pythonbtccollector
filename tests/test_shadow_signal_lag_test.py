@@ -110,11 +110,15 @@ def test_simple_lag_test_freezes_shorter_winner_before_holdout():
     assert seen_configs[0].lags_ms == (1_500, 2_000, 2_500, 3_000, 3_500)
     assert seen_configs[1].lags_ms == (2_000, 3_000)
     assert seen_configs[0].exclude_parse_error_sessions is True
+    assert seen_configs[0].allowed_chainlink_parse_error_totals == (0,)
     assert seen_configs[0].futures_availability_delay_ms == 100
     assert seen_configs[0].chainlink_availability_delay_ms == 100
     assert result["calibration"]["winner_lag_ms"] == 2_000
     assert result["holdout"]["challenger_lag_ms"] == 2_000
     assert result["status"] == "observed_shorter_better"
+    assert "allowed_chainlink_parse_error_totals" not in (
+        result["fixed_replay_settings"]
+    )
 
 
 def test_calibration_exact_skill_tie_chooses_smaller_lag():

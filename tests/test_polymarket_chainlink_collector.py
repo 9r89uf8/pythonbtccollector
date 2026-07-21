@@ -34,6 +34,25 @@ def valid_message(**overrides):
     return message
 
 
+def startup_history_snapshot(**overrides):
+    message = {
+        "topic": "crypto_prices",
+        "type": "subscribe",
+        "timestamp": 1_783_459_200_400,
+        "payload": {
+            "symbol": "btc/usd",
+            "data": [
+                {
+                    "timestamp": 1_783_459_199_000,
+                    "value": "123455.50",
+                }
+            ],
+        },
+    }
+    message.update(overrides)
+    return message
+
+
 def chainlink_sample(
     *,
     price="123456.78",
@@ -102,6 +121,28 @@ class ControlAndMalformedRtdsWebSocket:
         await asyncio.sleep(0.005)
         messages = ("PONG", "not-json")
         message = messages[self._index % len(messages)]
+        self._index += 1
+        return message
+
+
+class StartupFramesOnlyRtdsWebSocket:
+    def __init__(self):
+        self.sent = []
+        self._index = 0
+        self._messages = (
+            "",
+            json.dumps(startup_history_snapshot()),
+        )
+
+    async def send(self, message):
+        self.sent.append(message)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(0.005)
+        message = self._messages[self._index % len(self._messages)]
         self._index += 1
         return message
 
@@ -790,6 +831,287 @@ def test_pong_and_malformed_messages_are_counted_without_raw_events(monkeypatch)
         assert raw.counters.messages_received_total == 3
         assert raw.counters.messages_accepted_total == 1
         assert raw.counters.parse_errors_total == 1
+
+    asyncio.run(scenario())
+
+
+def test_expected_startup_frames_are_received_without_parse_errors(monkeypatch):
+    async def scenario():
+        monotonic_ns = [1_000_000_000]
+
+        def next_monotonic_ns():
+            monotonic_ns[0] += 1
+            return monotonic_ns[0]
+
+        websocket = ScriptedRtdsWebSocket(
+            [
+                "",
+                json.dumps(startup_history_snapshot()),
+                json.dumps(valid_message(), default=str),
+            ]
+        )
+        state = collector.ChainlinkDeliveryState()
+        raw = RecordingRawCapture()
+        monkeypatch.setattr(
+            collector.time,
+            "time_ns",
+            lambda: 1_783_459_200_500_000_000,
+        )
+        monkeypatch.setattr(collector.time, "monotonic_ns", next_monotonic_ns)
+        monkeypatch.setattr(
+            collector.websockets,
+            "connect",
+            lambda *args, **kwargs: WebSocketContext(websocket),
+        )
+
+        task = asyncio.create_task(
+            collector.polymarket_chainlink_reader_loop(
+                reader_settings(),
+                state,
+                raw_capture=raw,
+            )
+        )
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 1), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        event = next(
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.ChainlinkPriceEvent)
+        )
+        closed = next(
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.FeedSessionRecord)
+            and record.close_reason is not None
+        )
+        assert event.receive_sequence == 3
+        assert closed.messages_received_total == 3
+        assert closed.messages_accepted_total == 1
+        assert closed.parse_errors_total == 0
+        assert raw.counters.messages_received_total == 3
+        assert raw.counters.messages_accepted_total == 1
+        assert raw.counters.parse_errors_total == 0
+
+    asyncio.run(scenario())
+
+
+def test_binary_startup_and_malformed_frames_keep_connection_accounting(
+    monkeypatch,
+):
+    async def scenario():
+        monotonic_ns = [1_000_000_000]
+
+        def next_monotonic_ns():
+            monotonic_ns[0] += 1
+            return monotonic_ns[0]
+
+        websocket = ScriptedRtdsWebSocket(
+            [
+                b"",
+                json.dumps(startup_history_snapshot()).encode("utf-8"),
+                b"\xff",
+                json.dumps(valid_message(), default=str).encode("utf-8"),
+            ]
+        )
+        state = collector.ChainlinkDeliveryState()
+        raw = RecordingRawCapture()
+        monkeypatch.setattr(
+            collector.time,
+            "time_ns",
+            lambda: 1_783_459_200_500_000_000,
+        )
+        monkeypatch.setattr(collector.time, "monotonic_ns", next_monotonic_ns)
+        monkeypatch.setattr(
+            collector.websockets,
+            "connect",
+            lambda *args, **kwargs: WebSocketContext(websocket),
+        )
+
+        task = asyncio.create_task(
+            collector.polymarket_chainlink_reader_loop(
+                reader_settings(),
+                state,
+                raw_capture=raw,
+            )
+        )
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 1), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        event = next(
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.ChainlinkPriceEvent)
+        )
+        closed = next(
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.FeedSessionRecord)
+            and record.close_reason is not None
+        )
+        assert event.receive_sequence == 4
+        assert closed.messages_received_total == 4
+        assert closed.messages_accepted_total == 1
+        assert closed.parse_errors_total == 1
+        assert raw.counters.messages_received_total == 4
+        assert raw.counters.messages_accepted_total == 1
+        assert raw.counters.parse_errors_total == 1
+
+    asyncio.run(scenario())
+
+
+def test_startup_shaped_and_malformed_frames_after_first_tick_are_parse_errors(
+    monkeypatch,
+):
+    async def scenario():
+        monotonic_ns = [1_000_000_000]
+
+        def next_monotonic_ns():
+            monotonic_ns[0] += 1
+            return monotonic_ns[0]
+
+        second_tick = valid_message(
+            timestamp=1_783_459_201_456,
+            payload={
+                "symbol": "btc/usd",
+                "value": "123460.01",
+                "timestamp": 1_783_459_201_123,
+            },
+        )
+        websocket = ScriptedRtdsWebSocket(
+            [
+                json.dumps(valid_message(), default=str),
+                "",
+                json.dumps(startup_history_snapshot()),
+                "not-json",
+                json.dumps(second_tick),
+            ]
+        )
+        state = collector.ChainlinkDeliveryState()
+        raw = RecordingRawCapture()
+        monkeypatch.setattr(
+            collector.time,
+            "time_ns",
+            lambda: 1_783_459_201_500_000_000,
+        )
+        monkeypatch.setattr(collector.time, "monotonic_ns", next_monotonic_ns)
+        monkeypatch.setattr(
+            collector.websockets,
+            "connect",
+            lambda *args, **kwargs: WebSocketContext(websocket),
+        )
+
+        task = asyncio.create_task(
+            collector.polymarket_chainlink_reader_loop(
+                reader_settings(),
+                state,
+                raw_capture=raw,
+            )
+        )
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 2), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        events = [
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.ChainlinkPriceEvent)
+        ]
+        closed = next(
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.FeedSessionRecord)
+            and record.close_reason is not None
+        )
+        assert [event.receive_sequence for event in events] == [1, 5]
+        assert closed.messages_received_total == 5
+        assert closed.messages_accepted_total == 2
+        assert closed.parse_errors_total == 3
+        assert raw.counters.messages_received_total == 5
+        assert raw.counters.messages_accepted_total == 2
+        assert raw.counters.parse_errors_total == 3
+
+    asyncio.run(scenario())
+
+
+def test_startup_frames_do_not_reset_accepted_tick_idle_deadline(
+    monkeypatch,
+    caplog,
+):
+    async def scenario():
+        stale_websocket = StartupFramesOnlyRtdsWebSocket()
+        recovered_websocket = ScriptedRtdsWebSocket(
+            [json.dumps(valid_message(), default=str)]
+        )
+        websockets = [stale_websocket, recovered_websocket]
+        state = collector.ChainlinkDeliveryState()
+        raw = RecordingRawCapture()
+        connect_calls = 0
+        reconnect_attempts = []
+
+        def connect(*args, **kwargs):
+            nonlocal connect_calls
+            websocket = websockets[min(connect_calls, len(websockets) - 1)]
+            connect_calls += 1
+            return WebSocketContext(websocket)
+
+        monkeypatch.setattr(collector.websockets, "connect", connect)
+
+        def reconnect_delay(attempt):
+            reconnect_attempts.append(attempt)
+            return 0
+
+        monkeypatch.setattr(
+            collector,
+            "reconnect_delay_seconds",
+            reconnect_delay,
+        )
+        caplog.set_level(
+            "WARNING",
+            logger="price_collector.polymarket_chainlink_collector",
+        )
+
+        task = asyncio.create_task(
+            collector.polymarket_chainlink_reader_loop(
+                reader_settings(idle_timeout_ms=100),
+                state,
+                raw_capture=raw,
+            )
+        )
+        await asyncio.wait_for(wait_for_delivery_sequence(state, 1), timeout=1)
+
+        assert connect_calls == 2
+        assert reconnect_attempts == [1]
+        timeout_record = next(
+            record
+            for record in caplog.records
+            if getattr(record, "event", None)
+            == "polymarket_rtds_idle_reconnect_triggered"
+        )
+        assert timeout_record.connection_messages_received_total > 0
+        assert timeout_record.connection_messages_accepted_total == 0
+        assert timeout_record.connection_parse_errors_total == 0
+        assert timeout_record.frame_idle_ms < timeout_record.accepted_tick_idle_ms
+
+        closed = next(
+            record
+            for record in raw.records
+            if isinstance(record, raw_capture.FeedSessionRecord)
+            and record.close_reason is not None
+        )
+        assert closed.close_reason == "proactive_reconnect"
+        assert closed.messages_received_total > 0
+        assert closed.messages_accepted_total == 0
+        assert closed.parse_errors_total == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     asyncio.run(scenario())
 

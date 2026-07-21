@@ -44,6 +44,7 @@ from price_collector.raw_capture import (
 
 LOGGER = logging.getLogger("price_collector.polymarket_chainlink_collector")
 RTDS_PING_SECONDS = 5.0
+RTDS_CRYPTO_PRICES_HISTORY_TOPIC = "crypto_prices"
 CHAINLINK_HISTORY_PENDING_MAX_SECONDS = 5_000
 CHAINLINK_HISTORY_SETTLE_MS = 1_000
 CHAINLINK_HISTORY_POLL_SECONDS = 0.25
@@ -589,6 +590,26 @@ def parse_polymarket_chainlink_message(
         price=price,
         provider_event_ms=provider_event_ms,
         provider_message_ms=provider_message_ms,
+    )
+
+
+def _is_expected_chainlink_startup_snapshot(
+    message: Mapping[str, Any],
+    *,
+    expected_symbol: str,
+) -> bool:
+    """Identify the RTDS historical dump sent before live Chainlink updates."""
+
+    if message.get("topic") != RTDS_CRYPTO_PRICES_HISTORY_TOPIC:
+        return False
+    if message.get("type") != "subscribe":
+        return False
+
+    payload = message.get("payload")
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("symbol") == expected_symbol
+        and isinstance(payload.get("data"), list)
     )
 
 
@@ -1335,19 +1356,43 @@ async def polymarket_chainlink_reader_loop(
                         if raw_message in ("PONG", "PING", b"PONG", b"PING"):
                             continue
 
+                        before_first_accepted_tick = (
+                            connection_messages_accepted_total == 0
+                        )
+                        if before_first_accepted_tick and raw_message in (
+                            "",
+                            b"",
+                        ):
+                            continue
+
                         try:
                             message = json.loads(raw_message, parse_float=Decimal)
                             if not isinstance(message, Mapping):
                                 raise RtdsParseError(
                                     "RTDS message must be an object"
                                 )
+                            if (
+                                before_first_accepted_tick
+                                and _is_expected_chainlink_startup_snapshot(
+                                    message,
+                                    expected_symbol=(
+                                        settings.POLYMARKET_CHAINLINK_RTD_SYMBOL
+                                    ),
+                                )
+                            ):
+                                continue
                             tick = parse_polymarket_chainlink_message(
                                 message,
                                 expected_symbol=settings.POLYMARKET_CHAINLINK_RTD_SYMBOL,
                                 db_symbol=settings.POLYMARKET_CHAINLINK_SYMBOL,
                                 expected_topic=settings.POLYMARKET_CHAINLINK_TOPIC,
                             )
-                        except (json.JSONDecodeError, RtdsParseError, TypeError) as exc:
+                        except (
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                            RtdsParseError,
+                            TypeError,
+                        ) as exc:
                             connection_parse_errors_total += 1
                             _mark_chainlink_session(
                                 capture_session,
