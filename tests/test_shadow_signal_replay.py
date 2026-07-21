@@ -1209,6 +1209,87 @@ def test_chainlink_parse_error_allowlist_is_explicit_in_report():
     assert report["data_quality"]["session_policy"] == (
         "completed_integrity_checked_with_exact_chainlink_parse_error_allowlist"
     )
+    assert report["data_quality"]["excluded_session_ids_by_reason"] == {}
+
+
+def test_incident_report_records_excluded_session_ids_by_reason():
+    config = replay_config(
+        exclude_parse_error_sessions=True,
+        allowed_chainlink_parse_error_totals=(0, 2),
+    )
+    sessions = [
+        clean_session(
+            FUTURES_SESSION_SOURCE,
+            FUTURES_CONNECTION_1,
+        ),
+        clean_session(
+            CHAINLINK_SESSION_SOURCE,
+            CHAINLINK_CONNECTION_2,
+            parse_errors=3,
+        ),
+        clean_session(
+            CHAINLINK_SESSION_SOURCE,
+            CHAINLINK_CONNECTION_1,
+            parse_errors=1,
+            start_ms=ORIGIN_MS + 6_000,
+            end_ms=ORIGIN_MS + 7_000,
+        ),
+    ]
+
+    report = replay_shadow_signals(
+        events=[],
+        sessions=sessions,
+        config=config,
+    ).to_dict()
+
+    assert report["data_quality"]["excluded_session_ids_by_reason"] == {
+        "parse_errors": [
+            str(CHAINLINK_CONNECTION_1),
+            str(CHAINLINK_CONNECTION_2),
+        ]
+    }
+
+
+def test_finalized_incident_session_is_excluded_with_all_raw_rows():
+    incident_connection_id = UUID(
+        "f616a075-6f2d-4537-8224-aacbb1c50c89"
+    )
+    config = replay_config(
+        exclude_parse_error_sessions=True,
+        allowed_chainlink_parse_error_totals=(0, 2),
+    )
+    sessions = [
+        clean_session(
+            FUTURES_SESSION_SOURCE,
+            FUTURES_CONNECTION_1,
+        ),
+        clean_session(
+            CHAINLINK_SESSION_SOURCE,
+            incident_connection_id,
+            accepted=6_023,
+            raw_rows=6_023,
+            parse_errors=3,
+        ),
+    ]
+
+    selection = select_replay_sessions(sessions, config)
+    report = replay_shadow_signals(
+        events=[],
+        sessions=sessions,
+        config=config,
+    ).to_dict()
+
+    assert incident_connection_id not in selection.eligible_session_ids
+    assert selection.excluded_integrity_scope_raw_rows == 6_023
+    assert report["data_quality"]["sessions_excluded_by_reason"] == {
+        "parse_errors": 1
+    }
+    assert report["data_quality"]["excluded_session_ids_by_reason"] == {
+        "parse_errors": [str(incident_connection_id)]
+    }
+    assert report["data_quality"][
+        "excluded_integrity_scope_raw_rows"
+    ] == 6_023
 
 
 @pytest.mark.parametrize(

@@ -45,6 +45,9 @@ ORIGINAL_RESULT_SHA256 = (
 OPERATOR_RECORDED_SOURCE_GIT_COMMIT = (
     "ab30ab67fd66b96199b1526c29e897dad7a4ea0e"
 )
+INITIAL_RECOVERY_GIT_COMMIT = (
+    "c7d534a0f5a5d9bc749f1245aa29d0c447721438"
+)
 CALIBRATION_START_MS = 1_784_419_200_000
 CALIBRATION_END_MS = 1_784_505_600_000
 HOLDOUT_START_MS = 1_784_505_600_000
@@ -64,6 +67,14 @@ EXPECTED_RECOVERY_CHANGED_PATHS = (
     "tests/test_shadow_signal_lag_test.py",
     "tests/test_shadow_signal_replay.py",
 )
+EXPECTED_RECOVERY_FIX_CHANGED_PATHS = (
+    "CHAINLINK_SHORTER_LAG_TEST_RUNBOOK.md",
+    "price_collector/shadow_signal_lag_recovery.py",
+    "price_collector/shadow_signal_replay.py",
+    "tests/test_shadow_signal_lag_recovery.py",
+    "tests/test_shadow_signal_replay.py",
+)
+EXCLUDED_CHAINLINK_CONNECTION_ID = "f616a075-6f2d-4537-8224-aacbb1c50c89"
 RECOVERY_SESSION_CENSUS_SQL = """
 SELECT source, parse_errors_total, count(*) AS sessions
 FROM raw_capture.feed_sessions
@@ -76,6 +87,55 @@ WHERE connected_wall_ns < $2
 GROUP BY source, parse_errors_total
 ORDER BY source, parse_errors_total
 """
+RECOVERY_EXCLUDED_SESSION_SQL = """
+SELECT
+    sessions.connection_id::text AS connection_id,
+    sessions.source,
+    to_char(
+        to_timestamp(sessions.connected_wall_ns::numeric / 1000000000)
+            AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+    ) AS connected_utc,
+    to_char(
+        to_timestamp(sessions.ready_wall_ns::numeric / 1000000000)
+            AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+    ) AS ready_utc,
+    to_char(
+        to_timestamp(sessions.disconnected_wall_ns::numeric / 1000000000)
+            AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+    ) AS disconnected_utc,
+    sessions.close_reason,
+    sessions.messages_received_total,
+    sessions.messages_accepted_total,
+    sessions.parse_errors_total,
+    sessions.records_dropped_total,
+    sessions.last_receive_sequence,
+    (
+        SELECT count(*)
+        FROM raw_capture.chainlink_price_events events
+        WHERE events.connection_id = sessions.connection_id
+          AND events.received_wall_ns >= sessions.connected_wall_ns
+          AND events.received_wall_ns <= sessions.disconnected_wall_ns
+    ) AS raw_rows
+FROM raw_capture.feed_sessions sessions
+WHERE sessions.connection_id = $1::uuid
+"""
+EXPECTED_EXCLUDED_SESSION_EVIDENCE = {
+    "connection_id": EXCLUDED_CHAINLINK_CONNECTION_ID,
+    "source": CHAINLINK_SESSION_SOURCE,
+    "connected_utc": "2026-07-20T23:54:06.392045Z",
+    "ready_utc": "2026-07-20T23:54:06.392273Z",
+    "disconnected_utc": "2026-07-21T01:36:19.965997Z",
+    "close_reason": "cancelled",
+    "messages_received_total": 6_026,
+    "messages_accepted_total": 6_023,
+    "parse_errors_total": 3,
+    "records_dropped_total": 0,
+    "last_receive_sequence": 6_026,
+    "raw_rows": 6_023,
+}
 
 EXPECTED_CALIBRATION_RANGE = {
     "start_ms": CALIBRATION_START_MS,
@@ -141,7 +201,49 @@ class OriginalRecoveryArtifact:
 class RecoverySourceProvenance:
     git_commit: str
     parent_git_commit: str
+    original_git_commit: str
+    changed_paths_from_parent: tuple[str, ...]
     changed_paths_from_original: tuple[str, ...]
+
+
+def validate_recovery_source_provenance(
+    provenance: RecoverySourceProvenance,
+) -> RecoverySourceProvenance:
+    if not isinstance(provenance, RecoverySourceProvenance):
+        raise TypeError("recovery_source must be RecoverySourceProvenance")
+    if len(provenance.git_commit) != 40 or any(
+        character not in "0123456789abcdef"
+        for character in provenance.git_commit
+    ):
+        raise RecoveryValidationError("recovery Git commit is not a full SHA-1")
+    _require_equal(
+        provenance.parent_git_commit,
+        INITIAL_RECOVERY_GIT_COMMIT,
+        "recovery parent Git commit",
+    )
+    _require_equal(
+        provenance.original_git_commit,
+        OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
+        "recovery original Git commit",
+    )
+    _require_equal(
+        provenance.changed_paths_from_parent,
+        EXPECTED_RECOVERY_FIX_CHANGED_PATHS,
+        "recovery changed paths from parent",
+    )
+    _require_equal(
+        provenance.changed_paths_from_original,
+        EXPECTED_RECOVERY_CHANGED_PATHS,
+        "recovery changed paths from original",
+    )
+    if provenance.git_commit in {
+        provenance.parent_git_commit,
+        provenance.original_git_commit,
+    }:
+        raise RecoveryValidationError(
+            "recovery Git commit must differ from both pinned ancestors"
+        )
+    return provenance
 
 
 def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -351,10 +453,27 @@ def load_recovery_source_provenance(
         "1",
         "HEAD",
     ).split()
-    if parents != [git_commit, OPERATOR_RECORDED_SOURCE_GIT_COMMIT]:
+    if parents != [git_commit, INITIAL_RECOVERY_GIT_COMMIT]:
         raise RecoveryValidationError(
-            "recovery commit must be the single direct child of the original "
-            "operator-recorded commit"
+            "recovery fix commit must be the single direct child of the "
+            "pinned initial recovery commit"
+        )
+
+    initial_parents = _git_stdout(
+        repository_path,
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
+        INITIAL_RECOVERY_GIT_COMMIT,
+    ).split()
+    if initial_parents != [
+        INITIAL_RECOVERY_GIT_COMMIT,
+        OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
+    ]:
+        raise RecoveryValidationError(
+            "initial recovery commit is not the single direct child of the "
+            "operator-recorded original commit"
         )
 
     status = _git_stdout(
@@ -368,7 +487,44 @@ def load_recovery_source_provenance(
             "recovery repository must have a completely clean worktree"
         )
 
-    changed_paths = tuple(
+    initial_changed_paths = tuple(
+        sorted(
+            line
+            for line in _git_stdout(
+                repository_path,
+                "diff",
+                "--name-only",
+                (
+                    f"{OPERATOR_RECORDED_SOURCE_GIT_COMMIT}.."
+                    f"{INITIAL_RECOVERY_GIT_COMMIT}"
+                ),
+            ).splitlines()
+            if line
+        )
+    )
+    if initial_changed_paths != EXPECTED_RECOVERY_CHANGED_PATHS:
+        raise RecoveryValidationError(
+            "initial recovery commit differs from its audited changed-file set"
+        )
+
+    changed_paths_from_parent = tuple(
+        sorted(
+            line
+            for line in _git_stdout(
+                repository_path,
+                "diff",
+                "--name-only",
+                f"{INITIAL_RECOVERY_GIT_COMMIT}..HEAD",
+            ).splitlines()
+            if line
+        )
+    )
+    if changed_paths_from_parent != EXPECTED_RECOVERY_FIX_CHANGED_PATHS:
+        raise RecoveryValidationError(
+            "recovery fix commit differs from its audited changed-file set"
+        )
+
+    changed_paths_from_original = tuple(
         sorted(
             line
             for line in _git_stdout(
@@ -380,14 +536,18 @@ def load_recovery_source_provenance(
             if line
         )
     )
-    if changed_paths != EXPECTED_RECOVERY_CHANGED_PATHS:
+    if changed_paths_from_original != EXPECTED_RECOVERY_CHANGED_PATHS:
         raise RecoveryValidationError(
-            "recovery commit changed files outside the audited checkpoint"
+            "aggregate recovery history differs from its audited changed-file set"
         )
-    return RecoverySourceProvenance(
-        git_commit=git_commit,
-        parent_git_commit=OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
-        changed_paths_from_original=changed_paths,
+    return validate_recovery_source_provenance(
+        RecoverySourceProvenance(
+            git_commit=git_commit,
+            parent_git_commit=INITIAL_RECOVERY_GIT_COMMIT,
+            original_git_commit=OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
+            changed_paths_from_parent=changed_paths_from_parent,
+            changed_paths_from_original=changed_paths_from_original,
+        )
     )
 
 
@@ -426,13 +586,13 @@ def validate_recovery_session_census(
 
     futures_counts = normalized[FUTURES_SESSION_SOURCE]
     chainlink_counts = normalized[CHAINLINK_SESSION_SOURCE]
-    if set(futures_counts) != {"0"}:
+    if futures_counts != {"0": 3}:
         raise RecoveryValidationError(
-            "full-range Futures sessions must all have parse-error total zero"
+            "full-range Futures census must match the frozen 0:3 population"
         )
-    if chainlink_counts != {"0": 1, "2": 29}:
+    if chainlink_counts != {"2": 29, "3": 1}:
         raise RecoveryValidationError(
-            "full-range Chainlink census must match the frozen 0:1, 2:29 "
+            "full-range Chainlink census must match the finalized 2:29, 3:1 "
             "incident population"
         )
     return normalized
@@ -477,6 +637,59 @@ async def load_recovery_session_census(
     return validate_recovery_session_census(census)
 
 
+def validate_excluded_session_evidence(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = _require_mapping(evidence, "excluded Chainlink session evidence")
+    normalized = dict(evidence)
+    _require_equal(
+        normalized,
+        EXPECTED_EXCLUDED_SESSION_EVIDENCE,
+        "excluded Chainlink session evidence",
+    )
+    if (
+        normalized["messages_received_total"]
+        != normalized["messages_accepted_total"]
+        + normalized["parse_errors_total"]
+    ):
+        raise RecoveryValidationError(
+            "excluded session receive accounting does not reconcile"
+        )
+    if normalized["raw_rows"] != normalized["messages_accepted_total"]:
+        raise RecoveryValidationError(
+            "excluded session raw rows do not match accepted messages"
+        )
+    return normalized
+
+
+async def load_excluded_session_evidence(
+    database_url: str,
+) -> dict[str, Any]:
+    if not isinstance(database_url, str) or not database_url:
+        raise ValueError("DATABASE_URL is required")
+    connection = await asyncpg.connect(
+        dsn=database_url,
+        server_settings={
+            "application_name": "price_collector_shadow_lag_recovery_session",
+            "statement_timeout": "1500",
+            "lock_timeout": "1000",
+            "default_transaction_read_only": "on",
+        },
+    )
+    try:
+        row = await connection.fetchrow(
+            RECOVERY_EXCLUDED_SESSION_SQL,
+            EXCLUDED_CHAINLINK_CONNECTION_ID,
+        )
+    finally:
+        await connection.close()
+    if row is None:
+        raise RecoveryValidationError(
+            "excluded Chainlink session is missing from retained data"
+        )
+    return validate_excluded_session_evidence(dict(row))
+
+
 def _validate_recovery_report(report: Mapping[str, Any], phase: str) -> None:
     configuration = _require_mapping(
         report.get("configuration"),
@@ -505,10 +718,37 @@ def _validate_recovery_report(report: Mapping[str, Any], phase: str) -> None:
         data_quality.get("sessions_excluded_by_reason"),
         f"{phase}_report.data_quality.sessions_excluded_by_reason",
     )
-    if excluded.get("parse_errors", 0) != 0:
-        raise RecoveryValidationError(
-            f"{phase} contains a session outside the exact recovery parse policy"
-        )
+    excluded_ids = _require_mapping(
+        data_quality.get("excluded_session_ids_by_reason"),
+        f"{phase}_report.data_quality.excluded_session_ids_by_reason",
+    )
+    if phase == "calibration":
+        expected_excluded: Mapping[str, int] = {}
+        expected_excluded_ids: Mapping[str, list[str]] = {}
+        expected_excluded_raw_rows = 0
+    elif phase == "holdout":
+        expected_excluded = {"parse_errors": 1}
+        expected_excluded_ids = {
+            "parse_errors": [EXCLUDED_CHAINLINK_CONNECTION_ID]
+        }
+        expected_excluded_raw_rows = 6_023
+    else:
+        raise RecoveryValidationError("invalid recovery report phase")
+    _require_equal(
+        excluded,
+        expected_excluded,
+        f"{phase}_report.data_quality.sessions_excluded_by_reason",
+    )
+    _require_equal(
+        excluded_ids,
+        expected_excluded_ids,
+        f"{phase}_report.data_quality.excluded_session_ids_by_reason",
+    )
+    _require_equal(
+        data_quality.get("excluded_integrity_scope_raw_rows"),
+        expected_excluded_raw_rows,
+        f"{phase}_report.data_quality.excluded_integrity_scope_raw_rows",
+    )
 
     census = _require_mapping(
         data_quality.get("parse_error_totals_by_source"),
@@ -526,9 +766,18 @@ def _validate_recovery_report(report: Mapping[str, Any], phase: str) -> None:
         raise RecoveryValidationError(
             f"{phase} contains a Futures session with parse errors"
         )
-    if set(chainlink_counts) - {"0", "2"}:
+    if phase == "calibration":
+        if set(chainlink_counts) - {"0", "2"}:
+            raise RecoveryValidationError(
+                "calibration contains an unexpected Chainlink parse total"
+            )
+    elif chainlink_counts.get("3") != 1 or set(chainlink_counts) - {
+        "0",
+        "2",
+        "3",
+    }:
         raise RecoveryValidationError(
-            f"{phase} contains a Chainlink session outside parse totals 0 or 2"
+            "holdout must contain exactly one count-three Chainlink session"
         )
     exception_count = chainlink_counts.get("2", 0)
     if isinstance(exception_count, bool) or not isinstance(exception_count, int):
@@ -614,13 +863,22 @@ async def run_posthoc_lag_recovery(
     recovery_source: RecoverySourceProvenance,
     chunk_ms: int = DEFAULT_DATABASE_CHUNK_MS,
     parse_error_census: Optional[Mapping[str, Any]] = None,
+    excluded_session_evidence: Optional[Mapping[str, Any]] = None,
     replay: Optional[ReplayRunner] = None,
 ) -> dict[str, Any]:
-    if not isinstance(recovery_source, RecoverySourceProvenance):
-        raise TypeError("recovery_source must be RecoverySourceProvenance")
+    recovery_source = validate_recovery_source_provenance(recovery_source)
+    census_loaded_from_database = parse_error_census is None
     if parse_error_census is None:
         parse_error_census = await load_recovery_session_census(database_url)
     validated_census = validate_recovery_session_census(parse_error_census)
+    session_evidence_loaded_from_database = excluded_session_evidence is None
+    if excluded_session_evidence is None:
+        excluded_session_evidence = await load_excluded_session_evidence(
+            database_url
+        )
+    validated_excluded_session = validate_excluded_session_evidence(
+        excluded_session_evidence
+    )
     recovered = await run_lag_test(
         database_url=database_url,
         calibration_start_ms=CALIBRATION_START_MS,
@@ -635,6 +893,20 @@ async def run_posthoc_lag_recovery(
         replay=replay,
     )
     _validate_recovered_analysis(recovered, original)
+    if census_loaded_from_database:
+        post_replay_census = await load_recovery_session_census(database_url)
+        _require_equal(
+            post_replay_census,
+            validated_census,
+            "post-replay full-range session census",
+        )
+    if session_evidence_loaded_from_database:
+        post_replay_session = await load_excluded_session_evidence(database_url)
+        _require_equal(
+            post_replay_session,
+            validated_excluded_session,
+            "post-replay excluded Chainlink session evidence",
+        )
 
     underlying_status = recovered.get("status")
     if underlying_status == "insufficient_evidence":
@@ -681,8 +953,13 @@ async def run_posthoc_lag_recovery(
             "recovery_implementation": {
                 "git_commit": recovery_source.git_commit,
                 "parent_git_commit": recovery_source.parent_git_commit,
-                "single_direct_child_of_original_commit": True,
+                "original_git_commit": recovery_source.original_git_commit,
+                "single_direct_child_of_initial_recovery_commit": True,
+                "initial_recovery_commit_single_direct_child_of_original": True,
                 "worktree_clean_at_start": True,
+                "changed_paths_from_parent": list(
+                    recovery_source.changed_paths_from_parent
+                ),
                 "changed_paths_from_original": list(
                     recovery_source.changed_paths_from_original
                 ),
@@ -693,20 +970,55 @@ async def run_posthoc_lag_recovery(
                 "all_other_session_and_integrity_gates_unchanged": True,
                 "classification_basis": "persisted_session_counters_only",
                 "operator_observed_chainlink_48h_session_counter_distribution": {
-                    "0": 1,
                     "2": 29,
+                    "3": 1,
                 },
                 "database_preflight_parse_error_totals_by_source": (
                     validated_census
                 ),
-                "operator_observed_journal_error_line_counts": {
-                    "empty_json_frame": 6,
-                    "unexpected_crypto_prices_history_topic": 6,
+                "database_evidence_reloaded_after_replay": {
+                    "full_range_session_census": census_loaded_from_database,
+                    "excluded_chainlink_session": (
+                        session_evidence_loaded_from_database
+                    ),
                 },
+                "excluded_chainlink_session": validated_excluded_session,
+                "excluded_session_treatment": (
+                    "The exact count-three session is excluded in full because "
+                    "parse_errors_total is session-global and the third rejected "
+                    "frame cannot be separated from the session's pre-boundary data."
+                ),
+                "excluded_holdout_tail_approx_ms": 353_608,
+                "operator_observed_journal_errors_for_excluded_session": [
+                    {
+                        "at": "2026-07-20T23:54:06.578999Z",
+                        "error": "Expecting value: line 1 column 1 (char 0)",
+                        "classification": "known_empty_startup_frame",
+                    },
+                    {
+                        "at": "2026-07-20T23:54:06.583970Z",
+                        "error": (
+                            "unexpected RTDS topic: expected "
+                            "'crypto_prices_chainlink', got 'crypto_prices'"
+                        ),
+                        "classification": "known_startup_history_snapshot",
+                    },
+                    {
+                        "at": "2026-07-21T00:22:11.934202Z",
+                        "error": (
+                            "unexpected RTDS topic: expected "
+                            "'crypto_prices_chainlink', got None"
+                        ),
+                        "classification": "unclassified_post_holdout",
+                        "after_holdout_end_ms": 1_331_934,
+                    },
+                ],
                 "limitation": (
-                    "Rejected frame bodies were not persisted, and retained "
-                    "journals do not prove both startup causes for every exact-two "
-                    "session. This recovery is therefore post-hoc and descriptive."
+                    "Rejected frame bodies were not persisted. The topic-None "
+                    "frame occurred after the holdout but cannot be classified or "
+                    "removed from the session-global counter, so the entire exact "
+                    "session is excluded. This recovery remains post-hoc and "
+                    "descriptive."
                 ),
             },
         },

@@ -97,6 +97,8 @@ class FakeReplayReport:
         futures_counts=None,
         chainlink_counts=None,
         excluded=None,
+        excluded_ids=None,
+        excluded_raw_rows=0,
     ):
         self.config = config
         self.status = status
@@ -104,6 +106,8 @@ class FakeReplayReport:
         self.futures_counts = futures_counts or {"0": 2}
         self.chainlink_counts = chainlink_counts or {"2": 15}
         self.excluded = excluded or {}
+        self.excluded_ids = excluded_ids or {}
+        self.excluded_raw_rows = excluded_raw_rows
 
     def to_dict(self):
         return {
@@ -122,6 +126,8 @@ class FakeReplayReport:
                     "parse_error_allowlist"
                 ),
                 "sessions_excluded_by_reason": self.excluded,
+                "excluded_session_ids_by_reason": self.excluded_ids,
+                "excluded_integrity_scope_raw_rows": self.excluded_raw_rows,
                 "parse_error_totals_by_source": {
                     FUTURES_SESSION_SOURCE: self.futures_counts,
                     CHAINLINK_SESSION_SOURCE: self.chainlink_counts,
@@ -144,15 +150,21 @@ def original_artifact(tmp_path):
 
 def valid_parse_error_census():
     return {
-        FUTURES_SESSION_SOURCE: {"0": 2},
-        CHAINLINK_SESSION_SOURCE: {"0": 1, "2": 29},
+        FUTURES_SESSION_SOURCE: {"0": 3},
+        CHAINLINK_SESSION_SOURCE: {"2": 29, "3": 1},
     }
+
+
+def valid_excluded_session_evidence():
+    return dict(recovery.EXPECTED_EXCLUDED_SESSION_EVIDENCE)
 
 
 def recovery_source_provenance():
     return recovery.RecoverySourceProvenance(
         git_commit="b" * 40,
-        parent_git_commit=recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
+        parent_git_commit=recovery.INITIAL_RECOVERY_GIT_COMMIT,
+        original_git_commit=recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
+        changed_paths_from_parent=recovery.EXPECTED_RECOVERY_FIX_CHANGED_PATHS,
         changed_paths_from_original=recovery.EXPECTED_RECOVERY_CHANGED_PATHS,
     )
 
@@ -208,8 +220,28 @@ def test_output_validation_refuses_wrong_or_existing_name(tmp_path):
 
 def test_posthoc_recovery_is_descriptive_and_freezes_winner_before_holdout(
     tmp_path,
+    monkeypatch,
 ):
     seen_configs = []
+    census_loads = 0
+    session_evidence_loads = 0
+
+    async def load_census(_database_url):
+        nonlocal census_loads
+        census_loads += 1
+        return valid_parse_error_census()
+
+    async def load_session_evidence(_database_url):
+        nonlocal session_evidence_loads
+        session_evidence_loads += 1
+        return valid_excluded_session_evidence()
+
+    monkeypatch.setattr(recovery, "load_recovery_session_census", load_census)
+    monkeypatch.setattr(
+        recovery,
+        "load_excluded_session_evidence",
+        load_session_evidence,
+    )
 
     async def replay(**kwargs):
         config = kwargs["config"]
@@ -234,7 +266,12 @@ def test_posthoc_recovery_is_descriptive_and_freezes_winner_before_holdout(
                 candidate(2_000, Decimal("0.25")),
                 candidate(3_000, Decimal("0.2")),
             ],
-            chainlink_counts={"0": 1, "2": 14},
+            chainlink_counts={"2": 14, "3": 1},
+            excluded={"parse_errors": 1},
+            excluded_ids={
+                "parse_errors": [recovery.EXCLUDED_CHAINLINK_CONNECTION_ID]
+            },
+            excluded_raw_rows=6_023,
         )
 
     result = asyncio.run(
@@ -242,7 +279,6 @@ def test_posthoc_recovery_is_descriptive_and_freezes_winner_before_holdout(
             database_url="postgresql://writer@example/test",
             original=original_artifact(tmp_path),
             recovery_source=recovery_source_provenance(),
-            parse_error_census=valid_parse_error_census(),
             replay=replay,
         )
     )
@@ -270,14 +306,38 @@ def test_posthoc_recovery_is_descriptive_and_freezes_winner_before_holdout(
         "recovery_value": [0, 2],
         "all_model_timing_evidence_and_decision_settings_unchanged": True,
     }
+    implementation = result["provenance"]["recovery_implementation"]
+    assert (
+        implementation["parent_git_commit"]
+        == recovery.INITIAL_RECOVERY_GIT_COMMIT
+    )
+    assert implementation["original_git_commit"] == (
+        recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT
+    )
+    assert (
+        implementation["single_direct_child_of_initial_recovery_commit"]
+        is True
+    )
+    assert result["provenance"]["recovery_policy"][
+        "excluded_chainlink_session"
+    ] == valid_excluded_session_evidence()
+    assert census_loads == 2
+    assert session_evidence_loads == 2
+    assert result["provenance"]["recovery_policy"][
+        "database_evidence_reloaded_after_replay"
+    ] == {
+        "full_range_session_census": True,
+        "excluded_chainlink_session": True,
+    }
 
 
 @pytest.mark.parametrize(
     ("futures_counts", "chainlink_counts", "excluded", "match"),
     [
-        ({"0": 1, "2": 1}, {"2": 15}, {"parse_errors": 1}, "outside"),
-        ({"0": 2}, {"1": 1, "2": 14}, {"parse_errors": 1}, "outside"),
-        ({"0": 2}, {"2": 14, "3": 1}, {"parse_errors": 1}, "outside"),
+        ({"0": 1, "2": 1}, {"2": 15}, {}, "Futures"),
+        ({"0": 2}, {"1": 1, "2": 14}, {}, "unexpected Chainlink"),
+        ({"0": 2}, {"2": 14, "3": 1}, {}, "unexpected Chainlink"),
+        ({"0": 2}, {"2": 15}, {"parse_errors": 1}, "frozen incident"),
     ],
 )
 def test_recovery_fails_closed_on_any_unexpected_parse_total(
@@ -302,6 +362,99 @@ def test_recovery_fails_closed_on_any_unexpected_parse_total(
                 original=original_artifact(tmp_path),
                 recovery_source=recovery_source_provenance(),
                 parse_error_census=valid_parse_error_census(),
+                excluded_session_evidence=valid_excluded_session_evidence(),
+                replay=replay,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "chainlink_counts",
+        "excluded",
+        "excluded_ids",
+        "excluded_raw_rows",
+        "match",
+    ),
+    [
+        (
+            {"2": 15},
+            {"parse_errors": 1},
+            {"parse_errors": [recovery.EXCLUDED_CHAINLINK_CONNECTION_ID]},
+            6_023,
+            "count-three",
+        ),
+        (
+            {"2": 13, "3": 2},
+            {"parse_errors": 1},
+            {"parse_errors": [recovery.EXCLUDED_CHAINLINK_CONNECTION_ID]},
+            6_023,
+            "count-three",
+        ),
+        (
+            {"2": 14, "3": 1},
+            {"parse_errors": 1},
+            {
+                "parse_errors": [
+                    "00000000-0000-0000-0000-000000000000"
+                ]
+            },
+            6_023,
+            "frozen incident",
+        ),
+        (
+            {"2": 14, "3": 1},
+            {"parse_errors": 1},
+            {"parse_errors": [recovery.EXCLUDED_CHAINLINK_CONNECTION_ID]},
+            1,
+            "frozen incident",
+        ),
+    ],
+)
+def test_recovery_requires_exact_count_three_holdout_session_exclusion(
+    tmp_path,
+    chainlink_counts,
+    excluded,
+    excluded_ids,
+    excluded_raw_rows,
+    match,
+):
+    replay_calls = 0
+
+    async def replay(**kwargs):
+        nonlocal replay_calls
+        replay_calls += 1
+        config = kwargs["config"]
+        if replay_calls == 1:
+            return FakeReplayReport(
+                config,
+                status="ok",
+                candidates=[
+                    candidate(lag, Decimal("0.1"))
+                    for lag in CALIBRATION_LAGS_MS
+                ],
+            )
+        return FakeReplayReport(
+            config,
+            status="ok",
+            candidates=[
+                candidate(1_500, Decimal("0.1")),
+                candidate(3_000, Decimal("0.05")),
+            ],
+            chainlink_counts=chainlink_counts,
+            excluded=excluded,
+            excluded_ids=excluded_ids,
+            excluded_raw_rows=excluded_raw_rows,
+        )
+
+    with pytest.raises(recovery.RecoveryValidationError, match=match):
+        asyncio.run(
+            recovery.run_posthoc_lag_recovery(
+                database_url="postgresql://writer@example/test",
+                original=original_artifact(tmp_path),
+                recovery_source=recovery_source_provenance(),
+                parse_error_census=valid_parse_error_census(),
+                excluded_session_evidence=valid_excluded_session_evidence(),
                 replay=replay,
             )
         )
@@ -311,12 +464,24 @@ def test_recovery_fails_closed_on_any_unexpected_parse_total(
     "census",
     [
         {
-            FUTURES_SESSION_SOURCE: {"0": 1, "2": 1},
-            CHAINLINK_SESSION_SOURCE: {"2": 29},
+            FUTURES_SESSION_SOURCE: {"0": 2, "2": 1},
+            CHAINLINK_SESSION_SOURCE: {"2": 29, "3": 1},
         },
         {
             FUTURES_SESSION_SOURCE: {"0": 2},
-            CHAINLINK_SESSION_SOURCE: {"1": 1, "2": 28},
+            CHAINLINK_SESSION_SOURCE: {"2": 29, "3": 1},
+        },
+        {
+            FUTURES_SESSION_SOURCE: {"0": 3},
+            CHAINLINK_SESSION_SOURCE: {"1": 1, "2": 28, "3": 1},
+        },
+        {
+            FUTURES_SESSION_SOURCE: {"0": 3},
+            CHAINLINK_SESSION_SOURCE: {"2": 28, "3": 1},
+        },
+        {
+            FUTURES_SESSION_SOURCE: {"0": 3},
+            CHAINLINK_SESSION_SOURCE: {"2": 30},
         },
     ],
 )
@@ -335,11 +500,80 @@ def test_full_range_census_aborts_before_replay(tmp_path, census):
                 original=original_artifact(tmp_path),
                 recovery_source=recovery_source_provenance(),
                 parse_error_census=census,
+                excluded_session_evidence=valid_excluded_session_evidence(),
                 replay=replay,
             )
         )
 
     assert replay_called is False
+
+
+def test_changed_excluded_session_evidence_aborts_before_replay(tmp_path):
+    replay_called = False
+    evidence = valid_excluded_session_evidence()
+    evidence["raw_rows"] = 6_022
+
+    async def replay(**_kwargs):
+        nonlocal replay_called
+        replay_called = True
+        raise AssertionError("invalid session evidence must stop before replay")
+
+    with pytest.raises(
+        recovery.RecoveryValidationError,
+        match="excluded Chainlink session evidence",
+    ):
+        asyncio.run(
+            recovery.run_posthoc_lag_recovery(
+                database_url="postgresql://writer@example/test",
+                original=original_artifact(tmp_path),
+                recovery_source=recovery_source_provenance(),
+                parse_error_census=valid_parse_error_census(),
+                excluded_session_evidence=evidence,
+                replay=replay,
+            )
+        )
+
+    assert replay_called is False
+
+
+def test_database_census_change_during_replay_aborts(monkeypatch, tmp_path):
+    census_loads = 0
+
+    async def load_census(_database_url):
+        nonlocal census_loads
+        census_loads += 1
+        census = valid_parse_error_census()
+        if census_loads == 2:
+            census[FUTURES_SESSION_SOURCE] = {"0": 2}
+        return census
+
+    async def load_session_evidence(_database_url):
+        return valid_excluded_session_evidence()
+
+    async def replay(**kwargs):
+        return FakeReplayReport(kwargs["config"])
+
+    monkeypatch.setattr(recovery, "load_recovery_session_census", load_census)
+    monkeypatch.setattr(
+        recovery,
+        "load_excluded_session_evidence",
+        load_session_evidence,
+    )
+
+    with pytest.raises(
+        recovery.RecoveryValidationError,
+        match="post-replay full-range session census",
+    ):
+        asyncio.run(
+            recovery.run_posthoc_lag_recovery(
+                database_url="postgresql://writer@example/test",
+                original=original_artifact(tmp_path),
+                recovery_source=recovery_source_provenance(),
+                replay=replay,
+            )
+        )
+
+    assert census_loads == 2
 
 
 def test_database_census_is_read_only_and_covers_full_frozen_range(monkeypatch):
@@ -354,17 +588,17 @@ def test_database_census_is_read_only_and_covers_full_frozen_range(monkeypatch):
                 {
                     "source": FUTURES_SESSION_SOURCE,
                     "parse_errors_total": 0,
-                    "sessions": 2,
-                },
-                {
-                    "source": CHAINLINK_SESSION_SOURCE,
-                    "parse_errors_total": 0,
-                    "sessions": 1,
+                    "sessions": 3,
                 },
                 {
                     "source": CHAINLINK_SESSION_SOURCE,
                     "parse_errors_total": 2,
                     "sessions": 29,
+                },
+                {
+                    "source": CHAINLINK_SESSION_SOURCE,
+                    "parse_errors_total": 3,
+                    "sessions": 1,
                 },
             ]
 
@@ -400,20 +634,94 @@ def test_database_census_is_read_only_and_covers_full_frozen_range(monkeypatch):
     assert connection.closed is True
 
 
+def test_excluded_session_evidence_is_loaded_read_only_and_exact(monkeypatch):
+    class FakeConnection:
+        def __init__(self):
+            self.fetchrow_call = None
+            self.closed = False
+
+        async def fetchrow(self, query, *arguments):
+            self.fetchrow_call = (query, arguments)
+            return valid_excluded_session_evidence()
+
+        async def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+    connect_call = {}
+
+    async def connect(**kwargs):
+        connect_call.update(kwargs)
+        return connection
+
+    monkeypatch.setattr(recovery.asyncpg, "connect", connect)
+
+    evidence = asyncio.run(
+        recovery.load_excluded_session_evidence(
+            "postgresql://writer@example/test"
+        )
+    )
+
+    assert evidence == valid_excluded_session_evidence()
+    assert (
+        connect_call["server_settings"]["default_transaction_read_only"]
+        == "on"
+    )
+    assert connection.fetchrow_call == (
+        recovery.RECOVERY_EXCLUDED_SESSION_SQL,
+        (recovery.EXCLUDED_CHAINLINK_CONNECTION_ID,),
+    )
+    assert connection.closed is True
+
+
 def test_recovery_source_provenance_pins_clean_direct_child(monkeypatch, tmp_path):
     recovery_commit = "b" * 40
 
     def git_stdout(_repository_path, *arguments):
         if arguments == ("rev-parse", "HEAD"):
             return recovery_commit
-        if arguments[:3] == ("rev-list", "--parents", "-n"):
+        if arguments == ("rev-list", "--parents", "-n", "1", "HEAD"):
             return (
                 f"{recovery_commit} "
+                f"{recovery.INITIAL_RECOVERY_GIT_COMMIT}"
+            )
+        if arguments == (
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            recovery.INITIAL_RECOVERY_GIT_COMMIT,
+        ):
+            return (
+                f"{recovery.INITIAL_RECOVERY_GIT_COMMIT} "
                 f"{recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT}"
             )
-        if arguments[:2] == ("status", "--porcelain"):
+        if arguments == (
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ):
             return ""
-        if arguments[:2] == ("diff", "--name-only"):
+        if arguments == (
+            "diff",
+            "--name-only",
+            (
+                f"{recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT}.."
+                f"{recovery.INITIAL_RECOVERY_GIT_COMMIT}"
+            ),
+        ):
+            return "\n".join(recovery.EXPECTED_RECOVERY_CHANGED_PATHS)
+        if arguments == (
+            "diff",
+            "--name-only",
+            f"{recovery.INITIAL_RECOVERY_GIT_COMMIT}..HEAD",
+        ):
+            return "\n".join(recovery.EXPECTED_RECOVERY_FIX_CHANGED_PATHS)
+        if arguments == (
+            "diff",
+            "--name-only",
+            f"{recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT}..HEAD",
+        ):
             return "\n".join(recovery.EXPECTED_RECOVERY_CHANGED_PATHS)
         raise AssertionError(arguments)
 
@@ -436,6 +744,31 @@ def test_recovery_source_provenance_rejects_later_descendant(monkeypatch, tmp_pa
 
     with pytest.raises(recovery.RecoveryValidationError, match="direct child"):
         recovery.load_recovery_source_provenance(tmp_path)
+
+
+def test_run_rejects_structurally_forged_source_provenance(tmp_path):
+    provenance = recovery_source_provenance()
+    forged = recovery.RecoverySourceProvenance(
+        git_commit=provenance.git_commit,
+        parent_git_commit=recovery.OPERATOR_RECORDED_SOURCE_GIT_COMMIT,
+        original_git_commit=provenance.original_git_commit,
+        changed_paths_from_parent=provenance.changed_paths_from_parent,
+        changed_paths_from_original=provenance.changed_paths_from_original,
+    )
+
+    with pytest.raises(
+        recovery.RecoveryValidationError,
+        match="recovery parent Git commit",
+    ):
+        asyncio.run(
+            recovery.run_posthoc_lag_recovery(
+                database_url="postgresql://writer@example/test",
+                original=original_artifact(tmp_path),
+                recovery_source=forged,
+                parse_error_census=valid_parse_error_census(),
+                excluded_session_evidence=valid_excluded_session_evidence(),
+            )
+        )
 
 
 def test_exclusive_writer_never_clobbers_result(tmp_path):

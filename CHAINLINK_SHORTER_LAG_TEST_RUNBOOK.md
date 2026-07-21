@@ -380,43 +380,26 @@ Mode `0440` alone is not enough because the service user owns the parent state
 directory; the immutable flag prevents that user from unlinking or replacing
 the file. The recovery process can still read it through its group.
 
-## 9. Pull the recovery checkpoint
+## 9. Initial recovery checkpoint (completed)
 
-First commit only the recovery checkpoint on the Windows development machine;
-do not stage the downloaded market JSON files or other unrelated work:
+This checkpoint was already committed and pushed as
+`c7d534a0f5a5d9bc749f1245aa29d0c447721438`. Do not rerun the original commit
+command: the current five-file correction belongs only to Step 10A. The initial
+lineage can be checked read-only on the Windows development machine:
 
 ```powershell
 cd C:\Users\alexa\PycharmProjects\polycollector
 
-git status --short
-git diff --check
-.\.venv\Scripts\python.exe -m pytest -q
-
-$RecoveryPaths = @(
-  'CHAINLINK_SHORTER_LAG_TEST_RUNBOOK.md'
-  'OPERATIONS.md'
-  'README.md'
-  'price_collector/polymarket_chainlink_collector.py'
-  'price_collector/shadow_signal_lag_recovery.py'
-  'price_collector/shadow_signal_lag_test.py'
-  'price_collector/shadow_signal_replay.py'
-  'tests/test_polymarket_chainlink_collector.py'
-  'tests/test_shadow_signal_lag_recovery.py'
-  'tests/test_shadow_signal_lag_test.py'
-  'tests/test_shadow_signal_replay.py'
-)
-
-git add -- $RecoveryPaths
-git diff --cached --name-status -- $RecoveryPaths
-git commit --only -m "Recover July Chainlink lag evidence" -- $RecoveryPaths
-git push
+git rev-list --parents -n 1 c7d534a0f5a5d9bc749f1245aa29d0c447721438
+git diff --name-only `
+  ab30ab67fd66b96199b1526c29e897dad7a4ea0e..c7d534a0f5a5d9bc749f1245aa29d0c447721438
 ```
 
-`git commit --only` keeps any already staged downloaded-market deletion or other
-unrelated change out of this recovery commit. The recovery CLI later verifies
-that this is one direct child commit with exactly the file list above.
+The first command must show `c7d534a0... ab30ab67...` and no other parent. The
+second command must show the 11 audited initial-recovery paths. The recovery CLI
+repeats both checks. Existing staged downloaded-market work remains unrelated.
 
-Then run this on the droplet only after that commit has been pushed to GitHub:
+If this initial checkpoint has not yet been pulled onto the droplet, run:
 
 ```bash
 cd /opt/price-collector
@@ -558,10 +541,110 @@ ORDER BY source, parse_errors_total;
 "
 ```
 
-Futures must have only total `0`. Chainlink must reproduce the recorded exact
-distribution of one session at `0` and 29 sessions at `2`. Stop on any other
-total or count, or if Step 10 shows no common intersection. Do not edit session
-counters or run a generic replay with parse checking disabled.
+The finalized output must be exactly:
+
+```text
+binance_futures_agg_trade | 0 | 3
+polymarket_chainlink_rtds | 2 | 29
+polymarket_chainlink_rtds | 3 | 1
+```
+
+The count-three Chainlink row must be the single session
+`f616a075-6f2d-4537-8224-aacbb1c50c89`. Verify its immutable session evidence:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 \
+  -d price_collector -c "
+SET TIME ZONE 'UTC';
+SELECT
+    sessions.connection_id,
+    sessions.source,
+    to_timestamp(sessions.connected_wall_ns::numeric / 1000000000)
+        AS connected_utc,
+    to_timestamp(sessions.ready_wall_ns::numeric / 1000000000)
+        AS ready_utc,
+    to_timestamp(sessions.disconnected_wall_ns::numeric / 1000000000)
+        AS disconnected_utc,
+    sessions.close_reason,
+    sessions.messages_received_total,
+    sessions.messages_accepted_total,
+    sessions.parse_errors_total,
+    sessions.records_dropped_total,
+    sessions.last_receive_sequence,
+    (
+        SELECT count(*)
+        FROM raw_capture.chainlink_price_events events
+        WHERE events.connection_id = sessions.connection_id
+          AND events.received_wall_ns >= sessions.connected_wall_ns
+          AND events.received_wall_ns <= sessions.disconnected_wall_ns
+    ) AS raw_rows
+FROM raw_capture.feed_sessions sessions
+WHERE sessions.connection_id =
+    'f616a075-6f2d-4537-8224-aacbb1c50c89'::uuid
+  AND sessions.source = 'polymarket_chainlink_rtds';
+"
+```
+
+It must match source `polymarket_chainlink_rtds`, connected
+`2026-07-20 23:54:06.392045+00`, ready
+`23:54:06.392273+00`, disconnected `2026-07-21 01:36:19.965997+00`, close
+reason `cancelled`, received `6026`, accepted `6023`, parse errors `3`, dropped
+`0`, last sequence `6026`, and raw rows `6023`.
+
+The first two rejected frames occurred at startup. The third was an
+unclassified topic-`None` frame at `2026-07-21 00:22:11.934202 UTC`, after the
+holdout ended at `00:00:00 UTC`. Its timing does not make the session eligible:
+`parse_errors_total` is session-global, and the rejected body was not persisted.
+The recovery therefore excludes this exact session in full, including its last
+approximately 5 minutes 54 seconds inside the holdout. Stop on any other total,
+count, session evidence, or if Step 10 shows no common intersection. Do not edit
+session counters or run a generic replay with parse checking disabled.
+
+### 10A. Commit and pull the finalized-session recovery fix
+
+Do not run Step 11 from the initial recovery commit. On the Windows development
+machine, verify that it is the current commit, then commit only the five
+finalized-session recovery files:
+
+```powershell
+cd C:\Users\alexa\PycharmProjects\polycollector
+
+git rev-parse HEAD
+# Must print: c7d534a0f5a5d9bc749f1245aa29d0c447721438
+
+$RecoveryFixPaths = @(
+  'CHAINLINK_SHORTER_LAG_TEST_RUNBOOK.md'
+  'price_collector/shadow_signal_lag_recovery.py'
+  'price_collector/shadow_signal_replay.py'
+  'tests/test_shadow_signal_lag_recovery.py'
+  'tests/test_shadow_signal_replay.py'
+)
+
+git diff --check -- $RecoveryFixPaths
+.\.venv\Scripts\python.exe -m pytest -q
+git add -- $RecoveryFixPaths
+git diff --cached --name-status -- $RecoveryFixPaths
+git commit --only -m "Exclude finalized Chainlink recovery session" -- $RecoveryFixPaths
+git push
+```
+
+After that commit is pushed to GitHub, pull it onto the droplet:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector git status --short
+sudo -u pricecollector git rev-parse HEAD^
+sudo -u pricecollector .venv/bin/python \
+  -m price_collector.shadow_signal_lag_recovery --help
+curl -fsS http://127.0.0.1:9000/healthz
+```
+
+`git status --short` must print nothing, and `git rev-parse HEAD^` must print
+`c7d534a0f5a5d9bc749f1245aa29d0c447721438`. These five files affect only the
+offline replay/recovery command, its tests, and this runbook, so no systemd
+service restart is required for this second checkpoint.
 
 ## 11. Run the dedicated recovery once
 
@@ -595,12 +678,17 @@ fi
 
 The command first verifies the original basename, SHA-256, failed decision,
 ranges, settings, and diagnostics. It also requires a clean recovery worktree,
-the recovery commit to be the single direct child of the recorded original
-commit, and exactly the audited changed-file set. An independent full-48-hour
-database census then requires all Futures sessions to have parse total `0` and
-the exact recorded Chainlink distribution `{0: 1, 2: 29}`, even if calibration
-later stops before holdout replay. Every other replay integrity gate remains
-active. Any mismatch aborts without creating the recovery output.
+the current commit to be the single direct child of the pinned initial recovery
+commit, that initial commit to be the single direct child of the recorded
+original commit, and both audited changed-file sets. An independent full-48-hour
+database census requires the exact Futures distribution `{0: 3}` and Chainlink
+distribution `{2: 29, 3: 1}`. It separately verifies all counters, timestamps,
+and 6,023 raw rows for the exact count-three session before replay. The replay
+still allows only Chainlink totals `0` and `2`; if holdout replay runs, its report
+must prove that the one exact UUID was excluded with all 6,023 integrity-scope
+rows. The command reloads both exact database checks after replay and requires
+them to be unchanged. Every other replay integrity gate remains active. Any
+mismatch aborts without creating the recovery output.
 
 ## 12. Inspect and lock the recovery result
 
@@ -621,7 +709,13 @@ print("evidence class:", result["evidence_class"])
 print("eligible for production:", result["eligible_for_production_promotion"])
 print("original preserved:", result["original_result_preserved"])
 print("original SHA-256:", result["provenance"]["original_artifact"]["sha256"])
-print("recovery commit:", result["provenance"]["recovery_implementation"]["git_commit"])
+implementation = result["provenance"]["recovery_implementation"]
+policy = result["provenance"]["recovery_policy"]
+print("recovery commit:", implementation["git_commit"])
+print("initial recovery commit:", implementation["parent_git_commit"])
+print("original source commit:", implementation["original_git_commit"])
+print("excluded session:", policy["excluded_chainlink_session"]["connection_id"])
+print("post-replay DB reload:", policy["database_evidence_reloaded_after_replay"])
 print("conclusion:", json.dumps(result["conclusion"], indent=2))
 ' "$RECOVERY_OUTPUT"
 
@@ -636,9 +730,11 @@ sudo lsattr "$RECOVERY_OUTPUT"
 Expected invariant fields are `mode=posthoc_shadow_lag_recovery`,
 `evidence_class=descriptive_only`, and
 `eligible_for_production_promotion=false`. The artifact describes what the
-retained data shows under the corrected startup-frame classification, but the
-journals do not prove the two rejected startup frames for every historical
-session. A formal model decision still requires future clean calibration data
+retained data shows when exact-two startup sessions are admitted and the single
+count-three session is excluded. The rejected bodies were not persisted, so the
+evidence remains descriptive even though the third error occurred after the
+holdout. Both `post-replay DB reload` values must be `true`. A formal model
+decision still requires future clean calibration data
 and a newly untouched holdout. The final `lsattr` must show the immutable `i`
 flag; if it does not, the result is not locked against replacement by the state
 directory owner.

@@ -625,6 +625,7 @@ class SessionSelection:
     excluded_integrity_scope_raw_rows: int
     parse_error_totals_by_source: Mapping[str, Mapping[str, int]]
     parse_error_exception_applied_by_source: Mapping[str, int]
+    excluded_session_ids_by_reason: Mapping[str, tuple[str, ...]]
 
 
 def select_replay_sessions(
@@ -639,6 +640,7 @@ def select_replay_sessions(
         CHAINLINK_SESSION_SOURCE: Counter(),
     }
     parse_error_exception_applied_by_source: Counter[str] = Counter()
+    excluded_session_ids_by_reason: dict[str, list[str]] = {}
     excluded_raw_rows = 0
     eligible: dict[str, list[ReplaySession]] = {
         FUTURES_SESSION_SOURCE: [],
@@ -660,6 +662,10 @@ def select_replay_sessions(
             parse_error_exception_applied_by_source[session.source] += 1
         if reasons:
             excluded_by_reason.update(reasons)
+            for reason in reasons:
+                excluded_session_ids_by_reason.setdefault(reason, []).append(
+                    str(session.connection_id)
+                )
             excluded_raw_rows += session.raw_row_count or 0
             continue
         eligible[session.source].append(session)
@@ -737,6 +743,12 @@ def select_replay_sessions(
         parse_error_exception_applied_by_source=dict(
             parse_error_exception_applied_by_source
         ),
+        excluded_session_ids_by_reason={
+            reason: tuple(sorted(connection_ids))
+            for reason, connection_ids in sorted(
+                excluded_session_ids_by_reason.items()
+            )
+        },
     )
 
 
@@ -1473,6 +1485,13 @@ class ReplayReport:
                             self.session_selection
                             .parse_error_exception_applied_by_source
                         ),
+                        "excluded_session_ids_by_reason": {
+                            reason: list(connection_ids)
+                            for reason, connection_ids in (
+                                self.session_selection
+                                .excluded_session_ids_by_reason.items()
+                            )
+                        },
                     }
                     if self.config.allowed_chainlink_parse_error_totals == (0, 2)
                     else {}
