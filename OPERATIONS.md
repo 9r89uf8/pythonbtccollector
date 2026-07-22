@@ -2963,38 +2963,51 @@ repository and is not part of this rollout.
 
 ## Prospective two-second Chainlink challenger
 
-This checkpoint adds a second, independent shadow worker and a dedicated
-read-only dashboard endpoint. It does not change the accepted model, promoted
-evidence, or `btc:live:chainlink_shadow`. Each worker's retention cleanup is
-scoped to its frozen model set, so the challenger cannot delete accepted-model
-evidence. Deployment restarts both shadow workers to load that isolation.
+The challenger remains a separate shadow worker with a dedicated read-only
+dashboard endpoint. Its active V2 basis-band change does not modify the
+accepted model, promoted evidence, or `btc:live:chainlink_shadow`. Each worker's
+retention cleanup is scoped to its frozen model set, so the challenger cannot
+delete accepted-model evidence.
 
-The challenger is fixed as `catchup_v1_l2000_h2000_b100`: 2,000 ms lookback,
-2,000 ms horizon, and beta `1`. It writes only
+The active `prospective_catchup_2s_basis_v2` experiment is fixed as model
+`catchup_v2_l2000_h2000_b100_basis5m`: 2,000 ms lookback, 2,000 ms horizon,
+and beta `1`. It writes only
 `btc:live:chainlink_shadow_2s`, which expires after 2,000 ms, and is exposed at:
 
 ```text
 GET /markets/current/live/challengers/chainlink-catchup-2s
 ```
 
-This version is lag-only. It does not yet include futures–Chainlink basis
-deviation and must not be described as the accepted production model. Live
+This version defines basis as `futures - Chainlink`. It calculates the normal
+basis from strictly prior 500 ms samples over five minutes and requires 600
+samples. The soft-band half-width is
+`max($1, 0.75 * population standard deviation)`. It leaves the raw two-second
+projection unchanged inside the band and, outside it, moves the final projection
+50% toward the nearest edge. Warmup or basis-processing failure falls back to
+the raw lag projection. This remains an unselected prospective model; live
 publication and matured evaluation are separately disabled by default.
 
 When evaluation is enabled, one attempt is scheduled per entered 500 ms bucket
-and causally matured at its 2,000 ms target. The existing bounded nonblocking
-writer stores it in `shadow_signal_evaluations` for exactly 168 hours. Database
+and causally matured at its 2,000 ms target. The worker records both the active
+V2 output and a silent raw V1 comparator from the same forecast state and target;
+only V2 is published to Redis. The existing bounded nonblocking writer stores
+both model series in `shadow_signal_evaluations` for exactly 168 hours. Database
 or cleanup failures cannot block the 100 ms Redis path. The existing reporting
-and download routes accept `catchup_v1_l2000_h2000_b100` with the same response
-shape as `catchup_ratio_l3000_b100`, so the dashboard changes only
-`model_version` for retained charts and metrics.
+and download routes accept `catchup_v2_l2000_h2000_b100_basis5m` with the same
+response shape as `catchup_ratio_l3000_b100`, so the dashboard changes only
+`model_version` for retained charts and metrics. Historical
+`catchup_v1_l2000_h2000_b100` evidence remains separately reportable; do not
+merge V1 and V2 rows.
 
-The worker validates the Git-tracked
-`price_collector/shadow_signal_2s_registration.json` before opening Redis or
-PostgreSQL. That registration explicitly says the model is an unselected
-prospective challenger, records the inspected development session as markets
-`5948856..5948955` with cutoff `evidence_end_ms=1784686800000`, and has its own
-reproducible artifact and configuration hashes.
+The worker validates both the historical
+`price_collector/shadow_signal_2s_registration.json` and the active
+`price_collector/shadow_signal_2s_basis_registration.json` before opening Redis
+or PostgreSQL. The V2 registration explicitly says the model is an unselected
+prospective challenger and binds the frozen formula to
+`price_collector/shadow_signal_2s_basis_calibration.json`, with cutoff
+`evidence_end_ms=1784757680001` and reproducible artifact and configuration
+hashes. The live wire shape remains schema version `1`; `projected_chainlink`
+is the final value after any soft correction.
 
 After the change is pushed to GitHub, deploy it from the droplet with:
 
@@ -3003,6 +3016,7 @@ cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 sudo -u pricecollector .venv/bin/python -m pytest \
+  tests/test_shadow_signal_2s_basis.py \
   tests/test_shadow_signal_2s_live.py \
   tests/test_shadow_signal_2s_collector.py \
   tests/test_shadow_signal_evaluation.py \
@@ -3012,98 +3026,36 @@ sudo -u pricecollector .venv/bin/python -m pytest \
   tests/test_deployment.py \
   -q
 
-sudo test -e /etc/price-collector/shadow-signal-2s.env || \
-  sudo install -o root -g pricecollector -m 0640 \
-    /opt/price-collector/deployment/shadow-signal-2s.env.example \
-    /etc/price-collector/shadow-signal-2s.env
-CHALLENGER_ENV=/etc/price-collector/shadow-signal-2s.env
-set_challenger_env() {
-  key="$1"
-  value="$2"
-  if sudo grep -q "^${key}=" "$CHALLENGER_ENV"; then
-    sudo sed -i "s|^${key}=.*|${key}=${value}|" "$CHALLENGER_ENV"
-  else
-    printf '%s=%s\n' "$key" "$value" | sudo tee -a "$CHALLENGER_ENV" >/dev/null
-  fi
-}
-
-set_challenger_env SHADOW_SIGNAL_2S_ENABLED true
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_ENABLED true
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_INTERVAL_MS 500
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_QUEUE_MAX 5000
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_BATCH_MAX_ROWS 500
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_FLUSH_MS 1000
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_RETRY_MS 5000
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS 10
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS 5
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS 5
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_RETENTION_HOURS 168
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_RETENTION_CHECK_SECONDS 300
-set_challenger_env SHADOW_SIGNAL_2S_EVALUATION_RETENTION_BATCH_ROWS 5000
-
-WRITER_DATABASE_LINE="$(sudo grep -m1 '^DATABASE_URL=' \
-  /etc/price-collector/collector.env)"
-test -n "$WRITER_DATABASE_LINE"
-sudo sed -i '/^DATABASE_URL=/d' "$CHALLENGER_ENV"
-printf '%s\n' "$WRITER_DATABASE_LINE" | \
-  sudo tee -a "$CHALLENGER_ENV" >/dev/null
-
-if sudo grep -q '^READ_DATABASE_URL=' "$CHALLENGER_ENV"; then
-  echo 'STOP: READ_DATABASE_URL must not be present in shadow-signal-2s.env.'
-  false
-fi
-sudo chown root:pricecollector \
-  "$CHALLENGER_ENV"
-sudo chmod 0640 "$CHALLENGER_ENV"
-sudo grep -E \
-  '^(SHADOW_SIGNAL_2S_ENABLED|SHADOW_SIGNAL_2S_EVALUATION_ENABLED|SHADOW_SIGNAL_2S_EVALUATION_INTERVAL_MS|SHADOW_SIGNAL_2S_EVALUATION_RETENTION_HOURS)=' \
-  "$CHALLENGER_ENV"
-
-test "$(sudo -u postgres psql -X -v ON_ERROR_STOP=1 \
-  -d price_collector -Atc \
-  "SELECT CASE WHEN
-      to_regclass('public.shadow_signal_evaluations') IS NOT NULL
-      AND to_regclass('public.shadow_signal_evaluation_chart_points') IS NOT NULL
-    THEN 'ready' ELSE 'missing' END;")" = "ready"
-
-sudo cp \
-  /opt/price-collector/deployment/price-collector-shadow-signal-2s.service \
-  /etc/systemd/system/price-collector-shadow-signal-2s.service
-sudo systemctl daemon-reload
-sudo systemctl enable price-collector-shadow-signal-2s
-sudo systemctl restart price-collector-shadow-signal
-sudo systemctl restart price-collector-shadow-signal-2s
-sudo systemctl restart price-api
+sudo systemctl restart price-collector-shadow-signal-2s price-api
 ```
 
-The order matters: install the writer URL and enable both challenger switches,
-assert that the existing evaluation table/view are present, install the changed
-unit, restart both shadow workers so their model-scoped cleanup is loaded, and
-then restart `price-api` so its model allowlist is loaded. No schema
-application, PostgreSQL restart, Redis restart, or producer restart is
-required. The accepted model and selection files remain unchanged.
+The order matters only in that code and dependencies must be installed before
+the two affected services restart. This checkpoint changes no schema, systemd
+unit, environment key, PostgreSQL/Redis service, producer, or accepted
+three-second worker. The accepted model and selection files remain unchanged.
 
 Verify the service, its short-lived key, both API contracts, and bounded logs:
 
 ```bash
 sudo systemctl status \
-  price-collector-shadow-signal-2s price-collector-shadow-signal price-api \
+  price-collector-shadow-signal-2s price-api \
   --no-pager
 redis-cli -h 127.0.0.1 --raw PTTL btc:live:chainlink_shadow_2s
 curl -fsS \
   http://127.0.0.1:9000/markets/current/live/challengers/chainlink-catchup-2s
-curl -fsS http://127.0.0.1:9000/markets/current/live
 curl -fsS \
-  'http://127.0.0.1:9000/markets/current/shadow-evaluations?model_version=catchup_v1_l2000_h2000_b100'
+  'http://127.0.0.1:9000/markets/current/shadow-evaluations?model_version=catchup_v2_l2000_h2000_b100_basis5m'
 sudo -u postgres psql -X -d price_collector -c \
   "SELECT model_version, count(*) AS retained_rows,
           min(to_timestamp(generated_ms / 1000.0)) AS oldest,
           max(to_timestamp(generated_ms / 1000.0)) AS newest
    FROM shadow_signal_evaluations
-   WHERE model_version = 'catchup_v1_l2000_h2000_b100'
+   WHERE model_version IN (
+     'catchup_v1_l2000_h2000_b100',
+     'catchup_v2_l2000_h2000_b100_basis5m'
+   )
    GROUP BY model_version;"
 sudo journalctl -u price-collector-shadow-signal-2s -n 100 --no-pager
-sudo journalctl -u price-collector-shadow-signal -n 50 --no-pager
 sudo journalctl -u price-api -n 50 --no-pager
 ```
 

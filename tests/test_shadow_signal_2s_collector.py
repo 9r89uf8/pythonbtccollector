@@ -142,6 +142,7 @@ def make_worker(
     store=None,
     scheduler=None,
     writer=None,
+    basis_band=None,
     now_ms=None,
     sleep=None,
 ):
@@ -153,6 +154,8 @@ def make_worker(
         "evaluation_scheduler": scheduler,
         "evaluation_writer": writer,
     }
+    if basis_band is not None:
+        arguments["basis_band"] = basis_band
     if now_ms is not None:
         arguments["now_ms"] = now_ms
     if sleep is not None:
@@ -223,7 +226,7 @@ def test_shared_retention_cleanup_capacity_covers_five_candidates():
 
 
 def test_prospective_registration_is_explicit_and_digest_reproducible():
-    registration = collector.load_shadow_signal_2s_registration()
+    registration = collector.load_shadow_signal_2s_v1_registration()
     artifact_bytes = registration.path.read_bytes()
     payload = json.loads(artifact_bytes)
 
@@ -285,6 +288,68 @@ def test_prospective_registration_is_explicit_and_digest_reproducible():
     )
 
 
+def test_basis_registration_freezes_formula_evidence_and_candidate_set():
+    registration = collector.load_shadow_signal_2s_registration()
+    artifact_bytes = registration.path.read_bytes()
+    payload = json.loads(artifact_bytes)
+
+    assert payload["selected"] is False
+    assert payload["schema_version"] == 5
+    assert payload["policy_version"] == (
+        "prospective_basis_band_challenger_v2"
+    )
+    assert payload["evidence_end_ms"] == 1_784_757_680_001
+    assert payload["model"] == {
+        "beta": "1",
+        "forecast_horizon_ms": 2_000,
+        "futures_lookback_ms": 2_000,
+        "model_version": "catchup_v2_l2000_h2000_b100_basis5m",
+    }
+    expected_models = [
+        "catchup_v1_l2000_h2000_b100",
+        "catchup_v2_l2000_h2000_b100_basis5m",
+    ]
+    assert payload["evaluation"]["candidate_model_versions"] == (
+        expected_models
+    )
+    assert payload["evaluation"]["retained_model_versions"] == (
+        expected_models
+    )
+    assert payload["basis"] == {
+        "band_floor_usd": "1",
+        "band_population_sd_multiplier": "0.75",
+        "center": "arithmetic_mean",
+        "correction_strength": "0.5",
+        "fallback": "raw_two_second_projection",
+        "minimum_samples": 600,
+        "sample_cadence_ms": 500,
+        "sample_definition": "futures_now_minus_chainlink_now_usd",
+        "window_ms": 300_000,
+    }
+    evidence_path = (
+        Path(__file__).resolve().parents[1]
+        / payload["evidence"]["source_artifact_filename"]
+    )
+    assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+        payload["evidence"]["source_artifact_sha256"]
+    )
+    assert registration.artifact_sha256 == hashlib.sha256(
+        artifact_bytes
+    ).hexdigest()
+    assert registration.fingerprint_sha256 == hashlib.sha256(
+        collector._registration_fingerprint_bytes(payload)
+    ).hexdigest()
+    attributes = Path(".gitattributes").read_text().splitlines()
+    assert (
+        "price_collector/shadow_signal_2s_basis_calibration.json text eol=lf"
+        in attributes
+    )
+    assert (
+        "price_collector/shadow_signal_2s_basis_registration.json text eol=lf"
+        in attributes
+    )
+
+
 @pytest.mark.parametrize(
     "contents",
     (
@@ -322,8 +387,12 @@ def test_frozen_model_and_engine_assumptions_are_exact():
     worker, _, _ = make_worker()
 
     assert collector.SHADOW_SIGNAL_2S_MODEL.version == (
+        "catchup_v2_l2000_h2000_b100_basis5m"
+    )
+    assert collector.SHADOW_SIGNAL_2S_LEGACY_MODEL.version == (
         "catchup_v1_l2000_h2000_b100"
     )
+    assert worker.engine.models == collector.SHADOW_SIGNAL_2S_EVALUATION_MODELS
     assert collector.SHADOW_SIGNAL_2S_MODEL.lag_ms == 2_000
     assert collector.SHADOW_SIGNAL_2S_MODEL.beta == Decimal("1")
     assert worker.poll_ms == 100
@@ -420,7 +489,7 @@ def test_worker_warms_then_publishes_valid_and_overwrites_when_stale():
     assert waiting.state == "waiting_for_new_chainlink_anchor"
     assert valid.valid is True
     assert valid.status == "valid"
-    assert valid.state == "anchored"
+    assert valid.state == "basis_warming_up"
     assert valid.current_chainlink == Decimal("50000")
     assert valid.futures_reference == Decimal("60000")
     assert valid.futures_now == Decimal("60060")
@@ -477,6 +546,69 @@ def test_projection_uses_the_frozen_28_digit_decimal_calculation():
     )
     assert payload.valid is True
     assert payload.projected_chainlink == expected
+
+
+def test_complete_basis_window_reins_in_raw_projection_for_live_and_evaluation():
+    scheduler = FakeEvaluationScheduler()
+    writer = FakeEvaluationWriter()
+    worker, redis, _ = make_worker(scheduler=scheduler, writer=writer)
+
+    for index in range(600):
+        generated_ms = BASE_MS + index * 500
+        set_price(
+            redis,
+            FUTURES_LIVE_KEY,
+            "50020",
+            received_ms=generated_ms,
+        )
+        set_price(
+            redis,
+            CHAINLINK_LIVE_KEY,
+            "50000",
+            received_ms=generated_ms,
+        )
+        warming = run_once(worker, generated_ms)
+
+    assert warming.valid is True
+    assert warming.state == "basis_warming_up"
+
+    generated_ms = BASE_MS + 300_000
+    set_price(
+        redis,
+        FUTURES_LIVE_KEY,
+        "50030",
+        received_ms=generated_ms,
+    )
+    set_price(
+        redis,
+        CHAINLINK_LIVE_KEY,
+        "50008",
+        received_ms=generated_ms,
+    )
+    payload = run_once(worker, generated_ms)
+
+    raw_projection = project_chainlink_2s(
+        current_chainlink=Decimal("50008"),
+        futures_now=Decimal("50030"),
+        futures_reference=Decimal("50020"),
+    )
+    projected_basis = Decimal("50030") - raw_projection
+    expected_projection = raw_projection - (
+        Decimal("0.5") * (Decimal("19") - projected_basis)
+    )
+
+    assert payload.valid is True
+    assert payload.state == "basis_adjusted_down"
+    assert payload.projected_chainlink == expected_projection
+    assert payload.projected_chainlink < raw_projection
+
+    evaluated = scheduler.calls[-1]["observation"]
+    active = evaluated.signal_for(collector.SHADOW_SIGNAL_2S_MODEL.version)
+    legacy = evaluated.signal_for(
+        collector.SHADOW_SIGNAL_2S_LEGACY_MODEL.version
+    )
+    assert active.projection.projected_chainlink == payload.projected_chainlink
+    assert legacy.projection.projected_chainlink == raw_projection
 
 
 def test_malformed_input_still_overwrites_with_an_invalid_payload():
@@ -536,11 +668,11 @@ def test_worker_requires_evaluation_scheduler_and_writer_as_one_pair():
 
 
 def test_matured_evaluation_is_offered_after_live_publication():
-    record = object()
+    records = (object(), object())
     store = FakeSignalStore()
     writes_before_evaluation = []
     scheduler = FakeEvaluationScheduler(
-        matured=(record,),
+        matured=records,
         on_observe=lambda: writes_before_evaluation.append(
             len(store.set_calls)
         ),
@@ -557,7 +689,7 @@ def test_matured_evaluation_is_offered_after_live_publication():
     assert store.set_calls == [(payload, 2_000)]
     assert writes_before_evaluation == [1]
     assert len(scheduler.calls) == 1
-    assert writer.offers == [(record,)]
+    assert writer.offers == [records]
 
 
 def test_malformed_chainlink_reaches_evaluator_as_absent():
@@ -580,9 +712,9 @@ def test_malformed_chainlink_reaches_evaluator_as_absent():
 
 @pytest.mark.parametrize("failure_owner", ("scheduler", "writer"))
 def test_evaluation_failure_does_not_interrupt_live_publication(failure_owner):
-    record = object()
+    records = (object(), object())
     scheduler = FakeEvaluationScheduler(
-        matured=(record,),
+        matured=records,
         error=(
             RuntimeError("scheduler failed")
             if failure_owner == "scheduler"
@@ -607,7 +739,7 @@ def test_evaluation_failure_does_not_interrupt_live_publication(failure_owner):
 def test_real_scheduler_matures_two_second_rows_causally():
     registration = collector.load_shadow_signal_2s_registration()
     scheduler = collector.ShadowEvaluationScheduler(
-        models=(collector.SHADOW_SIGNAL_2S_MODEL,),
+        models=collector.SHADOW_SIGNAL_2S_EVALUATION_MODELS,
         provenance=registration.provenance,
         cadence_ms=500,
         max_observation_gap_ms=200,
@@ -650,15 +782,40 @@ def test_real_scheduler_matures_two_second_rows_causally():
         run_once(worker, BASE_MS + offset_ms)
 
     records = [record for cohort in writer.offers for record in cohort]
-    first = next(record for record in records if record.generated_ms == BASE_MS)
-    assert first.model_version == "catchup_v1_l2000_h2000_b100"
-    assert first.horizon_ms == 2_000
-    assert first.target_ms == BASE_MS + 2_000
-    assert first.matured_ms == BASE_MS + 2_000
-    assert first.actual_chainlink == Decimal("50010")
-    assert first.actual_chainlink_received_ms <= first.target_ms
-    assert first.selection_policy_version == (
-        "prospective_fixed_challenger_v1"
+    assert all(
+        [record.model_version for record in cohort]
+        == [
+            "catchup_v1_l2000_h2000_b100",
+            "catchup_v2_l2000_h2000_b100_basis5m",
+        ]
+        for cohort in writer.offers
+    )
+    first_cohort = [
+        record for record in records if record.generated_ms == BASE_MS
+    ]
+    assert [record.model_version for record in first_cohort] == [
+        "catchup_v1_l2000_h2000_b100",
+        "catchup_v2_l2000_h2000_b100_basis5m",
+    ]
+    assert all(record.horizon_ms == 2_000 for record in first_cohort)
+    assert all(
+        record.target_ms == BASE_MS + 2_000 for record in first_cohort
+    )
+    assert all(
+        record.matured_ms == BASE_MS + 2_000 for record in first_cohort
+    )
+    assert all(
+        record.actual_chainlink == Decimal("50010")
+        for record in first_cohort
+    )
+    assert all(
+        record.actual_chainlink_received_ms <= record.target_ms
+        for record in first_cohort
+    )
+    assert all(
+        record.selection_policy_version
+        == "prospective_basis_band_challenger_v2"
+        for record in first_cohort
     )
 
 
@@ -796,16 +953,18 @@ def test_enabled_evaluation_runtime_is_wired_started_and_closed(monkeypatch):
     assert len(schedulers) == 1
     scheduler_configuration = schedulers[0].configuration
     assert scheduler_configuration["models"] == (
-        collector.SHADOW_SIGNAL_2S_MODEL,
+        collector.SHADOW_SIGNAL_2S_EVALUATION_MODELS
     )
     assert scheduler_configuration["cadence_ms"] == 500
     assert scheduler_configuration["max_observation_gap_ms"] == 200
     provenance = scheduler_configuration["provenance"]
     registration = collector.load_shadow_signal_2s_registration()
     assert provenance == registration.provenance
-    assert provenance.policy_version == "prospective_fixed_challenger_v1"
-    assert provenance.selection_schema_version == 4
-    assert provenance.evidence_end_ms == 1_784_686_800_000
+    assert provenance.policy_version == (
+        "prospective_basis_band_challenger_v2"
+    )
+    assert provenance.selection_schema_version == 5
+    assert provenance.evidence_end_ms == 1_784_757_680_001
 
     assert len(writers) == 1
     writer = writers[0]
@@ -813,6 +972,7 @@ def test_enabled_evaluation_runtime_is_wired_started_and_closed(monkeypatch):
     assert writer.closed == 1
     assert writer.configuration["candidate_model_versions"] == (
         "catchup_v1_l2000_h2000_b100",
+        "catchup_v2_l2000_h2000_b100_basis5m",
     )
     assert writer.configuration["queue_max_records"] == 5_000
     assert writer.configuration["batch_max_rows"] == 500
@@ -829,6 +989,7 @@ def test_enabled_evaluation_runtime_is_wired_started_and_closed(monkeypatch):
             {
                 "model_versions": (
                     "catchup_v1_l2000_h2000_b100",
+                    "catchup_v2_l2000_h2000_b100_basis5m",
                 ),
                 "connect_timeout_seconds": 4.0,
                 "command_timeout_seconds": 3.0,
@@ -879,11 +1040,11 @@ def test_runtime_has_no_accepted_artifact_or_key_dependency():
 
     assert "shadow_signal_artifact" not in source
     assert "CHAINLINK_SHADOW_LIVE_KEY" not in source
-    assert "prospective_fixed_challenger_v1" in source
+    assert "prospective_basis_band_challenger_v2" in source
     provenance = collector.load_shadow_signal_2s_registration().provenance
-    assert provenance.selection_schema_version == 4
-    assert provenance.evidence_end_ms == 1_784_686_800_000
+    assert provenance.selection_schema_version == 5
+    assert provenance.evidence_end_ms == 1_784_757_680_001
     assert (
         provenance.policy_version
-        == "prospective_fixed_challenger_v1"
+        == "prospective_basis_band_challenger_v2"
     )

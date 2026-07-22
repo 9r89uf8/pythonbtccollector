@@ -27,8 +27,11 @@ SHADOW_SIGNAL_2S_LIVE_KEY = "btc:live:chainlink_shadow_2s"
 SHADOW_SIGNAL_2S_SCHEMA_VERSION = 1
 SHADOW_SIGNAL_2S_MODE = "shadow_candidate"
 SHADOW_SIGNAL_2S_PUBLICATION_ROLE = "challenger"
-SHADOW_SIGNAL_2S_EXPERIMENT_VERSION = "prospective_catchup_2s_v1"
-SHADOW_SIGNAL_2S_MODEL_VERSION = "catchup_v1_l2000_h2000_b100"
+SHADOW_SIGNAL_2S_EXPERIMENT_VERSION = "prospective_catchup_2s_basis_v2"
+SHADOW_SIGNAL_2S_MODEL_VERSION = (
+    "catchup_v2_l2000_h2000_b100_basis5m"
+)
+SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION = "catchup_v1_l2000_h2000_b100"
 SHADOW_SIGNAL_2S_BETA = Decimal("1")
 SHADOW_SIGNAL_2S_FUTURES_LOOKBACK_MS = 2_000
 SHADOW_SIGNAL_2S_FORECAST_HORIZON_MS = 2_000
@@ -226,7 +229,7 @@ def project_chainlink_2s(
     futures_now: Decimal,
     futures_reference: Decimal,
 ) -> Decimal:
-    """Apply the frozen beta-one two-second catch-up formula."""
+    """Apply the unadjusted beta-one two-second catch-up formula."""
 
     current = _require_decimal(
         current_chainlink,
@@ -393,13 +396,6 @@ def _validate_signal(signal: LiveShadowSignal2s) -> None:
 
         if signal.direction not in {"up", "down", "flat"}:
             raise PayloadError("direction is invalid")
-        expected_projected = project_chainlink_2s(
-            current_chainlink=current,
-            futures_now=futures_now,
-            futures_reference=futures_reference,
-        )
-        if projected != expected_projected:
-            raise PayloadError("projected_chainlink is inconsistent")
         with localcontext() as context:
             context.prec = 28
             expected_pending = projected - current

@@ -10,8 +10,8 @@ live 3-second and 2-second Chainlink catch-up predictions:
 
 Neither endpoint queries PostgreSQL. They return the newest short-lived Redis
 state, not historical evaluation rows. The 2-second model is still an
-unselected lag-only challenger and does not yet include the futures–Chainlink
-basis feature.
+unselected prospective challenger. Its active V2 model applies a calibrated
+soft futures–Chainlink basis band; the accepted 3-second engine is unchanged.
 
 ## Access
 
@@ -218,8 +218,8 @@ Representative valid response:
     "schema_version": 1,
     "mode": "shadow_candidate",
     "publication_role": "challenger",
-    "experiment_version": "prospective_catchup_2s_v1",
-    "model_version": "catchup_v1_l2000_h2000_b100",
+    "experiment_version": "prospective_catchup_2s_basis_v2",
+    "model_version": "catchup_v2_l2000_h2000_b100_basis5m",
     "beta": "1",
     "futures_lookback_ms": 2000,
     "forecast_horizon_ms": 2000,
@@ -228,7 +228,7 @@ Representative valid response:
     "valid": true,
     "status": "valid",
     "invalid_reasons": [],
-    "state": "anchored",
+    "state": "basis_within_band",
     "current_chainlink": "62290.21096323273",
     "projected_chainlink": "62292.00981418305598931493660",
     "pending_move": "1.79885095032598931493660",
@@ -257,6 +257,24 @@ Representative valid response:
   }
 }
 ```
+
+The V2 challenger defines basis as `futures - Chainlink`. Its normal level is
+the arithmetic mean of strictly prior 500 ms samples from the preceding five
+minutes, with 600 samples required. The soft-band half-width is
+`max($1, 0.75 * population standard deviation)`. The raw two-second projection
+is unchanged inside the band; outside it, the final projection moves 50%
+toward the nearest band edge. During warmup or if this basis calculation fails,
+the worker publishes the raw lag projection.
+
+The wire shape and nested schema version remain `1`. No basis diagnostics are
+added to this endpoint. `projected_chainlink` is the final value after any soft
+correction, and the move and direction fields are calculated from that value.
+The exact calibration is frozen in
+`price_collector/shadow_signal_2s_basis_calibration.json`.
+Only V2 is published here. The worker keeps the raw
+`catchup_v1_l2000_h2000_b100` model as a silent same-timestamp evaluation
+comparator; V1 is available through historical reporting, not this live
+endpoint.
 
 When the challenger key is missing, expired, or malformed, the wrapper remains
 HTTP `200` and `prediction` is `null`:
@@ -301,9 +319,9 @@ have the same meaning and can be rendered by one component.
 | `valid` | boolean | Whether the current prediction is usable |
 | `status` | string | `"valid"` or the primary reason it is currently invalid |
 | `invalid_reasons` | string array | All current invalidity reasons |
-| `state` | string | Model state such as `anchored`, `warming_up_futures_history`, or `waiting_for_new_chainlink_anchor` |
+| `state` | string | Model state such as `basis_within_band`, `basis_adjusted_up`, `basis_adjusted_down`, `basis_warming_up`, `warming_up_futures_history`, or `waiting_for_new_chainlink_anchor` |
 | `current_chainlink` | decimal string or `null` | Chainlink value used at forecast time |
-| `projected_chainlink` | decimal string or `null` | Predicted Chainlink value at the model horizon |
+| `projected_chainlink` | decimal string or `null` | Predicted Chainlink value at the model horizon; for V2 this is the final value after any basis-band correction |
 | `pending_move` | decimal string or `null` | `projected_chainlink - current_chainlink` |
 | `pending_move_bps` | decimal string or `null` | Pending move in basis points relative to current Chainlink |
 | `direction` | `"up"`, `"down"`, `"flat"`, or `null` | Direction implied by `pending_move` |

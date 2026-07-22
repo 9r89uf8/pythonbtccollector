@@ -267,21 +267,34 @@ The corresponding Python entry points are:
   persistence independently opt-in with
   `SHADOW_SIGNAL_2S_EVALUATION_ENABLED=false`; when enabled, this environment
   contains the writer `DATABASE_URL` and must never contain `READ_DATABASE_URL`.
-- Freeze the first challenger as `catchup_v1_l2000_h2000_b100`: 2,000 ms
-  production-style lookback, 2,000 ms forecast horizon, and Decimal beta `1`.
-  Do not describe it as selected or production-proven.
+- Preserve the first lag-only challenger, `catchup_v1_l2000_h2000_b100`, as a
+  historical reportable model. Freeze the active
+  `prospective_catchup_2s_basis_v2` experiment as
+  `catchup_v2_l2000_h2000_b100_basis5m`: 2,000 ms production-style lookback,
+  2,000 ms forecast horizon, Decimal beta `1`, and the reviewed basis-band
+  configuration below. Neither model is selected or production-proven. Do not
+  change or restart model selection inside the accepted three-second worker.
 - Poll `btc:live:futures` and `btc:live:chainlink` together on the same
   epoch-aligned 100 ms cadence used by the accepted shadow runtime, while
   keeping independent model state and failure handling.
-- Validate the Git-tracked `shadow_signal_2s_registration.json` before opening
-  Redis or PostgreSQL. It must remain an explicit unselected prospective
-  registration with its own reproducible artifact/fingerprint hashes,
-  evidence limited to markets `5948856..5948955` ending at
-  `1784686800000`, and no accepted-selection identity.
+- Validate both the historical Git-tracked `shadow_signal_2s_registration.json`
+  and active `shadow_signal_2s_basis_registration.json` before opening Redis or
+  PostgreSQL. Each must remain an explicit unselected prospective registration
+  with its own reproducible artifact/fingerprint hashes and no
+  accepted-selection identity. The active registration must also verify the
+  exact `shadow_signal_2s_basis_calibration.json` artifact.
+- Define basis as `futures_now - chainlink_now`. Estimate its normal level from
+  the arithmetic mean of strictly prior 500 ms samples over 300,000 ms, require
+  600 samples, and set the band half-width to
+  `max(Decimal("1"), Decimal("0.75") * population_standard_deviation)`. Leave
+  a raw projection inside the band unchanged; outside it, move the projection
+  50% toward the nearest band edge. On warmup or basis failure, use the raw
+  two-second lag projection. Do not hard-cap the basis.
 - Publish only to `btc:live:chainlink_shadow_2s` with one atomic Redis `SET` and
   a 2,000 ms TTL. Every invalid observation must overwrite any prior valid
   prediction with null projection fields. Decimal payload fields remain JSON
-  strings.
+  strings. Keep the live wire schema at version `1`; `projected_chainlink` and
+  its derived move/direction fields represent the final basis-adjusted output.
 - Expose the challenger only through
   `/markets/current/live/challengers/chainlink-catchup-2s`. FastAPI remains a
   Redis serializer: it must not execute the engine or query PostgreSQL on this
@@ -289,22 +302,22 @@ The corresponding Python entry points are:
   `prediction: null`; a Redis transport failure returns HTTP 503.
 - When 2-second evaluations are enabled, schedule every attempt once per
   entered epoch-aligned 500 ms bucket, causally mature it at its 2,000 ms target,
-  and use the shared bounded nonblocking writer. Database outages, retries,
-  cleanup, queue pressure, or shutdown loss must never delay or terminate the
-  100 ms live Redis path.
-- Persist the challenger in `shadow_signal_evaluations` under its distinct
-  model version and prospective registration provenance. Retain it for exactly
-  168 hours, keep the existing idempotent key, and size cleanup for at least
-  five candidates. Each worker's bounded retention deletion must be scoped to
-  that worker's frozen candidate-model set so it cannot shorten another
-  experiment's evidence window.
-- Accept `catchup_v1_l2000_h2000_b100` through the existing evaluation and
+  and evaluate active V2 plus the silent raw V1 comparator from the same
+  forecast state and target. Publish only V2 to Redis. Use the shared bounded
+  nonblocking writer; database outages, retries, cleanup, queue pressure, or
+  shutdown loss must never delay or terminate the 100 ms live Redis path.
+- Persist both challenger results in `shadow_signal_evaluations` under their
+  distinct model versions and prospective registration provenance. Retain both
+  for exactly 168 hours, keep the existing idempotent key, and size cleanup for
+  at least five candidates. Each worker's bounded retention deletion must be
+  scoped to that worker's frozen candidate-model set so it cannot shorten
+  another experiment's evidence window.
+- Accept both `catchup_v1_l2000_h2000_b100` and
+  `catchup_v2_l2000_h2000_b100_basis5m` through the existing evaluation and
   rounded-download routes with exactly the same report shape as the accepted
   three-second model. The dashboard may toggle `model_version`; it must keep the
-  challenger's unselected status visible and must not merge model series.
-- The challenger is a lag-only experiment. Do not add a futures–Chainlink basis
-  feature until its formula, calibration evidence, and versioned payload have
-  been reviewed separately.
+  challenger's unselected status visible and must not merge V1, V2, or accepted
+  model series.
 
 ### Polymarket Probabilities
 

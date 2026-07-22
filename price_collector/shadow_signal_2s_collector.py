@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import logging
@@ -30,8 +30,17 @@ from price_collector.live_cache import (
 from price_collector.shadow_signal import (
     CatchupModel,
     EngineObservation,
+    ModelSignal,
     ObservedPrice,
+    Projection,
     ShadowSignalEngine,
+)
+from price_collector.shadow_signal_2s_basis import (
+    BASIS_DECIMAL_PRECISION,
+    BasisBandStats,
+    RollingBasisBand,
+    apply_basis_band,
+    futures_chainlink_basis,
 )
 from price_collector.shadow_signal_evaluation import (
     ShadowEvaluationProvenance,
@@ -43,6 +52,7 @@ from price_collector.shadow_signal_2s_live import (
     SHADOW_SIGNAL_2S_EXPERIMENT_VERSION,
     SHADOW_SIGNAL_2S_FORECAST_HORIZON_MS,
     SHADOW_SIGNAL_2S_FUTURES_LOOKBACK_MS,
+    SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION,
     SHADOW_SIGNAL_2S_MODE,
     SHADOW_SIGNAL_2S_MODEL_VERSION,
     SHADOW_SIGNAL_2S_PUBLICATION_ROLE,
@@ -70,6 +80,15 @@ SHADOW_SIGNAL_2S_MODEL = CatchupModel(
     lag_ms=SHADOW_SIGNAL_2S_FUTURES_LOOKBACK_MS,
     beta=SHADOW_SIGNAL_2S_BETA,
 )
+SHADOW_SIGNAL_2S_LEGACY_MODEL = CatchupModel(
+    version=SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION,
+    lag_ms=SHADOW_SIGNAL_2S_FUTURES_LOOKBACK_MS,
+    beta=SHADOW_SIGNAL_2S_BETA,
+)
+SHADOW_SIGNAL_2S_EVALUATION_MODELS = (
+    SHADOW_SIGNAL_2S_LEGACY_MODEL,
+    SHADOW_SIGNAL_2S_MODEL,
+)
 
 NowMs = Callable[[], int]
 Sleep = Callable[[float], Awaitable[None]]
@@ -80,10 +99,13 @@ EvaluationSchedulerFactory = Callable[..., ShadowEvaluationScheduler]
 EvaluationWriterFactory = Callable[..., ShadowEvaluationWriterRuntime]
 
 
-SHADOW_SIGNAL_2S_REGISTRATION_PATH = Path(__file__).with_name(
+SHADOW_SIGNAL_2S_V1_REGISTRATION_PATH = Path(__file__).with_name(
     "shadow_signal_2s_registration.json"
 )
-SHADOW_SIGNAL_2S_REGISTRATION = {
+SHADOW_SIGNAL_2S_REGISTRATION_PATH = Path(__file__).with_name(
+    "shadow_signal_2s_basis_registration.json"
+)
+SHADOW_SIGNAL_2S_V1_REGISTRATION = {
     "basis_feature_included": False,
     "evaluation": {
         "cadence_ms": 500,
@@ -107,12 +129,12 @@ SHADOW_SIGNAL_2S_REGISTRATION = {
         ),
     },
     "evidence_end_ms": 1_784_686_800_000,
-    "experiment_version": SHADOW_SIGNAL_2S_EXPERIMENT_VERSION,
+    "experiment_version": "prospective_catchup_2s_v1",
     "model": {
         "beta": str(SHADOW_SIGNAL_2S_BETA),
         "forecast_horizon_ms": SHADOW_SIGNAL_2S_FORECAST_HORIZON_MS,
         "futures_lookback_ms": SHADOW_SIGNAL_2S_FUTURES_LOOKBACK_MS,
-        "model_version": SHADOW_SIGNAL_2S_MODEL_VERSION,
+        "model_version": SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION,
     },
     "policy_version": "prospective_fixed_challenger_v1",
     "publication_role": SHADOW_SIGNAL_2S_PUBLICATION_ROLE,
@@ -126,6 +148,64 @@ SHADOW_SIGNAL_2S_REGISTRATION = {
         "ttl_ms": SHADOW_SIGNAL_2S_TTL_MS,
     },
     "schema_version": 4,
+    "selected": False,
+}
+SHADOW_SIGNAL_2S_REGISTRATION = {
+    "basis": {
+        "band_floor_usd": "1",
+        "band_population_sd_multiplier": "0.75",
+        "center": "arithmetic_mean",
+        "correction_strength": "0.5",
+        "fallback": "raw_two_second_projection",
+        "minimum_samples": 600,
+        "sample_cadence_ms": 500,
+        "sample_definition": "futures_now_minus_chainlink_now_usd",
+        "window_ms": 300_000,
+    },
+    "basis_feature_included": True,
+    "evaluation": {
+        "cadence_ms": 500,
+        "candidate_model_versions": [
+            SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION,
+            SHADOW_SIGNAL_2S_MODEL_VERSION,
+        ],
+        "causal_policy_version": "sequenced_cache_causal_v3",
+        "retention_hours": 168,
+        "retained_model_versions": [
+            SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION,
+            SHADOW_SIGNAL_2S_MODEL_VERSION,
+        ],
+    },
+    "evidence": {
+        "calibration_cutoff_generated_ms": 1_784_757_680_001,
+        "source": "read_only_shadow_signal_evaluations_soft_band_grid",
+        "source_artifact_filename": (
+            "price_collector/shadow_signal_2s_basis_calibration.json"
+        ),
+        "source_artifact_sha256": (
+            "6579a6f90ca6c8f2bcd80e48cec9b0717a60da4ad4632d52547062e181a9d658"
+        ),
+    },
+    "evidence_end_ms": 1_784_757_680_001,
+    "experiment_version": SHADOW_SIGNAL_2S_EXPERIMENT_VERSION,
+    "model": {
+        "beta": str(SHADOW_SIGNAL_2S_BETA),
+        "forecast_horizon_ms": SHADOW_SIGNAL_2S_FORECAST_HORIZON_MS,
+        "futures_lookback_ms": SHADOW_SIGNAL_2S_FUTURES_LOOKBACK_MS,
+        "model_version": SHADOW_SIGNAL_2S_MODEL_VERSION,
+    },
+    "policy_version": "prospective_basis_band_challenger_v2",
+    "publication_role": SHADOW_SIGNAL_2S_PUBLICATION_ROLE,
+    "runtime": {
+        "chainlink_stale_ms": SHADOW_SIGNAL_2S_CHAINLINK_STALE_MS,
+        "futures_stale_ms": SHADOW_SIGNAL_2S_FUTURES_STALE_MS,
+        "history_retention_ms": SHADOW_SIGNAL_2S_HISTORY_RETENTION_MS,
+        "max_future_skew_ms": SHADOW_SIGNAL_2S_MAX_FUTURE_SKEW_MS,
+        "poll_ms": SHADOW_SIGNAL_2S_POLL_MS,
+        "reference_max_gap_ms": SHADOW_SIGNAL_2S_REFERENCE_MAX_GAP_MS,
+        "ttl_ms": SHADOW_SIGNAL_2S_TTL_MS,
+    },
+    "schema_version": 5,
     "selected": False,
 }
 
@@ -157,24 +237,29 @@ def _canonical_registration_bytes(payload: dict[str, Any]) -> bytes:
 
 
 def _registration_fingerprint_bytes(payload: dict[str, Any]) -> bytes:
+    frozen_keys = [
+        "basis_feature_included",
+        "evaluation",
+        "experiment_version",
+        "model",
+        "policy_version",
+        "publication_role",
+        "runtime",
+        "selected",
+    ]
+    if "basis" in payload:
+        frozen_keys.insert(1, "basis")
     frozen_configuration = {
         key: payload[key]
-        for key in (
-            "basis_feature_included",
-            "evaluation",
-            "experiment_version",
-            "model",
-            "policy_version",
-            "publication_role",
-            "runtime",
-            "selected",
-        )
+        for key in frozen_keys
     }
     return _canonical_registration_bytes(frozen_configuration)
 
 
-def load_shadow_signal_2s_registration(
-    path: Path = SHADOW_SIGNAL_2S_REGISTRATION_PATH,
+def _load_shadow_signal_2s_registration(
+    *,
+    path: Path,
+    expected: dict[str, Any],
 ) -> ShadowSignal2sRegistration:
     path = Path(path)
     try:
@@ -189,12 +274,34 @@ def load_shadow_signal_2s_registration(
         ) from exc
     if not isinstance(payload, dict) or (
         _canonical_registration_bytes(payload)
-        != _canonical_registration_bytes(SHADOW_SIGNAL_2S_REGISTRATION)
+        != _canonical_registration_bytes(expected)
     ):
         raise RuntimeError(
             "two-second challenger registration does not match the frozen "
             "prospective configuration"
         )
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict):
+        raise RuntimeError("two-second challenger evidence is missing")
+    evidence_filename = evidence.get("source_artifact_filename")
+    evidence_sha256 = evidence.get("source_artifact_sha256")
+    if not isinstance(evidence_filename, str) or not isinstance(
+        evidence_sha256,
+        str,
+    ):
+        raise RuntimeError("two-second challenger evidence is invalid")
+    evidence_path = Path(__file__).resolve().parents[1] / evidence_filename
+    try:
+        actual_evidence_sha256 = hashlib.sha256(
+            evidence_path.read_bytes()
+        ).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(
+            "two-second challenger evidence artifact is unavailable"
+        ) from exc
+    if actual_evidence_sha256 != evidence_sha256:
+        raise RuntimeError("two-second challenger evidence hash mismatch")
+
     artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
     fingerprint_sha256 = hashlib.sha256(
         _registration_fingerprint_bytes(payload)
@@ -210,6 +317,24 @@ def load_shadow_signal_2s_registration(
             selection_artifact_sha256=artifact_sha256,
             evidence_end_ms=payload["evidence_end_ms"],
         ),
+    )
+
+
+def load_shadow_signal_2s_registration(
+    path: Path = SHADOW_SIGNAL_2S_REGISTRATION_PATH,
+) -> ShadowSignal2sRegistration:
+    return _load_shadow_signal_2s_registration(
+        path=Path(path),
+        expected=SHADOW_SIGNAL_2S_REGISTRATION,
+    )
+
+
+def load_shadow_signal_2s_v1_registration(
+    path: Path = SHADOW_SIGNAL_2S_V1_REGISTRATION_PATH,
+) -> ShadowSignal2sRegistration:
+    return _load_shadow_signal_2s_registration(
+        path=Path(path),
+        expected=SHADOW_SIGNAL_2S_V1_REGISTRATION,
     )
 
 
@@ -419,6 +544,143 @@ def _observed_price(
         ) from exc
 
 
+def _basis_sample(
+    *,
+    futures: Optional[ObservedPrice],
+    chainlink: Optional[ObservedPrice],
+    generated_ms: int,
+) -> Optional[Decimal]:
+    """Return one contemporaneous, causally available basis sample."""
+
+    if futures is None or chainlink is None:
+        return None
+    if futures.received_ms > generated_ms or chainlink.received_ms > generated_ms:
+        return None
+    if generated_ms - futures.received_ms > SHADOW_SIGNAL_2S_FUTURES_STALE_MS:
+        return None
+    if generated_ms - chainlink.received_ms > SHADOW_SIGNAL_2S_CHAINLINK_STALE_MS:
+        return None
+    return futures_chainlink_basis(
+        futures_now=futures.value,
+        chainlink_now=chainlink.value,
+    )
+
+
+def _apply_basis_band_to_observation(
+    observation: EngineObservation,
+    *,
+    stats: BasisBandStats,
+) -> EngineObservation:
+    """Apply the frozen soft band to the active two-second projection."""
+
+    signal = observation.signal_for(SHADOW_SIGNAL_2S_MODEL.version)
+    projection = signal.projection
+    futures_now = signal.futures_now
+    chainlink_now = signal.chainlink_now
+    anchor = signal.anchor
+    if (
+        not signal.valid
+        or projection is None
+        or futures_now is None
+        or chainlink_now is None
+        or anchor is None
+    ):
+        return observation
+
+    raw_projected_chainlink = project_chainlink_2s(
+        current_chainlink=chainlink_now.value,
+        futures_now=futures_now.value,
+        futures_reference=anchor.futures_reference.value,
+    )
+    result = apply_basis_band(
+        raw_projected_chainlink=raw_projected_chainlink,
+        futures_now=futures_now.value,
+        stats=stats,
+    )
+    if not stats.ready:
+        state = "basis_warming_up"
+    elif result.adjustment < 0:
+        state = "basis_adjusted_down"
+    elif result.adjustment > 0:
+        state = "basis_adjusted_up"
+    else:
+        state = "basis_within_band"
+
+    adjusted_projection = _projection_at_price(
+        signal,
+        projected_chainlink=result.projected_chainlink,
+    )
+    adjusted_signal = replace(
+        signal,
+        state=state,
+        projection=adjusted_projection,
+    )
+
+    signals: list[ModelSignal] = []
+    for item in observation.signals:
+        if item.model_version == adjusted_signal.model_version:
+            signals.append(adjusted_signal)
+            continue
+        if (
+            item.model_version == SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION
+            and item.valid
+            and item.projection is not None
+            and item.anchor is not None
+            and item.futures_now is not None
+            and item.chainlink_now is not None
+        ):
+            raw_legacy_projection = project_chainlink_2s(
+                current_chainlink=item.chainlink_now.value,
+                futures_now=item.futures_now.value,
+                futures_reference=item.anchor.futures_reference.value,
+            )
+            signals.append(
+                replace(
+                    item,
+                    projection=_projection_at_price(
+                        item,
+                        projected_chainlink=raw_legacy_projection,
+                    ),
+                )
+            )
+            continue
+        signals.append(item)
+    return replace(observation, signals=tuple(signals))
+
+
+def _projection_at_price(
+    signal: ModelSignal,
+    *,
+    projected_chainlink: Decimal,
+) -> Projection:
+    """Rebuild a projection's derived fields at fixed Decimal precision."""
+
+    projection = signal.projection
+    chainlink_now = signal.chainlink_now
+    if projection is None or chainlink_now is None:
+        raise ValueError("projection inputs are incomplete")
+    with localcontext() as context:
+        context.prec = BASIS_DECIMAL_PRECISION
+        pending_move = projected_chainlink - chainlink_now.value
+        pending_move_bps = (
+            pending_move / chainlink_now.value * Decimal("10000")
+        )
+    return Projection(
+        model_version=projection.model_version,
+        horizon_ms=projection.horizon_ms,
+        projected_chainlink=projected_chainlink,
+        pending_move=pending_move,
+        pending_move_bps=pending_move_bps,
+        direction=(
+            "up"
+            if pending_move > 0
+            else "down"
+            if pending_move < 0
+            else "flat"
+        ),
+    )
+
+
 def build_live_shadow_signal_2s(
     observation: EngineObservation,
 ) -> LiveShadowSignal2s:
@@ -427,31 +689,15 @@ def build_live_shadow_signal_2s(
     futures_now = signal.futures_now
     chainlink_now = signal.chainlink_now
     reference = anchor.futures_reference if anchor is not None else None
-    projected_chainlink: Optional[Decimal] = None
-    pending_move: Optional[Decimal] = None
-    pending_move_bps: Optional[Decimal] = None
-    direction: Optional[str] = None
+    projection = signal.projection if signal.valid else None
     if signal.valid:
-        if chainlink_now is None or futures_now is None or reference is None:
+        if (
+            chainlink_now is None
+            or futures_now is None
+            or reference is None
+            or projection is None
+        ):
             raise RuntimeError("valid challenger signal is missing its inputs")
-        projected_chainlink = project_chainlink_2s(
-            current_chainlink=chainlink_now.value,
-            futures_now=futures_now.value,
-            futures_reference=reference.value,
-        )
-        with localcontext() as context:
-            context.prec = 28
-            pending_move = projected_chainlink - chainlink_now.value
-            pending_move_bps = (
-                pending_move / chainlink_now.value * Decimal("10000")
-            )
-        direction = (
-            "up"
-            if pending_move > 0
-            else "down"
-            if pending_move < 0
-            else "flat"
-        )
 
     return LiveShadowSignal2s(
         schema_version=SHADOW_SIGNAL_2S_SCHEMA_VERSION,
@@ -474,10 +720,16 @@ def build_live_shadow_signal_2s(
         current_chainlink=(
             chainlink_now.value if chainlink_now is not None else None
         ),
-        projected_chainlink=projected_chainlink,
-        pending_move=pending_move,
-        pending_move_bps=pending_move_bps,
-        direction=direction,
+        projected_chainlink=(
+            projection.projected_chainlink if projection is not None else None
+        ),
+        pending_move=(
+            projection.pending_move if projection is not None else None
+        ),
+        pending_move_bps=(
+            projection.pending_move_bps if projection is not None else None
+        ),
+        direction=(projection.direction if projection is not None else None),
         futures_now=(
             futures_now.value if futures_now is not None else None
         ),
@@ -544,6 +796,7 @@ class ShadowSignal2sWorker:
         ttl_ms: int = SHADOW_SIGNAL_2S_TTL_MS,
         evaluation_scheduler: Optional[ShadowEvaluationScheduler] = None,
         evaluation_writer: Optional[ShadowEvaluationWriterRuntime] = None,
+        basis_band: Optional[RollingBasisBand] = None,
         now_ms: NowMs = current_utc_epoch_ms,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
@@ -562,10 +815,13 @@ class ShadowSignal2sWorker:
         self.ttl_ms = ttl_ms
         self.evaluation_scheduler = evaluation_scheduler
         self.evaluation_writer = evaluation_writer
+        self.basis_band = (
+            basis_band if basis_band is not None else RollingBasisBand()
+        )
         self.now_ms = now_ms
         self.sleep = sleep
         self.engine = ShadowSignalEngine(
-            models=(SHADOW_SIGNAL_2S_MODEL,),
+            models=SHADOW_SIGNAL_2S_EVALUATION_MODELS,
             futures_stale_ms=SHADOW_SIGNAL_2S_FUTURES_STALE_MS,
             chainlink_stale_ms=SHADOW_SIGNAL_2S_CHAINLINK_STALE_MS,
             reference_max_gap_ms=(
@@ -627,6 +883,32 @@ class ShadowSignal2sWorker:
             chainlink=observed[CHAINLINK_LIVE_KEY],
             now_ms=generated_ms,
         )
+        try:
+            if observation.timestamp_regression_sources:
+                self.basis_band.reset()
+                basis = None
+            else:
+                basis = _basis_sample(
+                    futures=observed[FUTURES_LIVE_KEY],
+                    chainlink=observed[CHAINLINK_LIVE_KEY],
+                    generated_ms=generated_ms,
+                )
+            basis_stats = self.basis_band.observe(
+                generated_ms=generated_ms,
+                basis=basis,
+            )
+            observation = _apply_basis_band_to_observation(
+                observation,
+                stats=basis_stats,
+            )
+        except (ArithmeticError, DecimalException, TypeError, ValueError):
+            LOGGER.exception(
+                "shadow_signal_2s_basis_adjustment_failed",
+                extra={
+                    "event": "shadow_signal_2s_basis_adjustment_failed",
+                    "generated_ms": generated_ms,
+                },
+            )
         payload = build_live_shadow_signal_2s(observation)
         self._log_state_transition(payload)
 
@@ -746,8 +1028,15 @@ class ShadowSignal2sWorker:
                         "occurrence": count,
                     },
                 )
-            for record in matured:
-                writer.offer_cohort_nowait((record,))
+            candidate_count = len(SHADOW_SIGNAL_2S_EVALUATION_MODELS)
+            if len(matured) % candidate_count:
+                raise RuntimeError(
+                    "evaluation scheduler emitted an incomplete candidate cohort"
+                )
+            for offset in range(0, len(matured), candidate_count):
+                writer.offer_cohort_nowait(
+                    matured[offset : offset + candidate_count]
+                )
         except Exception:
             # Persistence is subordinate to the expiring Redis publication.
             # Scheduler and queue faults must never kill the live path.
@@ -806,8 +1095,9 @@ async def run_collector(
         )
         return
 
-    # Validate the Git-tracked prospective registration before touching Redis
-    # or constructing the lazy PostgreSQL backend.
+    # Preserve and validate the frozen lag-only v1 evidence, then validate the
+    # active basis-aware registration before touching Redis or PostgreSQL.
+    load_shadow_signal_2s_v1_registration()
     registration = load_shadow_signal_2s_registration()
     evaluation_enabled = settings.SHADOW_SIGNAL_2S_EVALUATION_ENABLED
     LOGGER.info(
@@ -860,6 +1150,7 @@ async def run_collector(
                 evaluation_writer_factory or ShadowEvaluationWriterRuntime
             )
             candidate_model_versions = (
+                SHADOW_SIGNAL_2S_LEGACY_MODEL_VERSION,
                 SHADOW_SIGNAL_2S_MODEL.version,
             )
             if evaluation_backend_factory is None:
@@ -880,7 +1171,7 @@ async def run_collector(
                     )
 
             evaluation_scheduler = scheduler_factory(
-                models=(SHADOW_SIGNAL_2S_MODEL,),
+                models=SHADOW_SIGNAL_2S_EVALUATION_MODELS,
                 provenance=registration.provenance,
                 cadence_ms=(
                     settings.SHADOW_SIGNAL_2S_EVALUATION_INTERVAL_MS

@@ -294,17 +294,26 @@ latency and not production model-selection evidence.
 
 The repository also contains a deliberately separate prospective challenger:
 `python -m price_collector.shadow_signal_2s_collector`, managed by
-`price-collector-shadow-signal-2s`. It fixes the model version
-`catchup_v1_l2000_h2000_b100` at a 2,000 ms production-style lookback, a
-2,000 ms target horizon, and beta `1`. It reads the same Chainlink and futures
-source keys but owns its own engine state and writes only
+`price-collector-shadow-signal-2s`. Its active experiment is
+`prospective_catchup_2s_basis_v2`, publishing the unselected
+`catchup_v2_l2000_h2000_b100_basis5m` model: a 2,000 ms production-style
+lookback, a 2,000 ms target horizon, beta `1`, and a separately calibrated
+basis-band correction. It reads the same Chainlink and futures source keys but
+owns its own engine state and writes only
 `btc:live:chainlink_shadow_2s` with a 2,000 ms TTL.
 
 This is a prospective live comparison, not a replacement for the accepted
 `catchup_ratio_l3000_b100` model. It does not modify the accepted worker,
-selection evidence, Redis key, or `signals.chainlink_catchup` response. It also
-does not yet include futures–Chainlink basis deviation; that will require a
-separately versioned model after basis evidence is collected.
+selection evidence, Redis key, or `signals.chainlink_catchup` response.
+
+The basis is `futures - Chainlink`. The worker estimates its normal level from
+strictly prior 500 ms samples over five minutes, requiring 600 samples. The
+soft band's half-width is `max($1, 0.75 * population standard deviation)`. A
+raw two-second projection inside the band is unchanged; outside it, the final
+projection moves 50% toward the nearest band edge. Warmup or a basis-feature
+failure falls back to the raw lag projection instead of hard-capping it. The
+exact calibration evidence is frozen in
+`price_collector/shadow_signal_2s_basis_calibration.json`.
 
 The read-only route
 `GET /markets/current/live/challengers/chainlink-catchup-2s` serializes this
@@ -316,11 +325,13 @@ from the accepted shadow service.
 Matured 2-second evaluation is independently opt-in. When enabled, the worker
 schedules one attempt per entered 500 ms bucket, causally matures it against the
 newest Chainlink observation available by its 2,000 ms target, and sends it to
-the existing bounded nonblocking evaluation writer. Rows use the distinct
-`catchup_v1_l2000_h2000_b100` identity and are retained for exactly 168 hours.
-A Git-tracked prospective registration is validated before runtime dependencies
-open; it explicitly records `selected: false`, the exact inspected-session
-cutoff, the frozen configuration, and its own reproducible hashes rather than
+the existing bounded nonblocking evaluation writer. The worker evaluates the
+active V2 result and a silent raw V1 comparator from the same forecast state and
+target; only V2 is published to Redis. Both model identities are retained for
+exactly 168 hours and remain separately reportable. The historical and active
+Git-tracked registrations are validated before any runtime dependency opens;
+the active registration records `selected: false`, the exact calibration
+evidence, the frozen configuration, and its own reproducible hashes rather than
 borrowing the accepted model's evidence.
 
 Retention cleanup is model-scoped even though both workers share the evaluation
@@ -331,8 +342,9 @@ other experiment's evidence window.
 The existing evaluation JSON and download routes accept either the challenger
 or accepted model through `model_version` with the same response shape. A
 dashboard can therefore reuse one chart/metrics renderer and toggle between
-`catchup_v1_l2000_h2000_b100` and `catchup_ratio_l3000_b100` without merging
-their separate evidence series.
+`catchup_v2_l2000_h2000_b100_basis5m` and `catchup_ratio_l3000_b100` without
+merging their separate evidence series. The historical
+`catchup_v1_l2000_h2000_b100` series remains available as its own model.
 
 Shadow-signal Phase 4 adds the opt-in, standalone
 `price-collector-shadow-signal` service. Its epoch-aligned 100 ms loop reads
@@ -608,8 +620,11 @@ parameters, complete response shapes, optional fields, and error responses.
 ```text
 price_collector/       Collectors, API, and current shadow runtime
 price_collector/shadow_signal_2s_collector.py  Independent 2-second challenger worker
+price_collector/shadow_signal_2s_basis.py  Rolling basis band and soft correction
 price_collector/shadow_signal_2s_live.py  Challenger cache payload and decoder
-price_collector/shadow_signal_2s_registration.json  Frozen prospective provenance
+price_collector/shadow_signal_2s_registration.json  Historical V1 prospective provenance
+price_collector/shadow_signal_2s_basis_registration.json  Active V2 prospective provenance
+price_collector/shadow_signal_2s_basis_calibration.json  Frozen V2 calibration evidence
 price_collector/shadow_signal_reporting.py  Bounded read-only evaluation reporting
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests

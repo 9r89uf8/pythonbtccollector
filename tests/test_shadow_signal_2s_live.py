@@ -133,8 +133,10 @@ def test_valid_signal_round_trips_with_decimal_strings_and_fixed_identity():
     assert wire["schema_version"] == 1
     assert wire["mode"] == "shadow_candidate"
     assert wire["publication_role"] == "challenger"
-    assert wire["experiment_version"] == "prospective_catchup_2s_v1"
-    assert wire["model_version"] == "catchup_v1_l2000_h2000_b100"
+    assert wire["experiment_version"] == "prospective_catchup_2s_basis_v2"
+    assert wire["model_version"] == (
+        "catchup_v2_l2000_h2000_b100_basis5m"
+    )
     assert wire["beta"] == "1"
     assert wire["current_chainlink"] == "50000.00"
     assert wire["projected_chainlink"] == "50050.00000"
@@ -175,7 +177,14 @@ def test_target_reference_and_market_invariants_are_enforced():
 
 
 def test_projection_move_bps_direction_and_anchor_invariants_are_enforced():
-    with pytest.raises(PayloadError, match="projected_chainlink is inconsistent"):
+    adjusted = valid_signal(
+        projected_chainlink=Decimal("50049"),
+        pending_move=Decimal("49"),
+        pending_move_bps=Decimal("9.8"),
+    )
+    assert adjusted.projected_chainlink == Decimal("50049")
+
+    with pytest.raises(PayloadError, match="pending_move is inconsistent"):
         valid_signal(projected_chainlink=Decimal("50049"))
     with pytest.raises(PayloadError, match="pending_move is inconsistent"):
         valid_signal(pending_move=Decimal("49"))

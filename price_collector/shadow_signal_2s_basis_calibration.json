@@ -1,0 +1,63 @@
+{
+  "analysis": "dynamic_basis_soft_band_calibration",
+  "candidate_grid": {
+    "band_population_sd_multipliers": [
+      "0.75",
+      "1",
+      "1.25",
+      "1.5",
+      "1.75",
+      "2"
+    ],
+    "correction_strengths": [
+      "0.25",
+      "0.5",
+      "0.75",
+      "1"
+    ]
+  },
+  "evidence": {
+    "cutoff_generated_ms": 1784757680001,
+    "primary_two_second": {
+      "adjusted_mean_absolute_error_usd": "1.456419273",
+      "adjustment_rate": "0.213035607",
+      "first_generated_ms": 1784746352005,
+      "last_generated_ms": 1784757680001,
+      "model_version": "catchup_v1_l2000_h2000_b100",
+      "non_overlapping_rows": 3314,
+      "raw_mean_absolute_error_usd": "1.485023795"
+    },
+    "secondary_three_second": {
+      "adjusted_mean_absolute_error_usd": "1.692010757",
+      "adjustment_rate": "0.227534509",
+      "first_generated_ms": 1784153292000,
+      "last_generated_ms": 1784757675004,
+      "model_version": "catchup_ratio_l3000_b100",
+      "non_overlapping_rows": 118593,
+      "raw_mean_absolute_error_usd": "1.750809587"
+    },
+    "source": "read_only_shadow_signal_evaluations_soft_band_grid"
+  },
+  "frozen_formula": {
+    "band_floor_usd": "1",
+    "band_population_sd_multiplier": "0.75",
+    "basis_definition": "futures_now_minus_chainlink_now_usd",
+    "center": "arithmetic_mean",
+    "correction_strength": "0.5",
+    "fallback": "raw_two_second_projection",
+    "minimum_samples": 600,
+    "sample_cadence_ms": 500,
+    "window_ms": 300000
+  },
+  "limitations": [
+    "The basis model remains an unselected prospective challenger.",
+    "The two-second calibration window is short and requires prospective evaluation.",
+    "The accepted three-second worker and its selection evidence are unchanged."
+  ],
+  "schema_version": 1,
+  "selection": {
+    "band_population_sd_multiplier": "0.75",
+    "correction_strength": "0.5",
+    "policy": "lowest_primary_two_second_non_overlapping_mae_in_frozen_grid"
+  }
+}

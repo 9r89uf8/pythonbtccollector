@@ -163,8 +163,8 @@ def live_shadow_signal_2s(**overrides):
         "schema_version": 1,
         "mode": "shadow_candidate",
         "publication_role": "challenger",
-        "experiment_version": "prospective_catchup_2s_v1",
-        "model_version": "catchup_v1_l2000_h2000_b100",
+        "experiment_version": "prospective_catchup_2s_basis_v2",
+        "model_version": "catchup_v2_l2000_h2000_b100_basis5m",
         "beta": Decimal("1"),
         "futures_lookback_ms": 2_000,
         "forecast_horizon_ms": 2_000,
@@ -173,7 +173,7 @@ def live_shadow_signal_2s(**overrides):
         "valid": True,
         "status": "valid",
         "invalid_reasons": (),
-        "state": "anchored",
+        "state": "basis_within_band",
         "current_chainlink": Decimal("62000"),
         "projected_chainlink": Decimal("62000.99838969404186795491142"),
         "pending_move": Decimal("0.99838969404186795491142"),
@@ -1171,8 +1171,8 @@ def test_chainlink_catchup_2s_challenger_is_redis_only(client, monkeypatch):
             "schema_version": 1,
             "mode": "shadow_candidate",
             "publication_role": "challenger",
-            "experiment_version": "prospective_catchup_2s_v1",
-            "model_version": "catchup_v1_l2000_h2000_b100",
+            "experiment_version": "prospective_catchup_2s_basis_v2",
+            "model_version": "catchup_v2_l2000_h2000_b100_basis5m",
             "beta": "1",
             "futures_lookback_ms": 2_000,
             "generated_ms": 1_783_459_250_100,
@@ -1181,7 +1181,7 @@ def test_chainlink_catchup_2s_challenger_is_redis_only(client, monkeypatch):
             "valid": True,
             "status": "valid",
             "invalid_reasons": [],
-            "state": "anchored",
+            "state": "basis_within_band",
             "current_chainlink": "62000",
             "projected_chainlink": "62000.99838969404186795491142",
             "pending_move": "0.99838969404186795491142",
@@ -2345,6 +2345,10 @@ def test_openapi_lists_shadow_evaluation_routes_and_required_model(client):
     ]
     assert "catchup_ratio_l3000_b100" in model_schema["enum"]
     assert "catchup_v1_l2000_h2000_b100" in model_schema["enum"]
+    assert (
+        "catchup_v2_l2000_h2000_b100_basis5m"
+        in model_schema["enum"]
+    )
     current_paths = (
         "/markets/current/shadow-evaluations",
         "/markets/current/shadow-evaluations/download",

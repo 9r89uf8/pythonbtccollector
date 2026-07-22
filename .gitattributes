@@ -1,1 +1,3 @@
 price_collector/shadow_signal_2s_registration.json text eol=lf
+price_collector/shadow_signal_2s_basis_calibration.json text eol=lf
+price_collector/shadow_signal_2s_basis_registration.json text eol=lf

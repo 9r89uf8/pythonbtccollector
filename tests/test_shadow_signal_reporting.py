@@ -935,6 +935,7 @@ def test_two_second_challenger_uses_the_same_report_and_point_shape():
     ("model_version", "horizon_ms"),
     (
         ("catchup_v1_l2000_h2000_b100", 2_000),
+        ("catchup_v2_l2000_h2000_b100_basis5m", 2_000),
         ("catchup_ratio_l3000_b100", 3_000),
         ("catchup_ratio_l3500_b100", 3_500),
         ("catchup_ratio_l4000_b100", 4_000),

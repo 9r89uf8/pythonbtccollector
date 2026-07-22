@@ -22,6 +22,9 @@ REPORT_DECIMAL_PRECISION = 80
 
 class ShadowEvaluationModelVersion(str, Enum):
     CATCHUP_V1_L2000_H2000_B100 = "catchup_v1_l2000_h2000_b100"
+    CATCHUP_V2_L2000_H2000_B100_BASIS5M = (
+        "catchup_v2_l2000_h2000_b100_basis5m"
+    )
     CATCHUP_RATIO_L3000_B100 = "catchup_ratio_l3000_b100"
     CATCHUP_RATIO_L3500_B100 = "catchup_ratio_l3500_b100"
     CATCHUP_RATIO_L4000_B100 = "catchup_ratio_l4000_b100"
@@ -42,6 +45,10 @@ SHADOW_EVALUATION_MODEL_SPECS = {
     )
     for version, horizon_ms in (
         (ShadowEvaluationModelVersion.CATCHUP_V1_L2000_H2000_B100, 2_000),
+        (
+            ShadowEvaluationModelVersion.CATCHUP_V2_L2000_H2000_B100_BASIS5M,
+            2_000,
+        ),
         (ShadowEvaluationModelVersion.CATCHUP_RATIO_L3000_B100, 3_000),
         (ShadowEvaluationModelVersion.CATCHUP_RATIO_L3500_B100, 3_500),
         (ShadowEvaluationModelVersion.CATCHUP_RATIO_L4000_B100, 4_000),

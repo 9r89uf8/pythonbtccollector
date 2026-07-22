@@ -934,29 +934,34 @@ Supported values and their fixed report metadata are:
 
 | `model_version` | `horizon_ms` | `beta` |
 | --- | ---: | ---: |
+| `catchup_v2_l2000_h2000_b100_basis5m` | `2000` | `"1"` |
 | `catchup_v1_l2000_h2000_b100` | `2000` | `"1"` |
 | `catchup_ratio_l3000_b100` | `3000` | `"1"` |
 | `catchup_ratio_l3500_b100` | `3500` | `"1"` |
 | `catchup_ratio_l4000_b100` | `4000` | `"1"` |
 
 There is no implicit default and the API does not choose or rerank a model for
-the caller. The two-second challenger and the accepted three-second primary use
-the exact same report, point, chart, performance, and rounded-download shape.
-A dashboard lag toggle therefore changes only `model_version`:
+the caller. The active two-second challenger, its historical lag-only V1
+series, and the accepted three-second primary use the exact same report, point,
+chart, performance, and rounded-download shape. A dashboard lag toggle therefore
+changes only `model_version`:
 
 | Dashboard choice | `model_version` | Status |
 | --- | --- | --- |
-| 2 seconds | `catchup_v1_l2000_h2000_b100` | Prospective challenger |
+| 2 seconds | `catchup_v2_l2000_h2000_b100_basis5m` | Prospective basis-band challenger |
 | 3 seconds | `catchup_ratio_l3000_b100` | Accepted primary |
 
 Keep the status visible; the identical transport shape does not make the
 two-second challenger selected or production-proven. Do not merge points from
-different model versions or selection identities into one series.
+different model versions or selection identities into one series. The V1
+two-second rows are the silent raw comparator evaluated at the same timestamps
+as active V2; the live challenger endpoint publishes only V2.
 
 Calls:
 
 ```bash
 curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
+curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_v2_l2000_h2000_b100_basis5m"
 curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_v1_l2000_h2000_b100"
 curl "${API_BASE_URL}/markets/5946630/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
 curl -OJ "${API_BASE_URL}/markets/current/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
@@ -967,7 +972,7 @@ Browser example using the `apiGet` helper from the access section:
 
 ```javascript
 const modelVersionByLag = {
-  2000: "catchup_v1_l2000_h2000_b100",
+  2000: "catchup_v2_l2000_h2000_b100_basis5m",
   3000: "catchup_ratio_l3000_b100",
 };
 const selectedLagMs = 2000;
@@ -1631,8 +1636,8 @@ When present, `prediction` is the complete strict two-second signal payload:
     "schema_version": 1,
     "mode": "shadow_candidate",
     "publication_role": "challenger",
-    "experiment_version": "prospective_catchup_2s_v1",
-    "model_version": "catchup_v1_l2000_h2000_b100",
+    "experiment_version": "prospective_catchup_2s_basis_v2",
+    "model_version": "catchup_v2_l2000_h2000_b100_basis5m",
     "beta": "1",
     "futures_lookback_ms": 2000,
     "forecast_horizon_ms": 2000,
@@ -1641,7 +1646,7 @@ When present, `prediction` is the complete strict two-second signal payload:
     "valid": true,
     "status": "valid",
     "invalid_reasons": [],
-    "state": "anchored",
+    "state": "basis_within_band",
     "current_chainlink": "62290.21096323273",
     "projected_chainlink": "62292.00981418305598931493660",
     "pending_move": "1.79885095032598931493660",
@@ -1677,16 +1682,31 @@ changing its Decimal strings. `target_ms` is exactly two seconds after
 this experiment. A well-formed payload with `valid: false` remains an object;
 consumers must clear any earlier projection and display its status instead.
 
-This endpoint is an unselected, lag-only challenger. It must not replace or be
-presented as the accepted `signals.chainlink_catchup` model. It also does not
-include the normal-basis or basis-implied component discussed in later hybrid
-research; that work still requires broader chronological evaluation.
+The V2 challenger computes basis as `futures - Chainlink`. It estimates the
+normal basis from strictly prior 500 ms samples over five minutes, requiring
+600 samples, and sets the soft-band half-width to
+`max($1, 0.75 * population standard deviation)`. The raw two-second projection
+is unchanged inside that band. Outside it, the final projection moves 50%
+toward the nearest band edge. Warmup or a basis-feature failure falls back to
+the raw projection.
+
+The wire shape and nested schema version remain `1`; no basis diagnostics are
+added to the live object. `projected_chainlink` is the final output after any
+soft correction, and `pending_move`, `pending_move_bps`, and `direction` are
+derived from that final value. The frozen calibration evidence is recorded in
+`price_collector/shadow_signal_2s_basis_calibration.json`.
+
+This endpoint remains an unselected prospective challenger. It must not replace
+or be presented as the accepted `signals.chainlink_catchup` model, and it does
+not change the accepted three-second engine.
 
 For retained charts, metrics, and downloads, request the common
 `/shadow-evaluations` routes documented above with
-`model_version=catchup_v1_l2000_h2000_b100`. Those responses have the same
-schema as the accepted three-second model, so the dashboard can reuse one
-renderer and switch only the requested model version.
+`model_version=catchup_v2_l2000_h2000_b100_basis5m`. Those responses have the
+same schema as the accepted three-second model, so the dashboard can reuse one
+renderer and switch only the requested model version. Historical V1 evidence
+remains separately available with
+`model_version=catchup_v1_l2000_h2000_b100`; never merge the two series.
 
 For the live card, keep the existing price request and select the corresponding
 cached prediction. The two payloads share all display fields; normalize the two
