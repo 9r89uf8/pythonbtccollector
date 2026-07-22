@@ -16,6 +16,7 @@ The deployed system is:
 - A Binance USD-M futures, flow, and book collector managed by systemd
 - A Polymarket BTC five-minute probability collector managed by systemd
 - An opt-in standalone Chainlink catch-up shadow worker managed by systemd
+- An opt-in standalone Chainlink two-second challenger managed by systemd
 - A small read-only FastAPI API managed by systemd
 - API binding fixed to `127.0.0.1:9000`
 - Redis binding fixed to `127.0.0.1:6379`
@@ -58,6 +59,7 @@ Use these exact service names in deployment and handoff commands:
 - Binance futures, flow, and book: `price-collector-binance-futures`
 - Polymarket probabilities: `price-collector-polymarket-probabilities`
 - Chainlink shadow signal: `price-collector-shadow-signal`
+- Chainlink two-second challenger: `price-collector-shadow-signal-2s`
 - Read-only API: `price-api`
 - Live cache: `redis-server`
 
@@ -68,6 +70,7 @@ The corresponding Python entry points are:
 - `python -m price_collector.binance_futures_collector`
 - `python -m price_collector.polymarket_probability_collector`
 - `python -m price_collector.shadow_signal_collector`
+- `python -m price_collector.shadow_signal_2s_collector`
 - `uvicorn price_collector.api:app --host 127.0.0.1 --port 9000 --workers 1`
 
 ## Collector Rules
@@ -153,9 +156,9 @@ The corresponding Python entry points are:
 - Keep the experimental worker in the standalone
   `price-collector-shadow-signal` service. It must never run inside FastAPI or
   either producer collector.
-- Keep `SHADOW_SIGNAL_ENABLED=false` until Phase 3 has produced an accepted
-  selection artifact and its exact replay-configuration report has been
-  promoted into `/var/lib/price-collector/shadow-decisions`.
+- Keep `SHADOW_SIGNAL_ENABLED=false` unless the accepted selection artifact and
+  its exact replay-configuration report have both been promoted into
+  `/var/lib/price-collector/shadow-decisions`.
 - Install both decision files as `root:pricecollector` mode `0440`. Configure
   their absolute paths and the full selection-file SHA-256 in the dedicated
   root-owned `/etc/price-collector/shadow-signal.env` file.
@@ -253,6 +256,34 @@ The corresponding Python entry points are:
 - Phase 6 adds backend exposure only. Do not add dashboard code or assets here;
   dashboard integration belongs to Phase 7 in its separate repository.
 
+### Chainlink Two-Second Challenger
+
+- Keep the prospective two-second experiment in its own
+  `price-collector-shadow-signal-2s` service. Do not add it to the accepted
+  worker's candidate set or alter the accepted selection/replay artifacts,
+  `btc:live:chainlink_shadow`, or `signals.chainlink_catchup`.
+- Keep `SHADOW_SIGNAL_2S_ENABLED=false` by default in the dedicated root-owned
+  `/etc/price-collector/shadow-signal-2s.env`. This worker is Redis-only and
+  must not receive either database URL.
+- Freeze the first challenger as `catchup_v1_l2000_h2000_b100`: 2,000 ms
+  production-style lookback, 2,000 ms forecast horizon, and Decimal beta `1`.
+  Do not describe it as selected or production-proven.
+- Poll `btc:live:futures` and `btc:live:chainlink` together on the same
+  epoch-aligned 100 ms cadence used by the accepted shadow runtime, while
+  keeping independent model state and failure handling.
+- Publish only to `btc:live:chainlink_shadow_2s` with one atomic Redis `SET` and
+  a 2,000 ms TTL. Every invalid observation must overwrite any prior valid
+  prediction with null projection fields. Decimal payload fields remain JSON
+  strings.
+- Expose the challenger only through
+  `/markets/current/live/challengers/chainlink-catchup-2s`. FastAPI remains a
+  Redis serializer: it must not execute the engine or query PostgreSQL on this
+  route. A missing, expired, or malformed challenger value returns
+  `prediction: null`; a Redis transport failure returns HTTP 503.
+- The challenger is a lag-only experiment. Do not add a futures–Chainlink basis
+  feature until its formula, calibration evidence, and versioned payload have
+  been reviewed separately.
+
 ### Polymarket Probabilities
 
 - Discover BTC five-minute Up/Down markets through Polymarket Gamma.
@@ -276,6 +307,8 @@ The corresponding Python entry points are:
   - `btc:live:futures`
 - Use `btc:live:chainlink_shadow` only for the standalone experimental shadow
   payload, with its required short TTL. It is not a `LivePrice` value.
+- Use `btc:live:chainlink_shadow_2s` only for the independent two-second
+  challenger payload. It must not replace or alias the accepted shadow key.
 - Store live prices as strings in the existing JSON shape with `value`,
   `source_timestamp_ms`, and `received_ms`.
 - `/markets/current/live` must read the three source-price keys and the shadow
@@ -288,6 +321,9 @@ The corresponding Python entry points are:
   malformed shadow payload cannot suppress readable actual prices.
 - `/markets/current/live` must not add PostgreSQL queries, evaluation-table
   reads, or model execution to its request path.
+- `/markets/current/live/challengers/chainlink-catchup-2s` must read only the
+  two-second challenger key and must keep its decoder and failure boundary
+  separate from both source prices and the accepted shadow payload.
 - A Redis write failure may be logged without corrupting the historical sample
   or changing numeric types.
 
@@ -348,6 +384,8 @@ in collector-specific code.
   fast-forward-only Git pull.
 - Keep real secrets out of Git. Never overwrite an existing production env file
   with an example file during an update.
+- Keep the two-second challenger environment separate at
+  `/etc/price-collector/shadow-signal-2s.env` and free of database credentials.
 - Keep the shadow decision directory limited to the two promoted, root-owned
   evidence files required by the configured worker. Do not let the service user
   write its own selection decision.
@@ -417,9 +455,9 @@ sudo systemctl restart price-collector
 Again, tailor the filename and service name to the actual unit changed. If an
 environment example changed, explain the exact keys that must be reviewed or
 added manually in `/etc/price-collector/collector.env`, `api.env`, or
-`shadow-signal.env`; never tell the user to replace a production env file
-wholesale. Include Redis setup or a Redis restart only when the change actually
-requires it.
+`shadow-signal.env`, or `shadow-signal-2s.env`; never tell the user to replace a
+production env file wholesale. Include Redis setup or a Redis restart only when
+the change actually requires it.
 
 Documentation-only and test-only changes do not require droplet commands unless
 they change the documented production procedure. Collector changes never omit
@@ -446,6 +484,9 @@ Add or update focused tests for each checkpoint. Relevant coverage includes:
 - Shadow live-API four-key `MGET`, backward-compatible source-price fields,
   strict decoder isolation, missing/malformed shadow behavior, and clamped
   `signal_age_ms`
+- Two-second challenger fixed configuration, disabled-by-default deployment,
+  independent Redis key and worker failure domain, invalid overwrite/TTL, and
+  endpoint null-versus-503 behavior
 
 Run the relevant tests before handoff. Run the full suite when practical:
 

@@ -2528,417 +2528,25 @@ The revert restores the accepted pre-cutover REST behavior. It does not require
 a schema change and must not restart Chainlink or disable either raw-capture
 flag unless a separate raw-capture failure justifies that action.
 
-## Shadow-Signal Phase 2 Raw Replay
+## Retired shadow-model experiment tooling
 
-This is an offline, read-only analysis job. It does not run inside a collector,
-FastAPI, Redis, or systemd. It does not select the provisional primary model;
-that decision is a later shadow-signal checkpoint. The current command writes
-replay schema v3. V3 corrects the directional accounting, requires strict
-zero-future-skew evidence, and records explicit source-visibility-delay and
-evaluation-phase sensitivity assumptions. Its volatility-regime returns enter
-the diagnostic series only on the worker poll where each delayed futures event
-becomes visible, and their lookback is keyed by that worker-poll visibility
-time. New reports identify this contract with
-`configuration.volatility_time_basis="worker_poll_visibility_ms"`.
+The offline raw-replay, provisional-selection, shorter-lag, and post-hoc
+recovery command modules were retired after the accepted model evidence was
+consolidated. They are not production dependencies and are no longer
+available as commands in this checkout.
 
-Prerequisites:
+The current decision, accepted metrics, failed shorter-lag experiment, and
+integrity hashes are preserved in
+[`CHAINLINK_SHADOW_MODEL_HISTORY.md`](CHAINLINK_SHADOW_MODEL_HISTORY.md).
+Do not recreate or rerun an old decision under the same artifact name. A
+future replacement model requires a newly versioned implementation, fresh
+calibration, and a later untouched holdout.
 
-- both raw capture products must already contain evidence;
-- the replay uses `DATABASE_URL` from `collector.env` because `price_reader`
-  intentionally has no access to `raw_capture`;
-- only completed, ready, drop-free, integrity-reconciled session intersections
-  are scored by default; and
-- the requested `[start_ms,end_ms)` range must be no longer than 24 hours.
+## Shadow-signal standalone worker
 
-Confirm the raw flags and row/session availability first:
-
-```bash
-sudo grep -E '^(RAW_FUTURES_TRACE_ENABLED|RAW_CHAINLINK_EVENTS_ENABLED)=' /etc/price-collector/collector.env
-sudo -u postgres psql -d price_collector -c "
-SELECT
-    (SELECT count(*) FROM raw_capture.binance_futures_price_trace_100ms) AS futures_rows,
-    (SELECT count(*) FROM raw_capture.chainlink_price_events) AS chainlink_rows,
-    (SELECT count(*) FROM raw_capture.feed_sessions
-      WHERE disconnected_wall_ns IS NOT NULL) AS completed_sessions;
-"
-```
-
-Choose a reproducible 24-hour window ending at the older of the latest
-completed futures and Chainlink session boundaries:
-
-```bash
-END_MS="$(sudo -u postgres psql -At -d price_collector -c "
-SELECT LEAST(
-    max(disconnected_wall_ns) FILTER (
-        WHERE source = 'binance_futures_agg_trade'
-    ),
-    max(disconnected_wall_ns) FILTER (
-        WHERE source = 'polymarket_chainlink_rtds'
-    )
-) / 1000000
-FROM raw_capture.feed_sessions
-WHERE disconnected_wall_ns IS NOT NULL;
-")"
-test -n "$END_MS"
-START_MS="$((END_MS - 86400000))"
-REPORT="/var/lib/price-collector/shadow-replay-${START_MS}-${END_MS}.json"
-FUTURES_AVAILABILITY_DELAY_MS=0
-CHAINLINK_AVAILABILITY_DELAY_MS=0
-EVALUATION_PHASE_OFFSET_MS=0
-printf 'START_MS=%s\nEND_MS=%s\nREPORT=%s\n' "$START_MS" "$END_MS" "$REPORT"
-printf 'futures_delay_ms=%s chainlink_delay_ms=%s phase_ms=%s\n' \
-  "$FUTURES_AVAILABILITY_DELAY_MS" \
-  "$CHAINLINK_AVAILABILITY_DELAY_MS" \
-  "$EVALUATION_PHASE_OFFSET_MS"
-```
-
-Run the replay with the service user's existing writer environment. The
-arguments are UTC epoch milliseconds with an inclusive start and exclusive
-end. Quantiles use a deterministic bounded sample; streaming counts, means,
-coverage, and RMSE are exact.
-
-```bash
-REPLAY_EXIT=0
-sudo -u pricecollector \
-  env START_MS="$START_MS" END_MS="$END_MS" REPORT="$REPORT" \
-      FUTURES_AVAILABILITY_DELAY_MS="$FUTURES_AVAILABILITY_DELAY_MS" \
-      CHAINLINK_AVAILABILITY_DELAY_MS="$CHAINLINK_AVAILABILITY_DELAY_MS" \
-      EVALUATION_PHASE_OFFSET_MS="$EVALUATION_PHASE_OFFSET_MS" \
-  bash -c '
-    set -a
-    . /etc/price-collector/collector.env
-    set +a
-    cd /opt/price-collector
-    exec .venv/bin/python -m price_collector.shadow_signal_replay \
-      --start-ms "$START_MS" \
-      --end-ms "$END_MS" \
-      --max-future-skew-ms 0 \
-      --futures-availability-delay-ms "$FUTURES_AVAILABILITY_DELAY_MS" \
-      --chainlink-availability-delay-ms "$CHAINLINK_AVAILABILITY_DELAY_MS" \
-      --evaluation-phase-offset-ms "$EVALUATION_PHASE_OFFSET_MS" \
-      --output "$REPORT"
-  ' || REPLAY_EXIT=$?
-printf 'replay_exit=%s\n' "$REPLAY_EXIT"
-if [ -f "$REPORT" ]; then
-  sudo chmod 640 "$REPORT"
-fi
-```
-
-Exit `0` means every configured candidate produced scored forecasts on the
-same common comparison cohort. Exit `2` means the diagnostic JSON was written
-but its status is `no_eligible_segments`, `no_scored_forecasts`, or
-`partial_candidate_evidence`; do not use it for the Phase 3 model decision.
-Other nonzero exits indicate a query, integrity, partition-manifest, or
-configuration failure.
-
-Print the comparison summary without installing another tool:
-
-```bash
-sudo -u pricecollector /opt/price-collector/.venv/bin/python - "$REPORT" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    report = json.load(stream)
-
-print("status:", report["status"])
-print("range:", report["range"])
-print("timing assumptions:", {
-    key: report["configuration"][key]
-    for key in (
-        "max_future_skew_ms",
-        "futures_availability_delay_ms",
-        "chainlink_availability_delay_ms",
-        "evaluation_phase_offset_ms",
-        "volatility_time_basis",
-    )
-})
-print("session exclusions:", report["data_quality"]["sessions_excluded_by_reason"])
-for candidate in report["candidates"]:
-    cohort = candidate["common_cohort"]
-    metrics = cohort["metrics"]
-    print({
-        "model": candidate["model_version"],
-        "scheduled": candidate["scheduled"],
-        "valid_generated": candidate["valid_generated"],
-        "target_eligible": candidate["target_eligible"],
-        "all_horizon_scored": candidate["scored"],
-        "common_cohort_scored": cohort["scored"],
-        "generation_coverage": candidate["generation_coverage"],
-        "median_abs_error_usd": metrics["model_median_absolute_error_usd"],
-        "baseline_median_abs_error_usd": metrics["baseline_median_absolute_error_usd"],
-        "rmse_usd": metrics["model_rmse_usd"],
-        "baseline_rmse_usd": metrics["baseline_rmse_usd"],
-        "mae_skill_vs_no_change": metrics["mae_skill_vs_no_change"],
-        "wins": metrics["wins"],
-        "ties": metrics["ties"],
-        "losses": metrics["losses"],
-        "directional": metrics["directional"],
-    })
-PY
-```
-
-The summary deliberately reads `common_cohort.metrics`, so every candidate is
-compared on the same generation times. Positive `mae_skill_vs_no_change` means
-the candidate reduced mean absolute error against no-change on those paired
-rows. Do not select a model from directional accuracy alone. Compare error,
-baseline advantage, coverage, the complete directional confusion matrix,
-move-size, expiry,
-raw-bucket-return RMS, and session-boundary slices across multiple
-chronological reports.
-
-The zero-delay example above is one explicit sensitivity point, not a claim
-that Redis publication has zero latency. Before any shorter-horizon model
-selection, preregister and preserve a timing matrix that includes, at minimum,
-25, 50, 100, 200, and 300 ms visibility-delay scenarios at phase offsets 0,
-100, 200, 300, and 400 ms. Use source-specific delay pairs when measured
-publication-completion telemetry is available. Do not inspect the matrix and
-then choose the delay or phase that favors a candidate; freeze the robustness
-rule before the new holdout. Every calibration/holdout pair passed to one v3
-selector run must use exactly the same timing configuration.
-
-Run this at least daily or preserve the derived JSON elsewhere: raw retention
-is configured for 72 hours. Phase 4 partition-boundary, retention, and storage
-budget behavior remains deliberately unproven. The replay reads in short
-time-bounded statements and aborts if the partition manifest changes; rerun the
-same range if maintenance overlaps the job. Never describe a successful replay
-as proof that Phase 4 retention risks are closed.
-
-## Shadow-Signal Phase 3 Provisional Selection
-
-Phase 3 is an offline decision checkpoint. It does not configure or start the
-future shadow worker. It consumes replay schema-version-3 reports, freezes a
-winner using older calibration evidence, and tests only that frozen winner on
-later holdout evidence. It never chooses the model that happens to look best on
-the holdout and never falls back after a holdout failure.
-
-Policy `chronological_holdout_v3` requires, for every replay report:
-
-- at least 10,000 common-cohort scored forecasts;
-- common valid coverage of at least 50%; and
-- common maturation coverage of at least 99%.
-
-The calibration winner and the same frozen model on holdout must each have
-positive pooled MAE skill and positive pooled RMSE skill versus no-change. An
-exact MAE/RMSE efficacy tie abstains. Paired win/loss frequency is diagnostic
-only: a warning appears when wins do not exceed losses, but it cannot affect
-eligibility or ranking because overlapping 500 ms rows are autocorrelated.
-Slice categories with fewer than 500 forecasts or no MAE improvement are also
-surfaced as warnings, not treated as significance tests. These thresholds are
-versioned project policy, not values supplied by `engine.md`.
-
-Policy v3 deliberately keeps the existing 3.0/3.5/4.0-second candidate set. It
-validates the measurement corrections without testing a new horizon. Do not
-add 2.0 or 2.5 seconds to these commands: the expanded grid, timing-robustness
-rule, reference-gap rule, uncertainty method, and evidence windows must be
-preregistered together under a later policy version.
-
-For a new evaluation, generate at least one calibration report followed by one
-strictly later untouched holdout report. Policy v3 was created after the v2
-holdout was inspected, so that window and every other inspected window are now
-calibration-only. V3 cannot reconstruct its corrected directional matrix or
-timing sensitivity from a v1/v2 aggregate report: rerun any still-retained raw
-window with replay v3, or omit it if its raw events have expired. Never pass a
-v1/v2 selection artifact or replay report as v3 replay evidence. Pre-fix v3
-reports also used raw receipt timing for volatility slices and must be
-regenerated before timing-sensitive comparison or selection. The selector
-rejects any report that does not declare
-`configuration.volatility_time_basis="worker_poll_visibility_ms"`. The
-following derives initial windows from the older of the latest completed
-futures and Chainlink sessions:
-
-This offline code update does not require a service restart. Before any later
-timing-sensitive comparison or new selection, regenerate the relevant retained
-raw windows. Existing immutable schema-v2/v3 decision pairs remain loadable
-because volatility slices do not affect live projection or selection ranking;
-do not reuse their markerless reports as new post-fix evidence.
-
-```bash
-END_MS="$(sudo -u postgres psql -At -d price_collector -c "
-SELECT LEAST(
-    max(disconnected_wall_ns) FILTER (
-        WHERE source = 'binance_futures_agg_trade'
-    ),
-    max(disconnected_wall_ns) FILTER (
-        WHERE source = 'polymarket_chainlink_rtds'
-    )
-) / 1000000
-FROM raw_capture.feed_sessions
-WHERE disconnected_wall_ns IS NOT NULL;
-")"
-test -n "$END_MS"
-HOLDOUT_END_MS="$END_MS"
-HOLDOUT_START_MS="$((HOLDOUT_END_MS - 86400000))"
-CALIBRATION_END_MS="$HOLDOUT_START_MS"
-CALIBRATION_START_MS="$((CALIBRATION_END_MS - 86400000))"
-CALIBRATION_REPORT="/var/lib/price-collector/shadow-replay-calibration-${CALIBRATION_START_MS}-${CALIBRATION_END_MS}.json"
-HOLDOUT_REPORT="/var/lib/price-collector/shadow-replay-holdout-${HOLDOUT_START_MS}-${HOLDOUT_END_MS}.json"
-SELECTION_REPORT="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v3-${HOLDOUT_END_MS}.json"
-FUTURES_AVAILABILITY_DELAY_MS=0
-CHAINLINK_AVAILABILITY_DELAY_MS=0
-EVALUATION_PHASE_OFFSET_MS=0
-```
-
-Generate the calibration report first:
-
-```bash
-sudo -u pricecollector \
-  env START_MS="$CALIBRATION_START_MS" END_MS="$CALIBRATION_END_MS" \
-      REPORT="$CALIBRATION_REPORT" \
-      FUTURES_AVAILABILITY_DELAY_MS="$FUTURES_AVAILABILITY_DELAY_MS" \
-      CHAINLINK_AVAILABILITY_DELAY_MS="$CHAINLINK_AVAILABILITY_DELAY_MS" \
-      EVALUATION_PHASE_OFFSET_MS="$EVALUATION_PHASE_OFFSET_MS" \
-  bash -c '
-    set -a
-    . /etc/price-collector/collector.env
-    set +a
-    cd /opt/price-collector
-    exec .venv/bin/python -m price_collector.shadow_signal_replay \
-      --start-ms "$START_MS" \
-      --end-ms "$END_MS" \
-      --max-future-skew-ms 0 \
-      --futures-availability-delay-ms "$FUTURES_AVAILABILITY_DELAY_MS" \
-      --chainlink-availability-delay-ms "$CHAINLINK_AVAILABILITY_DELAY_MS" \
-      --evaluation-phase-offset-ms "$EVALUATION_PHASE_OFFSET_MS" \
-      --output "$REPORT"
-  '
-```
-
-Generate the strictly later holdout report without changing replay settings:
-
-```bash
-sudo -u pricecollector \
-  env START_MS="$HOLDOUT_START_MS" END_MS="$HOLDOUT_END_MS" \
-      REPORT="$HOLDOUT_REPORT" \
-      FUTURES_AVAILABILITY_DELAY_MS="$FUTURES_AVAILABILITY_DELAY_MS" \
-      CHAINLINK_AVAILABILITY_DELAY_MS="$CHAINLINK_AVAILABILITY_DELAY_MS" \
-      EVALUATION_PHASE_OFFSET_MS="$EVALUATION_PHASE_OFFSET_MS" \
-  bash -c '
-    set -a
-    . /etc/price-collector/collector.env
-    set +a
-    cd /opt/price-collector
-    exec .venv/bin/python -m price_collector.shadow_signal_replay \
-      --start-ms "$START_MS" \
-      --end-ms "$END_MS" \
-      --max-future-skew-ms 0 \
-      --futures-availability-delay-ms "$FUTURES_AVAILABILITY_DELAY_MS" \
-      --chainlink-availability-delay-ms "$CHAINLINK_AVAILABILITY_DELAY_MS" \
-      --evaluation-phase-offset-ms "$EVALUATION_PHASE_OFFSET_MS" \
-      --output "$REPORT"
-  '
-```
-
-Confirm all inputs are successful schema-version-3 reports with the causal
-volatility-timing marker, then run the selector. `--calibration-report` may
-repeat; policy v3 requires exactly one strictly later `--holdout-report`.
-
-```bash
-sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
-  "$CALIBRATION_REPORT" "$HOLDOUT_REPORT" <<'PY'
-import json
-import sys
-
-for path in sys.argv[1:]:
-    with open(path, encoding="utf-8") as stream:
-        report = json.load(stream)
-    volatility_time_basis = report["configuration"].get("volatility_time_basis")
-    print(
-        path,
-        "schema=", report["schema_version"],
-        "status=", report["status"],
-        "volatility_time_basis=", volatility_time_basis,
-    )
-    if (
-        report["schema_version"] != 3
-        or report["status"] != "ok"
-        or volatility_time_basis != "worker_poll_visibility_ms"
-    ):
-        raise SystemExit(1)
-PY
-
-SELECTION_EXIT=0
-(
-  cd /opt/price-collector &&
-  sudo -u pricecollector .venv/bin/python \
-    -m price_collector.shadow_signal_selection \
-    --calibration-report "$CALIBRATION_REPORT" \
-    --holdout-report "$HOLDOUT_REPORT" \
-    --output "$SELECTION_REPORT"
-) || SELECTION_EXIT=$?
-printf 'selection_exit=%s\n' "$SELECTION_EXIT"
-if [ -f "$SELECTION_REPORT" ]; then
-  sudo chmod 640 "$SELECTION_REPORT"
-fi
-```
-
-The selector intentionally rejects v1/v2 reports instead of pretending their
-old aggregate directional counters can be upgraded. To reuse an older window
-as v3 calibration, rerun that exact `[start_ms,end_ms)` range from raw events
-with the same explicit v3 timing configuration used above. Repeat
-`--calibration-report` for each resulting v3 file. If the raw window has already
-expired, keep its old artifact as historical evidence but do not include it in
-the v3 decision.
-
-Exit `0` means one frozen calibration winner passed every holdout gate. Exit
-`2` means a valid artifact was written but selection abstained because of
-insufficient evidence, a calibration MAE/RMSE error-gate failure, an exact
-calibration tie, or holdout failure. Exit `1` means the inputs were malformed,
-overlapping, nonchronological, or incompatible.
-
-Inspect the immutable decision and its calibration ranking:
-
-```bash
-sudo -u pricecollector /opt/price-collector/.venv/bin/python - \
-  "$SELECTION_REPORT" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    selection = json.load(stream)
-
-print("status:", selection["status"])
-print("policy:", selection["policy"]["version"])
-print("decision:", selection["decision"])
-print("fingerprint:", selection["provenance"]["selection_fingerprint_sha256"])
-for candidate in selection["candidates"]:
-    print({
-        "rank": candidate["calibration_rank"],
-        "model": candidate["model_version"],
-        "calibration_skill": candidate["calibration"]["metrics"]["mae_skill_vs_no_change"],
-        "holdout_skill": candidate["holdout"]["metrics"]["mae_skill_vs_no_change"],
-        "calibration_gates": candidate["calibration"]["gates"],
-        "holdout_gates": candidate["holdout"]["gates"],
-        "calibration_paired_frequency": candidate["calibration"]["paired_frequency_diagnostic"],
-        "holdout_paired_frequency": candidate["holdout"]["paired_frequency_diagnostic"],
-        "calibration_directional": candidate["calibration"]["metrics"]["directional"],
-        "holdout_directional": candidate["holdout"]["metrics"]["directional"],
-        "slice_warning_count": len(candidate["slice_warnings"]),
-    })
-PY
-```
-
-Preserve every replay input and selection artifact beyond raw retention. Keep
-v1/v2 artifacts as historical evidence; do not overwrite them. Every inspected
-v1/v2 holdout is calibration-only for v3, whose validity must come from one new
-future holdout and a new schema-version-3 selection output filename.
-The selector permits an identical idempotent write but refuses to replace an
-existing artifact with different content; use a new evidence-end filename for
-a genuinely new decision checkpoint.
-Do not rerun the policy against the same holdout to pick a different model. If
-the frozen winner fails, revise the policy under a new version and wait for a
-new future holdout. Phase 4 will explicitly consume an accepted artifact; do
-not manually edit live configuration during Phase 3. This selection does not
-close the still-unproven raw partition, retention, or storage-budget risks.
-
-## Shadow-Signal Phase 4 Standalone Worker
-
-This is Phase 4 in the shadow-signal build order in `engine.md`. It is unrelated
-to the still-deferred raw-capture partition and retention validation also named
+This section operates the current standalone shadow worker. It is unrelated to
+the still-deferred raw-capture partition and retention validation also named
 Phase 4 elsewhere in this guide.
-
-For a standalone, step-by-step migration checklist, use
-[`SHADOW_SIGNAL_PHASE4_MIGRATION.md`](SHADOW_SIGNAL_PHASE4_MIGRATION.md).
 
 The standalone `price-collector-shadow-signal` service reads
 `btc:live:futures` and `btc:live:chainlink` together every 100 ms, runs every
@@ -2946,10 +2554,10 @@ candidate from the accepted Phase 3 decision, and publishes only its frozen
 primary to `btc:live:chainlink_shadow`. The output key has a 2-second TTL. This
 phase adds no PostgreSQL writes and does not expose the signal through the API.
 
-The replay reports and selection artifact are production evidence. Keep their
-originals in `/var/lib/price-collector`; do not copy them into the Git checkout
-or commit them. The activation steps below make immutable runtime copies in a
-root-owned decision directory.
+The SHA-named selection and replay-configuration files in the repository root
+are immutable restore and provenance copies of the accepted decision. The
+activation steps below use byte-identical, root-owned runtime copies under
+`/var/lib/price-collector/shadow-decisions`.
 
 ### 1. Deploy the Phase 4 code
 
@@ -2961,10 +2569,10 @@ sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 sudo -u pricecollector .venv/bin/python -m pytest \
   tests/test_shadow_signal.py \
-  tests/test_shadow_signal_replay.py \
-  tests/test_shadow_signal_selection.py \
   tests/test_shadow_signal_artifact.py \
   tests/test_shadow_signal_collector.py \
+  tests/test_shadow_signal_evaluation.py \
+  tests/test_shadow_signal_reporting.py \
   tests/test_live_cache.py \
   tests/test_config.py \
   tests/test_deployment.py
@@ -2972,14 +2580,13 @@ sudo -u pricecollector .venv/bin/python -m pytest \
 
 There is no schema migration in this phase.
 
-### 2. Identify the accepted Phase 3 evidence
+### 2. Identify the accepted decision evidence
 
-These are the paths produced by the accepted policy-v2 migration. Change them
-only if the actual droplet filenames differ:
+Use the exact SHA-named restore copies shipped in the repository:
 
 ```bash
-SOURCE_SELECTION="/var/lib/price-collector/shadow-primary-selection-chronological-holdout-v2-1783983205028.json"
-SOURCE_REPLAY_CONFIG="/var/lib/price-collector/shadow-replay-holdout-v2-1783896805028-1783983205028.json"
+SOURCE_SELECTION="/opt/price-collector/selection-1783983205028-890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699.json"
+SOURCE_REPLAY_CONFIG="/opt/price-collector/replay-config-1783983205028-e11377f4f4cb0a6bfc91a682347c77d67ed1d81a83d03b798ff1d963fed6b5e9.json"
 
 sudo test -f "$SOURCE_SELECTION"
 sudo test -f "$SOURCE_REPLAY_CONFIG"
@@ -3275,19 +2882,16 @@ redis-cli --raw EXISTS btc:live:chainlink_shadow
 The final command must print `0`. Leave the immutable evidence and dedicated
 environment in place for diagnosis or a later restart.
 
-## Shadow-Signal Phase 5 Matured Evaluations
+## Shadow-signal matured evaluations
 
-This is step 5 of the shadow-signal build order in `engine.md`, not the Binance
-futures source-cutover phase with the same number. It adds the internal
+This current subsystem adds the internal
 `shadow_signal_evaluations` table and a bounded, nonblocking writer to the
 existing standalone shadow worker. It does not add an API field or dashboard
 code.
 
-Use the schema-first, copy/paste rollout and independent rollback in
-[`SHADOW_SIGNAL_PHASE5_MIGRATION.md`](SHADOW_SIGNAL_PHASE5_MIGRATION.md). Keep
-`SHADOW_SIGNAL_EVALUATION_ENABLED=false` until that procedure has applied the
-schema, installed the writer URL without replacing trusted artifact settings,
-and verified the exact table grants.
+Keep `SHADOW_SIGNAL_EVALUATION_ENABLED=false` until `schema.sql` has been
+applied, the writer URL has been installed without replacing trusted artifact
+settings, and the exact table grants have been verified.
 
 When upgrading an existing evaluation deployment to the cohort-wide outcome
 contract, stop `price-collector-shadow-signal` before applying `schema.sql` and
@@ -3332,25 +2936,23 @@ price or raw cache contents. This uses the existing outcome columns and needs no
 schema, environment, publisher, or API change.
 
 If an already-enabled worker reports
-`shadow_signal_evaluations_check17`, disable evaluations immediately and use
-the dedicated `check17` recovery section in that migration guide. It preserves
-the Phase 4 Redis signal and existing evaluation rows while replacing the
-divide-first projection constraint before the writer is re-enabled.
+`shadow_signal_evaluations_check17`, disable evaluations immediately, reapply
+the current `schema.sql`, and verify the named projection constraints before
+the writer is re-enabled. This preserves the Redis signal and existing
+evaluation rows while replacing the divide-first projection constraint.
 
-## Shadow-Signal Phase 6 Live API Exposure
+## Shadow-signal live API exposure
 
-This is step 6 of the shadow-signal build order in `engine.md`. It extends the
-existing Redis-only `GET /markets/current/live` response with
+The current API extends the Redis-only `GET /markets/current/live` response with
 `signals.chainlink_catchup`; it does not add a route, PostgreSQL query, API
 writer credential, dashboard code, schema migration, environment setting, or
 systemd dependency on the optional shadow worker.
 
-Use the ordered deployment, isolation test, rollback, and acceptance procedure
-in [`SHADOW_SIGNAL_PHASE6_MIGRATION.md`](SHADOW_SIGNAL_PHASE6_MIGRATION.md).
-Because `price_collector/live_cache.py` is shared, that procedure restarts the
-three source-price services, then `price-collector-shadow-signal`, and finally
-`price-api`. It does not restart the Polymarket probability collector, Redis,
-or PostgreSQL.
+Because `price_collector/live_cache.py` is shared, changes to it require an
+ordered restart of the three source-price services, then
+`price-collector-shadow-signal`, and finally `price-api`. They do not require a
+restart of the Polymarket probability collector, Redis, or PostgreSQL unless a
+separate change affects those components.
 
 A well-formed signal is returned as an object whether `valid` is true or false.
 An expired, absent, or malformed experimental signal is isolated as
@@ -3358,6 +2960,98 @@ An expired, absent, or malformed experimental signal is isolated as
 HTTP 200. A Redis read failure or malformed source-price payload retains the
 existing HTTP 503 behavior. Phase 7 dashboard work remains outside this
 repository and is not part of this rollout.
+
+## Prospective two-second Chainlink challenger
+
+This checkpoint adds a second, independent shadow worker and a dedicated
+read-only dashboard endpoint. It does not change or restart the accepted
+`price-collector-shadow-signal` worker, its promoted evidence, or
+`btc:live:chainlink_shadow`.
+
+The challenger is fixed as `catchup_v1_l2000_h2000_b100`: 2,000 ms lookback,
+2,000 ms horizon, and beta `1`. It writes only
+`btc:live:chainlink_shadow_2s`, which expires after 2,000 ms, and is exposed at:
+
+```text
+GET /markets/current/live/challengers/chainlink-catchup-2s
+```
+
+This version is lag-only. It does not yet include futures–Chainlink basis
+deviation and must not be described as the accepted production model. The
+service is disabled by default and uses Redis only; do not add either database
+URL to `/etc/price-collector/shadow-signal-2s.env`.
+
+After the change is pushed to GitHub, deploy it from the droplet with:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector .venv/bin/python -m pytest \
+  tests/test_shadow_signal_2s_live.py \
+  tests/test_shadow_signal_2s_collector.py \
+  tests/test_api.py \
+  tests/test_deployment.py \
+  -q
+
+sudo test -e /etc/price-collector/shadow-signal-2s.env || \
+  sudo install -o root -g pricecollector -m 0640 \
+    /opt/price-collector/deployment/shadow-signal-2s.env.example \
+    /etc/price-collector/shadow-signal-2s.env
+sudo grep -E '^(SHADOW_SIGNAL_2S_ENABLED|REDIS_HOST|REDIS_PORT|REDIS_DB)=' \
+  /etc/price-collector/shadow-signal-2s.env
+sudo sed -i \
+  's/^SHADOW_SIGNAL_2S_ENABLED=false$/SHADOW_SIGNAL_2S_ENABLED=true/' \
+  /etc/price-collector/shadow-signal-2s.env
+sudo grep -qx 'SHADOW_SIGNAL_2S_ENABLED=true' \
+  /etc/price-collector/shadow-signal-2s.env
+sudo chown root:pricecollector \
+  /etc/price-collector/shadow-signal-2s.env
+sudo chmod 0640 /etc/price-collector/shadow-signal-2s.env
+
+sudo cp \
+  /opt/price-collector/deployment/price-collector-shadow-signal-2s.service \
+  /etc/systemd/system/price-collector-shadow-signal-2s.service
+sudo systemctl daemon-reload
+sudo systemctl enable price-collector-shadow-signal-2s
+sudo systemctl restart price-collector-shadow-signal-2s
+sudo systemctl restart price-api
+```
+
+The order matters: install and enable the challenger environment first, start
+its isolated worker, and then restart `price-api` so the new route is loaded.
+No schema application, PostgreSQL restart, Redis restart, or accepted-shadow
+restart is required.
+
+Verify the service, its short-lived key, both API contracts, and bounded logs:
+
+```bash
+sudo systemctl status \
+  price-collector-shadow-signal-2s price-api \
+  --no-pager
+redis-cli -h 127.0.0.1 --raw PTTL btc:live:chainlink_shadow_2s
+curl -fsS \
+  http://127.0.0.1:9000/markets/current/live/challengers/chainlink-catchup-2s
+curl -fsS http://127.0.0.1:9000/markets/current/live
+sudo journalctl -u price-collector-shadow-signal-2s -n 100 --no-pager
+sudo journalctl -u price-api -n 50 --no-pager
+```
+
+A running, healthy worker should keep the `PTTL` between `1` and `2000` ms.
+When inputs are temporarily unusable, the endpoint remains HTTP 200 with a
+well-formed invalid prediction; if the worker is stopped and the key expires,
+the endpoint remains HTTP 200 with `"prediction": null`.
+
+To stop only the prospective experiment without affecting either producer or
+the accepted shadow signal:
+
+```bash
+sudo systemctl disable --now price-collector-shadow-signal-2s
+sleep 3
+test "$(redis-cli -h 127.0.0.1 --raw EXISTS btc:live:chainlink_shadow_2s)" -eq 0
+curl -fsS \
+  http://127.0.0.1:9000/markets/current/live/challengers/chainlink-catchup-2s
+```
 
 ## Shadow-Signal Evaluation Reporting API
 

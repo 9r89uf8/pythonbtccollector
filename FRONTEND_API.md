@@ -105,6 +105,7 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/current/shadow-evaluations/download` | Download rounded current-window shadow evaluations as JSON | PostgreSQL |
 | `GET` | `/markets/{market_id}/shadow-evaluations/download` | Download one target window's rounded shadow evaluations as JSON | PostgreSQL |
 | `GET` | `/markets/current/live` | Lowest-latency current prices and experimental Chainlink catch-up signal | Redis only |
+| `GET` | `/markets/current/live/challengers/chainlink-catchup-2s` | Separate unselected two-second Chainlink catch-up challenger | Redis only |
 
 ## Health
 
@@ -1396,8 +1397,9 @@ Reads `btc:live:binance_spot`, `btc:live:chainlink`, `btc:live:futures`, and
 and does not return historical samples, probabilities, mark/index prices, open
 interest, flow, book data, or persisted shadow evaluations.
 
-See [`LIVE_DATA.md`](LIVE_DATA.md) for the upstream extraction paths, Redis
-handoff, freshness semantics, and recommended dashboard polling behavior.
+Upstream extraction and Redis handoff are summarized in
+[`README.md`](README.md); deployment and freshness checks are in
+[`OPERATIONS.md`](OPERATIONS.md).
 
 Query parameters:
 
@@ -1568,6 +1570,108 @@ raw value or turn an experimental model-payload problem into an outage of the
 actual live-price response. A Redis connection or `MGET` failure still returns
 the unchanged `503 live cache unavailable` response.
 
+## Two-Second Chainlink Catch-Up Challenger
+
+### `GET /markets/current/live/challengers/chainlink-catchup-2s`
+
+Reads the separate short-lived `btc:live:chainlink_shadow_2s` Redis value. It
+does not query PostgreSQL and does not alter the four-key `MGET`, response
+shape, or accepted `signals.chainlink_catchup` value returned by
+`GET /markets/current/live`. There are no query parameters.
+
+```bash
+curl "${API_BASE_URL}/markets/current/live/challengers/chainlink-catchup-2s"
+```
+
+The response wrapper is always schema version `1`. A missing or expired value,
+or a value rejected by the challenger's strict decoder, returns HTTP `200`
+with a null prediction:
+
+```json
+{
+  "schema_version": 1,
+  "server_time_ms": 1783988794075,
+  "market_id": 5946629,
+  "market_start_ms": 1783988700000,
+  "market_end_ms": 1783989000000,
+  "publication_role": "challenger",
+  "prediction": null
+}
+```
+
+When present, `prediction` is the complete strict two-second signal payload:
+
+```json
+{
+  "schema_version": 1,
+  "server_time_ms": 1783988794075,
+  "market_id": 5946629,
+  "market_start_ms": 1783988700000,
+  "market_end_ms": 1783989000000,
+  "publication_role": "challenger",
+  "prediction": {
+    "schema_version": 1,
+    "mode": "shadow_candidate",
+    "publication_role": "challenger",
+    "experiment_version": "prospective_catchup_2s_v1",
+    "model_version": "catchup_v1_l2000_h2000_b100",
+    "beta": "1",
+    "futures_lookback_ms": 2000,
+    "forecast_horizon_ms": 2000,
+    "generated_ms": 1783988794005,
+    "target_ms": 1783988796005,
+    "valid": true,
+    "status": "valid",
+    "invalid_reasons": [],
+    "state": "anchored",
+    "current_chainlink": "62290.21096323273",
+    "projected_chainlink": "62292.00981418305598931493660",
+    "pending_move": "1.79885095032598931493660",
+    "pending_move_bps": "0.2887854965506176800898399415",
+    "direction": "up",
+    "futures_now": "62331.80",
+    "futures_reference": "62330.00",
+    "chainlink_now_source_timestamp_ms": 1783988792000,
+    "chainlink_now_received_ms": 1783988793346,
+    "anchor_chainlink_source_timestamp_ms": 1783988792000,
+    "anchor_chainlink_received_ms": 1783988793346,
+    "futures_now_source_timestamp_ms": 1783988793451,
+    "futures_now_received_ms": 1783988793638,
+    "futures_reference_source_timestamp_ms": 1783988790826,
+    "futures_reference_received_ms": 1783988791015,
+    "futures_reference_target_ms": 1783988791346,
+    "futures_reference_gap_ms": 331,
+    "futures_received_age_ms": 367,
+    "chainlink_received_age_ms": 659,
+    "market_id": 5946629,
+    "market_start_ms": 1783988700000,
+    "market_end_ms": 1783989000000,
+    "ms_to_market_end": 205995,
+    "full_horizon_before_market_end": true,
+    "signal_age_ms": 70
+  }
+}
+```
+
+The API adds `signal_age_ms = max(0, server_time_ms - generated_ms)` without
+changing its Decimal strings. `target_ms` is exactly two seconds after
+`generated_ms`; the independent `futures_lookback_ms` is also two seconds for
+this experiment. A well-formed payload with `valid: false` remains an object;
+consumers must clear any earlier projection and display its status instead.
+
+This endpoint is an unselected, lag-only challenger. It must not replace or be
+presented as the accepted `signals.chainlink_catchup` model. It also does not
+include the normal-basis or basis-implied component discussed in later hybrid
+research; that work still requires broader chronological evaluation.
+
+A malformed challenger is logged without its raw contents and produces the
+same HTTP `200` null response as an absent key. A Redis connection/read failure
+returns HTTP `503` with:
+
+```json
+{ "detail": "live cache unavailable" }
+```
+
 ## Common Errors
 
 Application-raised FastAPI errors normally use this JSON shape:
@@ -1589,7 +1693,7 @@ Expected statuses are:
 | `405` | The route was called with a method other than `GET` |
 | `422` | A typed path/query value is invalid, such as a non-integer market ID, a discovery `limit` outside `1..50`, or a missing/unsupported shadow-evaluation `model_version` |
 | `500` | A PostgreSQL-backed shadow-evaluation request failed or its persisted result violated the public reporting invariants |
-| `503` | `/markets/current/live` cannot read Redis or one of its three actual source-price payloads is malformed, or `/healthz` cannot query PostgreSQL |
+| `503` | A live route cannot read Redis, one of `/markets/current/live`'s three actual source-price payloads is malformed, or `/healthz` cannot query PostgreSQL |
 
 The exact `detail` text is useful for logs but should not be treated as a stable
 frontend enum. Use the HTTP status and the endpoint context.

@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 import price_collector.shadow_signal_artifact as artifact_module
-import price_collector.shadow_signal_selection as selection_module
 from price_collector.shadow_signal_artifact import (
     ShadowSignalArtifactError,
     load_activated_selection,
@@ -384,16 +383,6 @@ def test_v3_activation_accepts_worker_visible_volatility_evidence(tmp_path):
 
     assert activated.selection_schema_version == 3
     assert activated.policy_version == "chronological_holdout_v3"
-
-
-def test_v3_activation_contract_matches_the_selection_writer():
-    assert artifact_module._EXPECTED_POLICY_V3 == selection_module._json_ready(
-        selection_module._policy_payload()
-    )
-    assert [
-        (version, horizon_ms)
-        for version, horizon_ms, _beta in artifact_module._EXPECTED_MODEL_SPECS
-    ] == list(selection_module.EXPECTED_CANDIDATES)
 
 
 def test_v3_selection_cannot_use_v2_policy_even_with_recalculated_fingerprint(

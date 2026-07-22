@@ -17,6 +17,7 @@ from price_collector.live_cache import (
     LiveShadowSignal,
 )
 from price_collector.market import MARKET_MS
+from price_collector.shadow_signal_2s_live import LiveShadowSignal2s
 from price_collector.shadow_signal_reporting import ShadowEvaluationFetchResult
 
 
@@ -55,10 +56,28 @@ class FakeLiveCache:
         self.closed = True
 
 
+class FakeShadowSignal2sStore:
+    def __init__(self) -> None:
+        self.closed = False
+        self.signal = None
+        self.read_error = None
+        self.get_calls = 0
+
+    async def get_signal(self):
+        self.get_calls += 1
+        if self.read_error is not None:
+            raise self.read_error
+        return self.signal
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def client(monkeypatch):
     fake_pool = FakePool()
     fake_live_cache = FakeLiveCache()
+    fake_shadow_signal_2s_store = FakeShadowSignal2sStore()
 
     async def fake_create_read_pool(settings):
         return fake_pool
@@ -72,12 +91,20 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(api, "create_read_pool", fake_create_read_pool)
     monkeypatch.setattr(api, "create_live_cache", lambda settings: fake_live_cache)
+    monkeypatch.setattr(
+        api,
+        "create_shadow_signal_2s_store",
+        lambda settings: fake_shadow_signal_2s_store,
+    )
     monkeypatch.setattr(api, "health_check", fake_health_check)
 
     with TestClient(api.app) as test_client:
         test_client.fake_pool = fake_pool
         test_client.fake_live_cache = fake_live_cache
+        test_client.fake_shadow_signal_2s_store = fake_shadow_signal_2s_store
         yield test_client
+
+    assert fake_shadow_signal_2s_store.closed is True
 
 
 def utc_dt(year, month, day, hour, minute, second):
@@ -129,6 +156,51 @@ def live_shadow_signal(**overrides):
     }
     values.update(overrides)
     return LiveShadowSignal(**values)
+
+
+def live_shadow_signal_2s(**overrides):
+    values = {
+        "schema_version": 1,
+        "mode": "shadow_candidate",
+        "publication_role": "challenger",
+        "experiment_version": "prospective_catchup_2s_v1",
+        "model_version": "catchup_v1_l2000_h2000_b100",
+        "beta": Decimal("1"),
+        "futures_lookback_ms": 2_000,
+        "forecast_horizon_ms": 2_000,
+        "generated_ms": 1_783_459_250_100,
+        "target_ms": 1_783_459_252_100,
+        "valid": True,
+        "status": "valid",
+        "invalid_reasons": (),
+        "state": "anchored",
+        "current_chainlink": Decimal("62000"),
+        "projected_chainlink": Decimal("62000.99838969404186795491142"),
+        "pending_move": Decimal("0.99838969404186795491142"),
+        "pending_move_bps": Decimal("0.1610305958132045088566806452"),
+        "direction": "up",
+        "futures_now": Decimal("62101"),
+        "futures_reference": Decimal("62100"),
+        "chainlink_now_source_timestamp_ms": 1_783_459_250_000,
+        "chainlink_now_received_ms": 1_783_459_250_070,
+        "anchor_chainlink_source_timestamp_ms": 1_783_459_250_000,
+        "anchor_chainlink_received_ms": 1_783_459_250_070,
+        "futures_now_source_timestamp_ms": 1_783_459_250_050,
+        "futures_now_received_ms": 1_783_459_250_090,
+        "futures_reference_source_timestamp_ms": 1_783_459_248_000,
+        "futures_reference_received_ms": 1_783_459_248_050,
+        "futures_reference_target_ms": 1_783_459_248_070,
+        "futures_reference_gap_ms": 20,
+        "futures_received_age_ms": 10,
+        "chainlink_received_age_ms": 30,
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "ms_to_market_end": 249_900,
+        "full_horizon_before_market_end": True,
+    }
+    values.update(overrides)
+    return LiveShadowSignal2s(**values)
 
 
 def test_healthz_success(client):
@@ -1000,6 +1072,7 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
             CHAINLINK_SHADOW_LIVE_KEY,
         ]
     ]
+    assert client.fake_shadow_signal_2s_store.get_calls == 0
     assert client.fake_pool.acquire_calls == 0
 
 
@@ -1076,6 +1149,144 @@ def test_markets_current_live_preserves_cache_error_status(
     assert response.status_code == 503
     assert response.json() == {"detail": detail}
     assert client.fake_pool.acquire_calls == 0
+
+
+def test_chainlink_catchup_2s_challenger_is_redis_only(client, monkeypatch):
+    client.fake_shadow_signal_2s_store.signal = live_shadow_signal_2s()
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get(
+        "/markets/current/live/challengers/chainlink-catchup-2s"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": 1,
+        "server_time_ms": 1_783_459_250_123,
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "publication_role": "challenger",
+        "prediction": {
+            "schema_version": 1,
+            "mode": "shadow_candidate",
+            "publication_role": "challenger",
+            "experiment_version": "prospective_catchup_2s_v1",
+            "model_version": "catchup_v1_l2000_h2000_b100",
+            "beta": "1",
+            "futures_lookback_ms": 2_000,
+            "generated_ms": 1_783_459_250_100,
+            "target_ms": 1_783_459_252_100,
+            "forecast_horizon_ms": 2_000,
+            "valid": True,
+            "status": "valid",
+            "invalid_reasons": [],
+            "state": "anchored",
+            "current_chainlink": "62000",
+            "projected_chainlink": "62000.99838969404186795491142",
+            "pending_move": "0.99838969404186795491142",
+            "pending_move_bps": "0.1610305958132045088566806452",
+            "direction": "up",
+            "futures_now": "62101",
+            "futures_reference": "62100",
+            "chainlink_now_source_timestamp_ms": 1_783_459_250_000,
+            "chainlink_now_received_ms": 1_783_459_250_070,
+            "anchor_chainlink_source_timestamp_ms": 1_783_459_250_000,
+            "anchor_chainlink_received_ms": 1_783_459_250_070,
+            "futures_now_source_timestamp_ms": 1_783_459_250_050,
+            "futures_now_received_ms": 1_783_459_250_090,
+            "futures_reference_source_timestamp_ms": 1_783_459_248_000,
+            "futures_reference_received_ms": 1_783_459_248_050,
+            "futures_reference_target_ms": 1_783_459_248_070,
+            "futures_reference_gap_ms": 20,
+            "futures_received_age_ms": 10,
+            "chainlink_received_age_ms": 30,
+            "market_id": 5_944_864,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+            "ms_to_market_end": 249_900,
+            "full_horizon_before_market_end": True,
+            "signal_age_ms": 23,
+        },
+    }
+    assert client.fake_shadow_signal_2s_store.get_calls == 1
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_chainlink_catchup_2s_challenger_returns_null_when_unavailable_or_rejected(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get(
+        "/markets/current/live/challengers/chainlink-catchup-2s"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["prediction"] is None
+    assert client.fake_shadow_signal_2s_store.get_calls == 1
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_chainlink_catchup_2s_challenger_keeps_well_formed_invalid_signal(
+    client,
+    monkeypatch,
+):
+    client.fake_shadow_signal_2s_store.signal = replace(
+        live_shadow_signal_2s(),
+        valid=False,
+        status="futures_stale",
+        invalid_reasons=("futures_stale",),
+        projected_chainlink=None,
+        pending_move=None,
+        pending_move_bps=None,
+        direction=None,
+        futures_reference=None,
+        anchor_chainlink_source_timestamp_ms=None,
+        anchor_chainlink_received_ms=None,
+        futures_reference_source_timestamp_ms=None,
+        futures_reference_received_ms=None,
+        futures_reference_target_ms=None,
+        futures_reference_gap_ms=None,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get(
+        "/markets/current/live/challengers/chainlink-catchup-2s"
+    )
+
+    assert response.status_code == 200
+    prediction = response.json()["prediction"]
+    assert prediction["valid"] is False
+    assert prediction["status"] == "futures_stale"
+    assert prediction["invalid_reasons"] == ["futures_stale"]
+    assert prediction["projected_chainlink"] is None
+    assert prediction["signal_age_ms"] == 23
+
+
+def test_chainlink_catchup_2s_challenger_returns_503_on_redis_failure(client):
+    client.fake_shadow_signal_2s_store.read_error = OSError("redis unavailable")
+
+    response = client.get(
+        "/markets/current/live/challengers/chainlink-catchup-2s"
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "live cache unavailable"}
+    assert client.fake_shadow_signal_2s_store.get_calls == 1
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_chainlink_catchup_2s_challenger_has_no_query_parameters(client):
+    operation = client.get("/openapi.json").json()["paths"][
+        "/markets/current/live/challengers/chainlink-catchup-2s"
+    ]["get"]
+
+    assert operation.get("parameters", []) == []
 
 
 def test_markets_download_returns_attachment_filename(client, monkeypatch):

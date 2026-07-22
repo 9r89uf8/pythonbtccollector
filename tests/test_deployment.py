@@ -164,6 +164,51 @@ def test_shadow_signal_service_is_isolated_and_ordered_after_producers():
     assert "ReadWritePaths=" not in service
 
 
+def test_shadow_signal_2s_env_is_disabled_and_redis_only():
+    lines = (
+        ROOT / "deployment" / "shadow-signal-2s.env.example"
+    ).read_text().splitlines()
+
+    assert "SHADOW_SIGNAL_2S_ENABLED=false" in lines
+    assert "SHADOW_SIGNAL_2S_POLL_MS=100" in lines
+    assert "SHADOW_SIGNAL_2S_TTL_MS=2000" in lines
+    assert "REDIS_HOST=127.0.0.1" in lines
+    assert "REDIS_PORT=6379" in lines
+    assert not any(line.startswith("DATABASE_URL=") for line in lines)
+    assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
+    assert not any("SELECTION" in line for line in lines)
+    assert not any("DECISION" in line for line in lines)
+
+
+def test_shadow_signal_2s_service_is_redis_only_and_hardened():
+    service = (
+        ROOT / "deployment" / "price-collector-shadow-signal-2s.service"
+    ).read_text()
+
+    assert (
+        "EnvironmentFile=/etc/price-collector/shadow-signal-2s.env"
+        in service
+    )
+    assert (
+        "ExecStart=/opt/price-collector/.venv/bin/python "
+        "-m price_collector.shadow_signal_2s_collector"
+    ) in service
+    assert "redis-server.service" in service
+    assert "price-collector-binance-futures.service" in service
+    assert "price-collector-polymarket-chainlink.service" in service
+    assert "postgresql.service" not in service
+    assert "Restart=on-failure" in service
+    assert "StartLimitIntervalSec=60" in service
+    assert "StartLimitBurst=3" in service
+    assert "NoNewPrivileges=true" in service
+    assert "PrivateDevices=true" in service
+    assert "PrivateTmp=true" in service
+    assert "ProtectSystem=strict" in service
+    assert "ProtectHome=true" in service
+    assert "CapabilityBoundingSet=\n" in service
+    assert "ReadWritePaths=" not in service
+
+
 def test_collector_services_depend_on_local_redis_service():
     for filename in (
         "price-collector.service",

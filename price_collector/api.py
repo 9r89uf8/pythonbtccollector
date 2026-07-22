@@ -27,6 +27,11 @@ from price_collector.live_cache import (
     create_live_cache,
 )
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.shadow_signal_2s_live import (
+    SHADOW_SIGNAL_2S_TRANSPORT_ERRORS,
+    create_shadow_signal_2s_store,
+    serialize_shadow_signal_2s,
+)
 from price_collector.shadow_signal_reporting import (
     MAX_MARKET_ID,
     SHADOW_EVALUATION_REPORT_SCHEMA_VERSION,
@@ -372,17 +377,24 @@ def get_live_cache(request: Request) -> Any:
     return request.app.state.live_cache
 
 
+def get_shadow_signal_2s_store(request: Request) -> Any:
+    return request.app.state.shadow_signal_2s_store
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
     pool = await create_read_pool(settings)
     live_cache = create_live_cache(settings)
+    shadow_signal_2s_store = create_shadow_signal_2s_store(settings)
     app.state.settings = settings
     app.state.pool = pool
     app.state.live_cache = live_cache
+    app.state.shadow_signal_2s_store = shadow_signal_2s_store
     try:
         yield
     finally:
+        await shadow_signal_2s_store.close()
         await live_cache.close()
         await pool.close()
 
@@ -650,6 +662,33 @@ async def markets_current_live(
         raise HTTPException(status_code=503, detail="live cache unavailable") from exc
     except LiveCachePayloadError as exc:
         raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
+
+
+@app.get("/markets/current/live/challengers/chainlink-catchup-2s")
+async def markets_current_live_chainlink_catchup_2s(
+    request: Request,
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    sample_second_ms = (now_ms // 1000) * 1000
+    window = market_for_sample_second(sample_second_ms)
+
+    try:
+        signal = await get_shadow_signal_2s_store(request).get_signal()
+    except SHADOW_SIGNAL_2S_TRANSPORT_ERRORS as exc:
+        raise HTTPException(status_code=503, detail="live cache unavailable") from exc
+
+    return {
+        "schema_version": 1,
+        "server_time_ms": now_ms,
+        "market_id": window.market_id,
+        "market_start_ms": window.market_start_ms,
+        "market_end_ms": window.market_end_ms,
+        "publication_role": "challenger",
+        "prediction": serialize_shadow_signal_2s(
+            signal,
+            server_time_ms=now_ms,
+        ),
+    }
 
 
 @app.get(
