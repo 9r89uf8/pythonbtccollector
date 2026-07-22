@@ -244,6 +244,26 @@ def _validated_database_timeout(value: float, field_name: str) -> float:
     return value
 
 
+def _validated_shadow_evaluation_model_versions(
+    model_versions: Optional[Sequence[str]],
+) -> Optional[tuple[str, ...]]:
+    if model_versions is None:
+        return None
+    if isinstance(model_versions, (str, bytes)):
+        raise TypeError("model_versions must be a sequence of strings")
+    try:
+        frozen = tuple(model_versions)
+    except TypeError as exc:
+        raise TypeError("model_versions must be a sequence of strings") from exc
+    if not frozen:
+        raise ValueError("model_versions must not be empty")
+    if not all(isinstance(version, str) and version.strip() for version in frozen):
+        raise ValueError("model_versions must contain non-empty strings")
+    if len(set(frozen)) != len(frozen):
+        raise ValueError("model_versions must be unique")
+    return frozen
+
+
 async def create_shadow_evaluation_pool(
     database_url: str,
     *,
@@ -902,11 +922,15 @@ class AsyncpgShadowEvaluationBackend:
         self,
         pool: asyncpg.Pool,
         *,
+        model_versions: Optional[Sequence[str]] = None,
         connect_timeout_seconds: float = (
             SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
         ),
     ) -> None:
         self._pool = pool
+        self._model_versions = _validated_shadow_evaluation_model_versions(
+            model_versions
+        )
         self._connect_timeout_seconds = _validated_database_timeout(
             connect_timeout_seconds,
             "connect_timeout_seconds",
@@ -1029,6 +1053,16 @@ class AsyncpgShadowEvaluationBackend:
         cohorts = _shadow_evaluation_database_cohorts(tuple(cohorts))
         if not cohorts:
             return ShadowEvaluationCohortWriteResult()
+        if self._model_versions is not None:
+            for cohort in cohorts:
+                cohort_model_versions = tuple(
+                    record.model_version for record in cohort.records
+                )
+                if cohort_model_versions != self._model_versions:
+                    raise ValueError(
+                        "evaluation cohort model set or order does not match "
+                        "backend models"
+                    )
         async with self._pool.acquire(
             timeout=self._connect_timeout_seconds
         ) as connection:
@@ -1077,11 +1111,24 @@ class AsyncpgShadowEvaluationBackend:
         if limit <= 0:
             raise ValueError("limit must be positive")
 
+        selection_scope_sql = ""
+        deletion_scope_sql = ""
+        arguments: tuple[Any, ...] = (cutoff_generated_ms, limit)
+        if self._model_versions is not None:
+            selection_scope_sql = (
+                "\n                      AND model_version = ANY($3::TEXT[])"
+            )
+            deletion_scope_sql = (
+                "\n                  AND evaluations.model_version "
+                "= ANY($3::TEXT[])"
+            )
+            arguments += (self._model_versions,)
+
         async with self._pool.acquire(
             timeout=self._connect_timeout_seconds
         ) as connection:
             status = await connection.execute(
-                """
+                f"""
                 WITH expired_cohort_counts AS (
                     SELECT
                         selection_schema_version,
@@ -1092,7 +1139,7 @@ class AsyncpgShadowEvaluationBackend:
                         generated_ms,
                         count(*) AS cohort_rows
                     FROM shadow_signal_evaluations
-                    WHERE generated_ms < $1
+                    WHERE generated_ms < $1{selection_scope_sql}
                     GROUP BY
                         generated_ms,
                         selection_artifact_sha256,
@@ -1142,9 +1189,9 @@ class AsyncpgShadowEvaluationBackend:
                         = expired_cohorts.selection_artifact_sha256
                   AND evaluations.selection_evidence_end_ms
                         = expired_cohorts.selection_evidence_end_ms
+                  {deletion_scope_sql}
                 """,
-                cutoff_generated_ms,
-                limit,
+                *arguments,
             )
 
         command, separator, count = status.partition(" ")
@@ -1161,6 +1208,7 @@ class AsyncpgShadowEvaluationBackend:
 async def create_shadow_evaluation_backend(
     database_url: str,
     *,
+    model_versions: Sequence[str],
     connect_timeout_seconds: float = (
         SHADOW_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
     ),
@@ -1168,6 +1216,11 @@ async def create_shadow_evaluation_backend(
         SHADOW_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS
     ),
 ) -> AsyncpgShadowEvaluationBackend:
+    frozen_model_versions = _validated_shadow_evaluation_model_versions(
+        model_versions
+    )
+    if frozen_model_versions is None:
+        raise ValueError("model_versions must not be empty")
     pool = await create_shadow_evaluation_pool(
         database_url,
         connect_timeout_seconds=connect_timeout_seconds,
@@ -1175,6 +1228,7 @@ async def create_shadow_evaluation_backend(
     )
     return AsyncpgShadowEvaluationBackend(
         pool,
+        model_versions=frozen_model_versions,
         connect_timeout_seconds=connect_timeout_seconds,
     )
 

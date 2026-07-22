@@ -20,6 +20,8 @@ from price_collector.shadow_signal_reporting import (
 
 MODEL_VERSION = "catchup_ratio_l3000_b100"
 HORIZON_MS = 3_000
+CHALLENGER_MODEL_VERSION = "catchup_v1_l2000_h2000_b100"
+CHALLENGER_HORIZON_MS = 2_000
 WINDOW = MarketWindow(
     market_id=10,
     market_start_ms=10 * MARKET_MS,
@@ -100,6 +102,29 @@ def evaluation_row(
             else None
         ),
     }
+    row.update(overrides)
+    return row
+
+
+def challenger_evaluation_row(**overrides):
+    row = evaluation_row()
+    generated_ms = row["generated_ms"]
+    target_ms = generated_ms + CHALLENGER_HORIZON_MS
+    row.update(
+        {
+            "model_version": CHALLENGER_MODEL_VERSION,
+            "target_ms": target_ms,
+            "matured_ms": target_ms + 7,
+            "horizon_ms": CHALLENGER_HORIZON_MS,
+            "full_horizon_before_forecast_market_end": (
+                target_ms
+                <= (row["forecast_market_id"] + 1) * MARKET_MS
+            ),
+            "actual_chainlink_source_timestamp_ms": target_ms - 200,
+            "actual_chainlink_received_ms": target_ms - 100,
+            "actual_chainlink_age_at_target_ms": 100,
+        }
+    )
     row.update(overrides)
     return row
 
@@ -883,9 +908,33 @@ def test_unsupported_model_is_rejected_before_database_acquisition():
         shadow_evaluation_model_spec("unknown_model")
 
 
+def test_two_second_challenger_uses_the_same_report_and_point_shape():
+    primary = build_report([evaluation_row()])
+    challenger = build_report(
+        [challenger_evaluation_row()],
+        model_version=CHALLENGER_MODEL_VERSION,
+    )
+
+    assert challenger["model"]["model_version"] == CHALLENGER_MODEL_VERSION
+    assert challenger["model"]["horizon_ms"] == CHALLENGER_HORIZON_MS
+    assert challenger["model"]["beta"] == "1"
+    assert challenger["points"][0]["model_version"] == (
+        CHALLENGER_MODEL_VERSION
+    )
+    assert challenger["points"][0]["target_ms"] == (
+        challenger["points"][0]["generated_ms"] + CHALLENGER_HORIZON_MS
+    )
+    assert set(challenger) == set(primary)
+    assert set(challenger["model"]) == set(primary["model"])
+    assert set(challenger["coverage"]) == set(primary["coverage"])
+    assert set(challenger["performance"]) == set(primary["performance"])
+    assert set(challenger["points"][0]) == set(primary["points"][0])
+
+
 @pytest.mark.parametrize(
     ("model_version", "horizon_ms"),
     (
+        ("catchup_v1_l2000_h2000_b100", 2_000),
         ("catchup_ratio_l3000_b100", 3_000),
         ("catchup_ratio_l3500_b100", 3_500),
         ("catchup_ratio_l4000_b100", 4_000),

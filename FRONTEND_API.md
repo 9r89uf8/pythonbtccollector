@@ -934,19 +934,30 @@ Supported values and their fixed report metadata are:
 
 | `model_version` | `horizon_ms` | `beta` |
 | --- | ---: | ---: |
+| `catchup_v1_l2000_h2000_b100` | `2000` | `"1"` |
 | `catchup_ratio_l3000_b100` | `3000` | `"1"` |
 | `catchup_ratio_l3500_b100` | `3500` | `"1"` |
 | `catchup_ratio_l4000_b100` | `4000` | `"1"` |
 
 There is no implicit default and the API does not choose or rerank a model for
-the caller. A dashboard should request its explicitly configured frozen
-primary and verify the returned selection identity rather than selecting the
-candidate with the best recent result.
+the caller. The two-second challenger and the accepted three-second primary use
+the exact same report, point, chart, performance, and rounded-download shape.
+A dashboard lag toggle therefore changes only `model_version`:
+
+| Dashboard choice | `model_version` | Status |
+| --- | --- | --- |
+| 2 seconds | `catchup_v1_l2000_h2000_b100` | Prospective challenger |
+| 3 seconds | `catchup_ratio_l3000_b100` | Accepted primary |
+
+Keep the status visible; the identical transport shape does not make the
+two-second challenger selected or production-proven. Do not merge points from
+different model versions or selection identities into one series.
 
 Calls:
 
 ```bash
 curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
+curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_v1_l2000_h2000_b100"
 curl "${API_BASE_URL}/markets/5946630/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
 curl -OJ "${API_BASE_URL}/markets/current/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
 curl -OJ "${API_BASE_URL}/markets/5946630/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
@@ -955,7 +966,12 @@ curl -OJ "${API_BASE_URL}/markets/5946630/shadow-evaluations/download?model_vers
 Browser example using the `apiGet` helper from the access section:
 
 ```javascript
-const modelVersion = "catchup_ratio_l3000_b100";
+const modelVersionByLag = {
+  2000: "catchup_v1_l2000_h2000_b100",
+  3000: "catchup_ratio_l3000_b100",
+};
+const selectedLagMs = 2000;
+const modelVersion = modelVersionByLag[selectedLagMs];
 
 const currentEvaluations = await apiGet(
   "/markets/current/shadow-evaluations",
@@ -1351,11 +1367,13 @@ after derived-evidence retention has removed older rows.
 `evaluation_semantics.scored_input_max_future_skew_ms` remains present and zero
 even when there are no points.
 
-Derived evaluation retention defaults to `168` hours (seven days), not seven
-minutes, although the production environment can configure a different value
-of at least 24 hours. Cleanup is bounded and asynchronous, and queue loss or a
-disabled evaluator can create gaps, so a download is a snapshot of retained
-evidence rather than a completeness guarantee or permanent archive.
+Derived challenger evaluation retention is `168` hours (seven days), not seven
+minutes. Cleanup is bounded, asynchronous, and scoped to each worker's frozen
+model set even though the workers share a table. Queue loss or a disabled
+evaluator can create gaps, so a download is a snapshot of retained evidence
+rather than a completeness guarantee or permanent archive. The same empty-market
+behavior applies to the two-second and three-second model versions; each is
+selected independently with the required query value.
 
 Each current route snapshots `server_time_ms` and its corresponding market once
 before querying PostgreSQL. Its returned `market` object and attachment
@@ -1663,6 +1681,38 @@ This endpoint is an unselected, lag-only challenger. It must not replace or be
 presented as the accepted `signals.chainlink_catchup` model. It also does not
 include the normal-basis or basis-implied component discussed in later hybrid
 research; that work still requires broader chronological evaluation.
+
+For retained charts, metrics, and downloads, request the common
+`/shadow-evaluations` routes documented above with
+`model_version=catchup_v1_l2000_h2000_b100`. Those responses have the same
+schema as the accepted three-second model, so the dashboard can reuse one
+renderer and switch only the requested model version.
+
+For the live card, keep the existing price request and select the corresponding
+cached prediction. The two payloads share all display fields; normalize the two
+timing aliases once:
+
+```javascript
+const live = await apiGet("/markets/current/live");
+const challenger = selectedLagMs === 2000
+  ? await apiGet("/markets/current/live/challengers/chainlink-catchup-2s")
+  : null;
+
+const rawPrediction = selectedLagMs === 2000
+  ? challenger?.prediction
+  : live.signals.chainlink_catchup;
+
+const prediction = rawPrediction == null ? null : {
+  ...rawPrediction,
+  horizon_ms:
+    rawPrediction.horizon_ms ?? rawPrediction.forecast_horizon_ms,
+  estimated_lag_ms:
+    rawPrediction.estimated_lag_ms ?? rawPrediction.futures_lookback_ms,
+};
+```
+
+This leaves the actual-price polling contract unchanged while allowing the same
+live prediction component to display either lag.
 
 A malformed challenger is logged without its raw contents and produces the
 same HTTP `200` null response as an absent key. A Redis connection/read failure

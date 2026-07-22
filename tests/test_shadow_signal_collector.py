@@ -912,6 +912,11 @@ def test_enabled_evaluation_runtime_is_wired_and_closed(monkeypatch):
     writer = writers[0]
     assert writer.started == 1
     assert writer.closed == 1
+    expected_model_versions = tuple(model.version for model in MODELS)
+    assert (
+        writer.configuration["candidate_model_versions"]
+        == expected_model_versions
+    )
     assert writer.configuration["queue_max_records"] == 5_000
     assert writer.configuration["batch_max_rows"] == 500
     assert writer.configuration["retry_ms"] == 5_000
@@ -923,6 +928,7 @@ def test_enabled_evaluation_runtime_is_wired_and_closed(monkeypatch):
         (
             settings.DATABASE_URL,
             {
+                "model_versions": expected_model_versions,
                 "connect_timeout_seconds": 4.0,
                 "command_timeout_seconds": 3.0,
             },

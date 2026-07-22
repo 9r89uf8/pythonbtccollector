@@ -535,12 +535,16 @@ async def run_collector(
             writer_factory = (
                 evaluation_writer_factory or ShadowEvaluationWriterRuntime
             )
+            candidate_model_versions = tuple(
+                model.version for model in activated.models
+            )
             if evaluation_backend_factory is None:
                 database_url = settings.DATABASE_URL
 
                 async def evaluation_backend_factory() -> Any:
                     return await create_shadow_evaluation_backend(
                         database_url,
+                        model_versions=candidate_model_versions,
                         connect_timeout_seconds=(
                             settings.SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS
                         ),
@@ -571,9 +575,7 @@ async def run_collector(
             )
             evaluation_writer = writer_factory(
                 backend_factory=evaluation_backend_factory,
-                candidate_model_versions=tuple(
-                    model.version for model in activated.models
-                ),
+                candidate_model_versions=candidate_model_versions,
                 queue_max_records=(
                     settings.SHADOW_SIGNAL_EVALUATION_QUEUE_MAX
                 ),

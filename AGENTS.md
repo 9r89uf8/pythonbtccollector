@@ -233,7 +233,7 @@ The corresponding Python entry points are:
   and USD performance metrics; four for basis points, beta, skills, and rates.
   Preserve nulls and canonicalize rounded zero as unsigned. Include the
   versioned `export` metadata and `_rounded.json` filename so the lossy artifact
-  cannot be mistaken for canonical evidence. Require one supported V0 `model_version`,
+  cannot be mistaken for canonical evidence. Require one supported `model_version`,
   select the requested half-open window by `target_ms`, inspect only its
   generation market and predecessor, and reject more than 1,000 rows.
   Keep this PostgreSQL read path separate from `/markets/current/live`.
@@ -263,14 +263,21 @@ The corresponding Python entry points are:
   worker's candidate set or alter the accepted selection/replay artifacts,
   `btc:live:chainlink_shadow`, or `signals.chainlink_catchup`.
 - Keep `SHADOW_SIGNAL_2S_ENABLED=false` by default in the dedicated root-owned
-  `/etc/price-collector/shadow-signal-2s.env`. This worker is Redis-only and
-  must not receive either database URL.
+  `/etc/price-collector/shadow-signal-2s.env`. Keep matured evaluation
+  persistence independently opt-in with
+  `SHADOW_SIGNAL_2S_EVALUATION_ENABLED=false`; when enabled, this environment
+  contains the writer `DATABASE_URL` and must never contain `READ_DATABASE_URL`.
 - Freeze the first challenger as `catchup_v1_l2000_h2000_b100`: 2,000 ms
   production-style lookback, 2,000 ms forecast horizon, and Decimal beta `1`.
   Do not describe it as selected or production-proven.
 - Poll `btc:live:futures` and `btc:live:chainlink` together on the same
   epoch-aligned 100 ms cadence used by the accepted shadow runtime, while
   keeping independent model state and failure handling.
+- Validate the Git-tracked `shadow_signal_2s_registration.json` before opening
+  Redis or PostgreSQL. It must remain an explicit unselected prospective
+  registration with its own reproducible artifact/fingerprint hashes,
+  evidence limited to markets `5948856..5948955` ending at
+  `1784686800000`, and no accepted-selection identity.
 - Publish only to `btc:live:chainlink_shadow_2s` with one atomic Redis `SET` and
   a 2,000 ms TTL. Every invalid observation must overwrite any prior valid
   prediction with null projection fields. Decimal payload fields remain JSON
@@ -280,6 +287,21 @@ The corresponding Python entry points are:
   Redis serializer: it must not execute the engine or query PostgreSQL on this
   route. A missing, expired, or malformed challenger value returns
   `prediction: null`; a Redis transport failure returns HTTP 503.
+- When 2-second evaluations are enabled, schedule every attempt once per
+  entered epoch-aligned 500 ms bucket, causally mature it at its 2,000 ms target,
+  and use the shared bounded nonblocking writer. Database outages, retries,
+  cleanup, queue pressure, or shutdown loss must never delay or terminate the
+  100 ms live Redis path.
+- Persist the challenger in `shadow_signal_evaluations` under its distinct
+  model version and prospective registration provenance. Retain it for exactly
+  168 hours, keep the existing idempotent key, and size cleanup for at least
+  five candidates. Each worker's bounded retention deletion must be scoped to
+  that worker's frozen candidate-model set so it cannot shorten another
+  experiment's evidence window.
+- Accept `catchup_v1_l2000_h2000_b100` through the existing evaluation and
+  rounded-download routes with exactly the same report shape as the accepted
+  three-second model. The dashboard may toggle `model_version`; it must keep the
+  challenger's unselected status visible and must not merge model series.
 - The challenger is a lag-only experiment. Do not add a futures–Chainlink basis
   feature until its formula, calibration evidence, and versioned payload have
   been reviewed separately.
@@ -385,7 +407,9 @@ in collector-specific code.
 - Keep real secrets out of Git. Never overwrite an existing production env file
   with an example file during an update.
 - Keep the two-second challenger environment separate at
-  `/etc/price-collector/shadow-signal-2s.env` and free of database credentials.
+  `/etc/price-collector/shadow-signal-2s.env`. Add only the writer
+  `DATABASE_URL` when its independently opt-in evaluations are enabled; never
+  add `READ_DATABASE_URL`.
 - Keep the shadow decision directory limited to the two promoted, root-owned
   evidence files required by the configured worker. Do not let the service user
   write its own selection decision.
@@ -487,6 +511,9 @@ Add or update focused tests for each checkpoint. Relevant coverage includes:
 - Two-second challenger fixed configuration, disabled-by-default deployment,
   independent Redis key and worker failure domain, invalid overwrite/TTL, and
   endpoint null-versus-503 behavior
+- Two-second prospective-registration validation, causal 500 ms maturation,
+  bounded nonblocking writer isolation, exact seven-day retention, and common
+  reporting/download shape selected by `model_version`
 
 Run the relevant tests before handoff. Run the full suite when practical:
 

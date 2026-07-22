@@ -313,6 +313,27 @@ produce `prediction: null`; the API never runs the model or queries PostgreSQL
 on this route. The worker is disabled by default and is enabled independently
 from the accepted shadow service.
 
+Matured 2-second evaluation is independently opt-in. When enabled, the worker
+schedules one attempt per entered 500 ms bucket, causally matures it against the
+newest Chainlink observation available by its 2,000 ms target, and sends it to
+the existing bounded nonblocking evaluation writer. Rows use the distinct
+`catchup_v1_l2000_h2000_b100` identity and are retained for exactly 168 hours.
+A Git-tracked prospective registration is validated before runtime dependencies
+open; it explicitly records `selected: false`, the exact inspected-session
+cutoff, the frozen configuration, and its own reproducible hashes rather than
+borrowing the accepted model's evidence.
+
+Retention cleanup is model-scoped even though both workers share the evaluation
+table. The challenger deletes only its frozen 2-second model rows; the accepted
+worker deletes only its own candidate-set rows, so neither can shorten the
+other experiment's evidence window.
+
+The existing evaluation JSON and download routes accept either the challenger
+or accepted model through `model_version` with the same response shape. A
+dashboard can therefore reuse one chart/metrics renderer and toggle between
+`catchup_v1_l2000_h2000_b100` and `catchup_ratio_l3000_b100` without merging
+their separate evidence series.
+
 Shadow-signal Phase 4 adds the opt-in, standalone
 `price-collector-shadow-signal` service. Its epoch-aligned 100 ms loop reads
 `btc:live:futures` and `btc:live:chainlink` together with one Redis `MGET`,
@@ -473,7 +494,7 @@ The Phase 7 backend prerequisite adds PostgreSQL reporting routes at
 `GET /markets/current/shadow-evaluations` and
 `GET /markets/{market_id}/shadow-evaluations`, plus rounded JSON attachment
 variants ending in `/download`. All four require one explicitly
-supported V0 `model_version`, select one five-minute window by forecast
+supported `model_version`, select one five-minute window by forecast
 `target_ms`, include boundary-crossing forecasts generated in the predecessor
 market, and reject an anomalous result above 1,000 rows. Financial values remain
 Decimal-derived JSON strings or `null`. The reporting routes retain full
@@ -588,6 +609,7 @@ parameters, complete response shapes, optional fields, and error responses.
 price_collector/       Collectors, API, and current shadow runtime
 price_collector/shadow_signal_2s_collector.py  Independent 2-second challenger worker
 price_collector/shadow_signal_2s_live.py  Challenger cache payload and decoder
+price_collector/shadow_signal_2s_registration.json  Frozen prospective provenance
 price_collector/shadow_signal_reporting.py  Bounded read-only evaluation reporting
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
@@ -650,9 +672,10 @@ environment files:
   `READ_DATABASE_URL`.
 - `/etc/price-collector/shadow-signal-2s.env`, created from
   `deployment/shadow-signal-2s.env.example`, contains logging, Redis, the frozen
-  poll/TTL values, and the disabled-by-default `SHADOW_SIGNAL_2S_ENABLED`
-  switch. The challenger model constants are frozen in code, and this file must
-  contain no database credential.
+  poll/TTL values, disabled-by-default live and evaluation switches, and bounded
+  evaluation-writer settings. The challenger model constants are frozen in
+  code. Add the writer `DATABASE_URL` only while 2-second evaluation is enabled;
+  this file must never contain `READ_DATABASE_URL`.
 
 The Chainlink collector's accepted-event watchdog is configured in
 `collector.env`:
@@ -954,8 +977,9 @@ exist, so rerunning them cannot replace production secrets with example values.
 Replace `REPLACE_ME` on the first deployment. Keep writer credentials out of
 `api.env`, and keep all database credentials out of `shadow-signal.env` until
 the Phase 5 migration copies in the existing writer `DATABASE_URL`. Never put
-`READ_DATABASE_URL` in the shadow file. Keep every database credential out of
-`shadow-signal-2s.env`. Leave the accepted shadow worker disabled until the
+`READ_DATABASE_URL` in the shadow file. Add only the existing writer
+`DATABASE_URL` to `shadow-signal-2s.env` when its evaluation switch is enabled.
+Leave the accepted shadow worker disabled until the
 Phase 4 evidence-promotion procedure has replaced its placeholder decision
 settings, leave evaluations disabled until the Phase 5 schema has been applied,
 and enable the prospective challenger only through its

@@ -1592,6 +1592,7 @@ SHADOW_REPORT_MARKET_ID = 5_944_864
 SHADOW_REPORT_MARKET_START_MS = 1_783_459_200_000
 SHADOW_REPORT_MARKET_END_MS = 1_783_459_500_000
 SHADOW_REPORT_MODEL = "catchup_ratio_l3000_b100"
+SHADOW_REPORT_2S_MODEL = "catchup_v1_l2000_h2000_b100"
 
 
 def shadow_evaluation_chart_row(**overrides):
@@ -1636,6 +1637,25 @@ def shadow_evaluation_chart_row(**overrides):
         "forecast_error": Decimal("0.5"),
         "baseline_error": Decimal("-0.5"),
     }
+    values.update(overrides)
+    return values
+
+
+def shadow_evaluation_2s_chart_row(**overrides):
+    values = shadow_evaluation_chart_row()
+    generated_ms = values["generated_ms"]
+    target_ms = generated_ms + 2_000
+    values.update(
+        {
+            "model_version": SHADOW_REPORT_2S_MODEL,
+            "target_ms": target_ms,
+            "matured_ms": target_ms + 10,
+            "horizon_ms": 2_000,
+            "actual_chainlink_source_timestamp_ms": target_ms - 1_100,
+            "actual_chainlink_received_ms": target_ms - 100,
+            "actual_chainlink_age_at_target_ms": 100,
+        }
+    )
     values.update(overrides)
     return values
 
@@ -1824,6 +1844,60 @@ def test_shadow_evaluations_by_id_returns_completed_market_report(
     assert body["points"][0]["chainlink_at_forecast"] == "62000"
     assert body["points"][0]["futures_at_forecast"] == "62101"
     assert body["points"][0]["projected_chainlink"] == "62001"
+    assert client.fake_live_cache.requested_keys == []
+    assert client.fake_pool.acquire_calls == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/markets/current/shadow-evaluations",
+        "/markets/current/shadow-evaluations/download",
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations",
+        f"/markets/{SHADOW_REPORT_MARKET_ID}/shadow-evaluations/download",
+    ),
+)
+def test_shadow_evaluation_routes_accept_two_second_challenger_with_same_shape(
+    client,
+    monkeypatch,
+    path,
+):
+    async def fake_fetch(pool, *, window, model_version):
+        assert pool is client.fake_pool
+        assert window.market_id == SHADOW_REPORT_MARKET_ID
+        assert model_version == SHADOW_REPORT_2S_MODEL
+        return ShadowEvaluationFetchResult(
+            market_exists=True,
+            rows=(shadow_evaluation_2s_chart_row(),),
+        )
+
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: SHADOW_REPORT_NOW_MS)
+    monkeypatch.setattr(api, "fetch_shadow_evaluation_chart_points", fake_fetch)
+
+    response = client.get(f"{path}?model_version={SHADOW_REPORT_2S_MODEL}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 2
+    assert body["model"]["model_version"] == SHADOW_REPORT_2S_MODEL
+    assert body["model"]["horizon_ms"] == 2_000
+    assert body["model"]["evaluation_cadence_ms"] == 500
+    assert body["points"][0]["model_version"] == SHADOW_REPORT_2S_MODEL
+    assert body["points"][0]["horizon_ms"] == 2_000
+    assert body["points"][0]["target_ms"] == (
+        body["points"][0]["generated_ms"] + 2_000
+    )
+    assert body["coverage"]["attempts"] == 1
+    assert body["performance"]["cohorts"][0]["scored_points"] == 1
+    if path.endswith("/download"):
+        assert body["export"]["variant"] == "rounded_download"
+        assert response.headers["content-disposition"] == (
+            'attachment; filename="'
+            f"btc_5m_market_{SHADOW_REPORT_MARKET_ID}_shadow_evaluations_"
+            f'{SHADOW_REPORT_2S_MODEL}_rounded.json"'
+        )
+    else:
+        assert "export" not in body
     assert client.fake_live_cache.requested_keys == []
     assert client.fake_pool.acquire_calls == 0
 
@@ -2264,7 +2338,13 @@ def test_openapi_lists_shadow_evaluation_routes_and_required_model(client):
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
-    paths = response.json()["paths"]
+    openapi = response.json()
+    paths = openapi["paths"]
+    model_schema = openapi["components"]["schemas"][
+        "ShadowEvaluationModelVersion"
+    ]
+    assert "catchup_ratio_l3000_b100" in model_schema["enum"]
+    assert "catchup_v1_l2000_h2000_b100" in model_schema["enum"]
     current_paths = (
         "/markets/current/shadow-evaluations",
         "/markets/current/shadow-evaluations/download",

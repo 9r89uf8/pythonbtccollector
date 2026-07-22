@@ -226,6 +226,98 @@ def test_shadow_evaluation_pool_rejects_invalid_timeouts(
         )
 
 
+def test_shadow_evaluation_backend_factory_freezes_model_versions(monkeypatch):
+    pool = FakePool(None)
+    calls = []
+
+    async def fake_create_pool(database_url, **configuration):
+        calls.append((database_url, configuration))
+        return pool
+
+    monkeypatch.setattr(db, "create_shadow_evaluation_pool", fake_create_pool)
+    model_versions = [
+        "catchup_ratio_l3000_b100",
+        "catchup_ratio_l3500_b100",
+    ]
+
+    backend = asyncio.run(
+        db.create_shadow_evaluation_backend(
+            "postgresql://writer/price_collector",
+            model_versions=model_versions,
+            connect_timeout_seconds=2,
+            command_timeout_seconds=3,
+        )
+    )
+    model_versions.append("catchup_ratio_l4000_b100")
+
+    assert backend._model_versions == (
+        "catchup_ratio_l3000_b100",
+        "catchup_ratio_l3500_b100",
+    )
+    assert calls == [
+        (
+            "postgresql://writer/price_collector",
+            {
+                "connect_timeout_seconds": 2,
+                "command_timeout_seconds": 3,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize("model_versions", (None, ()))
+def test_shadow_evaluation_backend_factory_rejects_scope_before_pool(
+    monkeypatch,
+    model_versions,
+):
+    calls = []
+
+    async def fake_create_pool(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("invalid scope must fail before pool creation")
+
+    monkeypatch.setattr(db, "create_shadow_evaluation_pool", fake_create_pool)
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        asyncio.run(
+            db.create_shadow_evaluation_backend(
+                "postgresql://writer/price_collector",
+                model_versions=model_versions,
+            )
+        )
+
+    assert calls == []
+
+
+def test_shadow_evaluation_backend_factory_requires_explicit_scope():
+    with pytest.raises(TypeError, match="model_versions"):
+        db.create_shadow_evaluation_backend(
+            "postgresql://writer/price_collector"
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_versions", "error", "message"),
+    (
+        ("catchup_ratio_l3000_b100", TypeError, "sequence of strings"),
+        ((), ValueError, "must not be empty"),
+        (("",), ValueError, "non-empty strings"),
+        ((1,), ValueError, "non-empty strings"),
+        (("same", "same"), ValueError, "must be unique"),
+    ),
+)
+def test_shadow_evaluation_backend_rejects_invalid_model_scope(
+    model_versions,
+    error,
+    message,
+):
+    with pytest.raises(error, match=message):
+        db.AsyncpgShadowEvaluationBackend(
+            FakePool(None),
+            model_versions=model_versions,
+        )
+
+
 def test_shadow_evaluation_row_is_fixed_and_preserves_decimal_values():
     record = evaluation_record()
 
@@ -294,11 +386,12 @@ def test_shadow_evaluation_backend_batches_idempotent_inserts_once():
 
     connection = FakeConnection()
     pool = FakePool(connection)
+    record = evaluation_record()
     backend = db.AsyncpgShadowEvaluationBackend(
         pool,
+        model_versions=(record.model_version,),
         connect_timeout_seconds=2,
     )
-    record = evaluation_record()
     cohort = singleton_cohort(record)
 
     result = asyncio.run(backend.write_evaluation_cohorts([cohort]))
@@ -327,6 +420,20 @@ def test_shadow_evaluation_backend_skips_empty_batches_without_db_access():
     assert result.persisted_cohort_ids == frozenset()
     assert result.rejected_cohort_ids == frozenset()
     assert result.deferred_cohort_ids == frozenset()
+
+
+def test_shadow_evaluation_backend_rejects_out_of_scope_cohort_before_db_access():
+    pool = FakePool(None)
+    backend = db.AsyncpgShadowEvaluationBackend(
+        pool,
+        model_versions=("catchup_v1_l2000_h2000_b100",),
+    )
+    cohort = singleton_cohort(evaluation_record())
+
+    with pytest.raises(ValueError, match="does not match backend models"):
+        asyncio.run(backend.write_evaluation_cohorts((cohort,)))
+
+    assert pool.acquire_calls == []
 
 
 def test_shadow_evaluation_backend_rejects_non_cohort_input_before_db_access():
@@ -742,8 +849,14 @@ def test_shadow_evaluation_backend_deletes_expired_rows_in_bounded_order():
 
     connection = FakeConnection()
     pool = FakePool(connection)
+    model_versions = (
+        "catchup_ratio_l3000_b100",
+        "catchup_ratio_l3500_b100",
+        "catchup_ratio_l4000_b100",
+    )
     backend = db.AsyncpgShadowEvaluationBackend(
         pool,
+        model_versions=model_versions,
         connect_timeout_seconds=4,
     )
 
@@ -758,8 +871,18 @@ def test_shadow_evaluation_backend_deletes_expired_rows_in_bounded_order():
     assert pool.acquire_calls == [{"timeout": 4}]
     query, args = connection.calls[0]
     assert "WITH expired_cohort_counts AS" in query
-    assert "WHERE generated_ms < $1" in query
-    assert "GROUP BY generated_ms" in query
+    expired_selection = query[
+        query.index("WITH expired_cohort_counts AS") : query.index(
+            "ordered_expired_cohorts AS"
+        )
+    ]
+    assert "WHERE generated_ms < $1" in expired_selection
+    assert (
+        "AND model_version = ANY($3::TEXT[])" in expired_selection
+    )
+    group_by = expired_selection[expired_selection.index("GROUP BY") :]
+    assert "generated_ms" in group_by
+    assert "model_version" not in group_by
     assert "LIMIT $2 ), ordered_expired_cohorts AS" in query
     assert "sum(cohort_rows) OVER" in query
     assert "WHERE cumulative_rows <= $2" in query
@@ -774,6 +897,30 @@ def test_shadow_evaluation_backend_deletes_expired_rows_in_bounded_order():
         "expired_cohorts.selection_evidence_end_ms"
         in query
     )
+    deletion = query[query.index("DELETE FROM shadow_signal_evaluations") :]
+    assert "evaluations.model_version = ANY($3::TEXT[])" in deletion
+    assert args == (1_000_000, 7, model_versions)
+
+
+def test_shadow_evaluation_backend_keeps_unscoped_cleanup_compatible():
+    class FakeConnection:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, query, *args):
+            self.calls.append((" ".join(query.split()), args))
+            return "DELETE 0"
+
+    connection = FakeConnection()
+    backend = db.AsyncpgShadowEvaluationBackend(FakePool(connection))
+
+    deleted = asyncio.run(
+        backend.delete_expired(cutoff_generated_ms=1_000_000, limit=7)
+    )
+
+    assert deleted == 0
+    query, args = connection.calls[0]
+    assert "model_version = ANY" not in query
     assert args == (1_000_000, 7)
 
 

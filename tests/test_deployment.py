@@ -164,7 +164,7 @@ def test_shadow_signal_service_is_isolated_and_ordered_after_producers():
     assert "ReadWritePaths=" not in service
 
 
-def test_shadow_signal_2s_env_is_disabled_and_redis_only():
+def test_shadow_signal_2s_env_keeps_evaluation_disabled_without_secrets():
     lines = (
         ROOT / "deployment" / "shadow-signal-2s.env.example"
     ).read_text().splitlines()
@@ -174,13 +174,40 @@ def test_shadow_signal_2s_env_is_disabled_and_redis_only():
     assert "SHADOW_SIGNAL_2S_TTL_MS=2000" in lines
     assert "REDIS_HOST=127.0.0.1" in lines
     assert "REDIS_PORT=6379" in lines
+    assert "SHADOW_SIGNAL_2S_EVALUATION_ENABLED=false" in lines
+    assert "SHADOW_SIGNAL_2S_EVALUATION_INTERVAL_MS=500" in lines
+    assert "SHADOW_SIGNAL_2S_EVALUATION_QUEUE_MAX=5000" in lines
+    assert "SHADOW_SIGNAL_2S_EVALUATION_BATCH_MAX_ROWS=500" in lines
+    assert "SHADOW_SIGNAL_2S_EVALUATION_FLUSH_MS=1000" in lines
+    assert "SHADOW_SIGNAL_2S_EVALUATION_RETRY_MS=5000" in lines
+    assert (
+        "SHADOW_SIGNAL_2S_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10"
+        in lines
+    )
+    assert (
+        "SHADOW_SIGNAL_2S_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=5"
+        in lines
+    )
+    assert (
+        "SHADOW_SIGNAL_2S_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=5"
+        in lines
+    )
+    assert "SHADOW_SIGNAL_2S_EVALUATION_RETENTION_HOURS=168" in lines
+    assert (
+        "SHADOW_SIGNAL_2S_EVALUATION_RETENTION_CHECK_SECONDS=300"
+        in lines
+    )
+    assert (
+        "SHADOW_SIGNAL_2S_EVALUATION_RETENTION_BATCH_ROWS=5000"
+        in lines
+    )
     assert not any(line.startswith("DATABASE_URL=") for line in lines)
     assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
     assert not any("SELECTION" in line for line in lines)
     assert not any("DECISION" in line for line in lines)
 
 
-def test_shadow_signal_2s_service_is_redis_only_and_hardened():
+def test_shadow_signal_2s_service_is_ordered_for_optional_db_and_hardened():
     service = (
         ROOT / "deployment" / "price-collector-shadow-signal-2s.service"
     ).read_text()
@@ -196,7 +223,7 @@ def test_shadow_signal_2s_service_is_redis_only_and_hardened():
     assert "redis-server.service" in service
     assert "price-collector-binance-futures.service" in service
     assert "price-collector-polymarket-chainlink.service" in service
-    assert "postgresql.service" not in service
+    assert "postgresql.service" in service
     assert "Restart=on-failure" in service
     assert "StartLimitIntervalSec=60" in service
     assert "StartLimitBurst=3" in service
