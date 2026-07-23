@@ -691,18 +691,19 @@ async def run_collector(settings: Settings) -> None:
     live_cache = None
     raw_capture = None
     trade_state = FuturesTradeState()
-    microstructure_runtime = (
-        create_microstructure_runtime(settings, pool)
-        if microstructure_enabled
-        else None
-    )
-    microstructure_sink = (
-        None if microstructure_runtime is None else microstructure_runtime.sink
-    )
+    microstructure_runtime = None
+    microstructure_sink = None
     tasks = []
     remove_sigterm_handler = _install_sigterm_cancellation()
     try:
         live_cache = create_live_cache(settings)
+        if microstructure_enabled:
+            microstructure_runtime = create_microstructure_runtime(
+                settings,
+                pool,
+                live_cache=live_cache,
+            )
+            microstructure_sink = microstructure_runtime.sink
 
         if settings.RAW_FUTURES_TRACE_ENABLED:
             async def raw_backend_factory() -> Any:

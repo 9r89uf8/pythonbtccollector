@@ -57,6 +57,7 @@ def test_collector_env_example_contains_writer_credentials_only():
         in lines
     )
     assert "BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30" in lines
+    assert "BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=600" in lines
     assert "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096" in lines
     assert "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144" in lines
     assert "RAW_FUTURES_TRACE_ENABLED=false" in lines

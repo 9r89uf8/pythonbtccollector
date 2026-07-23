@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         "wss://fstream.binance.com/market/ws/btcusdt@forceOrder"
     )
     BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS: int = Field(default=100_000, gt=0)
+    BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS: int = Field(
+        default=600,
+        gt=0,
+    )
     BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS: int = Field(
         default=250,
         gt=0,

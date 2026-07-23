@@ -37,6 +37,7 @@ For example, set it once for the `curl` calls in this document:
 ```bash
 API_BASE_URL="http://127.0.0.1:${LOCAL_API_PORT}"
 curl "${API_BASE_URL}/markets/current/live"
+curl "${API_BASE_URL}/markets/current/microstructure/live"
 ```
 
 The API does not currently install CORS middleware. A browser dashboard should
@@ -71,6 +72,7 @@ async function apiGet(path, query = {}) {
 }
 
 const live = await apiGet("/markets/current/live");
+const microstructureLive = await apiGet("/markets/current/microstructure/live");
 ```
 
 ## Data Conventions
@@ -88,6 +90,8 @@ const live = await apiGet("/markets/current/live");
 - A successful JSON response uses HTTP `200` unless stated otherwise.
 - Missing observations inside a market series are represented by `null`; they
   are not fabricated.
+- Responses larger than 1,000 bytes are gzip-compressed when the client sends
+  `Accept-Encoding: gzip`. Browsers handle this automatically.
 
 ## Endpoint Summary
 
@@ -105,6 +109,7 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/current/download` | Download current market JSON | PostgreSQL |
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
 | `GET` | `/markets/current/live` | Lowest-latency current source prices | Redis only |
+| `GET` | `/markets/current/microstructure/live` | Latest finalized microstructure second plus source prices | Redis only |
 
 ## Health
 
@@ -482,6 +487,8 @@ market window. Future or missing observations remain `null`.
 | `include_oi` | boolean | `false` | Adds `series[].open_interest` and, when available, top-level `previous_5m_oi_summary` |
 | `include_flow` | boolean | `false` | Adds `series[].flow` and `series[].freshness.futures_flow` |
 | `include_book` | boolean | `false` | Adds `series[].book` and `series[].freshness.futures_book` |
+| `include_microstructure` | boolean | `false` | Adds PostgreSQL `series[].microstructure`, availability counts, and response schema version `3` |
+| `microstructure_groups` | string or omitted | all groups | Comma-separated subset of `books,flow,cross_market,liquidations,quality`; used only with `include_microstructure=true` |
 | `fill_display` | boolean | `false` | Carries the latest prior Chainlink value into a missing second for display only |
 | `max_carry_forward_ms` | integer | `10000` | Maximum Chainlink display carry-forward age; negative values act as `0` |
 
@@ -492,6 +499,7 @@ Calls:
 ```bash
 curl "${API_BASE_URL}/markets/current/data"
 curl "${API_BASE_URL}/markets/5944864/data?include_probabilities=true&include_futures=true&include_oi=true&include_flow=true&include_book=true"
+curl --compressed "${API_BASE_URL}/markets/5944864/data?include_microstructure=true&microstructure_groups=books,flow,liquidations,quality"
 curl "${API_BASE_URL}/markets/current/data?fill_display=true&max_carry_forward_ms=5000"
 ```
 
@@ -504,6 +512,8 @@ const market = await apiGet("/markets/current/data", {
   include_oi: true,
   include_flow: true,
   include_book: true,
+  include_microstructure: true,
+  microstructure_groups: "books,flow,cross_market,liquidations,quality",
   fill_display: true,
   max_carry_forward_ms: 5000,
 });
@@ -586,6 +596,12 @@ These fields are always present on a successful response:
   ]
 }
 ```
+
+The base response remains schema version `2`. When
+`include_microstructure=true`, the response is schema version `3` and also
+contains the availability and per-second fields described under
+**Optional `microstructure`** below. The opt-in does not change the existing
+price, freshness, resolution, or other optional dataset shapes.
 
 `t` is the zero-based second offset from `market_start_ms`. Price strings in
 this response are rounded to two decimal places. Any value or freshness
@@ -813,13 +829,189 @@ integer or `null`. The same flag adds this object under `freshness`:
 }
 ```
 
+### Optional `microstructure`
+
+Added from PostgreSQL by `include_microstructure=true`. The response schema
+version becomes `3`, and top-level `availability` contains:
+
+```json
+{
+  "availability": {
+    "microstructure_rows": 300,
+    "microstructure_healthy_rows": 297,
+    "microstructure_missing_seconds": 0
+  }
+}
+```
+
+`microstructure_rows` counts stored rows matched to the selected 300-second
+grid. `microstructure_healthy_rows` counts those whose
+`collector_healthy` value is `true`.
+`microstructure_missing_seconds` is `market.seconds_expected` minus the matched
+row count. These counts describe storage and collector quality; group filtering
+does not change them.
+
+Every matched series row receives a nested object. With all five default groups
+it has this shape:
+
+```json
+{
+  "microstructure": {
+    "collector_healthy": true,
+    "books": {
+      "spot": {
+        "bid": "65757.90",
+        "ask": "65758.10",
+        "mid": "65758.00",
+        "spread_bps": "0.0304",
+        "imbalance_1": "0.15",
+        "imbalance_5": "0.09",
+        "imbalance_10": "0.04",
+        "bid_depth_usdt_10": "1254300.10",
+        "ask_depth_usdt_10": "1189200.50",
+        "weighted_mid_offset_bps": "0.006",
+        "bbo_ofi_usdt": "15200.40",
+        "snapshot_count": 2
+      },
+      "futures": {
+        "bid": "65723.60",
+        "ask": "65723.70",
+        "mid": "65723.65",
+        "spread_bps": "0.0152",
+        "imbalance_1": "0.17",
+        "imbalance_5": "0.11",
+        "imbalance_10": "0.08",
+        "bid_depth_usdt_10": "1432000.20",
+        "ask_depth_usdt_10": "1328000.90",
+        "weighted_mid_offset_bps": "0.004",
+        "bbo_ofi_usdt": "18450.25",
+        "snapshot_count": 2
+      }
+    },
+    "flow": {
+      "spot_buy_usdt": "90450.10",
+      "spot_sell_usdt": "81200.25",
+      "futures_buy_usdt": "120400.15",
+      "futures_sell_usdt": "110200.80",
+      "futures_rpi_buy_usdt": "4200.10",
+      "futures_rpi_sell_usdt": "3100.20",
+      "spot_trade_id_span": 42,
+      "spot_aggtrade_count": 18,
+      "spot_max_aggtrade_usdt": "11000.50",
+      "spot_vwap": "65757.98",
+      "spot_trade_high": "65758.20",
+      "spot_trade_low": "65757.60",
+      "spot_last_trade": "65758.01",
+      "futures_trade_id_span": 51,
+      "futures_aggtrade_count": 23,
+      "futures_max_aggtrade_usdt": "14300.25",
+      "futures_vwap": "65723.66",
+      "futures_trade_high": "65723.90",
+      "futures_trade_low": "65723.30",
+      "futures_last_trade": "65723.70"
+    },
+    "cross_market": {
+      "perp_spot_basis_bps": "-5.22",
+      "spot_futures_book_skew_ms": 41,
+      "mark_price": "65723.62",
+      "index_price": "65721.24",
+      "mark_index_basis_bps": "0.3621",
+      "funding_rate": "0.00010000",
+      "seconds_to_funding": 7123,
+      "open_interest_btc": "74321.123",
+      "open_interest_usdt": "4885093456.12"
+    },
+    "liquidations": {
+      "observed_long_usdt": "0",
+      "observed_short_usdt": "12500.20",
+      "snapshot_count": 1
+    },
+    "quality": {
+      "schema_version": 1,
+      "sample_span_ms": 1000,
+      "sample_jitter_ms": 251,
+      "spot_book_age_ms": 911,
+      "spot_book_lag_ms": 33,
+      "futures_book_age_ms": 363,
+      "futures_book_lag_ms": 27,
+      "spot_trade_age_ms": 147,
+      "spot_trade_lag_mean_ms": "42.25",
+      "spot_trade_lag_max_ms": 81,
+      "futures_trade_age_ms": 346,
+      "futures_trade_lag_mean_ms": "38.50",
+      "futures_trade_lag_max_ms": 75,
+      "mark_age_ms": 621,
+      "mark_lag_ms": 91,
+      "open_interest_age_ms": 621,
+      "open_interest_exchange_age_ms": 702,
+      "open_interest_http_lag_ms": 87,
+      "liquidation_lag_mean_ms": "54.00",
+      "connection_errors": 0,
+      "received_ms": 1784774593251
+    }
+  }
+}
+```
+
+All financial values, including averages stored as PostgreSQL `NUMERIC`, are
+exact decimal strings. Counts, timestamps, ages, and whole-millisecond lags are
+integers. Missing or unknown individual values are `null`; the API does not
+replace them with zero. Observed long/short liquidation values come from
+Binance's censored forced-order feed and must not be described as total market
+liquidations or future liquidation levels.
+
+Interval accumulators can legitimately report decimal zero when no event was
+observed. If `collector_healthy=false`, a zero flow or liquidation total is
+not evidence that market activity was zero; use the quality fields to reject
+or dim the whole interval.
+
+Use `microstructure_groups` to reduce the response. For example:
+
+```http
+GET /markets/5944864/data?include_microstructure=true&microstructure_groups=books,flow,liquidations,quality
+```
+
+`collector_healthy` is always present on a matched row even when groups are
+filtered. Group names are case-sensitive. Empty or unknown group names return
+HTTP `422`, as does sending `microstructure_groups` without
+`include_microstructure=true`. If the parameter is omitted, all five groups are
+returned in the stable order `books`, `flow`, `cross_market`, `liquidations`,
+`quality`.
+
+A second without a stored row has:
+
+```json
+{ "microstructure": null }
+```
+
+An older market with no microstructure collection still returns HTTP `200`.
+Its normal price and optional datasets are unchanged, every grid row has
+`microstructure: null`, and availability reports:
+
+```json
+{
+  "availability": {
+    "microstructure_rows": 0,
+    "microstructure_healthy_rows": 0,
+    "microstructure_missing_seconds": 300
+  }
+}
+```
+
+The API queries by `market_id` and ordered `sample_second_ms`, returning at most
+300 rows; there is no microstructure pagination. It does not read historical
+microstructure from Redis. These responses can be several hundred kilobytes, so
+clients should allow gzip compression; `fetch` does so automatically, and
+command-line callers can use `curl --compressed`.
+
 The data routes return HTTP `404` when the selected market window does not
 exist. The current route uses `{"detail":"no current market data found"}`;
 the ID route includes the requested market ID in `detail`.
 
 ## Market JSON Downloads
 
-The download routes accept the same seven query parameters as the data routes:
+The download routes retain the original seven non-microstructure query
+parameters:
 
 - `GET /markets/current/download`
 - `GET /markets/{market_id}/download`
@@ -838,6 +1030,9 @@ btc_5m_market_{market_id}[_futures][_oi][_flow][_book][_probabilities].json
 The downloaded JSON starts from the data-route response but intentionally uses
 a smaller export shape:
 
+- Downloads do not accept `include_microstructure` or
+  `microstructure_groups`, and they do not export microstructure rows or
+  availability.
 - `market.market_start_ms` and `market.market_end_ms` are removed;
   `market_start_at` and `market_end_at` are retained.
 - Every `series[].timestamp_ms` is removed; `series[].timestamp_at` and `t` are
@@ -891,6 +1086,151 @@ window.location.assign(url);
 
 The download routes return HTTP `404` with the requested market ID in `detail`
 when the market window does not exist.
+
+## Current Live Microstructure
+
+### `GET /markets/current/microstructure/live`
+
+Returns the newest finalized one-second microstructure row and the three latest
+source prices. It takes no query parameters and makes one ordered Redis `MGET`
+for:
+
+- `btc:live:binance_spot`
+- `btc:live:chainlink`
+- `btc:live:futures`
+- `btc:live:microstructure`
+
+It never queries PostgreSQL and never stores or returns a five-minute history.
+The ordinary `/markets/current/live` route remains a separate three-key read.
+
+```bash
+curl --compressed "${API_BASE_URL}/markets/current/microstructure/live"
+```
+
+Abbreviated response:
+
+```json
+{
+  "schema_version": 1,
+  "server_time_ms": 1784774594250,
+  "market_id": 5949248,
+  "sample_second_ms": 1784774593000,
+  "served_from": "redis",
+  "prices": {
+    "binance_spot": "65758.01",
+    "chainlink": "65721.23639093849",
+    "futures": "65723.70"
+  },
+  "microstructure": {
+    "collector_healthy": true,
+    "books": {
+      "spot": {
+        "bid": "65757.90",
+        "ask": "65758.10",
+        "mid": "65758.00",
+        "spread_bps": "0.0304",
+        "imbalance_1": "0.15",
+        "imbalance_5": "0.09",
+        "imbalance_10": "0.04",
+        "bid_depth_usdt_10": "1254300.10",
+        "ask_depth_usdt_10": "1189200.50",
+        "weighted_mid_offset_bps": "0.006",
+        "bbo_ofi_usdt": "15200.40",
+        "snapshot_count": 2
+      },
+      "futures": {
+        "bid": "65723.60",
+        "ask": "65723.70",
+        "mid": "65723.65",
+        "spread_bps": "0.0152",
+        "imbalance_1": "0.17",
+        "imbalance_5": "0.11",
+        "imbalance_10": "0.08",
+        "bid_depth_usdt_10": "1432000.20",
+        "ask_depth_usdt_10": "1328000.90",
+        "weighted_mid_offset_bps": "0.004",
+        "bbo_ofi_usdt": "18450.25",
+        "snapshot_count": 2
+      }
+    },
+    "flow": {
+      "spot_buy_usdt": "90450.10",
+      "spot_sell_usdt": "81200.25",
+      "futures_buy_usdt": "120400.15",
+      "futures_sell_usdt": "110200.80",
+      "futures_rpi_buy_usdt": "4200.10",
+      "futures_rpi_sell_usdt": "3100.20"
+    },
+    "cross_market": {
+      "perp_spot_basis_bps": "-5.22",
+      "spot_futures_book_skew_ms": 41
+    },
+    "liquidations": {
+      "observed_long_usdt": "0",
+      "observed_short_usdt": "12500.20",
+      "snapshot_count": 1
+    },
+    "quality": {
+      "spot_book_age_ms": 911,
+      "futures_book_age_ms": 363,
+      "spot_trade_age_ms": 147,
+      "futures_trade_age_ms": 346,
+      "connection_errors": 0
+    }
+  }
+}
+```
+
+The live `microstructure` object actually uses the complete five-group shape
+documented under **Optional `microstructure`**; the response above shortens the
+larger `flow`, `cross_market`, and `quality` groups for readability. It does not
+accept `microstructure_groups`.
+
+`sample_second_ms` is the start of the finalized local receipt interval. The
+collector normally finalizes and publishes it shortly after the next UTC-second
+boundary, using the configured 250 ms flush delay. This is a low-latency path
+to one-second data, not a subsecond feed.
+
+When a cached microstructure snapshot is present, `market_id` is derived from
+its `sample_second_ms`. This keeps the pair consistent during a five-minute
+rollover. When the microstructure key is absent, the endpoint still returns
+HTTP `200`: `sample_second_ms` and `microstructure` are `null`, `market_id`
+falls back to the server's current window, and every available source price is
+still returned. A missing source-price key produces `null` for only that entry
+in `prices`.
+
+The endpoint does not reject an unhealthy or aging snapshot. The cached
+`collector_healthy` and age fields describe that finalized interval; they do
+not change while a stale key remains in Redis. For current-live freshness,
+compute `max(0, server_time_ms - (sample_second_ms + 1000))` and apply the
+dashboard's own threshold in addition to checking `collector_healthy` and the
+`quality` fields. This matters if the optional collector is disabled or cannot
+finalize another row.
+
+Flow and liquidation totals are the events actually observed during the
+interval. An unhealthy or partial interval can therefore contain numeric
+zeros that are not proof of zero market activity; treat those totals as
+untrusted whenever `collector_healthy=false`. Keep the row available so the
+dashboard can dim, exclude, or annotate it rather than hiding it at the
+transport layer. A Redis connection/read failure returns:
+
+```json
+{ "detail": "live cache unavailable" }
+```
+
+Malformed JSON or an invalid value in any of the four keys returns:
+
+```json
+{ "detail": "live cache payload invalid" }
+```
+
+Both failures use HTTP `503`.
+
+For an active chart, first load
+`/markets/current/data?include_microstructure=true` from PostgreSQL. Poll this
+Redis endpoint and append or replace by `sample_second_ms`. At a market
+boundary, fetch the completed market from PostgreSQL once. Past-market
+responses are not cached in Redis.
 
 ## Current Live Prices
 
@@ -991,9 +1331,9 @@ Expected statuses are:
 | --- | --- |
 | `404` | The requested source or historical market has no stored data |
 | `405` | The route was called with a method other than `GET` |
-| `422` | A typed path/query value is invalid |
+| `422` | A typed path/query value or `microstructure_groups` selection is invalid |
 | `500` | An unhandled PostgreSQL-backed request failed |
-| `503` | The live route cannot read Redis, a source-price payload is malformed, or `/healthz` cannot query PostgreSQL |
+| `503` | A live route cannot read Redis, a source-price or microstructure payload is malformed, or `/healthz` cannot query PostgreSQL |
 
 Use the HTTP status and endpoint context rather than treating the exact
 `detail` text as a stable frontend enum.

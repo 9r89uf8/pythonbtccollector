@@ -140,6 +140,10 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
         "BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL", raising=False
     )
     monkeypatch.delenv("BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS", raising=False)
+    monkeypatch.delenv(
+        "BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS",
+        raising=False,
+    )
     monkeypatch.delenv("BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS", raising=False)
     monkeypatch.delenv("BINANCE_MICROSTRUCTURE_RETENTION_DAYS", raising=False)
     monkeypatch.delenv("BINANCE_MICROSTRUCTURE_WARN_RELATION_MB", raising=False)
@@ -179,6 +183,7 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
         "wss://fstream.binance.com/market/ws/btcusdt@forceOrder"
     )
     assert settings.BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS == 100_000
+    assert settings.BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS == 600
     assert settings.BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS == 250
     assert settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS == 30
     assert settings.BINANCE_MICROSTRUCTURE_WARN_RELATION_MB == 4_096

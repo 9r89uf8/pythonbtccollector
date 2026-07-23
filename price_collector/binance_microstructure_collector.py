@@ -37,6 +37,7 @@ from price_collector.collector import (
     reconnect_delay_seconds,
 )
 from price_collector.db import epoch_ms_to_utc_datetime
+from price_collector.live_cache import MICROSTRUCTURE_LIVE_KEY
 from price_collector.market import MarketWindow, market_for_sample_second
 
 
@@ -49,6 +50,7 @@ FUTURES_DEPTH_SOURCE = "futures_depth"
 FUTURES_LIQUIDATION_SOURCE = "futures_liquidation"
 _OFFER_LOG_INTERVAL_SECONDS = 60.0
 _LAST_OFFER_LOG_AT: dict[str, float] = {}
+MICROSTRUCTURE_PERSIST_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class MicrostructureMessageError(ValueError):
@@ -561,6 +563,99 @@ async def fetch_microstructure_relation_size_bytes(pool: Any) -> int:
     return int(size)
 
 
+async def update_microstructure_live_cache(
+    live_cache: Any,
+    *,
+    row: Mapping[str, Any],
+    received_ms: int,
+) -> bool:
+    """Publish a finalized second without coupling it to PostgreSQL storage."""
+
+    if live_cache is None:
+        return False
+    try:
+        await live_cache.set_microstructure_snapshot(
+            MICROSTRUCTURE_LIVE_KEY,
+            row=row,
+            received_ms=received_ms,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOGGER.exception(
+            "microstructure_live_cache_write_failed",
+            extra={
+                "event": "microstructure_live_cache_write_failed",
+                "sample_second_ms": row.get("sample_second_ms"),
+            },
+        )
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class FinalizedMicrostructureRow:
+    """One immutable queue envelope for independent historical persistence."""
+
+    row: Mapping[str, Any]
+    received_ms: int
+
+
+def enqueue_finalized_microstructure_row(
+    persistence_rows: asyncio.Queue[FinalizedMicrostructureRow],
+    *,
+    row: Mapping[str, Any],
+    received_ms: int,
+) -> Optional[FinalizedMicrostructureRow]:
+    """Offer without blocking, dropping the oldest queued history at capacity."""
+
+    finalized = FinalizedMicrostructureRow(
+        row=dict(row),
+        received_ms=received_ms,
+    )
+    try:
+        persistence_rows.put_nowait(finalized)
+        return None
+    except asyncio.QueueFull:
+        dropped = persistence_rows.get_nowait()
+        persistence_rows.task_done()
+        persistence_rows.put_nowait(finalized)
+
+    LOGGER.error(
+        "binance_microstructure_persistence_queue_overflow",
+        extra={
+            "event": "binance_microstructure_persistence_queue_overflow",
+            "dropped_row_count": 1,
+            "dropped_sample_second_ms": dropped.row.get("sample_second_ms"),
+            "retained_sample_second_ms": row.get("sample_second_ms"),
+            "queued_rows": persistence_rows.qsize(),
+            "queue_max_rows": persistence_rows.maxsize,
+        },
+    )
+    return dropped
+
+
+def _requeue_inflight_microstructure_row(
+    persistence_rows: asyncio.Queue[FinalizedMicrostructureRow],
+    finalized: FinalizedMicrostructureRow,
+) -> bool:
+    """Preserve a cancelled in-flight row when doing so loses no newer row."""
+
+    try:
+        persistence_rows.put_nowait(finalized)
+    except asyncio.QueueFull:
+        LOGGER.error(
+            "binance_microstructure_inflight_row_not_requeued",
+            extra={
+                "event": "binance_microstructure_inflight_row_not_requeued",
+                "sample_second_ms": finalized.row.get("sample_second_ms"),
+                "queue_max_rows": persistence_rows.maxsize,
+            },
+        )
+        return False
+    return True
+
+
 @dataclass
 class MicrostructureWriteGate:
     """Hysteretic relation-size cap for only the optional research rows."""
@@ -582,6 +677,171 @@ class MicrostructureWriteGate:
         if relation_bytes >= self.warning_bytes:
             return "warning"
         return "ok"
+
+
+async def microstructure_persistence_loop(
+    *,
+    pool: Any,
+    settings: Any,
+    persistence_rows: asyncio.Queue[FinalizedMicrostructureRow],
+    write_gate: Optional[MicrostructureWriteGate] = None,
+) -> None:
+    """Drain finalized rows without delaying aggregation or the Redis path."""
+
+    gate = write_gate or MicrostructureWriteGate(
+        warning_bytes=(
+            settings.BINANCE_MICROSTRUCTURE_WARN_RELATION_MB
+            * BYTES_PER_MEBIBYTE
+        ),
+        maximum_bytes=(
+            settings.BINANCE_MICROSTRUCTURE_MAX_RELATION_MB
+            * BYTES_PER_MEBIBYTE
+        ),
+    )
+    last_retention_day: Optional[int] = None
+    last_retention_attempt_minute: Optional[int] = None
+    last_size_check_minute: Optional[int] = None
+
+    while True:
+        finalized = await persistence_rows.get()
+        finalization_ms = finalized.received_ms
+        row = finalized.row
+        sample_second_ms = row.get("sample_second_ms")
+        try:
+            maintenance_ms = current_utc_epoch_ms()
+            utc_day = maintenance_ms // MILLISECONDS_PER_DAY
+            utc_minute = maintenance_ms // 60_000
+            if (
+                utc_day != last_retention_day
+                and utc_minute != last_retention_attempt_minute
+            ):
+                last_retention_attempt_minute = utc_minute
+                try:
+                    result = await delete_expired_microstructure_rows(
+                        pool,
+                        symbol=settings.BINANCE_FUTURES_SYMBOL,
+                        now_ms=maintenance_ms,
+                        retention_days=(
+                            settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS
+                        ),
+                    )
+                    LOGGER.info(
+                        "binance_microstructure_retention_completed",
+                        extra={
+                            "event": (
+                                "binance_microstructure_retention_completed"
+                            ),
+                            "result": result,
+                            "retention_days": (
+                                settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS
+                            ),
+                        },
+                    )
+                    last_retention_day = utc_day
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    LOGGER.exception(
+                        "binance_microstructure_retention_failed",
+                        extra={
+                            "event": (
+                                "binance_microstructure_retention_failed"
+                            )
+                        },
+                    )
+
+            if utc_minute != last_size_check_minute:
+                try:
+                    relation_bytes = (
+                        await fetch_microstructure_relation_size_bytes(pool)
+                    )
+                    gate_status = gate.observe(relation_bytes)
+                    log = (
+                        LOGGER.warning
+                        if gate_status in {"paused", "warning"}
+                        else LOGGER.info
+                    )
+                    if gate_status != "ok":
+                        log(
+                            "binance_microstructure_relation_size_status",
+                            extra={
+                                "event": (
+                                    "binance_microstructure_relation_size_status"
+                                ),
+                                "status": gate_status,
+                                "relation_bytes": relation_bytes,
+                                "warning_bytes": gate.warning_bytes,
+                                "maximum_bytes": gate.maximum_bytes,
+                                "writes_paused": gate.paused,
+                            },
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # A failed size check pauses only this optional historical
+                    # sink. Aggregation, Redis, and critical futures paths keep
+                    # running while a later successful check can release it.
+                    gate.paused = True
+                    LOGGER.exception(
+                        "binance_microstructure_relation_size_check_failed",
+                        extra={
+                            "event": (
+                                "binance_microstructure_relation_size_check_failed"
+                            )
+                        },
+                    )
+                last_size_check_minute = utc_minute
+
+            if gate.paused:
+                LOGGER.debug(
+                    "binance_microstructure_write_skipped_size_cap",
+                    extra={
+                        "event": (
+                            "binance_microstructure_write_skipped_size_cap"
+                        ),
+                        "sample_second_ms": sample_second_ms,
+                        "relation_bytes": gate.relation_bytes,
+                    },
+                )
+            else:
+                try:
+                    await upsert_binance_microstructure_1s(
+                        pool,
+                        symbol=settings.BINANCE_FUTURES_SYMBOL,
+                        row=row,
+                        received_ms=finalization_ms,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if _should_log_offer_failure("write"):
+                        LOGGER.exception(
+                            "binance_microstructure_write_failed",
+                            extra={
+                                "event": "binance_microstructure_write_failed",
+                                "sample_second_ms": sample_second_ms,
+                            },
+                        )
+        except asyncio.CancelledError:
+            persistence_rows.task_done()
+            _requeue_inflight_microstructure_row(
+                persistence_rows,
+                finalized,
+            )
+            raise
+        except Exception:
+            # An invalid internal envelope must not take down the live path or
+            # prevent newer, independently finalized rows from being drained.
+            LOGGER.exception(
+                "binance_microstructure_persistence_row_failed",
+                extra={
+                    "event": "binance_microstructure_persistence_row_failed",
+                    "sample_second_ms": sample_second_ms,
+                },
+            )
+            persistence_rows.task_done()
+        else:
+            persistence_rows.task_done()
 
 
 def _event_received_ms(event: Any) -> int:
@@ -654,29 +914,18 @@ def _drain_events_into_pending(
 
 async def microstructure_aggregate_loop(
     *,
-    pool: Any,
     settings: Any,
     state: CollectorState,
     events: asyncio.Queue[Any],
-    write_gate: Optional[MicrostructureWriteGate] = None,
+    persistence_rows: asyncio.Queue[FinalizedMicrostructureRow],
+    live_cache: Any = None,
 ) -> None:
-    """Heap-order events and persist receipt-time-causal one-second rows."""
+    """Finalize causally, publish Redis, and enqueue history without blocking."""
 
-    gate = write_gate or MicrostructureWriteGate(
-        warning_bytes=(
-            settings.BINANCE_MICROSTRUCTURE_WARN_RELATION_MB * BYTES_PER_MEBIBYTE
-        ),
-        maximum_bytes=(
-            settings.BINANCE_MICROSTRUCTURE_MAX_RELATION_MB * BYTES_PER_MEBIBYTE
-        ),
-    )
     pending: list[Any] = []
     now_ms = current_utc_epoch_ms()
     next_boundary_ms = (now_ms // 1000 + 1) * 1000
     last_finalized_boundary_ms: Optional[int] = None
-    last_retention_day: Optional[int] = None
-    last_retention_attempt_minute: Optional[int] = None
-    last_size_check_minute: Optional[int] = None
 
     while True:
         deadline_ms = next_boundary_ms + settings.BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS
@@ -704,7 +953,7 @@ async def microstructure_aggregate_loop(
             next_boundary_ms + settings.BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS
             <= now_ms
         ):
-            # PostgreSQL maintenance or an upsert can cross another boundary.
+            # A Redis attempt or scheduler delay can cross another boundary.
             # Re-drain before *every* catch-up row so events received during
             # those awaits are included in their own causal interval.
             _drain_events_into_pending(
@@ -730,112 +979,16 @@ async def microstructure_aggregate_loop(
                     f"got {row.get('sample_second_ms')!r}"
                 )
             last_finalized_boundary_ms = next_boundary_ms
-
-            utc_day = finalization_ms // MILLISECONDS_PER_DAY
-            utc_minute = finalization_ms // 60_000
-            if (
-                utc_day != last_retention_day
-                and utc_minute != last_retention_attempt_minute
-            ):
-                last_retention_attempt_minute = utc_minute
-                try:
-                    result = await delete_expired_microstructure_rows(
-                        pool,
-                        symbol=settings.BINANCE_FUTURES_SYMBOL,
-                        now_ms=finalization_ms,
-                        retention_days=settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS,
-                    )
-                    LOGGER.info(
-                        "binance_microstructure_retention_completed",
-                        extra={
-                            "event": "binance_microstructure_retention_completed",
-                            "result": result,
-                            "retention_days": (
-                                settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS
-                            ),
-                        },
-                    )
-                    last_retention_day = utc_day
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    LOGGER.exception(
-                        "binance_microstructure_retention_failed",
-                        extra={
-                            "event": "binance_microstructure_retention_failed"
-                        },
-                    )
-
-            if utc_minute != last_size_check_minute:
-                try:
-                    relation_bytes = await fetch_microstructure_relation_size_bytes(
-                        pool
-                    )
-                    gate_status = gate.observe(relation_bytes)
-                    log = LOGGER.warning if gate_status in {
-                        "paused",
-                        "warning",
-                    } else LOGGER.info
-                    if gate_status != "ok":
-                        log(
-                            "binance_microstructure_relation_size_status",
-                            extra={
-                                "event": (
-                                    "binance_microstructure_relation_size_status"
-                                ),
-                                "status": gate_status,
-                                "relation_bytes": relation_bytes,
-                                "warning_bytes": gate.warning_bytes,
-                                "maximum_bytes": gate.maximum_bytes,
-                                "writes_paused": gate.paused,
-                            },
-                        )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    # The optional writer must not grow while its cap cannot
-                    # be verified.  Readers and the core futures paths remain
-                    # active; a later successful check below the warning
-                    # threshold releases this gate.
-                    gate.paused = True
-                    LOGGER.exception(
-                        "binance_microstructure_relation_size_check_failed",
-                        extra={
-                            "event": (
-                                "binance_microstructure_relation_size_check_failed"
-                            )
-                        },
-                    )
-                last_size_check_minute = utc_minute
-
-            if gate.paused:
-                LOGGER.debug(
-                    "binance_microstructure_write_skipped_size_cap",
-                    extra={
-                        "event": "binance_microstructure_write_skipped_size_cap",
-                        "sample_second_ms": expected_sample_second_ms,
-                        "relation_bytes": gate.relation_bytes,
-                    },
-                )
-            else:
-                try:
-                    await upsert_binance_microstructure_1s(
-                        pool,
-                        symbol=settings.BINANCE_FUTURES_SYMBOL,
-                        row=row,
-                        received_ms=finalization_ms,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    if _should_log_offer_failure("write"):
-                        LOGGER.exception(
-                            "binance_microstructure_write_failed",
-                            extra={
-                                "event": "binance_microstructure_write_failed",
-                                "sample_second_ms": expected_sample_second_ms,
-                            },
-                        )
+            await update_microstructure_live_cache(
+                live_cache,
+                row=row,
+                received_ms=finalization_ms,
+            )
+            enqueue_finalized_microstructure_row(
+                persistence_rows,
+                row=row,
+                received_ms=finalization_ms,
+            )
 
             next_boundary_ms += 1000
             now_ms = current_utc_epoch_ms()
@@ -844,11 +997,25 @@ async def microstructure_aggregate_loop(
 class MicrostructureRuntime:
     """Own the optional microstructure readers, queue, state, and writer."""
 
-    def __init__(self, settings: Any, pool: Any) -> None:
+    def __init__(
+        self,
+        settings: Any,
+        pool: Any,
+        *,
+        live_cache: Any = None,
+    ) -> None:
         self.settings = settings
         self.pool = pool
+        self.live_cache = live_cache
         self.events: asyncio.Queue[Any] = asyncio.Queue(
             maxsize=settings.BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS
+        )
+        self.persistence_rows: asyncio.Queue[FinalizedMicrostructureRow] = (
+            asyncio.Queue(
+                maxsize=(
+                    settings.BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS
+                )
+            )
         )
         self.sink = MicrostructureEventSink(
             self.events,
@@ -866,7 +1033,7 @@ class MicrostructureRuntime:
             ),
         )
 
-    def _worker_coroutines(self) -> list[Any]:
+    def _producer_coroutines(self) -> list[Any]:
         return [
             spot_microstructure_reader_loop(self.settings, self.sink),
             futures_depth_microstructure_reader_loop(self.settings, self.sink),
@@ -875,16 +1042,122 @@ class MicrostructureRuntime:
                 self.sink,
             ),
             microstructure_aggregate_loop(
-                pool=self.pool,
                 settings=self.settings,
                 state=self.state,
                 events=self.events,
-                write_gate=self.write_gate,
+                persistence_rows=self.persistence_rows,
+                live_cache=self.live_cache,
             ),
         ]
 
+    async def _persistence_supervisor(self) -> None:
+        """Keep one queue consumer alive across producer-group restarts."""
+
+        attempt = 0
+        while True:
+            try:
+                await microstructure_persistence_loop(
+                    pool=self.pool,
+                    settings=self.settings,
+                    persistence_rows=self.persistence_rows,
+                    write_gate=self.write_gate,
+                )
+                raise RuntimeError(
+                    "Binance microstructure persistence stopped unexpectedly"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                attempt += 1
+                delay = reconnect_delay_seconds(attempt)
+                LOGGER.exception(
+                    "binance_microstructure_persistence_restarting",
+                    extra={
+                        "event": (
+                            "binance_microstructure_persistence_restarting"
+                        ),
+                        "attempt": attempt,
+                        "delay_seconds": round(delay, 3),
+                        "error": repr(exc),
+                        "queued_rows": self.persistence_rows.qsize(),
+                    },
+                )
+                await asyncio.sleep(delay)
+
+    def _discard_queued_persistence_rows(self, *, reason: str) -> int:
+        discarded_samples: list[Any] = []
+        while True:
+            try:
+                finalized = self.persistence_rows.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            discarded_samples.append(
+                finalized.row.get("sample_second_ms")
+            )
+            self.persistence_rows.task_done()
+
+        discarded_count = len(discarded_samples)
+        if discarded_count:
+            integer_samples = [
+                sample
+                for sample in discarded_samples
+                if isinstance(sample, int) and not isinstance(sample, bool)
+            ]
+            LOGGER.error(
+                "binance_microstructure_persistence_rows_discarded",
+                extra={
+                    "event": (
+                        "binance_microstructure_persistence_rows_discarded"
+                    ),
+                    "reason": reason,
+                    "discarded_row_count": discarded_count,
+                    "oldest_sample_second_ms": (
+                        min(integer_samples) if integer_samples else None
+                    ),
+                    "newest_sample_second_ms": (
+                        max(integer_samples) if integer_samples else None
+                    ),
+                },
+            )
+        return discarded_count
+
+    async def _stop_persistence(
+        self,
+        persistence_task: asyncio.Task[Any],
+    ) -> int:
+        """Drain briefly after producers stop, then cancel and account loss."""
+
+        timed_out = False
+        try:
+            await asyncio.wait_for(
+                self.persistence_rows.join(),
+                timeout=MICROSTRUCTURE_PERSIST_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            LOGGER.error(
+                "binance_microstructure_persistence_drain_timed_out",
+                extra={
+                    "event": (
+                        "binance_microstructure_persistence_drain_timed_out"
+                    ),
+                    "timeout_seconds": (
+                        MICROSTRUCTURE_PERSIST_DRAIN_TIMEOUT_SECONDS
+                    ),
+                    "queued_rows": self.persistence_rows.qsize(),
+                },
+            )
+        finally:
+            if not persistence_task.done():
+                persistence_task.cancel()
+            await asyncio.gather(persistence_task, return_exceptions=True)
+
+        return self._discard_queued_persistence_rows(
+            reason="shutdown_timeout" if timed_out else "shutdown",
+        )
+
     def _rebase_after_worker_failure(self) -> tuple[int, int]:
-        """Discard causally unassignable events and unfinished bucket totals."""
+        """Discard unfinished inputs while preserving finalized history rows."""
 
         discarded_events = 0
         latest_futures_trade_transition: Any = None
@@ -920,68 +1193,92 @@ class MicrostructureRuntime:
         """Supervise optional workers without propagating failures to core feeds."""
 
         restart_attempt = 0
-        while True:
-            tasks = [asyncio.create_task(worker) for worker in self._worker_coroutines()]
-            restarting = False
-            try:
-                done, _ = await asyncio.wait(
-                    tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                failure: Optional[Exception] = None
-                for task in done:
-                    if task.cancelled():
-                        continue
-                    exception = task.exception()
-                    if isinstance(exception, Exception):
-                        failure = exception
-                        break
-                if failure is None:
-                    failure = RuntimeError(
-                        "a Binance microstructure worker stopped unexpectedly"
+        persistence_task = asyncio.create_task(
+            self._persistence_supervisor()
+        )
+        try:
+            while True:
+                tasks = [
+                    asyncio.create_task(producer)
+                    for producer in self._producer_coroutines()
+                ]
+                restarting = False
+                try:
+                    done, _ = await asyncio.wait(
+                        tasks,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                raise failure
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                restarting = True
-                restart_attempt += 1
-                delay = reconnect_delay_seconds(restart_attempt)
-                LOGGER.exception(
-                    "binance_microstructure_runtime_restarting",
-                    extra={
-                        "event": "binance_microstructure_runtime_restarting",
-                        "attempt": restart_attempt,
-                        "delay_seconds": round(delay, 3),
-                        "error": repr(exc),
-                    },
-                )
-            finally:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-                if restarting:
-                    # The aggregate worker's local heap disappears with its
-                    # task. Drain the shared queue and reset unfinished bucket
-                    # totals as one no-await rebase so stale events cannot be
-                    # assigned to a later second. Cached quote/context ages are
-                    # deliberately retained to expose the gap.
-                    reset_ms, discarded_events = (
-                        self._rebase_after_worker_failure()
-                    )
-                    LOGGER.warning(
-                        "binance_microstructure_runtime_state_rebased",
+                    failure: Optional[Exception] = None
+                    for task in done:
+                        if task.cancelled():
+                            continue
+                        exception = task.exception()
+                        if isinstance(exception, Exception):
+                            failure = exception
+                            break
+                    if failure is None:
+                        failure = RuntimeError(
+                            "a Binance microstructure producer stopped "
+                            "unexpectedly"
+                        )
+                    raise failure
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    restarting = True
+                    restart_attempt += 1
+                    delay = reconnect_delay_seconds(restart_attempt)
+                    LOGGER.exception(
+                        "binance_microstructure_runtime_restarting",
                         extra={
-                            "event": "binance_microstructure_runtime_state_rebased",
-                            "received_ms": reset_ms,
-                            "discarded_events": discarded_events,
+                            "event": (
+                                "binance_microstructure_runtime_restarting"
+                            ),
+                            "attempt": restart_attempt,
+                            "delay_seconds": round(delay, 3),
+                            "error": repr(exc),
                         },
                     )
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
-            await asyncio.sleep(delay)
+                    if restarting:
+                        # The aggregate worker's local heap disappears with
+                        # its task. Drain unfinished inputs and reset bucket
+                        # totals without touching independently finalized rows.
+                        reset_ms, discarded_events = (
+                            self._rebase_after_worker_failure()
+                        )
+                        LOGGER.warning(
+                            "binance_microstructure_runtime_state_rebased",
+                            extra={
+                                "event": (
+                                    "binance_microstructure_runtime_state_rebased"
+                                ),
+                                "received_ms": reset_ms,
+                                "discarded_events": discarded_events,
+                                "queued_persistence_rows": (
+                                    self.persistence_rows.qsize()
+                                ),
+                            },
+                        )
+
+                await asyncio.sleep(delay)
+        finally:
+            await self._stop_persistence(persistence_task)
 
 
-def create_microstructure_runtime(settings: Any, pool: Any) -> MicrostructureRuntime:
-    return MicrostructureRuntime(settings, pool)
+def create_microstructure_runtime(
+    settings: Any,
+    pool: Any,
+    *,
+    live_cache: Any = None,
+) -> MicrostructureRuntime:
+    return MicrostructureRuntime(
+        settings,
+        pool,
+        live_cache=live_cache,
+    )

@@ -331,6 +331,49 @@ def test_retention_delete_uses_symbol_leading_primary_key():
     assert args == ("BTCUSDT", 7 * runtime.MILLISECONDS_PER_DAY)
 
 
+def test_microstructure_live_cache_write_is_decimal_safe_and_nonfatal(caplog):
+    row = {
+        "sample_second_ms": 1_783_459_500_000,
+        "spot_mid": Decimal("62000.123456789012345678"),
+    }
+    calls = []
+
+    class RecordingLiveCache:
+        async def set_microstructure_snapshot(self, key, **kwargs):
+            calls.append((key, kwargs))
+
+    assert asyncio.run(
+        runtime.update_microstructure_live_cache(
+            RecordingLiveCache(),
+            row=row,
+            received_ms=1_783_459_501_250,
+        )
+    )
+    assert calls == [
+        (
+            runtime.MICROSTRUCTURE_LIVE_KEY,
+            {
+                "row": row,
+                "received_ms": 1_783_459_501_250,
+            },
+        )
+    ]
+
+    class FailingLiveCache:
+        async def set_microstructure_snapshot(self, key, **kwargs):
+            raise OSError("redis unavailable")
+
+    with caplog.at_level("ERROR"):
+        assert not asyncio.run(
+            runtime.update_microstructure_live_cache(
+                FailingLiveCache(),
+                row=row,
+                received_ms=1_783_459_501_250,
+            )
+        )
+    assert "microstructure_live_cache_write_failed" in caplog.text
+
+
 def test_finalize_boundary_holds_event_received_at_boundary_for_next_row():
     first_trade = parse_binance_futures_agg_trade_payload(
         agg_trade_payload(a=1, f=1, l=1, p="100", q="1"),
@@ -426,6 +469,7 @@ def test_runtime_rebase_discards_queue_and_unfinished_interval(monkeypatch):
     async def scenario():
         settings = SimpleNamespace(
             BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=10,
+            BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=5,
             BINANCE_FUTURES_SYMBOL="BTCUSDT",
             BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
             BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
@@ -450,12 +494,18 @@ def test_runtime_rebase_discards_queue_and_unfinished_interval(monkeypatch):
             }
         )
         collector_runtime.events.put_nowait(QueuedEvent(1_950, 0, "error", "old"))
+        finalized = runtime.FinalizedMicrostructureRow(
+            row={"sample_second_ms": 1_000},
+            received_ms=2_250,
+        )
+        collector_runtime.persistence_rows.put_nowait(finalized)
         monkeypatch.setattr(runtime, "current_utc_epoch_ms", lambda: 2_000)
 
         reset_ms, discarded = collector_runtime._rebase_after_worker_failure()
 
         assert (reset_ms, discarded) == (2_000, 1)
         assert collector_runtime.events.empty()
+        assert collector_runtime.persistence_rows.get_nowait() is finalized
         assert collector_runtime.state.spot_trades.buy_quote == Decimal("0")
         assert collector_runtime.state.spot_trades.last_received_ms == 1_900
         assert collector_runtime.state.spot_book.bbo_ofi_quantity == Decimal("0")
@@ -486,6 +536,7 @@ def test_runtime_rebase_replays_latest_core_connection_transition(
     async def scenario():
         settings = SimpleNamespace(
             BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=10,
+            BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=5,
             BINANCE_FUTURES_SYMBOL="BTCUSDT",
             BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
             BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
@@ -509,52 +560,31 @@ def test_runtime_rebase_replays_latest_core_connection_transition(
     asyncio.run(scenario())
 
 
-def test_aggregate_loop_redrains_events_after_delayed_upsert(monkeypatch):
+def test_slow_postgres_does_not_delay_later_redis_seconds(monkeypatch):
     async def scenario():
         clock = {"now_ms": 1_950}
         events = asyncio.Queue()
+        persistence_rows = asyncio.Queue(maxsize=10)
         state = CollectorState(symbol="BTCUSDT")
         settings = SimpleNamespace(
-            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
-            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
             BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250,
             BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
             BINANCE_FUTURES_SYMBOL="BTCUSDT",
         )
-        rows = []
+        published_samples = []
+        three_published = asyncio.Event()
+        postgres_started = asyncio.Event()
 
-        def trade_event(received_ms, sequence, price, quantity="1"):
-            return QueuedEvent(
-                received_ms,
-                sequence,
-                "spot_trade",
-                {
-                    "s": "BTCUSDT",
-                    "e": "aggTrade",
-                    "p": price,
-                    "q": quantity,
-                    "m": False,
-                    "a": sequence,
-                    "f": sequence,
-                    "l": sequence,
-                    "T": received_ms - 10,
-                },
-            )
-
-        events.put_nowait(trade_event(1_999, 1, "100"))
-
-        async def fake_upsert(pool, *, symbol, row, received_ms):
-            del pool, symbol, received_ms
-            rows.append(row)
-            if len(rows) == 1:
-                # Simulate a write that crosses the next flush deadline. This
-                # event arrived while PostgreSQL was awaited and belongs in the
-                # row starting at 2,000 ms.
-                events.put_nowait(trade_event(2_500, 3, "102", "2"))
-                clock["now_ms"] = 3_350
-                await asyncio.sleep(0)
-                return
-            raise asyncio.CancelledError
+        class RecordingLiveCache:
+            async def set_microstructure_snapshot(self, key, **kwargs):
+                assert key == runtime.MICROSTRUCTURE_LIVE_KEY
+                published_samples.append(
+                    kwargs["row"]["sample_second_ms"]
+                )
+                if len(published_samples) == 3:
+                    three_published.set()
 
         async def fake_retention(*args, **kwargs):
             return "DELETE 0"
@@ -562,6 +592,12 @@ def test_aggregate_loop_redrains_events_after_delayed_upsert(monkeypatch):
         async def fake_relation_size(pool):
             return 0
 
+        async def blocked_upsert(pool, *, symbol, row, received_ms):
+            del pool, symbol, row, received_ms
+            postgres_started.set()
+            await asyncio.Future()
+
+        events.put_nowait(QueuedEvent(1_999, 0, "error", "first"))
         monkeypatch.setattr(
             runtime,
             "current_utc_epoch_ms",
@@ -570,7 +606,7 @@ def test_aggregate_loop_redrains_events_after_delayed_upsert(monkeypatch):
         monkeypatch.setattr(
             runtime,
             "upsert_binance_microstructure_1s",
-            fake_upsert,
+            blocked_upsert,
         )
         monkeypatch.setattr(
             runtime,
@@ -583,23 +619,586 @@ def test_aggregate_loop_redrains_events_after_delayed_upsert(monkeypatch):
             fake_relation_size,
         )
 
-        task = asyncio.create_task(
+        aggregate_task = asyncio.create_task(
             runtime.microstructure_aggregate_loop(
-                pool=object(),
                 settings=settings,
                 state=state,
                 events=events,
+                persistence_rows=persistence_rows,
+                live_cache=RecordingLiveCache(),
+            )
+        )
+        persistence_task = asyncio.create_task(
+            runtime.microstructure_persistence_loop(
+                pool=object(),
+                settings=settings,
+                persistence_rows=persistence_rows,
             )
         )
         await asyncio.sleep(0.01)
+
         clock["now_ms"] = 2_250
-        events.put_nowait(trade_event(2_200, 2, "101"))
+        events.put_nowait(QueuedEvent(2_000, 1, "error", "second"))
+        await asyncio.wait_for(postgres_started.wait(), timeout=1)
 
+        clock["now_ms"] = 3_250
+        events.put_nowait(QueuedEvent(3_000, 2, "error", "third"))
+        await asyncio.sleep(0)
+        clock["now_ms"] = 4_250
+        events.put_nowait(QueuedEvent(4_000, 3, "error", "fourth"))
+        await asyncio.wait_for(three_published.wait(), timeout=1)
+
+        assert published_samples == [1_000, 2_000, 3_000]
+        assert persistence_rows.qsize() == 2
+
+        aggregate_task.cancel()
+        persistence_task.cancel()
+        results = await asyncio.gather(
+            aggregate_task,
+            persistence_task,
+            return_exceptions=True,
+        )
+        assert all(
+            isinstance(result, asyncio.CancelledError)
+            for result in results
+        )
+
+    asyncio.run(scenario())
+
+
+def test_redis_failure_still_enqueues_and_persists_row(monkeypatch):
+    async def scenario():
+        clock = {"now_ms": 1_950}
+        events = asyncio.Queue()
+        persistence_rows = asyncio.Queue(maxsize=10)
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250,
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        persisted = asyncio.Event()
+        persisted_rows = []
+
+        class FailingLiveCache:
+            async def set_microstructure_snapshot(self, key, **kwargs):
+                raise OSError("redis unavailable")
+
+        async def fake_retention(*args, **kwargs):
+            return "DELETE 0"
+
+        async def fake_relation_size(pool):
+            return 0
+
+        async def fake_upsert(pool, *, symbol, row, received_ms):
+            persisted_rows.append((row["sample_second_ms"], received_ms))
+            persisted.set()
+
+        monkeypatch.setattr(
+            runtime,
+            "current_utc_epoch_ms",
+            lambda: clock["now_ms"],
+        )
+        monkeypatch.setattr(
+            runtime,
+            "delete_expired_microstructure_rows",
+            fake_retention,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "fetch_microstructure_relation_size_bytes",
+            fake_relation_size,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "upsert_binance_microstructure_1s",
+            fake_upsert,
+        )
+
+        aggregate_task = asyncio.create_task(
+            runtime.microstructure_aggregate_loop(
+                settings=settings,
+                state=CollectorState(symbol="BTCUSDT"),
+                events=events,
+                persistence_rows=persistence_rows,
+                live_cache=FailingLiveCache(),
+            )
+        )
+        persistence_task = asyncio.create_task(
+            runtime.microstructure_persistence_loop(
+                pool=object(),
+                settings=settings,
+                persistence_rows=persistence_rows,
+            )
+        )
+        await asyncio.sleep(0)
+        clock["now_ms"] = 2_250
+        events.put_nowait(QueuedEvent(2_000, 0, "error", "wake"))
+        await asyncio.wait_for(persisted.wait(), timeout=1)
+
+        assert persisted_rows == [(1_000, 2_250)]
+
+        aggregate_task.cancel()
+        persistence_task.cancel()
+        await asyncio.gather(
+            aggregate_task,
+            persistence_task,
+            return_exceptions=True,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_persistence_worker_pauses_at_cap_then_resumes(monkeypatch):
+    async def scenario():
+        clock = {"now_ms": 10 * runtime.MILLISECONDS_PER_DAY}
+        persistence_rows = asyncio.Queue(maxsize=10)
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        calls = []
+        relation_sizes = iter((150, 99))
+        gate = runtime.MicrostructureWriteGate(
+            warning_bytes=100,
+            maximum_bytes=150,
+        )
+
+        async def fake_retention(pool, *, symbol, now_ms, retention_days):
+            calls.append(("retention", now_ms))
+            return "DELETE 0"
+
+        async def fake_relation_size(pool):
+            size = next(relation_sizes)
+            calls.append(("size", size))
+            return size
+
+        async def fake_upsert(pool, *, symbol, row, received_ms):
+            calls.append(
+                ("postgres", row["sample_second_ms"], received_ms)
+            )
+
+        monkeypatch.setattr(
+            runtime,
+            "current_utc_epoch_ms",
+            lambda: clock["now_ms"],
+        )
+        monkeypatch.setattr(
+            runtime,
+            "delete_expired_microstructure_rows",
+            fake_retention,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "fetch_microstructure_relation_size_bytes",
+            fake_relation_size,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "upsert_binance_microstructure_1s",
+            fake_upsert,
+        )
+
+        persistence_rows.put_nowait(
+            runtime.FinalizedMicrostructureRow(
+                row={"sample_second_ms": 1_000},
+                received_ms=2_250,
+            )
+        )
+        task = asyncio.create_task(
+            runtime.microstructure_persistence_loop(
+                pool=object(),
+                settings=settings,
+                persistence_rows=persistence_rows,
+                write_gate=gate,
+            )
+        )
+        await asyncio.wait_for(persistence_rows.join(), timeout=1)
+        assert gate.paused is True
+        assert not any(call[0] == "postgres" for call in calls)
+
+        # Maintenance cadence follows writer wall time, not the queued row's
+        # old received_ms. Advancing one minute permits a fresh size check.
+        clock["now_ms"] += 60_000
+        persistence_rows.put_nowait(
+            runtime.FinalizedMicrostructureRow(
+                row={"sample_second_ms": 2_000},
+                received_ms=3_250,
+            )
+        )
+        await asyncio.wait_for(persistence_rows.join(), timeout=1)
+
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1)
+            await task
 
-        assert [row["sample_second_ms"] for row in rows] == [1_000, 2_000]
-        assert rows[0]["spot_buy_usdt"] == Decimal("100")
-        assert rows[1]["spot_buy_usdt"] == Decimal("305")
+        assert calls == [
+            ("retention", 10 * runtime.MILLISECONDS_PER_DAY),
+            ("size", 150),
+            ("size", 99),
+            ("postgres", 2_000, 3_250),
+        ]
+        assert gate.paused is False
+
+    asyncio.run(scenario())
+
+
+def test_persistence_failure_does_not_stop_newer_rows(monkeypatch):
+    async def scenario():
+        persistence_rows = asyncio.Queue(maxsize=10)
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        attempted = []
+
+        async def fake_retention(*args, **kwargs):
+            return "DELETE 0"
+
+        async def fake_relation_size(pool):
+            return 0
+
+        async def flaky_upsert(pool, *, symbol, row, received_ms):
+            attempted.append(row["sample_second_ms"])
+            if len(attempted) == 1:
+                raise OSError("postgres unavailable")
+
+        monkeypatch.setattr(
+            runtime,
+            "delete_expired_microstructure_rows",
+            fake_retention,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "fetch_microstructure_relation_size_bytes",
+            fake_relation_size,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "upsert_binance_microstructure_1s",
+            flaky_upsert,
+        )
+
+        for sample_second_ms in (1_000, 2_000):
+            persistence_rows.put_nowait(
+                runtime.FinalizedMicrostructureRow(
+                    row={"sample_second_ms": sample_second_ms},
+                    received_ms=sample_second_ms + 1_250,
+                )
+            )
+        task = asyncio.create_task(
+            runtime.microstructure_persistence_loop(
+                pool=object(),
+                settings=settings,
+                persistence_rows=persistence_rows,
+            )
+        )
+        await asyncio.wait_for(persistence_rows.join(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert attempted == [1_000, 2_000]
+
+    asyncio.run(scenario())
+
+
+def test_persistence_queue_overflow_keeps_newest_rows(caplog):
+    async def scenario():
+        queue = asyncio.Queue(maxsize=2)
+        runtime._LAST_OFFER_LOG_AT.pop("persistence_queue_overflow", None)
+        first_row = {"sample_second_ms": 1_000}
+
+        assert runtime.enqueue_finalized_microstructure_row(
+            queue,
+            row=first_row,
+            received_ms=2_250,
+        ) is None
+        first_row["sample_second_ms"] = 999_000
+        assert runtime.enqueue_finalized_microstructure_row(
+            queue,
+            row={"sample_second_ms": 2_000},
+            received_ms=3_250,
+        ) is None
+        with caplog.at_level("ERROR"):
+            dropped = runtime.enqueue_finalized_microstructure_row(
+                queue,
+                row={"sample_second_ms": 3_000},
+                received_ms=4_250,
+            )
+
+        assert dropped.row["sample_second_ms"] == 1_000
+        assert [
+            queue.get_nowait().row["sample_second_ms"],
+            queue.get_nowait().row["sample_second_ms"],
+        ] == [2_000, 3_000]
+
+    asyncio.run(scenario())
+    assert "binance_microstructure_persistence_queue_overflow" in caplog.text
+
+
+def test_persistence_shutdown_drains_before_stopping_writer(monkeypatch):
+    async def scenario():
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=10,
+            BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=5,
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        collector_runtime = runtime.MicrostructureRuntime(settings, object())
+        persisted = []
+
+        async def fake_retention(*args, **kwargs):
+            return "DELETE 0"
+
+        async def fake_relation_size(pool):
+            return 0
+
+        async def fake_upsert(pool, *, symbol, row, received_ms):
+            persisted.append((row["sample_second_ms"], received_ms))
+
+        monkeypatch.setattr(
+            runtime,
+            "delete_expired_microstructure_rows",
+            fake_retention,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "fetch_microstructure_relation_size_bytes",
+            fake_relation_size,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "upsert_binance_microstructure_1s",
+            fake_upsert,
+        )
+
+        for sample_second_ms in (1_000, 2_000):
+            collector_runtime.persistence_rows.put_nowait(
+                runtime.FinalizedMicrostructureRow(
+                    row={"sample_second_ms": sample_second_ms},
+                    received_ms=sample_second_ms + 1_250,
+                )
+            )
+        persistence_task = asyncio.create_task(
+            collector_runtime._persistence_supervisor()
+        )
+
+        discarded = await collector_runtime._stop_persistence(
+            persistence_task
+        )
+
+        assert discarded == 0
+        assert persisted == [(1_000, 2_250), (2_000, 3_250)]
+        assert collector_runtime.persistence_rows.empty()
+        await asyncio.wait_for(
+            collector_runtime.persistence_rows.join(),
+            timeout=0.1,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_persistence_shutdown_timeout_cancels_and_accounts_rows(
+    monkeypatch,
+    caplog,
+):
+    async def scenario():
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=10,
+            BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=5,
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        collector_runtime = runtime.MicrostructureRuntime(settings, object())
+        started = asyncio.Event()
+
+        async def fake_retention(*args, **kwargs):
+            return "DELETE 0"
+
+        async def fake_relation_size(pool):
+            return 0
+
+        async def blocked_upsert(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(
+            runtime,
+            "delete_expired_microstructure_rows",
+            fake_retention,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "fetch_microstructure_relation_size_bytes",
+            fake_relation_size,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "upsert_binance_microstructure_1s",
+            blocked_upsert,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "MICROSTRUCTURE_PERSIST_DRAIN_TIMEOUT_SECONDS",
+            0.01,
+        )
+
+        for sample_second_ms in (1_000, 2_000):
+            collector_runtime.persistence_rows.put_nowait(
+                runtime.FinalizedMicrostructureRow(
+                    row={"sample_second_ms": sample_second_ms},
+                    received_ms=sample_second_ms + 1_250,
+                )
+            )
+        persistence_task = asyncio.create_task(
+            collector_runtime._persistence_supervisor()
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        with caplog.at_level("ERROR"):
+            discarded = await collector_runtime._stop_persistence(
+                persistence_task
+            )
+
+        assert discarded == 2
+        assert collector_runtime.persistence_rows.empty()
+        await asyncio.wait_for(
+            collector_runtime.persistence_rows.join(),
+            timeout=0.1,
+        )
+
+    asyncio.run(scenario())
+    assert "binance_microstructure_persistence_drain_timed_out" in caplog.text
+    assert "binance_microstructure_persistence_rows_discarded" in caplog.text
+    discard_record = next(
+        record
+        for record in caplog.records
+        if record.message
+        == "binance_microstructure_persistence_rows_discarded"
+    )
+    assert discard_record.discarded_row_count == 2
+    assert discard_record.oldest_sample_second_ms == 1_000
+    assert discard_record.newest_sample_second_ms == 2_000
+
+
+def test_persistence_supervisor_survives_producer_restart(monkeypatch):
+    async def scenario():
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=10,
+            BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=5,
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        collector_runtime = runtime.MicrostructureRuntime(settings, object())
+        producer_round = {"value": 0}
+        second_round_started = asyncio.Event()
+        persistence_starts = []
+
+        def producer_coroutines():
+            producer_round["value"] += 1
+            current_round = producer_round["value"]
+
+            async def producer():
+                if current_round == 1:
+                    raise RuntimeError("restart producers")
+                second_round_started.set()
+                await asyncio.Future()
+
+            return [producer()]
+
+        async def fake_persistence_loop(**kwargs):
+            persistence_starts.append(kwargs["persistence_rows"])
+            await asyncio.Future()
+
+        collector_runtime._producer_coroutines = producer_coroutines
+        monkeypatch.setattr(
+            runtime,
+            "microstructure_persistence_loop",
+            fake_persistence_loop,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "reconnect_delay_seconds",
+            lambda attempt: 0,
+        )
+
+        task = asyncio.create_task(collector_runtime.run())
+        await asyncio.wait_for(second_round_started.wait(), timeout=1)
+        assert persistence_starts == [collector_runtime.persistence_rows]
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_persistence_requeues_inflight_row_when_safe(monkeypatch):
+    async def scenario():
+        queue = asyncio.Queue(maxsize=2)
+        settings = SimpleNamespace(
+            BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30,
+            BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=100,
+            BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=200,
+            BINANCE_FUTURES_SYMBOL="BTCUSDT",
+        )
+        started = asyncio.Event()
+        finalized = runtime.FinalizedMicrostructureRow(
+            row={"sample_second_ms": 1_000},
+            received_ms=2_250,
+        )
+        queue.put_nowait(finalized)
+
+        async def fake_retention(*args, **kwargs):
+            return "DELETE 0"
+
+        async def fake_relation_size(pool):
+            return 0
+
+        async def blocked_upsert(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(
+            runtime,
+            "delete_expired_microstructure_rows",
+            fake_retention,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "fetch_microstructure_relation_size_bytes",
+            fake_relation_size,
+        )
+        monkeypatch.setattr(
+            runtime,
+            "upsert_binance_microstructure_1s",
+            blocked_upsert,
+        )
+
+        task = asyncio.create_task(
+            runtime.microstructure_persistence_loop(
+                pool=object(),
+                settings=settings,
+                persistence_rows=queue,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert queue.get_nowait() is finalized
 
     asyncio.run(scenario())

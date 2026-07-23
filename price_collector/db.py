@@ -2492,6 +2492,113 @@ async def fetch_market_download_payload(
     )
 
 
+async def fetch_market_microstructure_rows(
+    pool: asyncpg.Pool,
+    *,
+    market_id: int,
+) -> list[dict[str, Any]]:
+    """Fetch the bounded finalized microstructure series for one market."""
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                sample_second_ms,
+                schema_version,
+                sample_span_ms,
+                sample_jitter_ms,
+                collector_healthy,
+
+                spot_bid,
+                spot_ask,
+                spot_mid,
+                spot_spread_bps,
+                spot_imbalance_1,
+                spot_imbalance_5,
+                spot_imbalance_10,
+                spot_bid_depth_usdt_10,
+                spot_ask_depth_usdt_10,
+                spot_weighted_mid_offset_bps,
+                spot_snapshot_bbo_ofi_usdt,
+                spot_book_snapshot_count,
+
+                fut_bid,
+                fut_ask,
+                fut_mid,
+                fut_spread_bps,
+                fut_imbalance_1,
+                fut_imbalance_5,
+                fut_imbalance_10,
+                fut_bid_depth_usdt_10,
+                fut_ask_depth_usdt_10,
+                fut_weighted_mid_offset_bps,
+                fut_snapshot_bbo_ofi_usdt,
+                fut_book_snapshot_count,
+
+                spot_buy_usdt,
+                spot_sell_usdt,
+                spot_trade_id_span,
+                spot_aggtrade_count,
+                spot_max_aggtrade_usdt,
+                spot_vwap,
+                spot_trade_high,
+                spot_trade_low,
+                spot_last_trade,
+                fut_buy_usdt,
+                fut_sell_usdt,
+                fut_rpi_buy_usdt,
+                fut_rpi_sell_usdt,
+                fut_trade_id_span,
+                fut_aggtrade_count,
+                fut_max_aggtrade_usdt,
+                fut_vwap,
+                fut_trade_high,
+                fut_trade_low,
+                fut_last_trade,
+
+                perp_spot_basis_bps,
+                spot_fut_book_skew_ms,
+                mark_price,
+                index_price,
+                mark_index_basis_bps,
+                funding_rate,
+                seconds_to_funding,
+                open_interest_btc,
+                open_interest_usdt,
+
+                long_liq_usdt,
+                short_liq_usdt,
+                liq_snapshot_count,
+                liq_lag_mean_ms,
+
+                spot_book_age_ms,
+                spot_book_lag_ms,
+                fut_book_age_ms,
+                fut_book_lag_ms,
+                spot_trade_age_ms,
+                spot_trade_lag_mean_ms,
+                spot_trade_lag_max_ms,
+                fut_trade_age_ms,
+                fut_trade_lag_mean_ms,
+                fut_trade_lag_max_ms,
+                mark_age_ms,
+                mark_lag_ms,
+                oi_age_ms,
+                oi_exchange_age_ms,
+                oi_http_lag_ms,
+                connection_errors,
+                received_ms
+            FROM binance_microstructure_1s
+            WHERE market_id = $1
+              AND symbol = 'BTCUSDT'
+            ORDER BY sample_second_ms ASC
+            LIMIT 300
+            """,
+            market_id,
+        )
+
+    return [dict(row) for row in rows]
+
+
 async def fetch_current_live_payload(
     pool: asyncpg.Pool,
     *,

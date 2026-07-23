@@ -1220,8 +1220,17 @@ def test_run_collector_microstructure_enabled_wires_and_runs_runtime(monkeypatch
             assert database_url == "postgresql://writer@localhost/price_collector"
             return pool
 
-        def fake_create_microstructure_runtime(received_settings, received_pool):
-            observed["runtime_factory"] = (received_settings, received_pool)
+        def fake_create_microstructure_runtime(
+            received_settings,
+            received_pool,
+            *,
+            live_cache,
+        ):
+            observed["runtime_factory"] = (
+                received_settings,
+                received_pool,
+                live_cache,
+            )
             return runtime
 
         async def blocking_task(name):
@@ -1288,7 +1297,8 @@ def test_run_collector_microstructure_enabled_wires_and_runs_runtime(monkeypatch
         await asyncio.wait_for(snapshot_started.wait(), timeout=0.5)
         await asyncio.wait_for(runtime_started.wait(), timeout=0.5)
 
-        assert observed["runtime_factory"] == (settings, pool)
+        assert observed["runtime_factory"][:2] == (settings, pool)
+        assert isinstance(observed["runtime_factory"][2], FakeLiveCache)
         assert observed["reader"][0] is settings
         assert observed["reader"][1] == "flow"
         assert observed["reader"][2]["microstructure_sink"] is sink

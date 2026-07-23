@@ -11,6 +11,7 @@ from price_collector.live_cache import (
     BINANCE_SPOT_LIVE_KEY,
     CHAINLINK_LIVE_KEY,
     FUTURES_LIVE_KEY,
+    MICROSTRUCTURE_LIVE_KEY,
     LiveCachePayloadError,
     LivePrice,
 )
@@ -33,8 +34,10 @@ class FakeLiveCache:
     def __init__(self) -> None:
         self.closed = False
         self.prices = {}
+        self.microstructure_snapshot = None
         self.read_error = None
         self.requested_keys = []
+        self.requested_combined_keys = []
 
     async def get_prices(self, keys):
         if self.read_error is not None:
@@ -42,6 +45,23 @@ class FakeLiveCache:
         key_list = list(keys)
         self.requested_keys.append(key_list)
         return {key: self.prices.get(key) for key in key_list}
+
+    async def get_prices_with_microstructure(
+        self,
+        price_keys,
+        *,
+        microstructure_key,
+    ):
+        if self.read_error is not None:
+            raise self.read_error
+        price_key_list = list(price_keys)
+        self.requested_combined_keys.append(
+            [*price_key_list, microstructure_key]
+        )
+        return (
+            {key: self.prices.get(key) for key in price_key_list},
+            self.microstructure_snapshot,
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -679,6 +699,66 @@ def market_data_payload(
     return payload
 
 
+def microstructure_row(**updates):
+    row = {
+        "sample_second_ms": 1_783_459_200_000,
+        "schema_version": 1,
+        "sample_span_ms": 1_000,
+        "sample_jitter_ms": 250,
+        "collector_healthy": True,
+        "spot_bid": Decimal("65757.900000000000000000"),
+        "spot_ask": Decimal("65758.100000000000000000"),
+        "spot_mid": Decimal("65758.000000000000000000"),
+        "spot_spread_bps": Decimal("0.03040000"),
+        "spot_imbalance_1": Decimal("0.15000000"),
+        "spot_imbalance_5": Decimal("0.09000000"),
+        "spot_imbalance_10": Decimal("0.04000000"),
+        "spot_bid_depth_usdt_10": Decimal("1254300.100000000000000000"),
+        "spot_ask_depth_usdt_10": Decimal("1189200.500000000000000000"),
+        "spot_weighted_mid_offset_bps": Decimal("0.00600000"),
+        "spot_snapshot_bbo_ofi_usdt": Decimal("15200.400000000000000000"),
+        "spot_book_snapshot_count": 4,
+        "fut_bid": Decimal("65723.600000000000000000"),
+        "fut_ask": Decimal("65723.700000000000000000"),
+        "fut_mid": Decimal("65723.650000000000000000"),
+        "fut_spread_bps": Decimal("0.01520000"),
+        "fut_imbalance_1": Decimal("0.17000000"),
+        "fut_imbalance_5": Decimal("0.11000000"),
+        "fut_imbalance_10": Decimal("0.08000000"),
+        "fut_bid_depth_usdt_10": Decimal("1432000.200000000000000000"),
+        "fut_ask_depth_usdt_10": Decimal("1328000.900000000000000000"),
+        "fut_weighted_mid_offset_bps": Decimal("0.00400000"),
+        "fut_snapshot_bbo_ofi_usdt": Decimal("18450.250000000000000000"),
+        "fut_book_snapshot_count": 5,
+        "spot_buy_usdt": Decimal("90450.100000000000000000"),
+        "spot_sell_usdt": Decimal("81200.250000000000000000"),
+        "fut_buy_usdt": Decimal("120400.150000000000000000"),
+        "fut_sell_usdt": Decimal("110200.800000000000000000"),
+        "fut_rpi_buy_usdt": Decimal("4200.100000000000000000"),
+        "fut_rpi_sell_usdt": None,
+        "perp_spot_basis_bps": Decimal("-5.22000000"),
+        "spot_fut_book_skew_ms": 41,
+        "mark_price": Decimal("65723.610000000000000000"),
+        "index_price": Decimal("65721.230000000000000000"),
+        "mark_index_basis_bps": Decimal("0.36210000"),
+        "funding_rate": Decimal("0.000100000000000000"),
+        "seconds_to_funding": 2_400,
+        "open_interest_btc": Decimal("80000.100000000000000000"),
+        "open_interest_usdt": Decimal("5257890000.100000000000000000"),
+        "long_liq_usdt": Decimal("0E-18"),
+        "short_liq_usdt": Decimal("12500.200000000000000000"),
+        "liq_snapshot_count": 1,
+        "spot_book_age_ms": 911,
+        "fut_book_age_ms": 363,
+        "spot_trade_age_ms": 147,
+        "fut_trade_age_ms": 346,
+        "connection_errors": 0,
+        "received_ms": 1_783_459_201_250,
+    }
+    row.update(updates)
+    return row
+
+
 def test_markets_current_data_uses_current_five_minute_market(client, monkeypatch):
     async def fake_fetch_market_download_payload(
         pool,
@@ -851,7 +931,202 @@ def test_markets_data_by_id_can_include_futures_flow_and_book(client, monkeypatc
     assert body["series"][0]["book"]["book_imbalance"] == "0.25000000"
 
 
-def test_openapi_lists_futures_flow_and_book_include_flags(client):
+def test_markets_data_by_id_can_include_selected_microstructure_groups(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_market_download_payload(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs["market_id"] == 5_944_864
+        return market_data_payload()
+
+    async def fake_fetch_market_microstructure_rows(pool, *, market_id):
+        assert pool is client.fake_pool
+        assert market_id == 5_944_864
+        return [microstructure_row()]
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        fake_fetch_market_microstructure_rows,
+    )
+
+    response = client.get(
+        "/markets/5944864/data"
+        "?include_microstructure=true"
+        "&microstructure_groups=books,flow,liquidations,quality"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 3
+    assert body["availability"] == {
+        "microstructure_rows": 1,
+        "microstructure_healthy_rows": 1,
+        "microstructure_missing_seconds": 299,
+    }
+    microstructure = body["series"][0]["microstructure"]
+    assert set(microstructure) == {
+        "collector_healthy",
+        "books",
+        "flow",
+        "liquidations",
+        "quality",
+    }
+    assert microstructure["collector_healthy"] is True
+    assert microstructure["books"]["spot"]["bid"] == (
+        "65757.900000000000000000"
+    )
+    assert microstructure["books"]["spot"]["snapshot_count"] == 4
+    assert microstructure["flow"]["spot_buy_usdt"] == (
+        "90450.100000000000000000"
+    )
+    assert microstructure["flow"]["futures_rpi_sell_usdt"] is None
+    assert microstructure["liquidations"]["observed_long_usdt"] == (
+        "0.000000000000000000"
+    )
+    assert microstructure["quality"]["spot_book_age_ms"] == 911
+    assert microstructure["quality"]["received_ms"] == 1_783_459_201_250
+
+
+def test_markets_current_data_includes_all_microstructure_groups_by_default(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_market_download_payload(pool, **kwargs):
+        return market_data_payload()
+
+    async def fake_fetch_market_microstructure_rows(pool, *, market_id):
+        return [microstructure_row(collector_healthy=False)]
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        fake_fetch_market_microstructure_rows,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+
+    response = client.get("/markets/current/data?include_microstructure=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market"]["market_id"] == 5_944_864
+    assert body["availability"]["microstructure_healthy_rows"] == 0
+    microstructure = body["series"][0]["microstructure"]
+    assert microstructure["cross_market"]["perp_spot_basis_bps"] == "-5.22000000"
+    assert microstructure["cross_market"]["seconds_to_funding"] == 2_400
+    assert microstructure["collector_healthy"] is False
+
+
+def test_markets_data_by_id_keeps_old_markets_without_microstructure(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_market_download_payload(pool, **kwargs):
+        return market_data_payload()
+
+    async def fake_fetch_market_microstructure_rows(pool, *, market_id):
+        return []
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        fake_fetch_market_microstructure_rows,
+    )
+
+    response = client.get(
+        "/markets/5944864/data?include_microstructure=true"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["series"][0]["microstructure"] is None
+    assert body["availability"] == {
+        "microstructure_rows": 0,
+        "microstructure_healthy_rows": 0,
+        "microstructure_missing_seconds": 300,
+    }
+
+
+def test_microstructure_market_history_supports_gzip(client, monkeypatch):
+    async def fake_fetch_market_download_payload(pool, **kwargs):
+        payload = market_data_payload()
+        first = payload["series"][0]
+        payload["series"] = [
+            {
+                **deepcopy(first),
+                "t": offset,
+                "timestamp_ms": 1_783_459_200_000 + offset * 1_000,
+            }
+            for offset in range(300)
+        ]
+        return payload
+
+    async def fake_fetch_market_microstructure_rows(pool, *, market_id):
+        return []
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        fake_fetch_market_microstructure_rows,
+    )
+
+    response = client.get(
+        "/markets/5944864/data?include_microstructure=true",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
+    assert len(response.json()["series"]) == 300
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "include_microstructure=true&microstructure_groups=books,unknown",
+        "microstructure_groups=books",
+        "include_microstructure=true&microstructure_groups=",
+        "include_microstructure=true&microstructure_groups=books,,flow",
+    ],
+)
+def test_market_data_rejects_invalid_microstructure_group_selection(
+    client,
+    monkeypatch,
+    query,
+):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid groups must be rejected before database access")
+
+    monkeypatch.setattr(api, "fetch_market_download_payload", unexpected_fetch)
+    monkeypatch.setattr(api, "fetch_market_microstructure_rows", unexpected_fetch)
+
+    response = client.get(f"/markets/5944864/data?{query}")
+
+    assert response.status_code == 422
+
+
+def test_openapi_lists_futures_flow_book_and_microstructure_flags(client):
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
@@ -867,8 +1142,12 @@ def test_openapi_lists_futures_flow_and_book_include_flags(client):
 
     assert "include_flow" in current_data_params
     assert "include_book" in current_data_params
+    assert "include_microstructure" in current_data_params
+    assert "microstructure_groups" in current_data_params
     assert "include_flow" in market_data_params
     assert "include_book" in market_data_params
+    assert "include_microstructure" in market_data_params
+    assert "microstructure_groups" in market_data_params
 
 
 def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
@@ -975,6 +1254,144 @@ def test_markets_current_live_preserves_cache_error_status(
     assert response.status_code == 503
     assert response.json() == {"detail": detail}
     assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_market(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_500_123)
+    client.fake_live_cache.prices = {
+        BINANCE_SPOT_LIVE_KEY: LivePrice(
+            value="65758.01",
+            source_timestamp_ms=1_783_459_499_900,
+            received_ms=1_783_459_499_950,
+        ),
+        CHAINLINK_LIVE_KEY: LivePrice(
+            value="65721.23639093849",
+            source_timestamp_ms=1_783_459_499_000,
+            received_ms=1_783_459_499_100,
+        ),
+        FUTURES_LIVE_KEY: LivePrice(
+            value="65723.70",
+            source_timestamp_ms=1_783_459_499_800,
+            received_ms=1_783_459_499_850,
+        ),
+    }
+    client.fake_live_cache.microstructure_snapshot = microstructure_row(
+        sample_second_ms=1_783_459_499_000,
+    )
+
+    response = client.get(
+        "/markets/current/microstructure/live",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
+    body = response.json()
+    assert body["schema_version"] == 1
+    assert body["server_time_ms"] == 1_783_459_500_123
+    assert body["market_id"] == 5_944_864
+    assert body["sample_second_ms"] == 1_783_459_499_000
+    assert body["served_from"] == "redis"
+    assert body["prices"] == {
+        "binance_spot": "65758.01",
+        "chainlink": "65721.23639093849",
+        "futures": "65723.70",
+    }
+    assert body["microstructure"]["collector_healthy"] is True
+    assert body["microstructure"]["books"]["futures"]["ask"] == (
+        "65723.700000000000000000"
+    )
+    assert client.fake_live_cache.requested_combined_keys == [
+        [
+            BINANCE_SPOT_LIVE_KEY,
+            CHAINLINK_LIVE_KEY,
+            FUTURES_LIVE_KEY,
+            MICROSTRUCTURE_LIVE_KEY,
+        ]
+    ]
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_microstructure_live_uses_current_market_when_snapshot_missing(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_500_123)
+
+    response = client.get("/markets/current/microstructure/live")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market_id"] == 5_944_865
+    assert body["sample_second_ms"] is None
+    assert body["prices"] == {
+        "binance_spot": None,
+        "chainlink": None,
+        "futures": None,
+    }
+    assert body["microstructure"] is None
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_microstructure_live_preserves_stale_snapshot_identity(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_546_000_123)
+    client.fake_live_cache.microstructure_snapshot = microstructure_row(
+        sample_second_ms=1_783_459_499_000,
+        collector_healthy=True,
+        received_ms=1_783_459_500_250,
+    )
+
+    response = client.get("/markets/current/microstructure/live")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["server_time_ms"] == 1_783_546_000_123
+    assert body["market_id"] == 5_944_864
+    assert body["sample_second_ms"] == 1_783_459_499_000
+    # Health describes the finalized interval, not current key freshness.
+    assert body["microstructure"]["collector_healthy"] is True
+    assert body["microstructure"]["quality"]["received_ms"] == 1_783_459_500_250
+    assert client.fake_pool.acquire_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    (
+        (OSError("redis unavailable"), "live cache unavailable"),
+        (LiveCachePayloadError("bad snapshot"), "live cache payload invalid"),
+    ),
+)
+def test_markets_current_microstructure_live_maps_cache_errors(
+    client,
+    error,
+    detail,
+):
+    client.fake_live_cache.read_error = error
+
+    response = client.get("/markets/current/microstructure/live")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": detail}
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_microstructure_live_rejects_invalid_nested_types(
+    client,
+):
+    client.fake_live_cache.microstructure_snapshot = microstructure_row(
+        spot_bid=True,
+    )
+
+    response = client.get("/markets/current/microstructure/live")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "live cache payload invalid"}
 
 
 def test_markets_download_returns_attachment_filename(client, monkeypatch):

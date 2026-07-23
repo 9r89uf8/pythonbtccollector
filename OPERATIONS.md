@@ -35,6 +35,7 @@ curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&sym
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
+curl http://127.0.0.1:9000/markets/current/microstructure/live
 ```
 
 Inspect the official resolution objects returned by both historical response
@@ -44,16 +45,20 @@ for this check:
 ```bash
 MARKET_ID="$(curl -fsS 'http://127.0.0.1:9000/markets?limit=1' | python3 -c 'import json, sys; print(json.load(sys.stdin)["markets"][0]["market_id"])')"
 curl -fsS "http://127.0.0.1:9000/markets/${MARKET_ID}/data" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "market": payload["market"]}, indent=2))'
+curl -fsS --compressed "http://127.0.0.1:9000/markets/${MARKET_ID}/data?include_microstructure=true&microstructure_groups=books,flow,cross_market,liquidations,quality" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "availability": payload["availability"]}, indent=2))'
 curl -fsS "http://127.0.0.1:9000/markets/${MARKET_ID}/download" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "market": payload["market"]}, indent=2))'
 ```
 
-Both responses should use schema version `2` and include
+The ordinary data and download responses should use schema version `2` and include
 `market.chainlink_resolution` and `market.resolution`. A recently completed
 market can legitimately remain `pending` until Polymarket publishes official
 resolution data. The data response keeps `market_start_ms`, `market_end_ms`,
 and `series[].timestamp_ms`. The download omits those three fields, retains the
 corresponding UTC `*_at` strings, and formats official Chainlink open/close
-values to two decimal places.
+values to two decimal places. The microstructure opt-in data response should use
+schema version `3` and report row, healthy-row, and missing-second counts. A
+completed market from before microstructure collection legitimately reports
+zero rows and 300 missing seconds rather than returning `404`.
 
 ## Connect From Your Local Machine
 
@@ -86,6 +91,7 @@ Then, from your local machine:
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/latest"
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/sources"
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/live"
+curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/microstructure/live"
 ```
 
 Keep the SSH tunnel terminal open while using the API locally.
@@ -161,19 +167,26 @@ curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
+curl http://127.0.0.1:9000/markets/current/microstructure/live
 ```
 
 ### Optional Binance microstructure summary rollout
 
 The microstructure collector runs inside `price-collector-binance-futures`; it
-does not add another systemd unit, database, Redis key, REST OI poller, or API
-route. Apply `schema.sql` before enabling it. Then add these keys manually to
-`/etc/price-collector/collector.env`; never replace the production environment
-file with the example:
+does not add another systemd unit, database, or REST OI poller. It writes only
+the latest finalized row to Redis key `btc:live:microstructure`, while
+PostgreSQL remains the historical source of record. The read-only API exposes
+that key through `GET /markets/current/microstructure/live` and exposes stored
+history only when a data route receives `include_microstructure=true`.
+
+Apply `schema.sql` before enabling the collector. Then add these keys manually
+to `/etc/price-collector/collector.env`; never replace the production
+environment file with the example:
 
 ```text
 BINANCE_MICROSTRUCTURE_ENABLED=true
 BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=100000
+BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=600
 BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250
 BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30
 BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096
@@ -239,6 +252,11 @@ ORDER BY grantee, privilege_type;
 SQL
 
 curl -fsS http://127.0.0.1:9000/healthz
+redis-cli -h 127.0.0.1 -p 6379 EXISTS btc:live:microstructure
+redis-cli -h 127.0.0.1 -p 6379 --raw GET btc:live:microstructure | python3 -c 'import json, sys; row = json.load(sys.stdin); print(json.dumps({"sample_second_ms": row["sample_second_ms"], "collector_healthy": row["collector_healthy"], "received_ms": row["received_ms"]}, indent=2))'
+curl -fsS --compressed http://127.0.0.1:9000/markets/current/microstructure/live | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "market_id": payload["market_id"], "sample_second_ms": payload["sample_second_ms"], "served_from": payload["served_from"], "prices": payload["prices"], "collector_healthy": None if payload["microstructure"] is None else payload["microstructure"]["collector_healthy"]}, indent=2))'
+curl -fsS --compressed "http://127.0.0.1:9000/markets/current/data?include_microstructure=true&microstructure_groups=books,flow,liquidations,quality" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "availability": payload["availability"]}, indent=2))'
+curl -fsS -H 'Accept-Encoding: gzip' -D - -o /dev/null "http://127.0.0.1:9000/markets/current/data?include_microstructure=true"
 ```
 
 The first few rows after startup can be unhealthy while every required source
@@ -250,7 +268,17 @@ The completeness query deliberately excludes the newest two seconds so the
 flush-delay window has settled. `expected_seconds` should be 120 and
 `missing_seconds` should be zero; the expected-series join detects missing
 leading, internal, and trailing one-second keys rather than counting only rows
-that happened to be written.
+that happened to be written. The Redis `EXISTS` result should be `1`; its
+decoded `sample_second_ms` should advance once per second. The live endpoint
+should report `served_from: "redis"` without a PostgreSQL dependency, while the
+data endpoint should report schema version `3`. The final header check should
+include `content-encoding: gzip`.
+
+`BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS` bounds only finalized rows
+waiting for PostgreSQL. Redis publication does not await that writer. If
+PostgreSQL falls behind long enough to fill the queue, the collector logs
+`binance_microstructure_persistence_queue_overflow` and drops the oldest
+unwritten row so newer finalized history and the live path continue.
 
 `spot_trade_id_span` and `fut_trade_id_span` are compatibility names for the
 number of underlying trades represented by accepted aggregate messages in a

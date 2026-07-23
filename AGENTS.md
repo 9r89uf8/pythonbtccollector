@@ -146,6 +146,14 @@ The corresponding Python entry points are:
   received exactly at the ending boundary belong to the next row. Preserve
   source ages, lags, quote skew, connection gaps, and unhealthy rows rather
   than fabricating fresh values.
+- Publish each finalized row to Redis key `btc:live:microstructure` before
+  retention checks and PostgreSQL storage. Redis holds only the latest
+  finalized second; a Redis failure must not discard its PostgreSQL row, and a
+  PostgreSQL size pause or write failure must not suppress the Redis attempt.
+- Drain finalized PostgreSQL rows through the independent bounded persistence
+  queue. PostgreSQL latency must not delay later causal finalization or Redis
+  publication. Queue overflow drops and logs the oldest unwritten row so the
+  newest rows and all critical futures paths continue.
 - Keep every microstructure financial value as `Decimal` and PostgreSQL
   `NUMERIC`. The forced-order feed is censored observed stress; never label its
   notional as total liquidations or infer future liquidation levels.
@@ -191,6 +199,14 @@ The corresponding Python entry points are:
   `received_ms`; price values remain decimal strings.
 - `/markets/current/live` must read all three source-price keys with one Redis
   `MGET` and must not query PostgreSQL or run derived models.
+- `/markets/current/microstructure/live` must read the three source-price keys
+  and `btc:live:microstructure` with one Redis `MGET`; it must not query
+  PostgreSQL. Derive its market ID from the cached finalized sample when one
+  exists so a boundary or stale snapshot is never assigned to a later market.
+- Historical and current-market microstructure series remain PostgreSQL-backed.
+  Add them to the data routes only when `include_microstructure=true`; missing
+  historical rows remain `null` and do not make an otherwise valid market a
+  `404`.
 - A Redis write failure may be logged without corrupting the historical sample
   or changing numeric types.
 

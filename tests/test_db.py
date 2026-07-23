@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 
 import price_collector.db as db
+from price_collector.binance_microstructure import MICROSTRUCTURE_VALUE_COLUMNS
 from price_collector.market import MarketWindow
 
 
@@ -1485,3 +1486,67 @@ def test_fetch_market_download_payload_query_includes_optional_futures_joins():
     assert "f.sample_second_ms - 30000" in source
     assert "f.sample_second_ms - 60000" in source
     assert "f.sample_second_ms - 300000" in source
+
+
+def test_fetch_market_microstructure_rows_uses_market_index_order():
+    class FakeAcquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeConnection:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch(self, query, *args):
+            self.calls.append((query, args))
+            return [
+                {
+                    "sample_second_ms": 1_783_459_200_000,
+                    "collector_healthy": True,
+                    "spot_mid": Decimal("65758.00"),
+                }
+            ]
+
+    class FakePool:
+        def __init__(self):
+            self.connection = FakeConnection()
+
+        def acquire(self):
+            return FakeAcquire(self.connection)
+
+    pool = FakePool()
+
+    rows = asyncio.run(
+        db.fetch_market_microstructure_rows(
+            pool,
+            market_id=5_944_864,
+        )
+    )
+
+    query, args = pool.connection.calls[0]
+    assert "FROM binance_microstructure_1s" in query
+    assert "WHERE market_id = $1" in query
+    assert "symbol = 'BTCUSDT'" in query
+    assert "ORDER BY sample_second_ms ASC" in query
+    assert "LIMIT 300" in query
+    assert args == (5_944_864,)
+    assert rows == [
+        {
+            "sample_second_ms": 1_783_459_200_000,
+            "collector_healthy": True,
+            "spot_mid": Decimal("65758.00"),
+        }
+    ]
+
+    source = inspect.getsource(db.fetch_market_microstructure_rows)
+    for column in MICROSTRUCTURE_VALUE_COLUMNS:
+        assert (
+            f"                {column}," in source
+            or f"                {column}\n" in source
+        ), column

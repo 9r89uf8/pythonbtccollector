@@ -4,7 +4,8 @@
 Production-oriented BTC market-data collection for a single-user Ubuntu 24.04
 DigitalOcean droplet. The application collects spot, oracle, futures, order-flow,
 top-of-book, and Polymarket probability data into local PostgreSQL. Redis holds
-the latest source prices needed by the live API response.
+the latest source prices and latest finalized microstructure second needed by
+the live API responses.
 
 The deployment is deliberately private:
 
@@ -95,6 +96,14 @@ columns, and are serialized as strings by the API.
   combined spot aggregate-trade/top-10 stream, futures top-10 depth, and the
   censored futures forced-order stream. It retains Decimal summaries, not raw
   messages.
+- Publishes that same latest finalized one-second row to Redis key
+  `btc:live:microstructure`. Redis holds only the newest finalized row; the
+  PostgreSQL table remains the source of record for current and completed
+  five-minute history.
+- Finalized PostgreSQL rows drain through an independent bounded queue, so a
+  slow or locked historical write cannot delay later Redis seconds. At queue
+  capacity the oldest unwritten row is dropped and logged, retaining the
+  newest history without blocking the live path.
 - The microstructure row includes spot/perpetual aggressive flow, top-1/5/10
   depth imbalance, spread, weighted midpoint, sampled BBO OFI, spot/perpetual
   basis, RPI-involved perpetual flow, mark/index/funding/OI context, observed
@@ -257,6 +266,12 @@ Each value has this shape:
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
 
+The optional microstructure collector also writes
+`btc:live:microstructure`. That key contains the latest finalized flat
+one-second microstructure row as compact JSON. Decimal values are JSON strings;
+integers and booleans retain their JSON types, and unknown values are `null`.
+It never contains the current or a completed five-minute history.
+
 ## API
 
 The FastAPI application is read-only and is started by systemd with:
@@ -279,19 +294,36 @@ Current routes:
 - `GET /markets/current/download`
 - `GET /markets/{market_id}/download`
 - `GET /markets/current/live`
+- `GET /markets/current/microstructure/live`
 
-The data and download responses use schema version `2` and always include
-`market.chainlink_resolution` and `market.resolution`, independently of the
-optional series flags. These objects contain only official Polymarket
+The data and download responses use schema version `2` by default and always
+include `market.chainlink_resolution` and `market.resolution`, independently of
+the optional series flags. These objects contain only official Polymarket
 Gamma/CLOB data. Ended markets can remain `pending` briefly while the collector
 waits for official resolution; the last Up/Down probability is never treated as
 the winner. The active CLOB connection stays open for a short grace period after
 the market boundary to capture an official resolution event, while durable REST
 reconciliation handles delayed results and fills the official Chainlink values.
-Downloads keep schema version `2` as a compact projection: they omit the market
-start/end millisecond fields and per-row `timestamp_ms`, retain the equivalent
-UTC `*_at` strings, and format official Chainlink open/close values to two
-decimal places. The data routes retain their full timing and precision fields.
+
+The two data routes accept `include_microstructure=true`. That opt-in reads at
+most 300 indexed PostgreSQL rows, adds `series[].microstructure` and
+microstructure availability counts, and raises the response schema version to
+`3`. `microstructure_groups` can select any comma-separated subset of
+`books,flow,cross_market,liquidations,quality`; all five are returned by default.
+Missing seconds remain `null`, and older markets without microstructure still
+return normally. These larger JSON responses support gzip compression.
+
+Downloads remain schema version `2` and do not include microstructure. They omit
+the market start/end millisecond fields and per-row `timestamp_ms`, retain the
+equivalent UTC `*_at` strings, and format official Chainlink open/close values
+to two decimal places. The data routes retain their full timing and precision
+fields.
+
+`GET /markets/current/microstructure/live` reads the three source-price keys and
+the latest finalized microstructure key with one Redis `MGET`. It returns simple
+string-or-`null` prices and the nested microstructure groups without querying
+PostgreSQL. `GET /markets/current/live` is unchanged and remains the isolated,
+small three-price response.
 
 `GET /markets` is the frontend discovery route. It returns the newest three
 completed markets by default, newest first, with market timestamps and
@@ -422,6 +454,7 @@ BINANCE_MICROSTRUCTURE_SPOT_WS_URL=wss://stream.binance.com:9443/stream?streams=
 BINANCE_MICROSTRUCTURE_FUTURES_DEPTH_WS_URL=wss://fstream.binance.com/public/ws/btcusdt@depth10@500ms
 BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL=wss://fstream.binance.com/market/ws/btcusdt@forceOrder
 BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=100000
+BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=600
 BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250
 BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30
 BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096

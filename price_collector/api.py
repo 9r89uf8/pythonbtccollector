@@ -6,6 +6,7 @@ from typing import Any, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.middleware.gzip import GZipMiddleware
 
 from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
@@ -14,18 +15,29 @@ from price_collector.db import (
     fetch_market_download_payload,
     fetch_latest_market_id,
     fetch_latest_price,
+    fetch_market_microstructure_rows,
     fetch_market_summaries_for_btc_sources,
     fetch_market_summary,
     fetch_recent_market_windows,
     health_check,
 )
 from price_collector.live_cache import (
+    BINANCE_SPOT_LIVE_KEY,
+    CHAINLINK_LIVE_KEY,
+    FUTURES_LIVE_KEY,
     LIVE_CACHE_READ_ERRORS,
+    MICROSTRUCTURE_LIVE_KEY,
     LiveCachePayloadError,
     build_current_live_payload,
     create_live_cache,
 )
 from price_collector.market import market_for_sample_second
+from price_collector.microstructure_api import (
+    MICROSTRUCTURE_GROUPS,
+    merge_microstructure_history,
+    parse_microstructure_groups,
+    serialize_microstructure_row,
+)
 
 
 DEFAULT_PROVIDER = "binance_spot"
@@ -261,6 +273,27 @@ def get_live_cache(request: Request) -> Any:
     return request.app.state.live_cache
 
 
+def requested_microstructure_groups(
+    *,
+    include_microstructure: bool,
+    microstructure_groups: Optional[str],
+) -> tuple[str, ...]:
+    if not include_microstructure:
+        if microstructure_groups is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "microstructure_groups requires include_microstructure=true"
+                ),
+            )
+        return ()
+
+    try:
+        return parse_microstructure_groups(microstructure_groups)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
@@ -277,6 +310,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1_000)
 
 
 @app.get("/healthz")
@@ -406,9 +440,21 @@ async def markets_current_data(
     include_oi: bool = Query(False),
     include_flow: bool = Query(False),
     include_book: bool = Query(False),
+    include_microstructure: bool = Query(False),
+    microstructure_groups: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated microstructure groups: "
+            + ", ".join(MICROSTRUCTURE_GROUPS)
+        ),
+    ),
     fill_display: bool = Query(False),
     max_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
+    selected_microstructure_groups = requested_microstructure_groups(
+        include_microstructure=include_microstructure,
+        microstructure_groups=microstructure_groups,
+    )
     now_ms = current_utc_epoch_ms()
     sample_second_ms = (now_ms // 1000) * 1000
     window = market_for_sample_second(sample_second_ms)
@@ -427,6 +473,16 @@ async def markets_current_data(
     )
     if payload is None:
         raise HTTPException(status_code=404, detail="no current market data found")
+    if include_microstructure:
+        microstructure_rows = await fetch_market_microstructure_rows(
+            get_pool(request),
+            market_id=window.market_id,
+        )
+        merge_microstructure_history(
+            payload,
+            microstructure_rows,
+            groups=selected_microstructure_groups,
+        )
     return payload
 
 
@@ -439,9 +495,21 @@ async def markets_data_by_id(
     include_oi: bool = Query(False),
     include_flow: bool = Query(False),
     include_book: bool = Query(False),
+    include_microstructure: bool = Query(False),
+    microstructure_groups: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated microstructure groups: "
+            + ", ".join(MICROSTRUCTURE_GROUPS)
+        ),
+    ),
     fill_display: bool = Query(False),
     max_carry_forward_ms: int = Query(10_000),
 ) -> dict[str, Any]:
+    selected_microstructure_groups = requested_microstructure_groups(
+        include_microstructure=include_microstructure,
+        microstructure_groups=microstructure_groups,
+    )
     now_ms = current_utc_epoch_ms()
     payload = await fetch_market_download_payload(
         get_pool(request),
@@ -459,6 +527,16 @@ async def markets_data_by_id(
         raise HTTPException(
             status_code=404,
             detail=f"no market data found for market_id={market_id}",
+        )
+    if include_microstructure:
+        microstructure_rows = await fetch_market_microstructure_rows(
+            get_pool(request),
+            market_id=market_id,
+        )
+        merge_microstructure_history(
+            payload,
+            microstructure_rows,
+            groups=selected_microstructure_groups,
         )
     return payload
 
@@ -539,6 +617,71 @@ async def markets_current_live(
         raise HTTPException(status_code=503, detail="live cache unavailable") from exc
     except LiveCachePayloadError as exc:
         raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
+
+
+@app.get("/markets/current/microstructure/live")
+async def markets_current_microstructure_live(
+    request: Request,
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    current_sample_second_ms = (now_ms // 1_000) * 1_000
+    current_window = market_for_sample_second(current_sample_second_ms)
+
+    try:
+        live_cache = get_live_cache(request)
+        prices, snapshot = await live_cache.get_prices_with_microstructure(
+            [
+                BINANCE_SPOT_LIVE_KEY,
+                CHAINLINK_LIVE_KEY,
+                FUTURES_LIVE_KEY,
+            ],
+            microstructure_key=MICROSTRUCTURE_LIVE_KEY,
+        )
+        snapshot_sample_second_ms = (
+            None
+            if snapshot is None
+            else int(snapshot["sample_second_ms"])
+        )
+        snapshot_window = (
+            current_window
+            if snapshot_sample_second_ms is None
+            else market_for_sample_second(snapshot_sample_second_ms)
+        )
+        serialized_snapshot = (
+            None
+            if snapshot is None
+            else serialize_microstructure_row(snapshot)
+        )
+    except LIVE_CACHE_READ_ERRORS as exc:
+        raise HTTPException(status_code=503, detail="live cache unavailable") from exc
+    except (LiveCachePayloadError, TypeError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
+
+    return {
+        "schema_version": 1,
+        "server_time_ms": now_ms,
+        "market_id": snapshot_window.market_id,
+        "sample_second_ms": snapshot_sample_second_ms,
+        "served_from": "redis",
+        "prices": {
+            "binance_spot": (
+                None
+                if prices.get(BINANCE_SPOT_LIVE_KEY) is None
+                else prices[BINANCE_SPOT_LIVE_KEY].value
+            ),
+            "chainlink": (
+                None
+                if prices.get(CHAINLINK_LIVE_KEY) is None
+                else prices[CHAINLINK_LIVE_KEY].value
+            ),
+            "futures": (
+                None
+                if prices.get(FUTURES_LIVE_KEY) is None
+                else prices[FUTURES_LIVE_KEY].value
+            ),
+        },
+        "microstructure": serialized_snapshot,
+    }
 
 
 @app.get("/markets/{market_id}")
