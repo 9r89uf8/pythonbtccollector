@@ -5,6 +5,9 @@ This is the frontend-facing contract for the read-only FastAPI application in
 `price_collector/api.py`. It covers every application data endpoint, how to
 call it, and the fields returned to a dashboard.
 
+For the concise dashboard migration note covering the removal of both
+prediction engines, see [`DASHBOARD_API_CHANGES.md`](DASHBOARD_API_CHANGES.md).
+
 ## Access and Base URL
 
 The production API listens only on the droplet at `127.0.0.1:9000`. It is not
