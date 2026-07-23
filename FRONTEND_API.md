@@ -1,3 +1,4 @@
+
 # Frontend FastAPI Reference
 
 This is the frontend-facing contract for the read-only FastAPI application in
@@ -100,12 +101,7 @@ const live = await apiGet("/markets/current/live");
 | `GET` | `/markets/{market_id}/data` | Full series for one market | PostgreSQL |
 | `GET` | `/markets/current/download` | Download current market JSON | PostgreSQL |
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
-| `GET` | `/markets/current/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for the current target window | PostgreSQL |
-| `GET` | `/markets/{market_id}/shadow-evaluations` | Persisted shadow forecasts and causal outcomes for one target window | PostgreSQL |
-| `GET` | `/markets/current/shadow-evaluations/download` | Download rounded current-window shadow evaluations as JSON | PostgreSQL |
-| `GET` | `/markets/{market_id}/shadow-evaluations/download` | Download one target window's rounded shadow evaluations as JSON | PostgreSQL |
-| `GET` | `/markets/current/live` | Lowest-latency current prices and experimental Chainlink catch-up signal | Redis only |
-| `GET` | `/markets/current/live/challengers/chainlink-catchup-2s` | Separate unselected two-second Chainlink catch-up challenger | Redis only |
+| `GET` | `/markets/current/live` | Lowest-latency current source prices | Redis only |
 
 ## Health
 
@@ -298,6 +294,7 @@ that dataset in the market:
 | --- | --- |
 | `binance` | Binance Spot price samples |
 | `chainlink` | Polymarket Chainlink RTDS price samples |
+
 | `futures` | Binance USD-M futures snapshots |
 | `open_interest` | Open-interest snapshots |
 | `flow` | Aggregated trade-flow seconds |
@@ -599,6 +596,7 @@ snapshot, not the WebSocket's pre-parse receive time. The snapshot row itself is
 keyed by the premium-index timestamp (or its local observation fallback), not by
 the trade timestamp.
 
+
 When `fill_display=true`, only Chainlink is carried forward, and
 `freshness.chainlink.is_carried_forward` reports whether the row uses an older
 sample. Stored data is not changed.
@@ -891,544 +889,18 @@ window.location.assign(url);
 The download routes return HTTP `404` with the requested market ID in `detail`
 when the market window does not exist.
 
-## Persisted Shadow-Evaluation Chart Data
-
-The shadow-evaluation JSON reporting routes are:
-
-- `GET /markets/current/shadow-evaluations`
-- `GET /markets/{market_id}/shadow-evaluations`
-
-The rounded attachment routes are:
-
-- `GET /markets/current/shadow-evaluations/download`
-- `GET /markets/{market_id}/shadow-evaluations/download`
-
-All four return the persisted 500 ms forecast attempts, the Chainlink and
-futures cache snapshots used at forecast time, and causal Chainlink outcomes
-for exactly one five-minute **target-time** window and one explicitly requested
-model. They read PostgreSQL through the API's reader connection and the
-restricted `shadow_signal_evaluation_chart_points` view. They do not read
-Redis, run a model, alter evaluation rows, or expose an arbitrary time-range
-query. The attachment variants preserve the report structure but round its
-Decimal strings for readability after all validation, classifications, and
-performance calculations are complete. They also add versioned `export`
-metadata. The reporting routes remain the canonical full-precision source.
-
-These reporting routes are independent from `GET /markets/current/live`. The
-live route remains one Redis `MGET`, performs no PostgreSQL query, and continues
-to return only the newest short-lived primary projection.
-
-The reporting point exposes only the current Chainlink/futures snapshots for
-the forecast attempt. It does not expose the model's `futures_reference`, its
-anchor metadata, worker-age diagnostics, or database-writer metadata.
-
-### Request
-
-All four routes require the same query parameter:
-
-| Parameter | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `model_version` | enum string | none; required | Return exactly one supported persisted candidate |
-
-Supported values and their fixed report metadata are:
-
-| `model_version` | `horizon_ms` | `beta` |
-| --- | ---: | ---: |
-| `catchup_v2_l2000_h2000_b100_basis5m` | `2000` | `"1"` |
-| `catchup_v1_l2000_h2000_b100` | `2000` | `"1"` |
-| `catchup_ratio_l3000_b100` | `3000` | `"1"` |
-| `catchup_ratio_l3500_b100` | `3500` | `"1"` |
-| `catchup_ratio_l4000_b100` | `4000` | `"1"` |
-
-There is no implicit default and the API does not choose or rerank a model for
-the caller. The active two-second challenger, its historical lag-only V1
-series, and the accepted three-second primary use the exact same report, point,
-chart, performance, and rounded-download shape. A dashboard lag toggle therefore
-changes only `model_version`:
-
-| Dashboard choice | `model_version` | Status |
-| --- | --- | --- |
-| 2 seconds | `catchup_v2_l2000_h2000_b100_basis5m` | Prospective basis-band challenger |
-| 3 seconds | `catchup_ratio_l3000_b100` | Accepted primary |
-
-Keep the status visible; the identical transport shape does not make the
-two-second challenger selected or production-proven. Do not merge points from
-different model versions or selection identities into one series. The V1
-two-second rows are the silent raw comparator evaluated at the same timestamps
-as active V2; the live challenger endpoint publishes only V2.
-
-Calls:
-
-```bash
-curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
-curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_v2_l2000_h2000_b100_basis5m"
-curl "${API_BASE_URL}/markets/current/shadow-evaluations?model_version=catchup_v1_l2000_h2000_b100"
-curl "${API_BASE_URL}/markets/5946630/shadow-evaluations?model_version=catchup_ratio_l3000_b100"
-curl -OJ "${API_BASE_URL}/markets/current/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
-curl -OJ "${API_BASE_URL}/markets/5946630/shadow-evaluations/download?model_version=catchup_ratio_l3000_b100"
-```
-
-Browser example using the `apiGet` helper from the access section:
-
-```javascript
-const modelVersionByLag = {
-  2000: "catchup_v2_l2000_h2000_b100_basis5m",
-  3000: "catchup_ratio_l3000_b100",
-};
-const selectedLagMs = 2000;
-const modelVersion = modelVersionByLag[selectedLagMs];
-
-const currentEvaluations = await apiGet(
-  "/markets/current/shadow-evaluations",
-  { model_version: modelVersion },
-);
-
-const selectedEvaluations = await apiGet(
-  "/markets/5946630/shadow-evaluations",
-  { model_version: modelVersion },
-);
-```
-
-Browser download example:
-
-```javascript
-const marketId = 5946630;
-const modelVersion = "catchup_ratio_l3000_b100";
-const url = new URL(
-  `${API_BASE_URL}/markets/${marketId}/shadow-evaluations/download`,
-  window.location.origin,
-);
-url.searchParams.set("model_version", modelVersion);
-
-const anchor = document.createElement("a");
-anchor.href = url.toString();
-anchor.click();
-```
-
-The server filename is
-`btc_5m_market_{market_id}_shadow_evaluations_{model_version}_rounded.json`.
-Prefer the ID-addressed route after a market ends; a current-window download is
-a partial snapshot and can resolve to an adjacent market if requested across a
-five-minute boundary.
-
-`market_id` must be a non-negative integer that can be represented safely by
-the PostgreSQL market-window calculation. FastAPI returns HTTP `422` before
-querying PostgreSQL when the ID, required model parameter, or supported-model
-enum is invalid.
-
-### Response
-
-The reporting routes use this canonical full-precision response shape. The
-attachment routes retain these fields and add the rounded-export metadata
-described below.
-
-```json
-{
-  "schema_version": 2,
-  "server_time_ms": 1783989010123,
-  "market": {
-    "market_id": 5946630,
-    "market_start_ms": 1783989000000,
-    "market_end_ms": 1783989300000,
-    "boundary": "[start_ms,end_ms)"
-  },
-  "evaluation_semantics": {
-    "scored_input_max_future_skew_ms": 0
-  },
-  "model": {
-    "model_version": "catchup_ratio_l3000_b100",
-    "horizon_ms": 3000,
-    "beta": "1",
-    "evaluation_cadence_ms": 500,
-    "selection_identities": [
-      {
-        "schema_version": 2,
-        "policy_version": "chronological_holdout_v2",
-        "evidence_end_ms": 1783983205028,
-        "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
-        "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
-      }
-    ]
-  },
-  "coverage": {
-    "window_buckets": 600,
-    "market_window_elapsed": false,
-    "observed_buckets": 1,
-    "unobserved_buckets_as_of_response": null,
-    "attempts": 1,
-    "valid_forecasts": 1,
-    "scored": 1,
-    "invalid": 0,
-    "valid_without_actual": 0
-  },
-  "performance": {
-    "cohorts": [
-      {
-        "selection_identity": {
-          "schema_version": 2,
-          "policy_version": "chronological_holdout_v2",
-          "evidence_end_ms": 1783983205028,
-          "fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
-          "artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699"
-        },
-        "scored_points": 1,
-        "forecast": {
-          "mean_absolute_error_usd": "3.250000000000000000",
-          "median_absolute_error_usd": "3.250000000000000000",
-          "p95_absolute_error_usd": "3.250000000000000000",
-          "maximum_absolute_error_usd": "3.250000000000000000",
-          "root_mean_squared_error_usd": "3.250000000000000000",
-          "mean_signed_error_usd": "3.250000000000000000"
-        },
-        "no_change_baseline": {
-          "mean_absolute_error_usd": "19.350000000000000000",
-          "root_mean_squared_error_usd": "19.350000000000000000"
-        },
-        "mean_absolute_advantage_usd": "16.100000000000000000",
-        "mae_skill_vs_no_change": "0.83204134366925064599483204134366925064599483204134366925064599483204134366925065",
-        "rmse_skill_vs_no_change": "0.83204134366925064599483204134366925064599483204134366925064599483204134366925065",
-        "paired_comparison": {
-          "wins": 1,
-          "ties": 0,
-          "losses": 0,
-          "win_rate": "1",
-          "tie_rate": "0",
-          "loss_rate": "0"
-        }
-      }
-    ]
-  },
-  "points": [
-    {
-      "selection_schema_version": 2,
-      "selection_policy_version": "chronological_holdout_v2",
-      "selection_evidence_end_ms": 1783983205028,
-      "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
-      "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
-      "model_version": "catchup_ratio_l3000_b100",
-      "beta": "1.000000000000000000",
-      "generated_ms": 1783989000507,
-      "target_ms": 1783989003507,
-      "matured_ms": 1783989003512,
-      "horizon_ms": 3000,
-      "valid": true,
-      "status": "valid",
-      "invalid_reasons": [],
-      "state": "anchored",
-      "outcome_status": "available",
-      "outcome_invalid_reasons": [],
-      "forecast_market_id": 5946630,
-      "full_horizon_before_forecast_market_end": true,
-      "chainlink_at_forecast": "64080.470000000000000000",
-      "chainlink_at_forecast_source_timestamp_ms": 1783989000000,
-      "chainlink_at_forecast_received_ms": 1783989000330,
-      "futures_at_forecast": "64121.300000000000000000",
-      "futures_at_forecast_source_timestamp_ms": 1783989000420,
-      "futures_at_forecast_received_ms": 1783989000475,
-      "projected_chainlink": "64103.070000000000000000",
-      "actual_chainlink": "64099.820000000000000000",
-      "actual_chainlink_source_timestamp_ms": 1783989003000,
-      "actual_chainlink_received_ms": 1783989003340,
-      "actual_chainlink_age_at_target_ms": 167,
-      "pending_move": "22.600000000000000000",
-      "pending_move_bps": "3.526815580472490292",
-      "direction": "up",
-      "forecast_error": "3.250000000000000000",
-      "baseline_error": "-19.350000000000000000"
-    }
-  ]
-}
-```
-
-On the reporting routes, decimal strings can contain different amounts of
-trailing precision; their lexical scale is not a display-format guarantee.
-`model.beta`, point `beta`, `chainlink_at_forecast`, `futures_at_forecast`,
-projected/actual prices, moves, basis points, and error values are fixed-point
-JSON strings or `null`. Keep those original strings and use a decimal library
-for exact calculations. Do not calculate chart errors with binary
-floating-point.
-
-#### Rounded attachment format
-
-The `/download` routes apply this fixed-scale policy with `ROUND_HALF_UP`:
-
-| Decimal places | Download fields |
-| ---: | --- |
-| 2 | Point `chainlink_at_forecast`, `futures_at_forecast`, `projected_chainlink`, `actual_chainlink`, `pending_move`, `forecast_error`, and `baseline_error`; all forecast/no-change USD performance metrics; `mean_absolute_advantage_usd` |
-| 4 | Model and point `beta`; point `pending_move_bps`; `mae_skill_vs_no_change`, `rmse_skill_vs_no_change`, and paired win/tie/loss rates |
-
-Fixed trailing zeros are intentional, so a download uses strings such as
-`"64399.90"`, `"0.0155"`, and `"1.0000"`. JSON `null` remains `null`, and a
-value that rounds to zero is emitted without a negative sign. All timestamps,
-counts, booleans, statuses, reasons, hashes, direction values, and market/model
-identifiers remain unchanged.
-
-Each attachment adds:
-
-```json
-{
-  "export": {
-    "schema_version": 1,
-    "variant": "rounded_download",
-    "source_report_schema_version": 2,
-    "decimal_encoding": "fixed_point_string",
-    "rounding_mode": "ROUND_HALF_UP",
-    "precision_policy": "shadow_evaluation_download_v1",
-    "decimal_places": {
-      "usd_price_move_error": 2,
-      "basis_points": 4,
-      "unitless_beta_rate_skill": 4
-    },
-    "derived_metrics_computed_before_rounding": true,
-    "classifications_computed_before_rounding": true
-  }
-}
-```
-
-The top-level `schema_version: 2` still identifies the source report contract;
-`export.schema_version: 1` versions the rounded representation. Rounding is
-lossy and happens independently for each final field. Consequently, rounded
-errors need not exactly equal subtraction of rounded prices, a non-flat
-direction can accompany `pending_move: "0.00"`, and rounded rates need not sum
-lexically to `1.0000`. Exact classifications and counts remain authoritative.
-Use the non-download reporting route for recomputation, audit evidence, or any
-calculation requiring full precision.
-
-`points` are sorted by `target_ms`, then `generated_ms`, then `horizon_ms`.
-For every point:
-
-```text
-target_ms = generated_ms + horizon_ms
-market_start_ms <= target_ms < market_end_ms
-```
-
-The point's price fields have two distinct chart times:
-
-| Fields | Chart time | Meaning |
-| --- | ---: | --- |
-| `chainlink_at_forecast`, `futures_at_forecast` | `generated_ms` | Persisted cache snapshots read for the forecast attempt |
-| `projected_chainlink`, `actual_chainlink` | `target_ms` | Predicted and causal observed Chainlink values for the forecast target |
-
-For a projection/futures/Chainlink chart, plot `futures_at_forecast` at
-`generated_ms`, and plot `projected_chainlink` and `actual_chainlink` at
-`target_ms`. If the no-change baseline is also shown, plot
-`chainlink_at_forecast` at `generated_ms`. Do not move a forecast-time snapshot
-to `target_ms`: the response does not contain a target-time futures outcome.
-The dashboard's browser-buffered `actual_futures` and `futures_received_ms` are
-therefore not present in a later backend download and cannot be reconstructed
-from latest-only Redis. `matured_ms` is the persistence time, not a chart time.
-
-The forecast-time `*_source_timestamp_ms` fields identify the provider events;
-they can be `null` when that metadata was unavailable. The corresponding
-`*_received_ms` fields identify the local cache observations. For a valid
-forecast they never exceed `generated_ms`. An invalid attempt deliberately can
-retain a snapshot received after `generated_ms`; that timing exposes the
-zero-skew violation that invalidated the attempt. A null forecast-time price
-has null source and receive timing metadata. A valid forecast has both
-forecast-time prices; an invalid attempt can retain either snapshot when that
-individual input was available.
-
-The paired actual is the newest Chainlink cache observation the live evaluator
-had successfully observed with `actual_chainlink_received_ms <= target_ms`; it
-is the causal value used by the stored error calculation. Raw replay remains
-the event-complete authority for events overwritten between live evaluator
-polls.
-
-`evaluation_semantics.scored_input_max_future_skew_ms` is the receive-time
-tolerance used when deciding whether a persisted live forecast can be scored.
-It is always `0`: forecast-time Chainlink and futures inputs received after
-`generated_ms` make that evaluation invalid. This field is independent of the
-selection artifact fields. In particular, a point with selection schema `2`
-and policy `chronological_holdout_v2` still uses this stricter zero-skew live
-evaluation rule; it is not directly comparable to historical v2 replay
-evidence that allowed nonzero future skew. The short-lived
-`/markets/current/live` projection continues to follow its activated artifact
-configuration and is not described by this reporting field.
-
-The requested market is selected by `target_ms`, not by
-`forecast_market_id`. `forecast_market_id` identifies the five-minute window
-containing `generated_ms`. A point generated in the preceding market's last
-four seconds can therefore appear at the beginning of the requested target
-window. `full_horizon_before_forecast_market_end` also refers to that
-generation-time market, not to the requested target window.
-
-Error signs are:
-
-```text
-forecast_error = projected_chainlink - actual_chainlink
-baseline_error = chainlink_at_forecast - actual_chainlink
-```
-
-Forecast validity and outcome integrity are independent axes. `valid`,
-`status`, and `invalid_reasons` describe the generation-time forecast. An
-invalid attempt is still returned. It has `valid: false`, a non-`valid`
-`status`, at least one `invalid_reasons` entry, and null
-`projected_chainlink`, `pending_move`, `pending_move_bps`, `direction`, and
-`forecast_error`. Its forecast-time snapshots, causal actual, and
-`baseline_error` fields can still be present when those individual values were
-available. Do not carry a preceding valid projection across such a point.
-
-`outcome_status` and `outcome_invalid_reasons` describe target-time evidence:
-
-- `available` has an actual value and no outcome-invalid reasons.
-- `unavailable` has no actual value and no outcome-invalid reasons; no causal
-  target observation was available.
-- `integrity_invalid` has no actual value and at least one explicit reason,
-  such as a sequence gap or metadata-integrity failure.
-
-For both null-actual statuses, the actual timing and error fields are null.
-Never infer outcome integrity from `actual_chainlink: null`; inspect
-`outcome_status`. A valid attempt always has a projection. It is counted as
-`scored` only when `outcome_status` is `available`; otherwise it contributes to
-`valid_without_actual`.
-
-### Per-market performance
-
-`performance` is calculated on demand from the same bounded rows returned in
-`points`; it does not add a query or persist a second accuracy record. Each
-cohort is scoped to the requested target-time market, requested model, and one
-exact selection identity: schema version, policy version, evidence end,
-selection fingerprint, and selection artifact hash. Never combine cohorts
-when `model.selection_identities` contains more than one identity.
-
-Only valid points whose `outcome_status` is `available` contribute. For every
-such point, the persisted signed errors are used directly:
-
-```text
-forecast absolute error = abs(forecast_error)
-baseline absolute error = abs(baseline_error)
-```
-
-`forecast` reports mean, median, nearest-rank p95, and maximum absolute error;
-root mean squared error; and mean signed error. Median averages the two middle
-values for an even cohort. The p95 uses every scored point and selects the
-1-based value at `ceil(0.95 * scored_points)` after sorting absolute errors.
-No sampling or binary floating-point calculation is used.
-
-`no_change_baseline` measures the same scored points using the Chainlink value
-at forecast time as the prediction. The comparison fields are:
-
-```text
-mean_absolute_advantage_usd = baseline MAE - forecast MAE
-mae_skill_vs_no_change = 1 - (forecast MAE / baseline MAE)
-rmse_skill_vs_no_change = 1 - (forecast RMSE / baseline RMSE)
-```
-
-A positive advantage or skill means the forecast was closer than no change;
-zero means equal aggregate error; a negative value means worse. Skill is not
-clamped. It is `null` when its baseline denominator is zero.
-
-`paired_comparison` compares each forecast and baseline absolute error from the
-same point. A smaller forecast error is a win, an exact equality is a tie, and
-a larger forecast error is a loss. Counts always sum to `scored_points`; rates
-are counts divided by that value. Comparisons use exact stored decimals with no
-tie tolerance.
-
-All derived financial metrics and rates are fixed-point JSON strings or
-`null`, never JSON numbers. The cohort `scored_points` values sum to
-`coverage.scored`. A represented selection identity with no scored points has
-zero counts and `null` metrics and rates. When there are no points at all,
-`performance.cohorts` is empty.
-
-Treat these as descriptive forecast-error measurements for one five-minute
-market, not settlement accuracy, probability accuracy, or evidence of
-statistical significance. The overlapping 500 ms forecasts are strongly
-autocorrelated. For an active market, label the metrics "so far" and show
-`coverage.scored` beside them.
-
-### Coverage and bounds
-
-`window_buckets` is always `600` for the 300-second market and 500 ms
-evaluation cadence. `observed_buckets` counts distinct generation buckets
-represented by returned attempts. `attempts` is the number of returned rows;
-`valid_forecasts + invalid` equals `attempts`, and
-`scored + valid_without_actual` equals `valid_forecasts`.
-
-`market_window_elapsed` is calculated against `server_time_ms`. While the
-window is active, `unobserved_buckets_as_of_response` is `null` because future
-buckets have not occurred. Once the market has elapsed, it is
-`window_buckets - observed_buckets`. Missing buckets are not fabricated or
-backfilled.
-
-The database query is bounded to 1,001 rows so the API can reject rather than
-truncate an anomalous result. A successful response contains at most 1,000
-points and at most 600 distinct generation buckets. Exceeding either public
-invariant returns HTTP `500`; the response never silently drops excess rows.
-
-`model.selection_identities` is the sorted set of unique full selection
-identities represented by the points. Each contains `schema_version`,
-`policy_version`, `evidence_end_ms`, `fingerprint_sha256`, and
-`artifact_sha256`. It is empty when `points` is empty and can contain more than
-one entry if persisted rows span a selection change. Consumers must not
-silently join different selection identities into one claimed-primary series.
-
-### Empty markets, current rollover, and errors
-
-A known market with no retained rows for the requested model returns HTTP
-`200` with the normal metadata, zero coverage counts, an empty
-`selection_identities` array, `performance: {"cohorts": []}`, and `points: []`.
-This is normal before the first current-window evaluation is persisted and
-after derived-evidence retention has removed older rows.
-`evaluation_semantics.scored_input_max_future_skew_ms` remains present and zero
-even when there are no points.
-
-Derived challenger evaluation retention is `168` hours (seven days), not seven
-minutes. Cleanup is bounded, asynchronous, and scoped to each worker's frozen
-model set even though the workers share a table. Queue loss or a disabled
-evaluator can create gaps, so a download is a snapshot of retained evidence
-rather than a completeness guarantee or permanent archive. The same empty-market
-behavior applies to the two-second and three-second model versions; each is
-selected independently with the required query value.
-
-Each current route snapshots `server_time_ms` and its corresponding market once
-before querying PostgreSQL. Its returned `market` object and attachment
-filename are authoritative for that response. Calls made on opposite sides of
-a five-minute boundary can therefore return adjacent market IDs. A dashboard
-that needs a stable window should read the returned ID and continue with an
-ID-addressed route.
-
-The current target window returns HTTP `200` even if it has not yet appeared in
-`market_windows`. An ID-addressed route uses the same behavior when the
-requested ID is the API server's current market. A non-current ID absent from
-`market_windows` returns HTTP `404`:
-
-```json
-{ "detail": "no market found for market_id=5946630" }
-```
-
-A missing or unsupported `model_version`, a negative or too-large market ID,
-or a non-integer market ID returns FastAPI's HTTP `422` validation response.
-
-If persisted rows violate the typed reporting invariants, including the
-1,000-point cap, the API logs the inconsistency and returns HTTP `500`:
-
-```json
-{ "detail": "shadow evaluation data inconsistent" }
-```
-
-A PostgreSQL read failure also returns HTTP `500` and can use the server's
-generic plain-text error body rather than the JSON `detail` shape. Treat either
-response as a reporting-path failure; it does not imply that the Redis-only
-live route or the standalone shadow worker has failed.
-
-## Current Live Prices and Shadow Signal
+## Current Live Prices
 
 ### `GET /markets/current/live`
 
-Reads `btc:live:binance_spot`, `btc:live:chainlink`, `btc:live:futures`, and
-`btc:live:chainlink_shadow` with one Redis `MGET`. It does not query PostgreSQL
-and does not return historical samples, probabilities, mark/index prices, open
-interest, flow, book data, or persisted shadow evaluations.
+Reads `btc:live:binance_spot`, `btc:live:chainlink`, and
+`btc:live:futures` with one Redis `MGET`. It does not query PostgreSQL or
+return historical samples, probabilities, mark/index prices, open interest,
+flow, or book data.
 
-Upstream extraction and Redis handoff are summarized in
-[`README.md`](README.md); deployment and freshness checks are in
-[`OPERATIONS.md`](OPERATIONS.md).
-
-Query parameters:
-
-| Parameter | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `max_chainlink_carry_forward_ms` | integer | `10000` | Accepted for compatibility; the current Redis implementation does not filter or carry values based on this parameter |
+The compatibility query parameter
+`max_chainlink_carry_forward_ms` is accepted as an integer and defaults to
+`10000`; the Redis implementation does not filter or carry values based on it.
 
 ```bash
 curl "${API_BASE_URL}/markets/current/live"
@@ -1469,277 +941,37 @@ Response:
       "received_age_ms": 437,
       "time_ms": 1783988793451
     }
-  },
-  "signals": {
-    "chainlink_catchup": {
-      "schema_version": 1,
-      "mode": "shadow",
-      "selection_schema_version": 2,
-      "selection_policy_version": "chronological_holdout_v2",
-      "selection_fingerprint_sha256": "2e403435a541b7fd7e431dc38ebeee62f88743c63ce8043088361fe7ac61b749",
-      "selection_artifact_sha256": "890a08366d45cb33978f1c382f2030b62a50281a3606a4caa7ddfac3e1570699",
-      "selection_evidence_end_ms": 1783983205028,
-      "model_version": "catchup_ratio_l3000_b100",
-      "beta": "1",
-      "generated_ms": 1783988794005,
-      "valid": true,
-      "status": "valid",
-      "invalid_reasons": [],
-      "state": "anchored",
-      "horizon_ms": 3000,
-      "estimated_lag_ms": 3000,
-      "current_chainlink": "62290.21096323273",
-      "projected_chainlink": "62292.00981418305598931493660",
-      "pending_move": "1.79885095032598931493660",
-      "pending_move_bps": "0.2887854965506176800898399415",
-      "direction": "up",
-      "futures_now": "62331.80",
-      "futures_reference": "62330.00",
-      "chainlink_now_source_timestamp_ms": 1783988792000,
-      "chainlink_now_received_ms": 1783988793346,
-      "anchor_chainlink_source_timestamp_ms": 1783988792000,
-      "anchor_chainlink_received_ms": 1783988793346,
-      "futures_now_source_timestamp_ms": 1783988793451,
-      "futures_now_received_ms": 1783988793638,
-      "futures_reference_source_timestamp_ms": 1783988789826,
-      "futures_reference_received_ms": 1783988790015,
-      "futures_reference_target_ms": 1783988790346,
-      "futures_reference_gap_ms": 331,
-      "futures_received_age_ms": 367,
-      "chainlink_received_age_ms": 659,
-      "market_id": 5946629,
-      "market_start_ms": 1783988700000,
-      "market_end_ms": 1783989000000,
-      "ms_to_market_end": 205995,
-      "full_horizon_before_market_end": true,
-      "signal_age_ms": 70
-    }
   }
 }
 ```
 
-`provider_event_ms` and `time_ms` are compatibility aliases for the same value
-as `source_timestamp_ms`. The futures `last` value comes from Binance
-`btcusdt@aggTrade.p`; its `source_timestamp_ms`/`time_ms` is `aggTrade.T`, and
-its `received_ms` is local wall time recorded immediately after WebSocket
-`recv()` and before parsing. This source change does not alter the response
-shape. The source-price objects and compatibility aliases are unchanged by the
-additional `signals` object.
+`provider_event_ms` and `time_ms` are compatibility aliases for
+`source_timestamp_ms`. Futures `last.value` comes from Binance
+`btcusdt@aggTrade.p`, with `aggTrade.T` as its source timestamp. Chainlink
+comes from Polymarket RTDS topic `crypto_prices_chainlink` filtered to
+`btc/usd`.
 
-`signals.chainlink_catchup` is either the complete typed shadow payload shown
-above or `null`. The API calculates its only API-specific field as:
+Prices are fixed-point strings. Timestamps and ages are JSON integers. If a key
+is absent, that object's value, timestamps, ages, and alias are all `null`, and
+the route still returns HTTP `200`. The endpoint does not reject stale values;
+clients should use both age fields to display freshness.
 
-```text
-signal_age_ms = max(0, server_time_ms - generated_ms)
-```
+During a Chainlink feed gap, the collector leaves the last value in Redis while
+its ages grow. The accepted-event watchdog reconnects only the RTDS WebSocket
+when no valid expected event arrives within its configured deadline. Futures
+behaves similarly during a stream gap: the last cached value remains visible
+and ages until a new accepted trade arrives.
 
-This object is an experimental projected Chainlink catch-up, not a probability,
-settlement, execution, or market-close forecast.
-
-`beta`, `current_chainlink`, `projected_chainlink`, `pending_move`,
-`pending_move_bps`, `futures_now`, and `futures_reference` are fixed-point JSON
-strings, or `null` where the typed shadow contract permits it. Do not parse
-them with binary floating-point. Timestamps, ages, horizons, and market IDs are
-JSON integers. `invalid_reasons` is an array of strings.
-
-The top-level market window is calculated by the API for `server_time_ms`. The
-nested `market_id`, `market_start_ms`, `market_end_ms`, `ms_to_market_end`, and
-`full_horizon_before_market_end` were fixed by the shadow worker at
-`generated_ms`. Around a five-minute boundary, a still-live signal can
-therefore contain the preceding window briefly; consumers must not overwrite
-the nested generation-time context with the top-level current window.
-
-A well-formed signal with `valid: false` is still returned as an object. Its
-non-`valid` `status` and non-empty `invalid_reasons` explain why it cannot be
-used, while projection and anchor fields are `null`; current input fields can
-still be present for diagnostics. Consumers should display its status rather
-than reuse a previous valid projection. If the shadow worker is disabled or
-stops, the short Redis TTL expires and `signals.chainlink_catchup` becomes
-`null`. A missing shadow key is normal and the endpoint still returns HTTP
-`200`.
-
-If a Redis key is absent, its value, timestamps, ages, and alias are all `null`;
-the endpoint still returns HTTP `200`. The endpoint does not reject stale
-values. If the futures WebSocket disconnects or its current trade becomes
-stale, the collector leaves the last cached value in place and its ages keep
-growing. The dashboard should use both `source_age_ms` and `received_age_ms` to
-decide whether to display a stale indicator.
-
-The Chainlink producer also leaves its last cached value in place during a
-feed gap. If no valid expected BTC/USD Chainlink event is accepted for 10
-seconds by default, its monotonic accepted-event watchdog reconnects only the
-RTDS WebSocket. PING/PONG and malformed or unrelated frames do not reset that
-deadline. The response shape does not change during recovery: the Chainlink
-ages continue growing until a fresh accepted event overwrites the Redis value,
-after which the shadow worker re-anchors automatically.
-
-Redis connection/read failures return HTTP `503` with:
+A Redis connection/read failure returns HTTP `503`:
 
 ```json
 { "detail": "live cache unavailable" }
 ```
 
-Malformed JSON in any of the three source-price keys still returns HTTP `503`
-with:
+Malformed JSON in any source-price key also returns HTTP `503`:
 
 ```json
 { "detail": "live cache payload invalid" }
-```
-
-A malformed `btc:live:chainlink_shadow` payload is isolated from the three
-actual prices. The API logs the shadow decode error, returns HTTP `200`, and
-sets `signals.chainlink_catchup` to `null`. It does not expose the malformed
-raw value or turn an experimental model-payload problem into an outage of the
-actual live-price response. A Redis connection or `MGET` failure still returns
-the unchanged `503 live cache unavailable` response.
-
-## Two-Second Chainlink Catch-Up Challenger
-
-### `GET /markets/current/live/challengers/chainlink-catchup-2s`
-
-Reads the separate short-lived `btc:live:chainlink_shadow_2s` Redis value. It
-does not query PostgreSQL and does not alter the four-key `MGET`, response
-shape, or accepted `signals.chainlink_catchup` value returned by
-`GET /markets/current/live`. There are no query parameters.
-
-```bash
-curl "${API_BASE_URL}/markets/current/live/challengers/chainlink-catchup-2s"
-```
-
-The response wrapper is always schema version `1`. A missing or expired value,
-or a value rejected by the challenger's strict decoder, returns HTTP `200`
-with a null prediction:
-
-```json
-{
-  "schema_version": 1,
-  "server_time_ms": 1783988794075,
-  "market_id": 5946629,
-  "market_start_ms": 1783988700000,
-  "market_end_ms": 1783989000000,
-  "publication_role": "challenger",
-  "prediction": null
-}
-```
-
-When present, `prediction` is the complete strict two-second signal payload:
-
-```json
-{
-  "schema_version": 1,
-  "server_time_ms": 1783988794075,
-  "market_id": 5946629,
-  "market_start_ms": 1783988700000,
-  "market_end_ms": 1783989000000,
-  "publication_role": "challenger",
-  "prediction": {
-    "schema_version": 1,
-    "mode": "shadow_candidate",
-    "publication_role": "challenger",
-    "experiment_version": "prospective_catchup_2s_basis_v2",
-    "model_version": "catchup_v2_l2000_h2000_b100_basis5m",
-    "beta": "1",
-    "futures_lookback_ms": 2000,
-    "forecast_horizon_ms": 2000,
-    "generated_ms": 1783988794005,
-    "target_ms": 1783988796005,
-    "valid": true,
-    "status": "valid",
-    "invalid_reasons": [],
-    "state": "basis_within_band",
-    "current_chainlink": "62290.21096323273",
-    "projected_chainlink": "62292.00981418305598931493660",
-    "pending_move": "1.79885095032598931493660",
-    "pending_move_bps": "0.2887854965506176800898399415",
-    "direction": "up",
-    "futures_now": "62331.80",
-    "futures_reference": "62330.00",
-    "chainlink_now_source_timestamp_ms": 1783988792000,
-    "chainlink_now_received_ms": 1783988793346,
-    "anchor_chainlink_source_timestamp_ms": 1783988792000,
-    "anchor_chainlink_received_ms": 1783988793346,
-    "futures_now_source_timestamp_ms": 1783988793451,
-    "futures_now_received_ms": 1783988793638,
-    "futures_reference_source_timestamp_ms": 1783988790826,
-    "futures_reference_received_ms": 1783988791015,
-    "futures_reference_target_ms": 1783988791346,
-    "futures_reference_gap_ms": 331,
-    "futures_received_age_ms": 367,
-    "chainlink_received_age_ms": 659,
-    "market_id": 5946629,
-    "market_start_ms": 1783988700000,
-    "market_end_ms": 1783989000000,
-    "ms_to_market_end": 205995,
-    "full_horizon_before_market_end": true,
-    "signal_age_ms": 70
-  }
-}
-```
-
-The API adds `signal_age_ms = max(0, server_time_ms - generated_ms)` without
-changing its Decimal strings. `target_ms` is exactly two seconds after
-`generated_ms`; the independent `futures_lookback_ms` is also two seconds for
-this experiment. A well-formed payload with `valid: false` remains an object;
-consumers must clear any earlier projection and display its status instead.
-
-The V2 challenger computes basis as `futures - Chainlink`. It estimates the
-normal basis from strictly prior 500 ms samples over five minutes, requiring
-600 samples, and sets the soft-band half-width to
-`max($1, 0.75 * population standard deviation)`. The raw two-second projection
-is unchanged inside that band. Outside it, the final projection moves 50%
-toward the nearest band edge. Warmup or a basis-feature failure falls back to
-the raw projection.
-
-The wire shape and nested schema version remain `1`; no basis diagnostics are
-added to the live object. `projected_chainlink` is the final output after any
-soft correction, and `pending_move`, `pending_move_bps`, and `direction` are
-derived from that final value. The frozen calibration evidence is recorded in
-`price_collector/shadow_signal_2s_basis_calibration.json`.
-
-This endpoint remains an unselected prospective challenger. It must not replace
-or be presented as the accepted `signals.chainlink_catchup` model, and it does
-not change the accepted three-second engine.
-
-For retained charts, metrics, and downloads, request the common
-`/shadow-evaluations` routes documented above with
-`model_version=catchup_v2_l2000_h2000_b100_basis5m`. Those responses have the
-same schema as the accepted three-second model, so the dashboard can reuse one
-renderer and switch only the requested model version. Historical V1 evidence
-remains separately available with
-`model_version=catchup_v1_l2000_h2000_b100`; never merge the two series.
-
-For the live card, keep the existing price request and select the corresponding
-cached prediction. The two payloads share all display fields; normalize the two
-timing aliases once:
-
-```javascript
-const live = await apiGet("/markets/current/live");
-const challenger = selectedLagMs === 2000
-  ? await apiGet("/markets/current/live/challengers/chainlink-catchup-2s")
-  : null;
-
-const rawPrediction = selectedLagMs === 2000
-  ? challenger?.prediction
-  : live.signals.chainlink_catchup;
-
-const prediction = rawPrediction == null ? null : {
-  ...rawPrediction,
-  horizon_ms:
-    rawPrediction.horizon_ms ?? rawPrediction.forecast_horizon_ms,
-  estimated_lag_ms:
-    rawPrediction.estimated_lag_ms ?? rawPrediction.futures_lookback_ms,
-};
-```
-
-This leaves the actual-price polling contract unchanged while allowing the same
-live prediction component to display either lag.
-
-A malformed challenger is logged without its raw contents and produces the
-same HTTP `200` null response as an absent key. A Redis connection/read failure
-returns HTTP `503` with:
-
-```json
-{ "detail": "live cache unavailable" }
 ```
 
 ## Common Errors
@@ -1750,23 +982,18 @@ Application-raised FastAPI errors normally use this JSON shape:
 { "detail": "human-readable message" }
 ```
 
-An unhandled internal HTTP `500`, including a PostgreSQL read failure on a
-shadow-evaluation route, can instead use a generic plain-text body. Clients
-should branch on HTTP status and tolerate either content type; the `apiGet`
-helper above does so.
-
 Expected statuses are:
 
 | Status | Meaning |
 | --- | --- |
-| `404` | The requested source or historical market has no stored data; a current shadow-evaluation window and a known market with no retained evaluation points instead return HTTP `200` with `points: []` |
+| `404` | The requested source or historical market has no stored data |
 | `405` | The route was called with a method other than `GET` |
-| `422` | A typed path/query value is invalid, such as a non-integer market ID, a discovery `limit` outside `1..50`, or a missing/unsupported shadow-evaluation `model_version` |
-| `500` | A PostgreSQL-backed shadow-evaluation request failed or its persisted result violated the public reporting invariants |
-| `503` | A live route cannot read Redis, one of `/markets/current/live`'s three actual source-price payloads is malformed, or `/healthz` cannot query PostgreSQL |
+| `422` | A typed path/query value is invalid |
+| `500` | An unhandled PostgreSQL-backed request failed |
+| `503` | The live route cannot read Redis, a source-price payload is malformed, or `/healthz` cannot query PostgreSQL |
 
-The exact `detail` text is useful for logs but should not be treated as a stable
-frontend enum. Use the HTTP status and the endpoint context.
+Use the HTTP status and endpoint context rather than treating the exact
+`detail` text as a stable frontend enum.
 
 ## Framework-Generated Developer Endpoints
 

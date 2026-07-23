@@ -1,11 +1,10 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP, localcontext
+from decimal import Decimal, ROUND_HALF_UP
 import json
-import logging
 from typing import Any, Mapping, Optional
 
-from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from price_collector.collector import current_utc_epoch_ms
@@ -26,27 +25,12 @@ from price_collector.live_cache import (
     build_current_live_payload,
     create_live_cache,
 )
-from price_collector.market import MarketWindow, market_for_sample_second
-from price_collector.shadow_signal_2s_live import (
-    SHADOW_SIGNAL_2S_TRANSPORT_ERRORS,
-    create_shadow_signal_2s_store,
-    serialize_shadow_signal_2s,
-)
-from price_collector.shadow_signal_reporting import (
-    MAX_MARKET_ID,
-    SHADOW_EVALUATION_REPORT_SCHEMA_VERSION,
-    ShadowEvaluationModelVersion,
-    ShadowEvaluationReportingError,
-    build_shadow_evaluation_report,
-    fetch_shadow_evaluation_chart_points,
-    shadow_evaluation_market_window,
-)
+from price_collector.market import market_for_sample_second
 
 
 DEFAULT_PROVIDER = "binance_spot"
 DEFAULT_SYMBOL = "BTCUSDT"
 SERVICE_NAME = "price-api"
-LOGGER = logging.getLogger(__name__)
 DOWNLOAD_FLOW_FIELDS = (
     "taker_imbalance",
     "cvd_10s",
@@ -58,32 +42,6 @@ DOWNLOAD_BOOK_FIELDS = (
     "book_imbalance",
     "microprice",
 )
-SHADOW_DOWNLOAD_DECIMAL_FORMATS = {
-    "beta": "0.0000",
-    "chainlink_at_forecast": "0.01",
-    "futures_at_forecast": "0.01",
-    "projected_chainlink": "0.01",
-    "actual_chainlink": "0.01",
-    "pending_move": "0.01",
-    "pending_move_bps": "0.0001",
-    "forecast_error": "0.01",
-    "baseline_error": "0.01",
-    "mean_absolute_error_usd": "0.01",
-    "median_absolute_error_usd": "0.01",
-    "p95_absolute_error_usd": "0.01",
-    "maximum_absolute_error_usd": "0.01",
-    "root_mean_squared_error_usd": "0.01",
-    "mean_signed_error_usd": "0.01",
-    "mean_absolute_advantage_usd": "0.01",
-    "mae_skill_vs_no_change": "0.0000",
-    "rmse_skill_vs_no_change": "0.0000",
-    "win_rate": "0.0000",
-    "tie_rate": "0.0000",
-    "loss_rate": "0.0000",
-}
-SHADOW_DOWNLOAD_DECIMAL_PRECISION = 100
-
-
 def utc_datetime_to_z(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -295,80 +253,6 @@ def serialize_download_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return exported
 
 
-def _serialize_shadow_download_value(
-    value: Any,
-    *,
-    field_name: Optional[str] = None,
-) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            key: _serialize_shadow_download_value(
-                child,
-                field_name=key,
-            )
-            for key, child in value.items()
-        }
-    if isinstance(value, list):
-        return [
-            _serialize_shadow_download_value(
-                child,
-                field_name=field_name,
-            )
-            for child in value
-        ]
-
-    places = SHADOW_DOWNLOAD_DECIMAL_FORMATS.get(field_name)
-    if places is None:
-        return value
-    if value is None:
-        return value
-    if not isinstance(value, str):
-        raise ValueError(
-            f"shadow download field {field_name!r} must be a decimal string or null"
-        )
-    with localcontext() as context:
-        context.prec = max(SHADOW_DOWNLOAD_DECIMAL_PRECISION, len(value) + 8)
-        decimal_value = Decimal(value)
-        if not decimal_value.is_finite():
-            raise ValueError(
-                f"shadow download field {field_name!r} must be finite"
-            )
-        quantized = decimal_value.quantize(
-            Decimal(places),
-            rounding=ROUND_HALF_UP,
-        )
-    if quantized == 0:
-        quantized = quantized.copy_abs()
-    return format(quantized, "f")
-
-
-def serialize_shadow_evaluation_download_payload(
-    payload: Mapping[str, Any],
-) -> dict[str, Any]:
-    if payload.get("schema_version") != SHADOW_EVALUATION_REPORT_SCHEMA_VERSION:
-        raise ValueError("unsupported shadow evaluation report schema_version")
-    exported = {
-        key: _serialize_shadow_download_value(value, field_name=key)
-        for key, value in payload.items()
-    }
-    exported["export"] = {
-        "schema_version": 1,
-        "variant": "rounded_download",
-        "source_report_schema_version": payload.get("schema_version"),
-        "decimal_encoding": "fixed_point_string",
-        "rounding_mode": "ROUND_HALF_UP",
-        "precision_policy": "shadow_evaluation_download_v1",
-        "decimal_places": {
-            "usd_price_move_error": 2,
-            "basis_points": 4,
-            "unitless_beta_rate_skill": 4,
-        },
-        "derived_metrics_computed_before_rounding": True,
-        "classifications_computed_before_rounding": True,
-    }
-    return exported
-
-
 def get_pool(request: Request) -> Any:
     return request.app.state.pool
 
@@ -377,24 +261,17 @@ def get_live_cache(request: Request) -> Any:
     return request.app.state.live_cache
 
 
-def get_shadow_signal_2s_store(request: Request) -> Any:
-    return request.app.state.shadow_signal_2s_store
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
     pool = await create_read_pool(settings)
     live_cache = create_live_cache(settings)
-    shadow_signal_2s_store = create_shadow_signal_2s_store(settings)
     app.state.settings = settings
     app.state.pool = pool
     app.state.live_cache = live_cache
-    app.state.shadow_signal_2s_store = shadow_signal_2s_store
     try:
         yield
     finally:
-        await shadow_signal_2s_store.close()
         await live_cache.close()
         await pool.close()
 
@@ -664,117 +541,6 @@ async def markets_current_live(
         raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
 
 
-@app.get("/markets/current/live/challengers/chainlink-catchup-2s")
-async def markets_current_live_chainlink_catchup_2s(
-    request: Request,
-) -> dict[str, Any]:
-    now_ms = current_utc_epoch_ms()
-    sample_second_ms = (now_ms // 1000) * 1000
-    window = market_for_sample_second(sample_second_ms)
-
-    try:
-        signal = await get_shadow_signal_2s_store(request).get_signal()
-    except SHADOW_SIGNAL_2S_TRANSPORT_ERRORS as exc:
-        raise HTTPException(status_code=503, detail="live cache unavailable") from exc
-
-    return {
-        "schema_version": 1,
-        "server_time_ms": now_ms,
-        "market_id": window.market_id,
-        "market_start_ms": window.market_start_ms,
-        "market_end_ms": window.market_end_ms,
-        "publication_role": "challenger",
-        "prediction": serialize_shadow_signal_2s(
-            signal,
-            server_time_ms=now_ms,
-        ),
-    }
-
-
-@app.get(
-    "/markets/current/shadow-evaluations",
-    responses={
-        500: {"description": "Persisted evaluation data is inconsistent"},
-    },
-)
-async def markets_current_shadow_evaluations(
-    request: Request,
-    model_version: ShadowEvaluationModelVersion = Query(...),
-) -> dict[str, Any]:
-    server_time_ms = current_utc_epoch_ms()
-    sample_second_ms = (server_time_ms // 1000) * 1000
-    window = market_for_sample_second(sample_second_ms)
-    return await shadow_evaluations_response(
-        request,
-        window=window,
-        server_time_ms=server_time_ms,
-        model_version=model_version.value,
-    )
-
-
-@app.get(
-    "/markets/current/shadow-evaluations/download",
-    responses={
-        500: {"description": "Persisted evaluation data is inconsistent"},
-    },
-)
-async def markets_current_shadow_evaluations_download(
-    request: Request,
-    model_version: ShadowEvaluationModelVersion = Query(...),
-) -> Response:
-    server_time_ms = current_utc_epoch_ms()
-    sample_second_ms = (server_time_ms // 1000) * 1000
-    window = market_for_sample_second(sample_second_ms)
-    return await shadow_evaluations_download_response(
-        request,
-        window=window,
-        server_time_ms=server_time_ms,
-        model_version=model_version.value,
-    )
-
-
-@app.get(
-    "/markets/{market_id}/shadow-evaluations",
-    responses={
-        404: {"description": "Unknown historical market"},
-        500: {"description": "Persisted evaluation data is inconsistent"},
-    },
-)
-async def markets_shadow_evaluations_by_id(
-    request: Request,
-    market_id: int = Path(..., ge=0, le=MAX_MARKET_ID),
-    model_version: ShadowEvaluationModelVersion = Query(...),
-) -> dict[str, Any]:
-    server_time_ms = current_utc_epoch_ms()
-    return await shadow_evaluations_response(
-        request,
-        window=shadow_evaluation_market_window(market_id),
-        server_time_ms=server_time_ms,
-        model_version=model_version.value,
-    )
-
-
-@app.get(
-    "/markets/{market_id}/shadow-evaluations/download",
-    responses={
-        404: {"description": "Unknown historical market"},
-        500: {"description": "Persisted evaluation data is inconsistent"},
-    },
-)
-async def markets_shadow_evaluations_download_by_id(
-    request: Request,
-    market_id: int = Path(..., ge=0, le=MAX_MARKET_ID),
-    model_version: ShadowEvaluationModelVersion = Query(...),
-) -> Response:
-    server_time_ms = current_utc_epoch_ms()
-    return await shadow_evaluations_download_response(
-        request,
-        window=shadow_evaluation_market_window(market_id),
-        server_time_ms=server_time_ms,
-        model_version=model_version.value,
-    )
-
-
 @app.get("/markets/{market_id}")
 async def markets_by_id(
     request: Request,
@@ -787,73 +553,6 @@ async def markets_by_id(
         provider=provider,
         symbol=symbol,
         market_id=market_id,
-    )
-
-
-async def shadow_evaluations_response(
-    request: Request,
-    *,
-    window: MarketWindow,
-    server_time_ms: int,
-    model_version: str,
-) -> dict[str, Any]:
-    result = await fetch_shadow_evaluation_chart_points(
-        get_pool(request),
-        window=window,
-        model_version=model_version,
-    )
-
-    current_sample_second_ms = (server_time_ms // 1000) * 1000
-    current_window = market_for_sample_second(current_sample_second_ms)
-    if not result.market_exists and window.market_id != current_window.market_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no market found for market_id={window.market_id}",
-        )
-
-    try:
-        return build_shadow_evaluation_report(
-            window=window,
-            server_time_ms=server_time_ms,
-            model_version=model_version,
-            rows=result.rows,
-        )
-    except ShadowEvaluationReportingError as exc:
-        LOGGER.exception(
-            "shadow_evaluation_reporting_inconsistent",
-            extra={
-                "market_id": window.market_id,
-                "model_version": model_version,
-            },
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="shadow evaluation data inconsistent",
-        ) from exc
-
-
-async def shadow_evaluations_download_response(
-    request: Request,
-    *,
-    window: MarketWindow,
-    server_time_ms: int,
-    model_version: str,
-) -> Response:
-    payload = await shadow_evaluations_response(
-        request,
-        window=window,
-        server_time_ms=server_time_ms,
-        model_version=model_version,
-    )
-    filename = (
-        f"btc_5m_market_{window.market_id}_shadow_evaluations_"
-        f"{model_version}_rounded.json"
-    )
-    download_payload = serialize_shadow_evaluation_download_payload(payload)
-    return Response(
-        content=json.dumps(download_payload, separators=(",", ":")),
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

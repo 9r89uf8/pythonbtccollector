@@ -1,10 +1,10 @@
+
 # Price Collector
 
 Production-oriented BTC market-data collection for a single-user Ubuntu 24.04
 DigitalOcean droplet. The application collects spot, oracle, futures, order-flow,
 top-of-book, and Polymarket probability data into local PostgreSQL. Redis holds
-the latest values needed by the live API response and, when explicitly enabled,
-short-lived accepted and prospective Chainlink catch-up projections.
+the latest source prices needed by the live API response.
 
 The deployment is deliberately private:
 
@@ -23,12 +23,10 @@ DigitalOcean droplet
 │   ├── price-collector-polymarket-chainlink.service
 │   ├── price-collector-binance-futures.service
 │   ├── price-collector-polymarket-probabilities.service
-│   ├── price-collector-shadow-signal.service  Opt-in experimental worker
-│   ├── price-collector-shadow-signal-2s.service  Opt-in 2-second challenger
 │   └── price-api.service
 ├── /opt/price-collector              Git checkout and Python virtualenv
 ├── /etc/price-collector              Root-owned environment files
-├── /var/lib/price-collector          State and trusted decision evidence
+├── /var/lib/price-collector          Collector state
 ├── Redis on 127.0.0.1:6379           Live-value cache only
 └── PostgreSQL database price_collector
                                       Historical source of record
@@ -232,326 +230,6 @@ Each value has this shape:
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
 
-The Chainlink producer additionally writes internal
-`publisher_epoch` and `accepted_event_sequence` fields in the same atomic
-value. The three fields above remain unchanged, other source keys remain
-compatible, and API serialization never exposes the continuity metadata.
-
-Shadow-signal Phases 4 and 5 can also create `btc:live:chainlink_shadow`. That key is a
-typed shadow projection rather than a source price, and it expires 1.5 to 2.0
-seconds after each write. Those phases deliberately kept it out of the API.
-Phase 6 reads it alongside the three source-price keys and exposes it only as
-the optional nested `signals.chainlink_catchup` object.
-
-### Shadow-signal runtime and accepted model
-
-The live implementation remains separate from every producer collector and
-from FastAPI. `price_collector.shadow_signal` contains the dependency-free
-anchor/ratio engine. The standalone worker loads an immutable selection and
-replay-configuration pair, runs the engine, and publishes only the selected
-primary. FastAPI only serializes the cached result and persisted evaluation
-view; it never executes or selects a model.
-
-The accepted production decision currently selects
-`catchup_ratio_l3000_b100`. The complete retained explanation of the accepted
-3,000/3,500/4,000 ms selection and the later inconclusive 2,500 ms experiment
-is in [`CHAINLINK_SHADOW_MODEL_HISTORY.md`](CHAINLINK_SHADOW_MODEL_HISTORY.md).
-The old offline replay, selector, lag-test, and recovery command modules were
-retired after that evidence was consolidated. They are not part of the current
-runtime checkout.
-
-The two SHA-named JSON files in the repository root are immutable restore and
-provenance copies of the active decision pair. Production uses root-owned,
-read-only copies under `/var/lib/price-collector/shadow-decisions`; the worker
-requires and validates both files before it opens Redis.
-
-### Descriptive futures-to-Chainlink lead measurement
-
-`price_collector.chainlink_futures_lead_lag` is a standalone offline analysis
-command. It does not import, configure, select, or change the live shadow
-engine. From consecutive canonical full-precision shadow-evaluation reports,
-it deduplicates the forecast-time Chainlink and futures cache observations and
-compares their event-to-event percentage moves over candidate time shifts.
-Positive `lag_ms` means futures moved first. The primary clock is local
-`received_ms`, because that is when a future engine could observe each value.
-The default scan is 0 through 10,000 ms in 500 ms steps; the bounds can be
-changed explicitly for a wider diagnostic.
-
-```powershell
-python -m price_collector.chainlink_futures_lead_lag `
-  --input-dir "C:\path\to\canonical-shadow-evaluation-json" `
-  --output-dir "C:\path\to\lead-lag-results"
-```
-
-The output includes the complete lag-score curve, per-market winning lags, and
-an audit CSV containing the exact Chainlink interval and as-of futures values
-used at the measured pooled winner. Calculations use `Decimal`, every candidate
-lag is scored on the same intervals, and gaps are not bridged. The result is a
-descriptive estimate over 500 ms sampled latest-cache states, not raw-feed
-latency and not production model-selection evidence.
-
-### Prospective two-second challenger
-
-The repository also contains a deliberately separate prospective challenger:
-`python -m price_collector.shadow_signal_2s_collector`, managed by
-`price-collector-shadow-signal-2s`. Its active experiment is
-`prospective_catchup_2s_basis_v2`, publishing the unselected
-`catchup_v2_l2000_h2000_b100_basis5m` model: a 2,000 ms production-style
-lookback, a 2,000 ms target horizon, beta `1`, and a separately calibrated
-basis-band correction. It reads the same Chainlink and futures source keys but
-owns its own engine state and writes only
-`btc:live:chainlink_shadow_2s` with a 2,000 ms TTL.
-
-This is a prospective live comparison, not a replacement for the accepted
-`catchup_ratio_l3000_b100` model. It does not modify the accepted worker,
-selection evidence, Redis key, or `signals.chainlink_catchup` response.
-
-The basis is `futures - Chainlink`. The worker estimates its normal level from
-strictly prior 500 ms samples over five minutes, requiring 600 samples. The
-soft band's half-width is `max($1, 0.75 * population standard deviation)`. A
-raw two-second projection inside the band is unchanged; outside it, the final
-projection moves 50% toward the nearest band edge. Warmup or a basis-feature
-failure falls back to the raw lag projection instead of hard-capping it. The
-exact calibration evidence is frozen in
-`price_collector/shadow_signal_2s_basis_calibration.json`.
-
-The read-only route
-`GET /markets/current/live/challengers/chainlink-catchup-2s` serializes this
-challenger cache value for the dashboard. Missing, expired, or malformed values
-produce `prediction: null`; the API never runs the model or queries PostgreSQL
-on this route. The worker is disabled by default and is enabled independently
-from the accepted shadow service.
-
-Matured 2-second evaluation is independently opt-in. When enabled, the worker
-schedules one attempt per entered 500 ms bucket, causally matures it against the
-newest Chainlink observation available by its 2,000 ms target, and sends it to
-the existing bounded nonblocking evaluation writer. The worker evaluates the
-active V2 result and a silent raw V1 comparator from the same forecast state and
-target; only V2 is published to Redis. Both model identities are retained for
-exactly 168 hours and remain separately reportable. The historical and active
-Git-tracked registrations are validated before any runtime dependency opens;
-the active registration records `selected: false`, the exact calibration
-evidence, the frozen configuration, and its own reproducible hashes rather than
-borrowing the accepted model's evidence.
-
-Retention cleanup is model-scoped even though both workers share the evaluation
-table. The challenger deletes only its frozen 2-second model rows; the accepted
-worker deletes only its own candidate-set rows, so neither can shorten the
-other experiment's evidence window.
-
-The existing evaluation JSON and download routes accept either the challenger
-or accepted model through `model_version` with the same response shape. A
-dashboard can therefore reuse one chart/metrics renderer and toggle between
-`catchup_v2_l2000_h2000_b100_basis5m` and `catchup_ratio_l3000_b100` without
-merging their separate evidence series. The historical
-`catchup_v1_l2000_h2000_b100` series remains available as its own model.
-
-Shadow-signal Phase 4 adds the opt-in, standalone
-`price-collector-shadow-signal` service. Its epoch-aligned 100 ms loop reads
-`btc:live:futures` and `btc:live:chainlink` together with one Redis `MGET`,
-feeds the pure engine, and atomically refreshes
-`btc:live:chainlink_shadow` with a default 2,000 ms TTL. It instantiates all
-three fixed V0 candidates, but serializes only the provisional primary frozen
-by the accepted Phase 3 artifact. The accepted production decision currently
-selects `catchup_ratio_l3000_b100`; that model is discovered from the artifact,
-not hard-coded in the worker or its environment.
-
-The worker starts only when an accepted selection artifact and the exact replay
-report that defines its configuration have been promoted to
-`/var/lib/price-collector/shadow-decisions`. Both files must be
-`root:pricecollector` mode `0440`. The dedicated root-owned
-`/etc/price-collector/shadow-signal.env` pins both absolute paths and the full
-selection-file SHA-256. At startup the worker verifies the selection hash, the
-report hash recorded in selection provenance, the replay configuration digest,
-policy, evidence, candidate set, and frozen primary before it opens Redis. It
-does not choose a model dynamically or fall back to another candidate. The
-loader keeps the currently promoted v2 selection/replay pair valid under its
-original semantics and separately accepts only matching v3 pairs with the
-exact v3 policy and zero future skew; schema versions cannot be mixed.
-
-Every tick replaces the cached payload. When either source is missing, stale,
-malformed, regresses, lacks anchor history, or otherwise fails validation, the
-new payload is invalid and all projection fields are `null`; a previous valid
-forecast is never carried forward. If the worker dies, the short TTL removes
-the key while the three source-price keys and producer collectors continue
-normally.
-
-Shadow-signal Phase 5 retains that live contract and adds independently opt-in
-matured evaluations. Once per entered epoch-aligned 500 ms bucket, the worker
-schedules every configured candidate attempt, including invalid attempts. It
-does not backfill buckets missed while paused. The complete generated-time
-cohort remains pending until its maximum
-`target_ms = generated_ms + horizon_ms`. At that finalization tick, each
-candidate is resolved separately against the newest retained Chainlink
-observation whose `received_ms` is no later than that candidate's target. A
-Chainlink update received after a target is excluded even though the complete
-cohort is finalized later.
-
-`generated_ms` is captured immediately after the Redis `MGET`, so it represents
-when the forecast inputs are locally available. A future-dated input is stored
-as an invalid evaluation rather than scored. The Chainlink producer includes a
-process epoch and monotonic accepted-event sequence in the same Redis value.
-The evaluator invalidates outcome history on a sequence jump or regression, a
-producer-epoch change, or metadata loss. Within one publisher epoch, each
-accepted sequence is also bound to one immutable identity consisting of source
-timestamp, receive timestamp, and price. An identical repeat is normal; a
-different identity under the same sequence resets outstanding history and
-enters `chainlink_sequence_identity_mismatch` quarantine. Neither disputed
-identity is admitted to the new history epoch or allowed to confirm maturation.
-The last sequence binding remains known across a metadata-less read, preventing
-metadata recovery from silently redefining that sequence.
-Attempts generated while quarantined remain scheduled for coverage but mature
-`integrity_invalid`; only a newer sequence or publisher epoch establishes a
-clean baseline. This
-integrity rule applies whenever sequence metadata is present, including v2.
-
-Schema v2 retains legacy-only startup and its conservative gap check. Schema v3
-does not admit any Chainlink value into outcome history until the first atomic
-producer-epoch/accepted-sequence pair is observed. It still schedules every
-candidate attempt for coverage, but cohorts generated
-before establishment are permanently unscoreable: they mature with null
-actual/error fields, `outcome_status=integrity_invalid`, and
-`chainlink_sequence_not_established`. Later sequence establishment cannot
-retroactively validate them, and consumed cadence buckets are not backfilled.
-The first newly entered bucket after establishment can score normally. Once
-sequencing has been established, metadata loss suppresses actual-outcome
-ingestion until a sequenced value recovers continuity. Redis is still
-latest-value-only, so missing events are not reconstructed. Sequence
-discontinuities that become visible invalidate the affected live evidence,
-while the raw replay remains
-the event-complete authority for selection.
-
-For an otherwise outcome-eligible schema-v3 cohort, reaching the maximum target
-is necessary but not enough to finalize it. The evaluator also requires a
-successful Chainlink cache observation with sequence metadata at or after that
-target. A missing or malformed Chainlink value defers maturation for at most
-two configured poll intervals. Confirmation at or before that deadline permits
-normal causal target
-resolution; otherwise, the whole cohort is emitted with null actual/error
-fields, `outcome_status=integrity_invalid`, and
-`chainlink_sequence_confirmation_timeout`. Schema v2 retains its prior
-maturation behavior.
-
-No final evaluation row is constructed at a shorter target. If any outcome
-history reset occurs between generation and the maximum target, every row in
-that cohort has null actual/error fields, `outcome_status=integrity_invalid`,
-and the same explicit reset reasons. With intact continuity, each row is
-`available` when it has a causal actual or `unavailable` when it does not.
-Every row receives the common `matured_ms` at which the complete cohort became
-eligible for persistence, including any bounded v3 confirmation wait. The
-cohort then enters a bounded nonblocking queue
-and is batch-inserted into `shadow_signal_evaluations`. Database connection,
-retry, retention, and
-shutdown work never runs on the 100 ms publication path. If the queue fills
-during an outage, whole oldest cohorts are dropped rather than individual
-candidate rows;
-a rate-limited warning is emitted on the first and every hundredth dropped
-cohort, and Redis signal generation continues. Batching, retry, permanent-error
-isolation, deferral, and retention also preserve whole cohorts. The database
-backend receives typed cohorts and returns exact, disjoint persisted, rejected,
-and deferred cohort identities; the writer fails and retries the complete batch
-if any identity is missing, unknown, or classified more than once. Transiently
-failed batches are requeued ahead of newer cohorts and retried safely because
-inserts are idempotent on
-`(model_version, generated_ms, horizon_ms)`, and the default derived-evidence
-retention is seven days. A deterministic PostgreSQL integrity or data error is
-isolated at cohort boundaries inside one transaction and the entire affected
-cohort is rejected instead of poisoning the retry queue. Isolation is capped;
-rejection and cap events are rate-limited, and unprobed whole cohorts return to
-the bounded queue instead of being mislabeled as rejected. These events remain
-evidence-coverage failures that require investigation. Shutdown telemetry keeps
-both row and cohort totals for offered, enqueued, persisted, rejected, deferred,
-and dropped work, plus row/cohort queue high-water marks. Invalid model attempts
-that satisfy the storage contract are
-stored to preserve an honest coverage denominator. For valid attempts with an
-actual, signed `forecast_error` is
-`projected_chainlink - actual_chainlink` and signed
-`baseline_error` is the no-change result
-`chainlink_at_forecast - actual_chainlink`.
-
-The schema migration that introduced cohort-wide finalization quarantines
-pre-fix rows because their shorter-horizon actuals cannot be proven clean after
-the fact. It preserves the base rows, labels them `legacy_unverified` with
-`pre_cohort_integrity_fix_unverified` as the reason, and excludes them from the
-reader view so they cannot contribute to API reporting.
-
-Move-size, direction, expiry, and sampled-volatility slices can be derived from
-these rows. Reconnect slices require a receive-time join to
-`raw_capture.feed_sessions`; materialize any longer-lived reconnect report
-before the separate 72-hour raw-capture retention removes that join evidence.
-
-The evaluation table is internal: `price_writer` receives only `SELECT`,
-`INSERT`, and retention `DELETE`, while `price_reader` and `PUBLIC` are
-explicitly revoked. Phase 5 deliberately added no API response or dashboard
-code. It is distinct from the Binance futures-collector Phase 5 source cutover
-and from the still-deferred high-resolution raw-capture Phase 4 partition and
-72-hour-retention validation; it does not validate either rollout.
-
-Shadow-signal Phase 6 adds a Redis-only serialization path to the existing
-`GET /markets/current/live` endpoint. The route obtains the three source-price
-keys and `btc:live:chainlink_shadow` with one four-key `MGET`. It decodes the
-shadow value independently with its dedicated typed decoder, never as a
-`LivePrice`, and returns it under `signals.chainlink_catchup`. A present,
-well-formed signal is returned as an object, including a request-time
-`signal_age_ms = max(0, server_time_ms - generated_ms)`; a missing, expired, or
-malformed shadow value produces `null` in that slot. A malformed shadow value is
-logged but cannot turn otherwise readable actual prices into an HTTP `503`.
-
-FastAPI remains a read-only serializer in Phase 6. The live route performs no
-PostgreSQL query and neither runs nor imports model execution or model state.
-The shadow worker remains isolated in its standalone service. Phase 6 is
-backend-only.
-
-The Phase 7 backend prerequisite adds PostgreSQL reporting routes at
-`GET /markets/current/shadow-evaluations` and
-`GET /markets/{market_id}/shadow-evaluations`, plus rounded JSON attachment
-variants ending in `/download`. All four require one explicitly
-supported `model_version`, select one five-minute window by forecast
-`target_ms`, include boundary-crossing forecasts generated in the predecessor
-market, and reject an anomalous result above 1,000 rows. Financial values remain
-Decimal-derived JSON strings or `null`. The reporting routes retain full
-precision. Downloads round only after validation and performance calculation:
-USD prices, moves, errors, and USD metrics use two decimal places; basis points,
-beta, skills, and rates use four. Their `export` object records this lossy
-policy, and attachment filenames end in `_rounded.json`. Evaluation persistence
-defaults to seven days; an export contains only rows still retained when it is
-requested. Every point carries its persisted forecast-time
-Chainlink and futures cache snapshots: `chainlink_at_forecast` and
-`futures_at_forecast`, each with source and local-receive timestamps. Those
-snapshots correspond to `generated_ms`; `projected_chainlink` and the causal
-`actual_chainlink` correspond to `target_ms`. This makes chart rows
-self-contained without reconstructing forecast-time futures history from the
-latest-only live cache. The backend does not persist the dashboard's
-target-aligned `actual_futures`, so that browser-computed field is not present
-in either reporting or download responses.
-
-Report schema v2 exposes the complete selection identity (schema, policy,
-evidence end, fingerprint, and artifact hash) and keeps generation-time
-forecast validity separate from target-time `outcome_status`. Consumers can
-therefore distinguish an ordinary `unavailable` target from
-`integrity_invalid` evidence and its explicit reasons. Each response also
-derives per-market performance cohorts from valid points with an `available`
-outcome, separated by the full selection identity: forecast MAE,
-median/p95/maximum absolute error, RMSE, signed bias, no-change baseline
-comparisons, skill, and paired wins/ties/losses. This calculation uses the
-already fetched rows and does not add storage or another query. The API reader
-still has no privilege on the base `shadow_signal_evaluations` table; it can
-select only the deliberately narrow
-`shadow_signal_evaluation_chart_points` view. The view exposes only the six
-approved forecast-time snapshot fields and excludes `futures_reference` and
-its metadata, worker age/internal fields, and writer metadata such as
-`created_at`. `/markets/current/live` remains Redis-only and unchanged.
-Reporting also declares
-`evaluation_semantics.scored_input_max_future_skew_ms=0`: persisted live
-evaluations use zero-skew forecast inputs even when their selection provenance
-is schema v2, so those rows are not directly comparable to v2 replay evidence
-that allowed nonzero skew. This narrow causality rule does not relabel the
-selection or change the live Redis projection's activated configuration. No
-dashboard code is included in this repository. Frontend response and chart
-semantics are documented in [`FRONTEND_API.md`](FRONTEND_API.md). Deploy the
-reporting prerequisite with the schema-first procedure in
-[`OPERATIONS.md`](OPERATIONS.md#shadow-signal-evaluation-reporting-api).
-
 ## API
 
 The FastAPI application is read-only and is started by systemd with:
@@ -574,22 +252,6 @@ Current routes:
 - `GET /markets/current/download`
 - `GET /markets/{market_id}/download`
 - `GET /markets/current/live`
-- `GET /markets/current/live/challengers/chainlink-catchup-2s`
-- `GET /markets/current/shadow-evaluations?model_version=...`
-- `GET /markets/{market_id}/shadow-evaluations?model_version=...`
-- `GET /markets/current/shadow-evaluations/download?model_version=...`
-- `GET /markets/{market_id}/shadow-evaluations/download?model_version=...`
-
-The data and download routes accept optional `include_probabilities`,
-`include_futures`, `include_oi`, `include_flow`, `include_book`, `fill_display`,
-and `max_carry_forward_ms` query parameters. `/markets/current/live` reads the
-three source prices plus the optional shadow signal from Redis with one four-key
-`MGET`; the historical and aggregate routes read PostgreSQL.
-The two-second challenger route independently reads its dedicated Redis key;
-it returns live prospective output only and does not query PostgreSQL.
-The shadow-evaluation reporting and attachment routes also read PostgreSQL, but
-only through their restricted view and only for one explicit model and
-five-minute target window. They do not alter the Redis-only live request path.
 
 The data and download responses use schema version `2` and always include
 `market.chainlink_resolution` and `market.resolution`, independently of the
@@ -618,19 +280,11 @@ parameters, complete response shapes, optional fields, and error responses.
 ## Repository Layout
 
 ```text
-price_collector/       Collectors, API, and current shadow runtime
-price_collector/shadow_signal_2s_collector.py  Independent 2-second challenger worker
-price_collector/shadow_signal_2s_basis.py  Rolling basis band and soft correction
-price_collector/shadow_signal_2s_live.py  Challenger cache payload and decoder
-price_collector/shadow_signal_2s_registration.json  Historical V1 prospective provenance
-price_collector/shadow_signal_2s_basis_registration.json  Active V2 prospective provenance
-price_collector/shadow_signal_2s_basis_calibration.json  Frozen V2 calibration evidence
-price_collector/shadow_signal_reporting.py  Bounded read-only evaluation reporting
+price_collector/       Source collectors, shared storage helpers, and API
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
-CHAINLINK_SHADOW_MODEL_HISTORY.md  Accepted model decision and test history
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 requirements.txt       Python runtime and test dependencies
 ```
@@ -670,8 +324,7 @@ a live PostgreSQL instance.
 ## Configuration
 
 Pydantic settings read case-sensitive environment variables without a prefix.
-The collectors, API, and experimental shadow workers intentionally use separate
-environment files:
+Collectors and the API intentionally use separate environment files:
 
 - `/etc/price-collector/collector.env`, created from
   `deployment/collector.env.example`, contains the writer database URL and
@@ -679,18 +332,6 @@ environment files:
 - `/etc/price-collector/api.env`, created from
   `deployment/api.env.example`, contains only the reader database URL and Redis
   settings.
-- `/etc/price-collector/shadow-signal.env`, created from
-  `deployment/shadow-signal.env.example`, contains Redis, pinned shadow
-  decision settings, and disabled evaluation controls. The default example has
-  no database credential. The Phase 5 migration adds `DATABASE_URL` only while
-  matured evaluation is enabled; this file must never contain
-  `READ_DATABASE_URL`.
-- `/etc/price-collector/shadow-signal-2s.env`, created from
-  `deployment/shadow-signal-2s.env.example`, contains logging, Redis, the frozen
-  poll/TTL values, disabled-by-default live and evaluation switches, and bounded
-  evaluation-writer settings. The challenger model constants are frozen in
-  code. Add the writer `DATABASE_URL` only while 2-second evaluation is enabled;
-  this file must never contain `READ_DATABASE_URL`.
 
 The Chainlink collector's accepted-event watchdog is configured in
 `collector.env`:
@@ -699,49 +340,13 @@ The Chainlink collector's accepted-event watchdog is configured in
 POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000
 ```
 
-The value must be between 5,000 and 60,000 ms. It is independent of
-`STALE_PRICE_MS` and of the frozen shadow model's Chainlink freshness gate.
+The value must be between 5,000 and 60,000 ms and is independent of
+`STALE_PRICE_MS`.
 Only a successfully parsed and accepted `crypto_prices_chainlink` `btc/usd`
 event resets the monotonic timer. When it expires, the collector classifies the
 connection close as `proactive_reconnect`, applies the existing jittered
 backoff, and resubscribes without restarting the process. The last Redis value
 is left in place and continues aging until a fresh event arrives.
-
-The shadow example remains disabled. Enabling it requires exact, distinct
-selection and replay-report paths inside the trusted decision directory plus
-the lowercase 64-character SHA-256 of the complete selection file:
-
-```text
-SHADOW_SIGNAL_ENABLED=false
-SHADOW_SIGNAL_TRUSTED_DECISION_DIR=/var/lib/price-collector/shadow-decisions
-SHADOW_SIGNAL_SELECTION_PATH=/var/lib/price-collector/shadow-decisions/primary-selection.json
-SHADOW_SIGNAL_SELECTION_SHA256=0000000000000000000000000000000000000000000000000000000000000000
-SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=/var/lib/price-collector/shadow-decisions/replay-configuration.json
-SHADOW_SIGNAL_POLL_MS=100
-SHADOW_SIGNAL_TTL_MS=2000
-SHADOW_SIGNAL_EVALUATION_ENABLED=false
-SHADOW_SIGNAL_EVALUATION_INTERVAL_MS=500
-SHADOW_SIGNAL_EVALUATION_QUEUE_MAX=5000
-SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS=500
-SHADOW_SIGNAL_EVALUATION_FLUSH_MS=1000
-SHADOW_SIGNAL_EVALUATION_RETRY_MS=5000
-SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10
-SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=5
-SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=5
-SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS=168
-SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS=300
-SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS=5000
-```
-
-The poll cadence is fixed at 100 ms. The TTL is constrained to 1,500 through
-2,000 ms and defaults to 2,000 ms. Freshness, history, reference-gap, future
-skew, candidate, and beta settings come from the verified replay configuration;
-they are not independent live overrides. Follow the Phase 4 procedure in
-[`OPERATIONS.md`](OPERATIONS.md) to promote immutable evidence, replace the
-placeholder paths and hash, and only then set `SHADOW_SIGNAL_ENABLED=true`.
-Keep `SHADOW_SIGNAL_EVALUATION_ENABLED=false` until the Phase 5 schema and
-writer URL have been installed using the schema-first shadow evaluation
-procedure in [`OPERATIONS.md`](OPERATIONS.md#shadow-signal-matured-evaluations).
 
 At minimum, replace the database passwords in:
 
@@ -939,26 +544,8 @@ GRANT USAGE, SELECT ON SEQUENCES TO price_writer;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
 GRANT SELECT ON TABLES TO price_reader;
 
-REVOKE ALL ON TABLE shadow_signal_evaluations
-FROM PUBLIC, price_reader, price_writer;
-GRANT SELECT, INSERT, DELETE ON TABLE shadow_signal_evaluations
-TO price_writer;
-
-REVOKE ALL ON TABLE shadow_signal_evaluation_chart_points
-FROM PUBLIC, price_reader, price_writer;
-GRANT SELECT ON TABLE shadow_signal_evaluation_chart_points
-TO price_reader;
 \q
 ```
-
-`schema.sql` separately creates and secures the `raw_capture` schema. Do not
-grant `price_reader` or `PUBLIC` access to it. Its narrowly scoped
-`price_writer` ownership and `CREATE` permission are for raw partition
-maintenance only and do not grant DDL access in `public`.
-The explicit base-table and reporting-view privilege corrections must remain
-after the broad first-install grants. The API reader can select the restricted
-view, but cannot access the internal evaluation table; the writer does not gain
-view access.
 
 ### Configure Redis
 
@@ -980,8 +567,6 @@ The expected reply is `PONG`.
 sudo install -d -o root -g pricecollector -m 750 /etc/price-collector
 sudo test -e /etc/price-collector/collector.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/collector.env.example /etc/price-collector/collector.env
 sudo test -e /etc/price-collector/api.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/api.env.example /etc/price-collector/api.env
-sudo test -e /etc/price-collector/shadow-signal.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/shadow-signal.env.example /etc/price-collector/shadow-signal.env
-sudo test -e /etc/price-collector/shadow-signal-2s.env || sudo install -o root -g pricecollector -m 640 /opt/price-collector/deployment/shadow-signal-2s.env.example /etc/price-collector/shadow-signal-2s.env
 
 sudo nano /etc/price-collector/collector.env
 sudo nano /etc/price-collector/api.env
@@ -989,16 +574,8 @@ sudo nano /etc/price-collector/api.env
 
 The guarded install commands create each file only when it does not already
 exist, so rerunning them cannot replace production secrets with example values.
-Replace `REPLACE_ME` on the first deployment. Keep writer credentials out of
-`api.env`, and keep all database credentials out of `shadow-signal.env` until
-the Phase 5 migration copies in the existing writer `DATABASE_URL`. Never put
-`READ_DATABASE_URL` in the shadow file. Add only the existing writer
-`DATABASE_URL` to `shadow-signal-2s.env` when its evaluation switch is enabled.
-Leave the accepted shadow worker disabled until the
-Phase 4 evidence-promotion procedure has replaced its placeholder decision
-settings, leave evaluations disabled until the Phase 5 schema has been applied,
-and enable the prospective challenger only through its
-[independent runbook](OPERATIONS.md#prospective-two-second-chainlink-challenger).
+Replace `REPLACE_ME` on the first deployment and keep writer credentials out of
+`api.env`.
 
 ### Install systemd Units
 
@@ -1007,22 +584,11 @@ sudo cp /opt/price-collector/deployment/price-collector.service /etc/systemd/sys
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.service /etc/systemd/system/price-collector-polymarket-chainlink.service
 sudo cp /opt/price-collector/deployment/price-collector-binance-futures.service /etc/systemd/system/price-collector-binance-futures.service
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-probabilities.service /etc/systemd/system/price-collector-polymarket-probabilities.service
-sudo cp /opt/price-collector/deployment/price-collector-shadow-signal.service /etc/systemd/system/price-collector-shadow-signal.service
-sudo cp /opt/price-collector/deployment/price-collector-shadow-signal-2s.service /etc/systemd/system/price-collector-shadow-signal-2s.service
 sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 ```
-
-The commands install both shadow units but deliberately do not enable or start
-them. Activate the accepted unit only after its trusted evidence and dedicated
-environment have passed the Phase 4 checks in [`OPERATIONS.md`](OPERATIONS.md).
-Enable its PostgreSQL evaluations separately using the matured-evaluation
-procedure in
-[`OPERATIONS.md`](OPERATIONS.md#shadow-signal-matured-evaluations). Activate the
-two-second challenger only with its
-[prospective runbook](OPERATIONS.md#prospective-two-second-chainlink-challenger).
 
 ### Verify the Deployment
 
@@ -1033,7 +599,6 @@ curl http://127.0.0.1:9000/prices/latest
 curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
-curl http://127.0.0.1:9000/markets/current/live/challengers/chainlink-catchup-2s
 ```
 
 Confirm every network service is private:

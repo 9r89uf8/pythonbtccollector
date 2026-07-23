@@ -15,6 +15,3 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-
-# Local API downloads used for one-off shadow chart inspection.
-btc_5m_market_*_shadow_evaluations*.json

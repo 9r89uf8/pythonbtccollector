@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 
@@ -11,7 +12,6 @@ def test_price_api_service_binds_to_loopback_only():
     assert "--host 127.0.0.1" in service
     assert "--host 0.0.0.0" not in service
     assert "redis-server.service" in service
-    assert "price-collector-shadow-signal.service" not in service
 
 
 def test_api_env_example_contains_reader_credentials_only():
@@ -60,7 +60,6 @@ def test_api_env_example_has_no_raw_capture_or_writer_settings():
     lines = (ROOT / "deployment" / "api.env.example").read_text().splitlines()
 
     assert not any(line.startswith("RAW_") for line in lines)
-    assert not any(line.startswith("SHADOW_SIGNAL_") for line in lines)
     assert not any(line.startswith("DATABASE_URL=") for line in lines)
 
 
@@ -100,140 +99,19 @@ def test_binance_futures_collector_service_execs_futures_module():
     assert "--host 0.0.0.0" not in service
 
 
-def test_shadow_signal_env_is_disabled_and_has_phase5_controls_without_secrets():
-    lines = (
-        ROOT / "deployment" / "shadow-signal.env.example"
-    ).read_text().splitlines()
+def test_deployment_contains_only_active_runtime_units():
+    unit_names = {
+        path.name
+        for path in (ROOT / "deployment").glob("*.service")
+    }
 
-    assert "SHADOW_SIGNAL_ENABLED=false" in lines
-    assert "REDIS_HOST=127.0.0.1" in lines
-    assert "REDIS_PORT=6379" in lines
-    assert "SHADOW_SIGNAL_POLL_MS=100" in lines
-    assert "SHADOW_SIGNAL_TTL_MS=2000" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_ENABLED=false" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_INTERVAL_MS=500" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_QUEUE_MAX=5000" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_BATCH_MAX_ROWS=500" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_FLUSH_MS=1000" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_RETRY_MS=5000" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=5" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=5" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_RETENTION_HOURS=168" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_RETENTION_CHECK_SECONDS=300" in lines
-    assert "SHADOW_SIGNAL_EVALUATION_RETENTION_BATCH_ROWS=5000" in lines
-    assert (
-        "SHADOW_SIGNAL_TRUSTED_DECISION_DIR="
-        "/var/lib/price-collector/shadow-decisions"
-    ) in lines
-    assert any(line.startswith("SHADOW_SIGNAL_SELECTION_PATH=") for line in lines)
-    assert any(
-        line.startswith("SHADOW_SIGNAL_SELECTION_SHA256=") for line in lines
-    )
-    assert any(
-        line.startswith("SHADOW_SIGNAL_REPLAY_CONFIG_REPORT_PATH=")
-        for line in lines
-    )
-    assert not any(line.startswith("DATABASE_URL=") for line in lines)
-    assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
-
-
-def test_shadow_signal_service_is_isolated_and_ordered_after_producers():
-    service = (
-        ROOT / "deployment" / "price-collector-shadow-signal.service"
-    ).read_text()
-
-    assert "EnvironmentFile=/etc/price-collector/shadow-signal.env" in service
-    assert (
-        "ExecStart=/opt/price-collector/.venv/bin/python "
-        "-m price_collector.shadow_signal_collector"
-    ) in service
-    assert "redis-server.service" in service
-    assert "price-collector-binance-futures.service" in service
-    assert "price-collector-polymarket-chainlink.service" in service
-    assert "postgresql.service" in service
-    assert "Restart=on-failure" in service
-    assert "StartLimitIntervalSec=60" in service
-    assert "StartLimitBurst=3" in service
-    assert "NoNewPrivileges=true" in service
-    assert "PrivateDevices=true" in service
-    assert "PrivateTmp=true" in service
-    assert "ProtectSystem=strict" in service
-    assert "ProtectHome=true" in service
-    assert "CapabilityBoundingSet=\n" in service
-    assert "ReadWritePaths=" not in service
-
-
-def test_shadow_signal_2s_env_keeps_evaluation_disabled_without_secrets():
-    lines = (
-        ROOT / "deployment" / "shadow-signal-2s.env.example"
-    ).read_text().splitlines()
-
-    assert "SHADOW_SIGNAL_2S_ENABLED=false" in lines
-    assert "SHADOW_SIGNAL_2S_POLL_MS=100" in lines
-    assert "SHADOW_SIGNAL_2S_TTL_MS=2000" in lines
-    assert "REDIS_HOST=127.0.0.1" in lines
-    assert "REDIS_PORT=6379" in lines
-    assert "SHADOW_SIGNAL_2S_EVALUATION_ENABLED=false" in lines
-    assert "SHADOW_SIGNAL_2S_EVALUATION_INTERVAL_MS=500" in lines
-    assert "SHADOW_SIGNAL_2S_EVALUATION_QUEUE_MAX=5000" in lines
-    assert "SHADOW_SIGNAL_2S_EVALUATION_BATCH_MAX_ROWS=500" in lines
-    assert "SHADOW_SIGNAL_2S_EVALUATION_FLUSH_MS=1000" in lines
-    assert "SHADOW_SIGNAL_2S_EVALUATION_RETRY_MS=5000" in lines
-    assert (
-        "SHADOW_SIGNAL_2S_EVALUATION_SHUTDOWN_TIMEOUT_SECONDS=10"
-        in lines
-    )
-    assert (
-        "SHADOW_SIGNAL_2S_EVALUATION_DB_CONNECT_TIMEOUT_SECONDS=5"
-        in lines
-    )
-    assert (
-        "SHADOW_SIGNAL_2S_EVALUATION_DB_COMMAND_TIMEOUT_SECONDS=5"
-        in lines
-    )
-    assert "SHADOW_SIGNAL_2S_EVALUATION_RETENTION_HOURS=168" in lines
-    assert (
-        "SHADOW_SIGNAL_2S_EVALUATION_RETENTION_CHECK_SECONDS=300"
-        in lines
-    )
-    assert (
-        "SHADOW_SIGNAL_2S_EVALUATION_RETENTION_BATCH_ROWS=5000"
-        in lines
-    )
-    assert not any(line.startswith("DATABASE_URL=") for line in lines)
-    assert not any(line.startswith("READ_DATABASE_URL=") for line in lines)
-    assert not any("SELECTION" in line for line in lines)
-    assert not any("DECISION" in line for line in lines)
-
-
-def test_shadow_signal_2s_service_is_ordered_for_optional_db_and_hardened():
-    service = (
-        ROOT / "deployment" / "price-collector-shadow-signal-2s.service"
-    ).read_text()
-
-    assert (
-        "EnvironmentFile=/etc/price-collector/shadow-signal-2s.env"
-        in service
-    )
-    assert (
-        "ExecStart=/opt/price-collector/.venv/bin/python "
-        "-m price_collector.shadow_signal_2s_collector"
-    ) in service
-    assert "redis-server.service" in service
-    assert "price-collector-binance-futures.service" in service
-    assert "price-collector-polymarket-chainlink.service" in service
-    assert "postgresql.service" in service
-    assert "Restart=on-failure" in service
-    assert "StartLimitIntervalSec=60" in service
-    assert "StartLimitBurst=3" in service
-    assert "NoNewPrivileges=true" in service
-    assert "PrivateDevices=true" in service
-    assert "PrivateTmp=true" in service
-    assert "ProtectSystem=strict" in service
-    assert "ProtectHome=true" in service
-    assert "CapabilityBoundingSet=\n" in service
-    assert "ReadWritePaths=" not in service
+    assert unit_names == {
+        "price-api.service",
+        "price-collector.service",
+        "price-collector-binance-futures.service",
+        "price-collector-polymarket-chainlink.service",
+        "price-collector-polymarket-probabilities.service",
+    }
 
 
 def test_collector_services_depend_on_local_redis_service():
