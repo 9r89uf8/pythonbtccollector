@@ -45,7 +45,7 @@ def book_ticker_payload(**overrides):
 
 def test_parse_agg_trade_uses_decimal_fields_and_taker_side():
     trade = streams.parse_binance_futures_agg_trade_payload(
-        agg_trade_payload(m=False),
+        agg_trade_payload(m=False, nq="1.250"),
         expected_symbol="BTCUSDT",
     )
 
@@ -55,7 +55,93 @@ def test_parse_agg_trade_uses_decimal_fields_and_taker_side():
     assert trade.quote_notional == Decimal("200.00000")
     assert trade.trade_count == 3
     assert trade.buyer_is_maker is False
+    assert trade.normal_quantity == Decimal("1.250")
     assert not isinstance(trade.price, float)
+    assert not isinstance(trade.normal_quantity, float)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", Decimal("0")),
+        (1, Decimal("1")),
+        (Decimal("2.000"), Decimal("2.000")),
+    ],
+)
+def test_parse_agg_trade_accepts_optional_nonnegative_normal_quantity(
+    value,
+    expected,
+):
+    trade = streams.parse_binance_futures_agg_trade_payload(
+        agg_trade_payload(q="2.000", nq=value),
+        expected_symbol="BTCUSDT",
+    )
+
+    assert trade.normal_quantity == expected
+    assert streams.parse_binance_futures_agg_trade_payload(
+        agg_trade_payload(),
+        expected_symbol="BTCUSDT",
+    ).normal_quantity is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        1.0,
+        True,
+        None,
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        "-0.001",
+    ],
+)
+def test_parse_agg_trade_rejects_invalid_normal_quantity(value):
+    with pytest.raises(streams.FuturesStreamParseError, match="decimal field 'nq'"):
+        streams.parse_binance_futures_agg_trade_payload(
+            agg_trade_payload(nq=value),
+            expected_symbol="BTCUSDT",
+        )
+
+
+def test_parse_agg_trade_rejects_normal_quantity_above_total_quantity():
+    with pytest.raises(
+        streams.FuturesStreamParseError,
+        match="normal quantity must not exceed total quantity",
+    ):
+        streams.parse_binance_futures_agg_trade_payload(
+            agg_trade_payload(q="2.000", nq="2.001"),
+            expected_symbol="BTCUSDT",
+        )
+
+
+@pytest.mark.parametrize(
+    "stream_type",
+    [2, "2", 0, True, "invalid", 1.5, Decimal("1.5"), "1.0", " 1"],
+)
+def test_futures_stream_parsers_reject_non_usdm_stream_type(stream_type):
+    with pytest.raises(streams.FuturesStreamParseError, match="USD-M"):
+        streams.parse_binance_futures_agg_trade_payload(
+            agg_trade_payload(st=stream_type),
+            expected_symbol="BTCUSDT",
+        )
+
+    with pytest.raises(streams.FuturesStreamParseError, match="USD-M"):
+        streams.parse_binance_futures_book_ticker_payload(
+            book_ticker_payload(st=stream_type),
+            expected_symbol="BTCUSDT",
+        )
+
+
+def test_non_strict_optional_normal_quantity_preserves_core_trade():
+    trade = streams.parse_binance_futures_agg_trade_payload(
+        agg_trade_payload(q="2.000", nq="not-a-number", st=1),
+        expected_symbol="BTCUSDT",
+        strict_normal_quantity=False,
+    )
+
+    assert trade.price == Decimal("100.00")
+    assert trade.quantity == Decimal("2.000")
+    assert trade.normal_quantity is None
 
 
 def test_parse_agg_trade_rejects_unexpected_symbol():
@@ -278,6 +364,35 @@ class RecordingRawCapture:
         )
 
 
+class RecordingMicrostructureSink:
+    def __init__(self, *, events=None, fail=False):
+        self.calls = []
+        self.events = events
+        self.fail = fail
+        self.closed = None
+
+    def _record(self, name, *args):
+        self.calls.append((name, *args))
+        if self.events is not None:
+            self.events.append(name)
+        if name == "connection_closed" and self.closed is not None:
+            self.closed.set()
+        if self.fail:
+            raise RuntimeError("microstructure sink failed")
+
+    def connection_opened(self, source, received_ms):
+        self._record("connection_opened", source, received_ms)
+
+    def offer_futures_trade(self, trade, received_ms):
+        self._record("offer_futures_trade", trade, received_ms)
+
+    def connection_closed(self, source, received_ms):
+        self._record("connection_closed", source, received_ms)
+
+    def record_error(self, source, received_ms, error):
+        self._record("record_error", source, received_ms, error)
+
+
 def stream_settings():
     return SimpleNamespace(
         BINANCE_FUTURES_AGG_TRADE_WS_URL="wss://example.test/aggTrade",
@@ -293,6 +408,7 @@ async def run_reader_until_flow(
     flow_store,
     raw=None,
     trade_state=None,
+    microstructure_sink=None,
 ):
     trade_state = trade_state or streams.FuturesTradeState()
     flow_store.reached_target = asyncio.Event()
@@ -307,6 +423,7 @@ async def run_reader_until_flow(
             flow_store,
             trade_state=trade_state,
             raw_capture=raw,
+            microstructure_sink=microstructure_sink,
         )
     )
     await asyncio.wait_for(flow_store.reached_target.wait(), timeout=1)
@@ -538,6 +655,7 @@ def test_reader_stamps_receive_clocks_before_parse_and_updates_state_without_raw
     events = []
     websocket = ScriptedWebSocket([json.dumps(agg_trade_payload())], events=events)
     state = streams.FuturesTradeState()
+    sink = RecordingMicrostructureSink(events=events)
     original_loads = json.loads
     connection_id = UUID("55555555-5555-5555-5555-555555555555")
 
@@ -567,6 +685,11 @@ def test_reader_stamps_receive_clocks_before_parse_and_updates_state_without_raw
     monkeypatch.setattr(streams.time, "time_ns", wall_stamp)
     monkeypatch.setattr(streams.time, "monotonic_ns", monotonic_stamp)
     monkeypatch.setattr(streams, "uuid4", lambda: connection_id)
+    monkeypatch.setattr(
+        streams,
+        "current_utc_epoch_ms",
+        lambda: 1_783_459_500_111,
+    )
 
     asyncio.run(
         run_reader_until_flow(
@@ -574,6 +697,7 @@ def test_reader_stamps_receive_clocks_before_parse_and_updates_state_without_raw
             websocket=websocket,
             flow_store=flow_store,
             trade_state=state,
+            microstructure_sink=sink,
         )
     )
 
@@ -585,11 +709,90 @@ def test_reader_stamps_receive_clocks_before_parse_and_updates_state_without_raw
         "parse",
     ]
     assert events.index("parse") < events.index("flow")
+    assert events.index("offer_futures_trade") < events.index("flow")
     assert flow_store.calls[0][1] == 1_783_459_500_222
+    assert sink.calls[0] == (
+        "connection_opened",
+        "futures_trade",
+        1_783_459_500_111,
+    )
+    assert sink.calls[1][0] == "offer_futures_trade"
+    assert sink.calls[1][1] == flow_store.calls[0][0]
+    assert sink.calls[1][2] == 1_783_459_500_222
+    assert [call[0] for call in sink.calls] == [
+        "connection_opened",
+        "offer_futures_trade",
+    ]
     fields = state.telemetry_fields(now_ms=1_783_459_500_223)
     assert fields["shadow_ws_price"] == Decimal("100.00")
     assert fields["shadow_ws_trade_time_ms"] == 1_783_459_500_100
     assert fields["shadow_ws_received_ms"] == 1_783_459_500_222
+
+
+def test_reader_offers_non_cancel_connection_close(monkeypatch):
+    class ClosingWebSocket:
+        async def recv(self):
+            raise RuntimeError("remote connection failed")
+
+    async def scenario():
+        sink = RecordingMicrostructureSink()
+        sink.closed = asyncio.Event()
+        timestamps = iter([1_783_459_500_111, 1_783_459_500_222])
+        monkeypatch.setattr(
+            streams.websockets,
+            "connect",
+            lambda *args, **kwargs: WebSocketContext(ClosingWebSocket()),
+        )
+        monkeypatch.setattr(streams, "current_utc_epoch_ms", lambda: next(timestamps))
+
+        task = asyncio.create_task(
+            streams.futures_agg_trade_reader_loop(
+                stream_settings(),
+                RecordingFlowStore(),
+                trade_state=streams.FuturesTradeState(),
+                microstructure_sink=sink,
+            )
+        )
+        await asyncio.wait_for(sink.closed.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert sink.calls == [
+            ("connection_opened", "futures_trade", 1_783_459_500_111),
+            ("connection_closed", "futures_trade", 1_783_459_500_222),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_reader_microstructure_sink_failure_does_not_block_phase_five(monkeypatch):
+    install_capture_clocks(monkeypatch)
+    monkeypatch.setattr(
+        streams,
+        "current_utc_epoch_ms",
+        lambda: 1_783_459_500_001,
+    )
+    flow_store = RecordingFlowStore()
+    trade_state = streams.FuturesTradeState()
+    sink = RecordingMicrostructureSink(fail=True)
+
+    asyncio.run(
+        run_reader_until_flow(
+            monkeypatch,
+            websocket=ScriptedWebSocket([json.dumps(agg_trade_payload(nq="1.5"))]),
+            flow_store=flow_store,
+            trade_state=trade_state,
+            microstructure_sink=sink,
+        )
+    )
+
+    assert len(flow_store.calls) == 1
+    assert flow_store.calls[0][0].normal_quantity == Decimal("1.5")
+    assert (
+        trade_state.telemetry_fields(1_783_459_501_000)["shadow_ws_price"]
+        == Decimal("100.00")
+    )
 
 
 def test_reader_rejects_non_current_connection_state_after_shutdown(monkeypatch):
@@ -778,6 +981,7 @@ def test_malformed_message_updates_parse_counters_and_valid_trade_still_flows(
     flow_store = RecordingFlowStore()
     raw = RecordingRawCapture()
     trade_state = streams.FuturesTradeState()
+    microstructure_sink = RecordingMicrostructureSink()
 
     asyncio.run(
         run_reader_until_flow(
@@ -786,6 +990,7 @@ def test_malformed_message_updates_parse_counters_and_valid_trade_still_flows(
             flow_store=flow_store,
             raw=raw,
             trade_state=trade_state,
+            microstructure_sink=microstructure_sink,
         )
     )
 
@@ -799,6 +1004,13 @@ def test_malformed_message_updates_parse_counters_and_valid_trade_still_flows(
     assert closed.messages_accepted_total == 1
     assert closed.parse_errors_total == 1
     assert raw.counters.parse_errors_total == 1
+    assert [call[0] for call in microstructure_sink.calls] == [
+        "connection_opened",
+        "record_error",
+        "offer_futures_trade",
+    ]
+    assert microstructure_sink.calls[1][1] == "futures_trade"
+    assert isinstance(microstructure_sink.calls[1][3], streams.FuturesStreamParseError)
     assert len(flow_store.calls) == 1
     assert (
         trade_state.telemetry_fields(1_783_459_501_000)[

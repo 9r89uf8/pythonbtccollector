@@ -133,6 +133,27 @@ The corresponding Python entry points are:
   source. Disabling raw capture must not disable connection identity,
   pre-parse receive timing, Redis delivery, or normal flow aggregation.
 - Respect the stream flush-delay and raw-JSON settings in `Settings`.
+- Keep the optional microstructure path inside
+  `price-collector-binance-futures`. Reuse the accepted futures `aggTrade`
+  observation and the existing REST premium/open-interest snapshot; do not add
+  a duplicate futures trade connection or REST poller.
+- When `BINANCE_MICROSTRUCTURE_ENABLED=true`, consume spot aggregate trades and
+  spot top-10 depth together, futures top-10 depth through `/public`, and
+  observed forced orders through `/market`. Record wall receive time before
+  parsing and retain only one causal PostgreSQL summary row per second.
+- Treat `binance_microstructure_1s.sample_second_ms` as the start of the local
+  receipt interval `[sample_second_ms, sample_second_ms + 1000)`. Events
+  received exactly at the ending boundary belong to the next row. Preserve
+  source ages, lags, quote skew, connection gaps, and unhealthy rows rather
+  than fabricating fresh values.
+- Keep every microstructure financial value as `Decimal` and PostgreSQL
+  `NUMERIC`. The forced-order feed is censored observed stress; never label its
+  notional as total liquidations or infer future liquidation levels.
+- Microstructure retention and relation-size guards apply only to
+  `binance_microstructure_1s`. Reaching its cap may pause optional summary
+  writes but must not stop the critical futures Redis, snapshot, flow, or book
+  paths. Start with the measured PostgreSQL canary retention, not the starter's
+  DuckDB size estimate.
 
 ### High-Resolution Rollout Status
 

@@ -89,6 +89,18 @@ columns, and are serialized as strings by the API.
   can still be stored. `STALE_PRICE_MS` controls that freshness gate.
 - Aggregates `btcusdt@aggTrade` into one-second `binance_flow_1s` rows.
 - Aggregates `btcusdt@bookTicker` into one-second `binance_book_1s` rows.
+- Can additionally produce one causal `binance_microstructure_1s` research row
+  per second when `BINANCE_MICROSTRUCTURE_ENABLED=true`. That path reuses the
+  accepted futures `aggTrade` feed and REST premium/OI snapshot, and adds a
+  combined spot aggregate-trade/top-10 stream, futures top-10 depth, and the
+  censored futures forced-order stream. It retains Decimal summaries, not raw
+  messages.
+- The microstructure row includes spot/perpetual aggressive flow, top-1/5/10
+  depth imbalance, spread, weighted midpoint, sampled BBO OFI, spot/perpetual
+  basis, RPI-involved perpetual flow, mark/index/funding/OI context, observed
+  long/short forced fills, and source age/lag/skew/gap health fields. A Binance
+  forced-order snapshot is observed liquidation stress, not total liquidated
+  volume or a future liquidation level.
 - Can optionally coalesce the same `aggTrade` feed into private 100 ms OHLC
   evidence rows when `RAW_FUTURES_TRACE_ENABLED=true`. The raw flag does not
   select or disable the public price source; `BINANCE_FUTURES_STREAMS_ENABLED`
@@ -137,12 +149,27 @@ PostgreSQL is the historical source of record. The main tables are:
 - `binance_futures_oi_5m_summaries`
 - `binance_flow_1s`
 - `binance_book_1s`
+- `binance_microstructure_1s` for the optional receipt-time-aligned research
+  summary
 
 Prices in `price_samples` use `NUMERIC(38,18)`. Its primary key is
 `(instrument_id, sample_second_ms)`, and a duplicate sample for the same
 instrument and second updates the existing row instead of creating a duplicate.
 The other one-second tables follow the same upsert pattern with source-specific
 keys.
+
+`binance_microstructure_1s.sample_second_ms` labels the start of the local
+receipt interval `[sample_second_ms, sample_second_ms + 1000)`. The coordinator
+waits for the configured short flush delay, heap-orders events by their
+pre-parse wall-receive timestamp, and never moves an event received on or after
+the interval boundary backward into the previous row. This also keeps exact
+five-minute boundaries in the correct half-open market window.
+
+The compatibility columns `spot_trade_id_span` and `fut_trade_id_span` count
+the underlying trades represented by the accepted aggregate-trade messages in
+that receipt interval. They sum each message's first-to-last trade-ID span;
+they are not gaps between aggregate-trade IDs. The legacy `*_trade_id_span`
+names are retained so starter-derived research features keep the same contract.
 
 ### High-resolution evidence capture
 
@@ -386,6 +413,36 @@ RAW_CAPTURE_RETENTION_CHECK_SECONDS=60
 The Phase 1 schema accepts only a 100 ms futures bucket. The relation budget
 applies only to raw-capture PostgreSQL relations; it is not a filesystem quota
 and does not include WAL, temporary files, or the rest of the database.
+
+The optional microstructure summary has a separate bounded policy:
+
+```text
+BINANCE_MICROSTRUCTURE_ENABLED=false
+BINANCE_MICROSTRUCTURE_SPOT_WS_URL=wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@depth10
+BINANCE_MICROSTRUCTURE_FUTURES_DEPTH_WS_URL=wss://fstream.binance.com/public/ws/btcusdt@depth10@500ms
+BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL=wss://fstream.binance.com/market/ws/btcusdt@forceOrder
+BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=100000
+BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250
+BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30
+BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096
+BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
+```
+
+It defaults off so applying a schema/code update does not silently begin a new
+high-rate dataset. Enable it only after applying `schema.sql` and adding the
+single production override manually. The collector deletes rows older than the
+configured retention once per UTC day. It checks the table plus indexes once
+per minute, warns at the lower relation threshold, and pauses only new
+microstructure writes at the upper threshold; the critical futures live,
+snapshot, flow, and book paths continue. The size gate is hysteretic: after it
+pauses, writes resume only when a later `pg_total_relation_size` measurement is
+strictly below the warning threshold. Retention `DELETE` removes logical rows
+but normally does not shrink the physical PostgreSQL relation, so it must not
+be expected to resume a size-paused writer by itself. Resumption requires an
+operator-controlled compaction/rebuild or another real physical shrink, plus a
+confirmed measurement below the warning threshold. The 30-day starting
+retention is a PostgreSQL canary policy, not the DuckDB starter's 400-day
+estimate. Measure real PostgreSQL growth before raising it.
 
 For the Phase 2 accelerated three-hour production canary, manually set only
 `RAW_FUTURES_TRACE_ENABLED=true`, keep

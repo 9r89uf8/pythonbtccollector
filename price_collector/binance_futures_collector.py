@@ -14,6 +14,7 @@ from price_collector.binance_futures_streams import (
     AsyncFlowAggregator,
     FuturesTradeState,
     SequencedFuturesTrade,
+    _call_microstructure_sink,
     futures_agg_trade_reader_loop,
     futures_book_flush_loop,
     futures_book_ticker_reader_loop,
@@ -39,6 +40,9 @@ from price_collector.live_cache import (
     create_live_cache,
 )
 from price_collector.market import MARKET_MS, MarketWindow, market_for_sample_second
+from price_collector.binance_microstructure_collector import (
+    create_microstructure_runtime,
+)
 from price_collector.raw_capture import create_raw_capture_runtime
 
 
@@ -67,6 +71,7 @@ class BinanceFuturesSnapshot:
     premium_bps: Optional[Decimal]
     received_ms: int
     raw: Mapping[str, Any]
+    request_started_ms: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,7 @@ def build_binance_futures_snapshot(
     premium_index_payload: Mapping[str, Any],
     futures_trade: Optional[SequencedFuturesTrade],
     received_ms: int,
+    request_started_ms: Optional[int] = None,
 ) -> BinanceFuturesSnapshot:
     if futures_trade is not None:
         if not isinstance(futures_trade, SequencedFuturesTrade):
@@ -227,6 +233,7 @@ def build_binance_futures_snapshot(
                 }
             ),
         },
+        request_started_ms=request_started_ms,
     )
 
 
@@ -361,10 +368,12 @@ async def collect_once(
     client: httpx.AsyncClient,
     settings: Settings,
     trade_state: FuturesTradeState,
+    microstructure_sink: Any = None,
 ) -> BinanceFuturesSnapshot:
     symbol = settings.BINANCE_FUTURES_SYMBOL
     base_url = settings.BINANCE_FUTURES_BASE_URL
 
+    request_started_ms = current_utc_epoch_ms()
     open_interest_data, premium_index_data = await asyncio.gather(
         get_json(
             client,
@@ -402,6 +411,13 @@ async def collect_once(
         premium_index_payload=_require_mapping(premium_index_data, "premium index"),
         futures_trade=futures_trade,
         received_ms=received_ms,
+        request_started_ms=request_started_ms,
+    )
+
+    _call_microstructure_sink(
+        microstructure_sink,
+        "offer_context",
+        snapshot,
     )
 
     await upsert_binance_futures_snapshot(
@@ -533,6 +549,7 @@ async def snapshot_loop(
     client: httpx.AsyncClient,
     settings: Settings,
     trade_state: FuturesTradeState,
+    microstructure_sink: Any = None,
 ) -> None:
     while True:
         if settings.BINANCE_FUTURES_POLL_SECONDS <= 1:
@@ -546,6 +563,7 @@ async def snapshot_loop(
                 client=client,
                 settings=settings,
                 trade_state=trade_state,
+                microstructure_sink=microstructure_sink,
             )
         except asyncio.CancelledError:
             raise
@@ -614,8 +632,35 @@ async def _run_raw_capture_telemetry_noncritical(
         )
 
 
+async def _run_microstructure_noncritical(microstructure_runtime: Any) -> None:
+    """Keep an optional research-runtime failure from stopping core futures."""
+
+    attempt = 0
+    while True:
+        try:
+            await microstructure_runtime.run()
+            raise RuntimeError("Binance microstructure runtime stopped unexpectedly")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            attempt += 1
+            delay_seconds = min(60.0, float(2 ** min(attempt, 6)))
+            LOGGER.exception(
+                "binance_futures_microstructure_runtime_failed",
+                extra={
+                    "event": "binance_futures_microstructure_runtime_failed",
+                    "attempt": attempt,
+                    "delay_seconds": delay_seconds,
+                },
+            )
+            await asyncio.sleep(delay_seconds)
+
+
 async def run_collector(settings: Settings) -> None:
     setup_logging(settings.LOG_LEVEL)
+    microstructure_enabled = bool(
+        getattr(settings, "BINANCE_MICROSTRUCTURE_ENABLED", False)
+    )
     if not settings.BINANCE_FUTURES_STREAMS_ENABLED:
         raise RuntimeError(
             "Phase 5 futures last-price collection requires "
@@ -637,6 +682,7 @@ async def run_collector(settings: Settings) -> None:
             "futures_last_stale_ms": settings.STALE_PRICE_MS,
             "store_raw_json": settings.BINANCE_FUTURES_STORE_RAW_JSON,
             "raw_futures_trace_enabled": settings.RAW_FUTURES_TRACE_ENABLED,
+            "microstructure_enabled": microstructure_enabled,
         },
     )
 
@@ -645,6 +691,14 @@ async def run_collector(settings: Settings) -> None:
     live_cache = None
     raw_capture = None
     trade_state = FuturesTradeState()
+    microstructure_runtime = (
+        create_microstructure_runtime(settings, pool)
+        if microstructure_enabled
+        else None
+    )
+    microstructure_sink = (
+        None if microstructure_runtime is None else microstructure_runtime.sink
+    )
     tasks = []
     remove_sigterm_handler = _install_sigterm_cancellation()
     try:
@@ -699,6 +753,7 @@ async def run_collector(settings: Settings) -> None:
                                 flow_store,
                                 trade_state=trade_state,
                                 raw_capture=raw_capture,
+                                microstructure_sink=microstructure_sink,
                             )
                         ),
                         asyncio.create_task(
@@ -727,6 +782,7 @@ async def run_collector(settings: Settings) -> None:
                                 client=client,
                                 settings=settings,
                                 trade_state=trade_state,
+                                microstructure_sink=microstructure_sink,
                             )
                         ),
                     ]
@@ -739,6 +795,13 @@ async def run_collector(settings: Settings) -> None:
                                 client=client,
                                 settings=settings,
                             )
+                        )
+                    )
+
+                if microstructure_runtime is not None:
+                    tasks.append(
+                        asyncio.create_task(
+                            _run_microstructure_noncritical(microstructure_runtime)
                         )
                     )
 

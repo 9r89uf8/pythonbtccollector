@@ -33,6 +33,8 @@ ZERO = Decimal("0")
 ONE = Decimal("1")
 TWO = Decimal("2")
 TEN_THOUSAND = Decimal("10000")
+MICROSTRUCTURE_SINK_LOG_INTERVAL_SECONDS = 60.0
+_MICROSTRUCTURE_SINK_LAST_LOG_AT: dict[str, float] = {}
 
 
 class FuturesStreamParseError(ValueError):
@@ -50,6 +52,7 @@ class BinanceAggTrade:
     trade_time_ms: int
     event_time_ms: int
     buyer_is_maker: bool
+    normal_quantity: Optional[Decimal] = None
 
     @property
     def quote_notional(self) -> Decimal:
@@ -544,6 +547,36 @@ def _required_bool(payload: Mapping[str, Any], field_name: str) -> bool:
     return value
 
 
+def _optional_nonnegative_decimal(
+    payload: Mapping[str, Any],
+    field_name: str,
+) -> Optional[Decimal]:
+    if field_name not in payload:
+        return None
+
+    value = payload[field_name]
+    if isinstance(value, bool) or not isinstance(value, (str, int, Decimal)):
+        raise FuturesStreamParseError(
+            f"decimal field {field_name!r} must be a string, integer, or Decimal"
+        )
+
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise FuturesStreamParseError(
+            f"decimal field {field_name!r} is invalid"
+        ) from exc
+
+    if not parsed.is_finite():
+        raise FuturesStreamParseError(f"decimal field {field_name!r} must be finite")
+    if parsed < 0:
+        raise FuturesStreamParseError(
+            f"decimal field {field_name!r} must be non-negative"
+        )
+
+    return parsed
+
+
 def _validate_symbol(
     payload: Mapping[str, Any],
     *,
@@ -558,11 +591,35 @@ def _validate_symbol(
     return str(symbol)
 
 
+def _validate_usdm_stream_type(payload: Mapping[str, Any]) -> None:
+    stream_type = payload.get("st")
+    if stream_type is None:
+        return
+    is_usdm = False
+    if isinstance(stream_type, int) and not isinstance(stream_type, bool):
+        is_usdm = stream_type == 1
+    elif isinstance(stream_type, Decimal):
+        is_usdm = (
+            stream_type.is_finite()
+            and stream_type == stream_type.to_integral_value()
+            and stream_type == Decimal("1")
+        )
+    elif isinstance(stream_type, str):
+        # Reject permissive coercions such as "1.0", whitespace, and signs.
+        is_usdm = stream_type == "1"
+    if not is_usdm:
+        raise FuturesStreamParseError(
+            f"stream type 'st' must be USD-M (1), got {stream_type!r}"
+        )
+
+
 def parse_binance_futures_agg_trade_payload(
     payload: Mapping[str, Any],
     *,
     expected_symbol: str,
+    strict_normal_quantity: bool = True,
 ) -> BinanceAggTrade:
+    _validate_usdm_stream_type(payload)
     symbol = _validate_symbol(
         payload,
         expected_symbol=expected_symbol,
@@ -573,16 +630,31 @@ def parse_binance_futures_agg_trade_payload(
     if last_trade_id < first_trade_id:
         raise FuturesStreamParseError("aggTrade last trade id is before first trade id")
 
+    quantity = _decimal_field(payload, "q", positive=True)
+    try:
+        normal_quantity = _optional_nonnegative_decimal(payload, "nq")
+    except FuturesStreamParseError:
+        if strict_normal_quantity:
+            raise
+        normal_quantity = None
+    if normal_quantity is not None and normal_quantity > quantity:
+        if strict_normal_quantity:
+            raise FuturesStreamParseError(
+                "aggTrade normal quantity must not exceed total quantity"
+            )
+        normal_quantity = None
+
     return BinanceAggTrade(
         symbol=symbol,
         agg_trade_id=_required_int(payload, "a", positive=False),
         price=_decimal_field(payload, "p", positive=True),
-        quantity=_decimal_field(payload, "q", positive=True),
+        quantity=quantity,
         first_trade_id=first_trade_id,
         last_trade_id=last_trade_id,
         trade_time_ms=_required_int(payload, "T", positive=True),
         event_time_ms=_required_int(payload, "E", positive=True),
         buyer_is_maker=_required_bool(payload, "m"),
+        normal_quantity=normal_quantity,
     )
 
 
@@ -591,6 +663,7 @@ def parse_binance_futures_book_ticker_payload(
     *,
     expected_symbol: str,
 ) -> BinanceBookTicker:
+    _validate_usdm_stream_type(payload)
     symbol = _validate_symbol(
         payload,
         expected_symbol=expected_symbol,
@@ -1132,12 +1205,41 @@ async def futures_raw_capture_telemetry_loop(
             )
 
 
+def _call_microstructure_sink(
+    microstructure_sink: Any,
+    method_name: str,
+    *args: Any,
+) -> None:
+    if microstructure_sink is None:
+        return
+
+    try:
+        callback = getattr(microstructure_sink, method_name)
+        callback(*args)
+    except Exception:
+        now = time.monotonic()
+        previous = _MICROSTRUCTURE_SINK_LAST_LOG_AT.get(method_name)
+        if (
+            previous is None
+            or now - previous >= MICROSTRUCTURE_SINK_LOG_INTERVAL_SECONDS
+        ):
+            _MICROSTRUCTURE_SINK_LAST_LOG_AT[method_name] = now
+            LOGGER.exception(
+                "binance_futures_microstructure_sink_failed",
+                extra={
+                    "event": "binance_futures_microstructure_sink_failed",
+                    "method": method_name,
+                },
+            )
+
+
 async def futures_agg_trade_reader_loop(
     settings: Settings,
     flow_store: AsyncFlowAggregator,
     *,
     trade_state: FuturesTradeState,
     raw_capture: Any = None,
+    microstructure_sink: Any = None,
 ) -> None:
     attempt = 0
 
@@ -1166,6 +1268,13 @@ async def futures_agg_trade_reader_loop(
                 connected_at = time.monotonic()
                 connection_id = uuid4()
                 trade_state.connection_opened(connection_id)
+                if microstructure_sink is not None:
+                    _call_microstructure_sink(
+                        microstructure_sink,
+                        "connection_opened",
+                        "futures_trade",
+                        current_utc_epoch_ms(),
+                    )
 
                 if raw_capture is not None and connection_id is not None:
                     try:
@@ -1305,6 +1414,10 @@ async def futures_agg_trade_reader_loop(
                         trade = parse_binance_futures_agg_trade_payload(
                             payload,
                             expected_symbol=settings.BINANCE_FUTURES_SYMBOL,
+                            # `nq` is optional RPI research context. A malformed
+                            # optional field must not suppress the critical
+                            # Phase 5 last-price and normal flow paths.
+                            strict_normal_quantity=False,
                         )
                     except (
                         json.JSONDecodeError,
@@ -1312,6 +1425,13 @@ async def futures_agg_trade_reader_loop(
                         TypeError,
                     ) as exc:
                         _mark_capture_message(capture_session, "mark_parse_error")
+                        _call_microstructure_sink(
+                            microstructure_sink,
+                            "record_error",
+                            "futures_trade",
+                            received_wall_ns // 1_000_000,
+                            exc,
+                        )
                         LOGGER.warning(
                             "binance_futures_agg_trade_message_skipped",
                             extra={
@@ -1322,8 +1442,18 @@ async def futures_agg_trade_reader_loop(
                         continue
 
                     _mark_capture_message(capture_session, "mark_accepted")
+                    accepted_current_trade = None
                     if stamp is not None:
-                        trade_state.update_ws(trade, stamp)
+                        accepted_current_trade = trade_state.update_ws(trade, stamp)
+
+                    received_ms = received_wall_ns // 1_000_000
+                    if accepted_current_trade is not None:
+                        _call_microstructure_sink(
+                            microstructure_sink,
+                            "offer_futures_trade",
+                            trade,
+                            received_ms,
+                        )
 
                     if (
                         raw_capture is not None
@@ -1339,7 +1469,6 @@ async def futures_agg_trade_reader_loop(
                             stamp=stamp,
                         )
 
-                    received_ms = received_wall_ns // 1_000_000
                     accepted = await flow_store.add_trade(trade, received_ms=received_ms)
                     if not accepted:
                         LOGGER.debug(
@@ -1380,6 +1509,13 @@ async def futures_agg_trade_reader_loop(
                 )
             if connection_id is not None:
                 trade_state.connection_closed(connection_id)
+                if close_reason != "cancelled" and microstructure_sink is not None:
+                    _call_microstructure_sink(
+                        microstructure_sink,
+                        "connection_closed",
+                        "futures_trade",
+                        current_utc_epoch_ms(),
+                    )
 
         if reconnect_error is not None:
             attempt += 1

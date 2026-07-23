@@ -163,6 +163,116 @@ curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
 ```
 
+### Optional Binance microstructure summary rollout
+
+The microstructure collector runs inside `price-collector-binance-futures`; it
+does not add another systemd unit, database, Redis key, REST OI poller, or API
+route. Apply `schema.sql` before enabling it. Then add these keys manually to
+`/etc/price-collector/collector.env`; never replace the production environment
+file with the example:
+
+```text
+BINANCE_MICROSTRUCTURE_ENABLED=true
+BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=100000
+BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250
+BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30
+BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096
+BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
+```
+
+The three WebSocket URL settings normally remain at their code defaults. If
+they are pinned in production, use the routed 2026 Binance endpoints from
+`deployment/collector.env.example`: spot combined streams on the spot host,
+futures depth under `/public`, and forced orders under `/market`.
+
+Restart only the futures unit for an enable/disable change:
+
+```bash
+sudo systemctl restart price-collector-binance-futures
+sudo systemctl status price-collector-binance-futures --no-pager
+sudo journalctl -u price-collector-binance-futures -n 150 --no-pager
+```
+
+After at least two minutes, verify continuous keys, health coverage, role
+grants, and actual PostgreSQL size:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector <<'SQL'
+WITH bounds AS (
+    SELECT
+        floor(extract(epoch FROM clock_timestamp() - interval '2 seconds'))::bigint
+            * 1000 AS last_expected_ms
+), expected AS (
+    SELECT generate_series(
+        last_expected_ms - 119000,
+        last_expected_ms,
+        1000::bigint
+    ) AS sample_second_ms
+    FROM bounds
+)
+SELECT
+    count(*) AS expected_seconds,
+    count(samples.sample_second_ms) AS rows,
+    count(*) FILTER (WHERE samples.sample_second_ms IS NULL) AS missing_seconds,
+    array_agg(expected.sample_second_ms ORDER BY expected.sample_second_ms)
+        FILTER (WHERE samples.sample_second_ms IS NULL)
+        AS missing_sample_second_ms,
+    min(samples.sample_second_at) AS first_sample,
+    max(samples.sample_second_at) AS last_sample,
+    round(100.0 * avg(samples.collector_healthy::int), 2) AS healthy_percent,
+    max(samples.connection_errors) AS connection_errors
+FROM expected
+LEFT JOIN binance_microstructure_1s AS samples
+  ON samples.symbol = 'BTCUSDT'
+ AND samples.sample_second_ms = expected.sample_second_ms;
+
+SELECT
+    pg_size_pretty(pg_relation_size('binance_microstructure_1s')) AS heap,
+    pg_size_pretty(pg_indexes_size('binance_microstructure_1s')) AS indexes,
+    pg_size_pretty(pg_total_relation_size('binance_microstructure_1s')) AS total;
+
+SELECT grantee, privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+  AND table_name = 'binance_microstructure_1s'
+ORDER BY grantee, privilege_type;
+SQL
+
+curl -fsS http://127.0.0.1:9000/healthz
+```
+
+The first few rows after startup can be unhealthy while every required source
+becomes fresh. Persistent unhealthy rows require inspection of book/trade/
+mark/OI ages, exchange lag, quote skew, connection errors, and collector logs.
+Absence of a forced-order event is normally a zero, not evidence that no
+liquidation occurred market-wide; Binance publishes a censored snapshot feed.
+The completeness query deliberately excludes the newest two seconds so the
+flush-delay window has settled. `expected_seconds` should be 120 and
+`missing_seconds` should be zero; the expected-series join detects missing
+leading, internal, and trailing one-second keys rather than counting only rows
+that happened to be written.
+
+`spot_trade_id_span` and `fut_trade_id_span` are compatibility names for the
+number of underlying trades represented by accepted aggregate messages in a
+receipt interval. They are not aggregate-trade ID gap counters.
+
+The daily retention `DELETE` enforces logical age but ordinarily leaves its
+pages available for PostgreSQL reuse instead of reducing
+`pg_total_relation_size`. The relation-size gate pauses optional writes at the
+maximum threshold and resumes them only after a later physical-size reading is
+strictly below the warning threshold. Therefore `DELETE` alone must not be
+treated as recovery from a size pause. Schedule an operator-controlled
+physical compaction or table rebuild (with maintenance locking, backup, free
+disk, and transient-space requirements reviewed first), or another operation
+that actually shrinks the relation, and confirm the size query is below the
+warning threshold before expecting writes to resume.
+
+To stop only this optional dataset, set
+`BINANCE_MICROSTRUCTURE_ENABLED=false` and restart
+`price-collector-binance-futures`. Existing rows remain queryable and the core
+futures collector continues normally. Do not drop or truncate the table as a
+rollback step.
+
 For an update that changes the market data/download contract, repeat the
 completed-market API check from **Check Services** above.
 

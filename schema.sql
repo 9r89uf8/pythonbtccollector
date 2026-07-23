@@ -393,6 +393,145 @@ CREATE INDEX IF NOT EXISTS binance_book_1s_market_idx
 CREATE INDEX IF NOT EXISTS binance_book_1s_latest_idx
     ON binance_book_1s (venue, symbol, sample_second_ms DESC);
 
+-- Causal, receipt-time-aligned research summaries. Fast Binance messages are
+-- aggregated in memory; raw spot trades, depth frames, and forced-order frames
+-- are intentionally not retained here.
+CREATE TABLE IF NOT EXISTS binance_microstructure_1s (
+    symbol TEXT NOT NULL,
+
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    sample_second_ms BIGINT NOT NULL,
+    sample_second_at TIMESTAMPTZ NOT NULL,
+
+    schema_version SMALLINT NOT NULL,
+    sample_span_ms BIGINT,
+    sample_jitter_ms BIGINT NOT NULL,
+    collector_healthy BOOLEAN NOT NULL,
+
+    spot_mid NUMERIC(38, 18),
+    spot_bid NUMERIC(38, 18),
+    spot_ask NUMERIC(38, 18),
+    spot_spread_bps NUMERIC(20, 8),
+    spot_weighted_mid_offset_bps NUMERIC(20, 8),
+    spot_imbalance_1 NUMERIC(20, 8),
+    spot_imbalance_5 NUMERIC(20, 8),
+    spot_imbalance_10 NUMERIC(20, 8),
+    spot_bid_depth_usdt_10 NUMERIC(38, 18),
+    spot_ask_depth_usdt_10 NUMERIC(38, 18),
+    spot_book_age_ms BIGINT,
+    spot_book_lag_ms BIGINT,
+    spot_snapshot_bbo_ofi_usdt NUMERIC(38, 18),
+    spot_book_snapshot_count INTEGER NOT NULL DEFAULT 0,
+
+    spot_buy_usdt NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    spot_sell_usdt NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    spot_trade_id_span INTEGER NOT NULL DEFAULT 0,
+    spot_aggtrade_count INTEGER NOT NULL DEFAULT 0,
+    spot_max_aggtrade_usdt NUMERIC(38, 18),
+    spot_vwap NUMERIC(38, 18),
+    spot_trade_high NUMERIC(38, 18),
+    spot_trade_low NUMERIC(38, 18),
+    spot_last_trade NUMERIC(38, 18),
+    spot_trade_age_ms BIGINT,
+    spot_trade_lag_mean_ms NUMERIC(20, 8),
+    spot_trade_lag_max_ms BIGINT,
+
+    fut_mid NUMERIC(38, 18),
+    fut_bid NUMERIC(38, 18),
+    fut_ask NUMERIC(38, 18),
+    fut_spread_bps NUMERIC(20, 8),
+    fut_weighted_mid_offset_bps NUMERIC(20, 8),
+    fut_imbalance_1 NUMERIC(20, 8),
+    fut_imbalance_5 NUMERIC(20, 8),
+    fut_imbalance_10 NUMERIC(20, 8),
+    fut_bid_depth_usdt_10 NUMERIC(38, 18),
+    fut_ask_depth_usdt_10 NUMERIC(38, 18),
+    fut_book_age_ms BIGINT,
+    fut_book_lag_ms BIGINT,
+    fut_snapshot_bbo_ofi_usdt NUMERIC(38, 18),
+    fut_book_snapshot_count INTEGER NOT NULL DEFAULT 0,
+
+    fut_buy_usdt NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    fut_sell_usdt NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    fut_rpi_buy_usdt NUMERIC(38, 18),
+    fut_rpi_sell_usdt NUMERIC(38, 18),
+    fut_trade_id_span INTEGER NOT NULL DEFAULT 0,
+    fut_aggtrade_count INTEGER NOT NULL DEFAULT 0,
+    fut_max_aggtrade_usdt NUMERIC(38, 18),
+    fut_vwap NUMERIC(38, 18),
+    fut_trade_high NUMERIC(38, 18),
+    fut_trade_low NUMERIC(38, 18),
+    fut_last_trade NUMERIC(38, 18),
+    fut_trade_age_ms BIGINT,
+    fut_trade_lag_mean_ms NUMERIC(20, 8),
+    fut_trade_lag_max_ms BIGINT,
+
+    perp_spot_basis_bps NUMERIC(20, 8),
+    spot_fut_book_skew_ms BIGINT,
+
+    mark_price NUMERIC(38, 18),
+    index_price NUMERIC(38, 18),
+    mark_index_basis_bps NUMERIC(20, 8),
+    funding_rate NUMERIC(38, 18),
+    seconds_to_funding BIGINT,
+    mark_age_ms BIGINT,
+    mark_lag_ms BIGINT,
+
+    open_interest_btc NUMERIC(38, 18),
+    open_interest_usdt NUMERIC(38, 18),
+    oi_age_ms BIGINT,
+    oi_exchange_age_ms BIGINT,
+    oi_http_lag_ms BIGINT,
+
+    long_liq_usdt NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    short_liq_usdt NUMERIC(38, 18) NOT NULL DEFAULT 0,
+    liq_snapshot_count INTEGER NOT NULL DEFAULT 0,
+    liq_lag_mean_ms NUMERIC(20, 8),
+    connection_errors INTEGER NOT NULL DEFAULT 0,
+
+    received_ms BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (symbol, sample_second_ms),
+
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms >= market_id * 300000),
+    CHECK (sample_second_ms < (market_id + 1) * 300000),
+    CHECK (sample_jitter_ms >= 0),
+    CHECK (spot_bid IS NULL OR spot_ask IS NULL OR spot_ask >= spot_bid),
+    CHECK (fut_bid IS NULL OR fut_ask IS NULL OR fut_ask >= fut_bid),
+    CHECK (spot_imbalance_1 IS NULL OR spot_imbalance_1 BETWEEN -1 AND 1),
+    CHECK (spot_imbalance_5 IS NULL OR spot_imbalance_5 BETWEEN -1 AND 1),
+    CHECK (spot_imbalance_10 IS NULL OR spot_imbalance_10 BETWEEN -1 AND 1),
+    CHECK (fut_imbalance_1 IS NULL OR fut_imbalance_1 BETWEEN -1 AND 1),
+    CHECK (fut_imbalance_5 IS NULL OR fut_imbalance_5 BETWEEN -1 AND 1),
+    CHECK (fut_imbalance_10 IS NULL OR fut_imbalance_10 BETWEEN -1 AND 1),
+    CHECK (spot_buy_usdt >= 0),
+    CHECK (spot_sell_usdt >= 0),
+    CHECK (fut_buy_usdt >= 0),
+    CHECK (fut_sell_usdt >= 0),
+    CHECK (fut_rpi_buy_usdt IS NULL OR fut_rpi_buy_usdt >= 0),
+    CHECK (fut_rpi_sell_usdt IS NULL OR fut_rpi_sell_usdt >= 0),
+    CHECK (long_liq_usdt >= 0),
+    CHECK (short_liq_usdt >= 0),
+    CHECK (open_interest_btc IS NULL OR open_interest_btc >= 0)
+);
+
+-- Preserve unknown RPI status if this table was created by an earlier
+-- checkpoint that represented missing Binance `nq` as a default zero.
+ALTER TABLE binance_microstructure_1s
+    ALTER COLUMN fut_rpi_buy_usdt DROP NOT NULL,
+    ALTER COLUMN fut_rpi_buy_usdt DROP DEFAULT,
+    ALTER COLUMN fut_rpi_sell_usdt DROP NOT NULL,
+    ALTER COLUMN fut_rpi_sell_usdt DROP DEFAULT;
+
+CREATE INDEX IF NOT EXISTS binance_microstructure_1s_market_idx
+    ON binance_microstructure_1s (market_id, sample_second_ms);
+
+REVOKE ALL ON binance_microstructure_1s FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON binance_microstructure_1s TO price_writer;
+GRANT SELECT ON binance_microstructure_1s TO price_reader;
+
 CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
     symbol TEXT NOT NULL,
 

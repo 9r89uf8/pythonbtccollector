@@ -765,6 +765,7 @@ def test_schema_includes_binance_futures_tables_and_seed():
     assert "CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries" in schema
     assert "CREATE TABLE IF NOT EXISTS binance_flow_1s" in schema
     assert "CREATE TABLE IF NOT EXISTS binance_book_1s" in schema
+    assert "CREATE TABLE IF NOT EXISTS binance_microstructure_1s" in schema
     assert "PRIMARY KEY (symbol, sample_second_ms)" in schema
     assert "PRIMARY KEY (symbol, source_window_start_ms, source_window_end_ms)" in schema
     assert "PRIMARY KEY (venue, symbol, sample_second_ms)" in schema
@@ -777,6 +778,34 @@ def test_schema_includes_binance_futures_tables_and_seed():
     assert "microprice NUMERIC(38, 18)" in schema
     assert "'binance_usdm_perp'" in schema
     assert "'binance_usdm_perp:BTCUSDT'" in schema
+
+
+def test_microstructure_schema_is_decimal_keyed_bounded_and_role_separated():
+    schema = (ROOT / "schema.sql").read_text()
+    table = _schema_create_table_statement(schema, "binance_microstructure_1s")
+
+    assert "PRIMARY KEY (symbol, sample_second_ms)" in table
+    assert "sample_second_ms % 1000 = 0" in table
+    assert "sample_second_ms >= market_id * 300000" in table
+    assert "sample_second_ms < (market_id + 1) * 300000" in table
+    assert "spot_mid NUMERIC(38, 18)" in table
+    assert "fut_bid_depth_usdt_10 NUMERIC(38, 18)" in table
+    assert "perp_spot_basis_bps NUMERIC(20, 8)" in table
+    assert "funding_rate NUMERIC(38, 18)" in table
+    assert "long_liq_usdt NUMERIC(38, 18)" in table
+    assert "fut_rpi_buy_usdt NUMERIC(38, 18)," in table
+    assert "fut_rpi_buy_usdt NUMERIC(38, 18) NOT NULL" not in table
+    assert "ALTER COLUMN fut_rpi_buy_usdt DROP NOT NULL" in schema
+    assert "ALTER COLUMN fut_rpi_sell_usdt DROP NOT NULL" in schema
+    assert " DOUBLE" not in table
+    assert " REAL" not in table
+    assert "REVOKE ALL ON binance_microstructure_1s FROM PUBLIC" in schema
+    assert (
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON binance_microstructure_1s "
+        "TO price_writer"
+        in schema
+    )
+    assert "GRANT SELECT ON binance_microstructure_1s TO price_reader" in schema
 
 
 def test_schema_isolates_partitioned_raw_capture_tables_from_api_reader():

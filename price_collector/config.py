@@ -60,6 +60,27 @@ class Settings(BaseSettings):
     BINANCE_FUTURES_STREAM_FLUSH_SECONDS: float = 0.25
     BINANCE_FUTURES_STORE_RAW_JSON: bool = False
 
+    BINANCE_MICROSTRUCTURE_ENABLED: bool = False
+    BINANCE_MICROSTRUCTURE_SPOT_WS_URL: str = (
+        "wss://stream.binance.com:9443/stream?streams="
+        "btcusdt@aggTrade/btcusdt@depth10"
+    )
+    BINANCE_MICROSTRUCTURE_FUTURES_DEPTH_WS_URL: str = (
+        "wss://fstream.binance.com/public/ws/btcusdt@depth10@500ms"
+    )
+    BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL: str = (
+        "wss://fstream.binance.com/market/ws/btcusdt@forceOrder"
+    )
+    BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS: int = Field(default=100_000, gt=0)
+    BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS: int = Field(
+        default=250,
+        gt=0,
+        le=250,
+    )
+    BINANCE_MICROSTRUCTURE_RETENTION_DAYS: int = Field(default=30, ge=1)
+    BINANCE_MICROSTRUCTURE_WARN_RELATION_MB: int = Field(default=4_096, gt=0)
+    BINANCE_MICROSTRUCTURE_MAX_RELATION_MB: int = Field(default=6_144, gt=0)
+
     RAW_FUTURES_TRACE_ENABLED: bool = False
     RAW_CHAINLINK_EVENTS_ENABLED: bool = False
     RAW_FUTURES_BUCKET_MS: int = Field(default=100, ge=100, le=100)
@@ -84,5 +105,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RAW_CAPTURE_BATCH_MAX_ROWS must be less than or equal to "
                 "RAW_CAPTURE_QUEUE_MAX_EVENTS"
+            )
+        if (
+            self.BINANCE_MICROSTRUCTURE_WARN_RELATION_MB
+            >= self.BINANCE_MICROSTRUCTURE_MAX_RELATION_MB
+        ):
+            raise ValueError(
+                "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB must be less than "
+                "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB"
             )
         return self

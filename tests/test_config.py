@@ -131,6 +131,19 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
     monkeypatch.delenv("BINANCE_FUTURES_BOOK_FLUSH_DELAY_MS", raising=False)
     monkeypatch.delenv("BINANCE_FUTURES_STREAM_FLUSH_SECONDS", raising=False)
     monkeypatch.delenv("BINANCE_FUTURES_STORE_RAW_JSON", raising=False)
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_ENABLED", raising=False)
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_SPOT_WS_URL", raising=False)
+    monkeypatch.delenv(
+        "BINANCE_MICROSTRUCTURE_FUTURES_DEPTH_WS_URL", raising=False
+    )
+    monkeypatch.delenv(
+        "BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL", raising=False
+    )
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS", raising=False)
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS", raising=False)
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_WARN_RELATION_MB", raising=False)
+    monkeypatch.delenv("BINANCE_MICROSTRUCTURE_MAX_RELATION_MB", raising=False)
 
     settings = Settings()
 
@@ -154,6 +167,22 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
     assert settings.BINANCE_FUTURES_BOOK_FLUSH_DELAY_MS == 1_500
     assert settings.BINANCE_FUTURES_STREAM_FLUSH_SECONDS == 0.25
     assert settings.BINANCE_FUTURES_STORE_RAW_JSON is False
+    assert settings.BINANCE_MICROSTRUCTURE_ENABLED is False
+    assert settings.BINANCE_MICROSTRUCTURE_SPOT_WS_URL == (
+        "wss://stream.binance.com:9443/stream?streams="
+        "btcusdt@aggTrade/btcusdt@depth10"
+    )
+    assert settings.BINANCE_MICROSTRUCTURE_FUTURES_DEPTH_WS_URL == (
+        "wss://fstream.binance.com/public/ws/btcusdt@depth10@500ms"
+    )
+    assert settings.BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL == (
+        "wss://fstream.binance.com/market/ws/btcusdt@forceOrder"
+    )
+    assert settings.BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS == 100_000
+    assert settings.BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS == 250
+    assert settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS == 30
+    assert settings.BINANCE_MICROSTRUCTURE_WARN_RELATION_MB == 4_096
+    assert settings.BINANCE_MICROSTRUCTURE_MAX_RELATION_MB == 6_144
 
 
 def test_settings_include_local_redis_defaults(monkeypatch):
@@ -215,4 +244,26 @@ def test_settings_raw_capture_batch_cannot_exceed_queue(monkeypatch):
         ValidationError,
         match="RAW_CAPTURE_BATCH_MAX_ROWS must be less than or equal to",
     ):
+        Settings()
+
+
+def test_microstructure_warning_relation_size_must_be_below_cap(monkeypatch):
+    monkeypatch.setenv("BINANCE_MICROSTRUCTURE_WARN_RELATION_MB", "100")
+    monkeypatch.setenv("BINANCE_MICROSTRUCTURE_MAX_RELATION_MB", "100")
+
+    with pytest.raises(
+        ValidationError,
+        match="BINANCE_MICROSTRUCTURE_WARN_RELATION_MB must be less than",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize("flush_delay_ms", ["0", "251"])
+def test_microstructure_flush_delay_matches_health_jitter_bound(
+    monkeypatch,
+    flush_delay_ms,
+):
+    monkeypatch.setenv("BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS", flush_delay_ms)
+
+    with pytest.raises(ValidationError, match="BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS"):
         Settings()

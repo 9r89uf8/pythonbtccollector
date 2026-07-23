@@ -265,6 +265,10 @@ def test_collect_once_fetches_only_two_rest_endpoints_and_waits_before_upsert(
             assert item == futures_trade
             return True
 
+    class RecordingMicrostructureSink:
+        def offer_context(self, snapshot):
+            events.append(("context", snapshot))
+
     async def fake_get_json(client, base_url, path, params):
         requests.append((base_url, path, params))
         return {
@@ -281,7 +285,8 @@ def test_collect_once_fetches_only_two_rest_endpoints_and_waits_before_upsert(
         "upsert_binance_futures_snapshot",
         fake_upsert_binance_futures_snapshot,
     )
-    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+    wall_times = iter([1_783_459_500_600, 1_783_459_500_700])
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: next(wall_times))
     monkeypatch.setattr(collector.time, "monotonic_ns", lambda: 1_000_000_100)
 
     snapshot = asyncio.run(
@@ -290,6 +295,7 @@ def test_collect_once_fetches_only_two_rest_endpoints_and_waits_before_upsert(
             client="client",
             settings=futures_settings(),
             trade_state=FakeTradeState(),
+            microstructure_sink=RecordingMicrostructureSink(),
         )
     )
 
@@ -302,9 +308,11 @@ def test_collect_once_fetches_only_two_rest_endpoints_and_waits_before_upsert(
     assert snapshot.sample_second_ms == 1_783_459_500_000
     assert snapshot.futures_last_price == Decimal("62075.12")
     assert snapshot.futures_last_price_time_ms == 1_783_459_499_510
+    assert snapshot.request_started_ms == 1_783_459_500_600
     assert [event_name for event_name, _payload in events] == [
         "select",
         "redis_attempted",
+        "context",
         "postgres",
     ]
     upsert = events[-1][1]
@@ -314,6 +322,73 @@ def test_collect_once_fetches_only_two_rest_endpoints_and_waits_before_upsert(
     assert upsert["futures_last_price_time_ms"] == 1_783_459_499_510
     assert upsert["open_interest"] == Decimal("74321.123")
     assert upsert["raw"] is None
+
+
+def test_collect_once_context_sink_failure_does_not_block_postgres(monkeypatch):
+    events = []
+
+    class NoCurrentTradeState:
+        def fresh_current(self, **_kwargs):
+            return None
+
+    class FailingMicrostructureSink:
+        def offer_context(self, snapshot):
+            events.append(("context", snapshot))
+            raise RuntimeError("context sink failed")
+
+    async def fake_get_json(client, base_url, path, params):
+        return {
+            "/fapi/v1/openInterest": open_interest_payload(),
+            "/fapi/v1/premiumIndex": premium_index_payload(),
+        }[path]
+
+    async def fake_upsert(pool, **kwargs):
+        events.append(("postgres", kwargs))
+
+    monkeypatch.setattr(collector, "get_json", fake_get_json)
+    monkeypatch.setattr(collector, "upsert_binance_futures_snapshot", fake_upsert)
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: 1_783_459_500_700)
+
+    snapshot = asyncio.run(
+        collector.collect_once(
+            pool="pool",
+            client="client",
+            settings=futures_settings(),
+            trade_state=NoCurrentTradeState(),
+            microstructure_sink=FailingMicrostructureSink(),
+        )
+    )
+
+    assert [name for name, _payload in events] == ["context", "postgres"]
+    assert events[0][1] == snapshot
+    assert events[1][1]["sample_second_ms"] == snapshot.sample_second_ms
+
+
+def test_snapshot_loop_passes_microstructure_sink_to_collect_once(monkeypatch):
+    sink = object()
+    settings = futures_settings()
+    settings.BINANCE_FUTURES_POLL_SECONDS = 2
+
+    async def fake_sleep(seconds):
+        assert seconds == 2
+
+    async def fake_collect_once(**kwargs):
+        assert kwargs["microstructure_sink"] is sink
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(collector.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(collector, "collect_once", fake_collect_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            collector.snapshot_loop(
+                pool="pool",
+                client="client",
+                settings=settings,
+                trade_state="trade-state",
+                microstructure_sink=sink,
+            )
+        )
 
 
 def test_collect_once_can_store_raw_json_when_enabled(monkeypatch):
@@ -1088,6 +1163,7 @@ def test_run_collector_raw_disabled_still_wires_trade_state_and_live_worker(
         assert observed["reader"] == {
             "trade_state": state,
             "raw_capture": None,
+            "microstructure_sink": None,
         }
         assert observed["snapshot"]["trade_state"] is state
         task.cancel()
@@ -1103,6 +1179,128 @@ def test_run_collector_raw_disabled_still_wires_trade_state_and_live_worker(
             "book_reader_stopped",
             "book_flush_stopped",
         }.issubset(events)
+
+    asyncio.run(scenario())
+
+
+def test_run_collector_microstructure_enabled_wires_and_runs_runtime(monkeypatch):
+    async def scenario():
+        events = []
+        agg_started = asyncio.Event()
+        snapshot_started = asyncio.Event()
+        runtime_started = asyncio.Event()
+        observed = {}
+        sink = object()
+
+        class FakePool:
+            async def close(self):
+                events.append("pool_close")
+
+        class FakeLiveCache:
+            async def close(self):
+                events.append("live_close")
+
+        class FakeMicrostructureRuntime:
+            def __init__(self):
+                self.sink = sink
+
+            async def run(self):
+                runtime_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    events.append("microstructure_stopped")
+
+        settings = run_settings(raw_enabled=False)
+        settings.BINANCE_MICROSTRUCTURE_ENABLED = True
+        pool = FakePool()
+        runtime = FakeMicrostructureRuntime()
+
+        async def fake_create_pool(database_url):
+            assert database_url == "postgresql://writer@localhost/price_collector"
+            return pool
+
+        def fake_create_microstructure_runtime(received_settings, received_pool):
+            observed["runtime_factory"] = (received_settings, received_pool)
+            return runtime
+
+        async def blocking_task(name):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append(f"{name}_stopped")
+
+        async def fake_agg_reader(received_settings, flow_store, **kwargs):
+            observed["reader"] = (received_settings, flow_store, kwargs)
+            agg_started.set()
+            await blocking_task("agg")
+
+        async def fake_snapshot_loop(**kwargs):
+            observed["snapshot"] = kwargs
+            snapshot_started.set()
+            await blocking_task("snapshot")
+
+        async def fake_live_worker(**kwargs):
+            await blocking_task("live_worker")
+
+        async def fake_flow_flush_loop(**kwargs):
+            await blocking_task("flow_flush")
+
+        async def fake_book_reader(received_settings, book_store):
+            await blocking_task("book_reader")
+
+        async def fake_book_flush_loop(**kwargs):
+            await blocking_task("book_flush")
+
+        monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
+        monkeypatch.setattr(collector, "create_pool", fake_create_pool)
+        monkeypatch.setattr(
+            collector, "create_live_cache", lambda _settings: FakeLiveCache()
+        )
+        monkeypatch.setattr(
+            collector,
+            "create_microstructure_runtime",
+            fake_create_microstructure_runtime,
+        )
+        monkeypatch.setattr(collector, "FuturesTradeState", object)
+        monkeypatch.setattr(collector, "AsyncFlowAggregator", lambda **_kwargs: "flow")
+        monkeypatch.setattr(
+            collector, "AsyncBookTickerAggregator", lambda **_kwargs: "book"
+        )
+        monkeypatch.setattr(collector, "futures_live_worker", fake_live_worker)
+        monkeypatch.setattr(collector, "futures_agg_trade_reader_loop", fake_agg_reader)
+        monkeypatch.setattr(collector, "snapshot_loop", fake_snapshot_loop)
+        monkeypatch.setattr(collector, "futures_flow_flush_loop", fake_flow_flush_loop)
+        monkeypatch.setattr(
+            collector, "futures_book_ticker_reader_loop", fake_book_reader
+        )
+        monkeypatch.setattr(collector, "futures_book_flush_loop", fake_book_flush_loop)
+        monkeypatch.setattr(collector.httpx, "AsyncClient", FakeAsyncClient)
+        monkeypatch.setattr(collector, "_install_sigterm_cancellation", lambda: None)
+        monkeypatch.setattr(
+            collector,
+            "create_raw_capture_runtime",
+            lambda **_kwargs: pytest.fail("disabled capture constructed a runtime"),
+        )
+
+        task = asyncio.create_task(collector.run_collector(settings))
+        await asyncio.wait_for(agg_started.wait(), timeout=0.5)
+        await asyncio.wait_for(snapshot_started.wait(), timeout=0.5)
+        await asyncio.wait_for(runtime_started.wait(), timeout=0.5)
+
+        assert observed["runtime_factory"] == (settings, pool)
+        assert observed["reader"][0] is settings
+        assert observed["reader"][1] == "flow"
+        assert observed["reader"][2]["microstructure_sink"] is sink
+        assert observed["snapshot"]["microstructure_sink"] is sink
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert "microstructure_stopped" in events
+        assert events.index("microstructure_stopped") < events.index("live_close")
+        assert events[-2:] == ["live_close", "pool_close"]
 
     asyncio.run(scenario())
 
@@ -1230,6 +1428,7 @@ def test_run_collector_wires_lazy_raw_runtime_and_closes_after_tasks(monkeypatch
         assert reader_kwargs == {
             "trade_state": state,
             "raw_capture": raw_runtime,
+            "microstructure_sink": None,
         }
         assert live_kwargs["trade_state"] is state
         assert snapshot_kwargs["trade_state"] is state

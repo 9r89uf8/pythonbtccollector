@@ -39,6 +39,26 @@ def test_collector_env_example_contains_writer_credentials_only():
         in lines
     )
     assert "BINANCE_FUTURES_STORE_RAW_JSON=false" in lines
+    assert "BINANCE_MICROSTRUCTURE_ENABLED=false" in lines
+    assert (
+        "BINANCE_MICROSTRUCTURE_SPOT_WS_URL="
+        "wss://stream.binance.com:9443/stream?streams="
+        "btcusdt@aggTrade/btcusdt@depth10"
+        in lines
+    )
+    assert (
+        "BINANCE_MICROSTRUCTURE_FUTURES_DEPTH_WS_URL="
+        "wss://fstream.binance.com/public/ws/btcusdt@depth10@500ms"
+        in lines
+    )
+    assert (
+        "BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL="
+        "wss://fstream.binance.com/market/ws/btcusdt@forceOrder"
+        in lines
+    )
+    assert "BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30" in lines
+    assert "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096" in lines
+    assert "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144" in lines
     assert "RAW_FUTURES_TRACE_ENABLED=false" in lines
     assert "RAW_CHAINLINK_EVENTS_ENABLED=false" in lines
     assert (
