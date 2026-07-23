@@ -333,8 +333,11 @@ exclusive `before_market_id` cursor for older pages. Future and observation-empt
 windows are not returned. The frontend should select a returned `market_id` and
 then request `/markets/{market_id}/data` with the desired optional datasets.
 
-See [`FRONTEND_API.md`](FRONTEND_API.md) for frontend call examples, query
-parameters, complete response shapes, optional fields, and error responses.
+See [`MICROSTRUCTURE_API.md`](MICROSTRUCTURE_API.md) for a focused guide to the
+live and historical microstructure additions, including copy/paste calls,
+response examples, field semantics, and the recommended dashboard update flow.
+See [`FRONTEND_API.md`](FRONTEND_API.md) for the complete frontend API
+reference.
 
 ## Repository Layout
 
@@ -344,6 +347,7 @@ deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
+MICROSTRUCTURE_API.md  Focused live/history microstructure API usage guide
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 requirements.txt       Python runtime and test dependencies
 ```
