@@ -1133,7 +1133,7 @@ async def fetch_due_flip_markets(
               AND r.resolution_type IS NOT NULL
               AND r.chainlink_open_price IS NOT NULL
               AND r.chainlink_close_price IS NOT NULL
-              AND mw.market_end_ms <= $1 - $3
+              AND mw.market_end_ms <= $1::BIGINT - $3::BIGINT
               AND (
                     evaluation.market_id IS NULL
                     OR (
@@ -1395,7 +1395,7 @@ async def _mark_archive_failed(
             SET archive_status = 'failed',
                 retention_safe = FALSE,
                 evaluation_attempts = evaluation_attempts + 1,
-                next_retry_ms = $3 + (
+                next_retry_ms = $3::BIGINT + (
                     LEAST(
                         $4::BIGINT,
                         $5::BIGINT
@@ -1877,8 +1877,8 @@ async def fetch_flip_markets(
             f"""
             SELECT
                 evaluation.market_id,
-                window.market_start_ms,
-                window.market_end_ms,
+                mw.market_start_ms,
+                mw.market_end_ms,
                 evaluation.evaluation_status,
                 evaluation.price_to_beat,
                 evaluation.official_close_price AS official_close,
@@ -1902,8 +1902,8 @@ async def fetch_flip_markets(
                 evaluation.retention_safe,
                 evaluation.archived_ms AS archived_at_ms
             FROM {EVALUATION_TABLE} evaluation
-            JOIN market_windows window
-              ON window.market_id = evaluation.market_id
+            JOIN market_windows mw
+              ON mw.market_id = evaluation.market_id
             LEFT JOIN LATERAL (
                 SELECT count(*)::INTEGER AS matching_count
                 FROM {EVENT_TABLE} event
@@ -1923,7 +1923,8 @@ async def fetch_flip_markets(
                     WHERE cutoff.market_id = evaluation.market_id
                       AND cutoff.definition_version =
                             evaluation.definition_version
-                      AND cutoff.seconds_before_end = ($2 / 1000)::INTEGER
+                      AND cutoff.seconds_before_end =
+                            ($2::BIGINT / 1000)::INTEGER
                       AND cutoff.chainlink_fresh = TRUE
                       AND cutoff.flipped_after_cutoff = TRUE
                       AND (
@@ -1944,8 +1945,8 @@ async def fetch_flip_markets(
             WHERE evaluation.definition_version = $1
               AND evaluation.observation_precision <> 'evaluation_failed'
               AND ($5::TEXT IS NULL OR evaluation.official_winner = $5)
-              AND ($6::BIGINT IS NULL OR window.market_start_ms >= $6)
-              AND ($7::BIGINT IS NULL OR window.market_start_ms < $7)
+              AND ($6::BIGINT IS NULL OR mw.market_start_ms >= $6)
+              AND ($7::BIGINT IS NULL OR mw.market_start_ms < $7)
               AND ($8::BIGINT IS NULL OR evaluation.market_id < $8)
               AND (
                     ($3 = 'any_crossing'
@@ -2008,8 +2009,8 @@ async def fetch_market_flip_analysis(
             f"""
             SELECT
                 evaluation.*,
-                window.market_start_ms,
-                window.market_end_ms,
+                mw.market_start_ms,
+                mw.market_end_ms,
                 evaluation.official_close_price AS official_close,
                 evaluation.official_winner AS winner,
                 evaluation.source_microstructure_row_count
@@ -2025,8 +2026,8 @@ async def fetch_market_flip_analysis(
                 evaluation.chainlink_max_gap_ms
                     AS max_observation_gap_ms
             FROM {EVALUATION_TABLE} evaluation
-            JOIN market_windows window
-              ON window.market_id = evaluation.market_id
+            JOIN market_windows mw
+              ON mw.market_id = evaluation.market_id
             WHERE evaluation.market_id = $1
               AND evaluation.definition_version = $2
               AND evaluation.observation_precision <> 'evaluation_failed'
@@ -2116,7 +2117,8 @@ async def fetch_flip_distribution(
                         WHERE event.market_id = evaluation.market_id
                           AND event.definition_version =
                                 evaluation.definition_version
-                          AND event.observed_ms_before_end <= $2 * 1000
+                          AND event.observed_ms_before_end <=
+                                $2::INTEGER * 1000
                           AND (
                                 $3::TEXT IS NULL
                                 OR event.direction = $3
@@ -2124,12 +2126,12 @@ async def fetch_flip_distribution(
                     )
                 )::INTEGER AS markets_with_any_crossing
             FROM {EVALUATION_TABLE} evaluation
-            JOIN market_windows window
-              ON window.market_id = evaluation.market_id
+            JOIN market_windows mw
+              ON mw.market_id = evaluation.market_id
             WHERE evaluation.definition_version = $1
               AND evaluation.observation_precision <> 'evaluation_failed'
-              AND ($4::BIGINT IS NULL OR window.market_start_ms >= $4)
-              AND ($5::BIGINT IS NULL OR window.market_start_ms < $5)
+              AND ($4::BIGINT IS NULL OR mw.market_start_ms >= $4)
+              AND ($5::BIGINT IS NULL OR mw.market_start_ms < $5)
             """,
             definition_version,
             seconds,
@@ -2147,14 +2149,14 @@ async def fetch_flip_distribution(
                     evaluation.market_id,
                     evaluation.evaluation_status
                 FROM {EVALUATION_TABLE} evaluation
-                JOIN market_windows window
-                  ON window.market_id = evaluation.market_id
+                JOIN market_windows mw
+                  ON mw.market_id = evaluation.market_id
                 WHERE evaluation.definition_version = $1
                   AND evaluation.observation_precision <>
                         'evaluation_failed'
                   AND evaluation.evaluation_status <> 'ambiguous'
-                  AND ($4::BIGINT IS NULL OR window.market_start_ms >= $4)
-                  AND ($5::BIGINT IS NULL OR window.market_start_ms < $5)
+                  AND ($4::BIGINT IS NULL OR mw.market_start_ms >= $4)
+                  AND ($5::BIGINT IS NULL OR mw.market_start_ms < $5)
             )
             SELECT
                 bins.second * 1000 AS from_ms_before_end,
@@ -2217,7 +2219,7 @@ async def fetch_flip_distribution(
             LEFT JOIN {EVENT_TABLE} event
               ON event.market_id = eligible.market_id
              AND event.definition_version = $1
-             AND event.observed_ms_before_end <= $2 * 1000
+             AND event.observed_ms_before_end <= $2::INTEGER * 1000
              AND ($3::TEXT IS NULL OR event.direction = $3)
             GROUP BY bins.second
             ORDER BY bins.second DESC
@@ -2241,12 +2243,12 @@ async def fetch_flip_distribution(
                     cutoff.official_winner,
                     cutoff.chainlink_fresh
                 FROM {CUTOFF_TABLE} cutoff
-                JOIN market_windows window
-                  ON window.market_id = cutoff.market_id
+                JOIN market_windows mw
+                  ON mw.market_id = cutoff.market_id
                 WHERE cutoff.definition_version = $1
                   AND cutoff.seconds_before_end <= $2
-                  AND ($4::BIGINT IS NULL OR window.market_start_ms >= $4)
-                  AND ($5::BIGINT IS NULL OR window.market_start_ms < $5)
+                  AND ($4::BIGINT IS NULL OR mw.market_start_ms >= $4)
+                  AND ($5::BIGINT IS NULL OR mw.market_start_ms < $5)
             )
             SELECT
                 seconds.second AS seconds_before_end,

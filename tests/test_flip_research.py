@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+import inspect
 from types import SimpleNamespace
 from typing import Optional
 
@@ -420,6 +421,7 @@ def test_due_scan_waits_for_complete_official_prices_and_orders_oldest_first():
     assert "r.resolution_type IS NOT NULL" in query
     assert "r.chainlink_open_price IS NOT NULL" in query
     assert "r.chainlink_close_price IS NOT NULL" in query
+    assert "mw.market_end_ms <= $1::BIGINT - $3::BIGINT" in query
     assert "ORDER BY mw.market_end_ms ASC" in query
     assert "evaluation.archive_status = 'complete'" in query
     assert "archived_row.received_ms <" in query
@@ -804,6 +806,21 @@ def test_cutoff_reversal_list_requires_a_fresh_chainlink_cutoff():
 
     assert rows == []
     assert "cutoff.chainlink_fresh = TRUE" in captured["query"]
+    assert "$2::BIGINT / 1000" in captured["query"]
+
+
+def test_flip_queries_do_not_use_reserved_window_alias():
+    source = "\n".join(
+        inspect.getsource(function)
+        for function in (
+            flip_research.fetch_flip_markets,
+            flip_research.fetch_market_flip_analysis,
+            flip_research.fetch_flip_distribution,
+        )
+    )
+
+    assert "market_windows window" not in source
+    assert "JOIN market_windows mw" in source
 
 
 def test_distribution_bins_survive_an_empty_eligible_population():
@@ -839,6 +856,7 @@ def test_distribution_bins_survive_an_empty_eligible_population():
     assert "LEFT JOIN eligible ON TRUE" in crossing_query
     assert "CROSS JOIN eligible" not in crossing_query
     assert "evaluation.evaluation_status <> 'ambiguous'" in crossing_query
+    assert "$2::INTEGER * 1000" in crossing_query
     assert "ROUND(" in crossing_query
     cutoff_query = next(
         query for query in queries if "WITH seconds AS" in query
