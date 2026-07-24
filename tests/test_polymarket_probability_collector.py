@@ -513,6 +513,10 @@ def test_apply_clob_book_and_price_change_updates_best_bid_ask():
     assert state.down_ask == Decimal("0.53")
     assert state.latest_provider_event_ms == 1_783_459_200_456
     assert state.latest_received_ms == 1_783_459_200_500
+    assert state.up_bid_provider_event_ms == 1_783_459_200_123
+    assert state.up_ask_received_ms == 1_783_459_200_200
+    assert state.down_bid_provider_event_ms == 1_783_459_200_456
+    assert state.down_ask_received_ms == 1_783_459_200_500
 
 
 def test_market_resolved_message_captures_official_websocket_winner():
@@ -603,6 +607,14 @@ def test_build_probability_snapshot_skips_stale_and_boundary_samples():
         up_ask=Decimal("0.49"),
         down_bid=Decimal("0.50"),
         down_ask=Decimal("0.53"),
+        up_bid_provider_event_ms=1_783_459_200_500,
+        up_bid_received_ms=1_783_459_200_500,
+        up_ask_provider_event_ms=1_783_459_200_500,
+        up_ask_received_ms=1_783_459_200_500,
+        down_bid_provider_event_ms=1_783_459_200_500,
+        down_bid_received_ms=1_783_459_200_500,
+        down_ask_provider_event_ms=1_783_459_200_500,
+        down_ask_received_ms=1_783_459_200_500,
         latest_provider_event_ms=1_783_459_200_500,
         latest_received_ms=1_783_459_200_500,
     )
@@ -673,6 +685,10 @@ def test_build_probability_snapshot_requires_asks_not_bids():
         up_ask=Decimal("0.56"),
         down_bid=None,
         down_ask=Decimal("0.45"),
+        up_ask_provider_event_ms=1_783_459_200_000,
+        up_ask_received_ms=1_783_459_200_000,
+        down_ask_provider_event_ms=1_783_459_200_000,
+        down_ask_received_ms=1_783_459_200_000,
         latest_provider_event_ms=1_783_459_200_000,
         latest_received_ms=1_783_459_200_000,
     )
@@ -700,6 +716,70 @@ def test_build_probability_snapshot_requires_asks_not_bids():
     )
 
 
+def test_build_probability_snapshot_rejects_one_stale_outcome():
+    market = current_market()
+    state = collector.ProbabilityState(
+        up_token_id="up-token",
+        down_token_id="down-token",
+    )
+    assert state.update_token(
+        "down-token",
+        bid=Decimal("0.50"),
+        ask=Decimal("0.53"),
+        replace=True,
+        provider_event_ms=1_783_459_200_000,
+        received_ms=1_783_459_200_000,
+        event_type="book",
+    )
+    assert state.update_token(
+        "up-token",
+        bid=Decimal("0.47"),
+        ask=Decimal("0.49"),
+        replace=True,
+        provider_event_ms=1_783_459_216_000,
+        received_ms=1_783_459_216_000,
+        event_type="book",
+    )
+
+    assert (
+        collector.build_probability_snapshot(
+            current_market=market,
+            state=state,
+            now_ms=1_783_459_216_100,
+            stale_ms=15_000,
+        )
+        is None
+    )
+
+
+def test_outcome_freshness_keeps_old_ask_age_after_bid_only_update():
+    state = collector.ProbabilityState(
+        up_token_id="up-token",
+        down_token_id="down-token",
+    )
+    assert state.update_token(
+        "up-token",
+        bid=Decimal("0.47"),
+        ask=Decimal("0.49"),
+        replace=True,
+        provider_event_ms=1_000,
+        received_ms=1_100,
+        event_type="book",
+    )
+    assert state.update_token(
+        "up-token",
+        bid=Decimal("0.48"),
+        ask=None,
+        replace=False,
+        provider_event_ms=2_000,
+        received_ms=2_100,
+        event_type="price_change",
+    )
+
+    assert state.outcome_observation_ms("Up") == (1_000, 1_100)
+    assert state.latest_received_ms == 2_100
+
+
 def test_sample_probability_once_writes_one_snapshot_with_market_source_key(monkeypatch):
     calls = []
 
@@ -718,6 +798,14 @@ def test_sample_probability_once_writes_one_snapshot_with_market_source_key(monk
         up_ask=Decimal("0.49"),
         down_bid=Decimal("0.50"),
         down_ask=Decimal("0.53"),
+        up_bid_provider_event_ms=1_783_459_200_500,
+        up_bid_received_ms=1_783_459_200_500,
+        up_ask_provider_event_ms=1_783_459_200_500,
+        up_ask_received_ms=1_783_459_200_500,
+        down_bid_provider_event_ms=1_783_459_200_500,
+        down_bid_received_ms=1_783_459_200_500,
+        down_ask_provider_event_ms=1_783_459_200_500,
+        down_ask_received_ms=1_783_459_200_500,
         latest_provider_event_ms=1_783_459_200_500,
         latest_received_ms=1_783_459_200_500,
     )
@@ -739,6 +827,8 @@ def test_sample_probability_once_writes_one_snapshot_with_market_source_key(monk
     assert calls[0]["window"].market_id == 5_944_864
     assert calls[0]["up_mid"] == Decimal("0.48")
     assert calls[0]["down_mid"] == Decimal("0.515")
+    assert calls[0]["up_received_ms"] == 1_783_459_200_500
+    assert calls[0]["down_received_ms"] == 1_783_459_200_500
 
 
 def test_rest_prime_asks_before_t0_allow_t0_snapshot(monkeypatch):
@@ -996,6 +1086,7 @@ def test_run_collector_preloads_and_starts_next_market_before_boundary(monkeypat
     assert collect_calls[1][0] == next_window.market_id
     assert collect_calls[1][1] < next_window.market_start_ms
     assert "resolution_reconciler_loop" in created_task_names
+    assert "flip_evaluator_loop" in created_task_names
 
 
 def test_clob_ping_loop_sends_text_ping_every_configured_interval(monkeypatch):

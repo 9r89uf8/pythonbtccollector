@@ -182,10 +182,23 @@ The corresponding Python entry points are:
 - Store at most one probability snapshot per UTC second in the active market.
 - Skip stale, resolved, incomplete, or out-of-window snapshots instead of
   backfilling fabricated values.
+- Track the oldest bid/ask component timestamp for Up and Down independently;
+  freshness of one outcome must never refresh the opposite outcome.
 - Preload the next market before the current market boundary.
 - Reconcile ended markets against official Polymarket Gamma/CLOB resolution
   data and persist the official Chainlink open/final prices and outcome.
 - Never infer an official winner from the final Up/Down probability quote.
+- After official open, close, and resolution data are complete, evaluate the
+  versioned final-20-second flip definition in the independent retrying loop.
+  Preserve every strict-side crossing, all causal T-20 through T-1 cutoff
+  examples, and explicit missing/stale/tie quality instead of classifying
+  incomplete evidence as a non-flip.
+- Keep flip events immutable within a definition version. A definition change
+  creates new versioned rows rather than rewriting prior research labels.
+- Before ordinary microstructure retention removes a confirmed-flip or
+  ambiguous market, verify that every available five-minute source row was
+  copied to `binance_microstructure_1s_flip_archive`. Retention must fail closed
+  while evaluation or archival is incomplete.
 
 ## Live Cache Rules
 

@@ -543,8 +543,29 @@ async def delete_expired_microstructure_rows(
         return await connection.execute(
             """
             DELETE FROM binance_microstructure_1s
+            USING polymarket_btc_5m_flip_evaluations AS evaluation
             WHERE symbol = $1
               AND sample_second_ms < $2
+              AND evaluation.market_id = binance_microstructure_1s.market_id
+              AND evaluation.definition_version = 1
+              AND evaluation.retention_safe = TRUE
+              AND (
+                    evaluation.archive_status = 'not_required'
+                    OR (
+                        evaluation.archive_status = 'complete'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM binance_microstructure_1s_flip_archive
+                                AS archive
+                            WHERE archive.symbol
+                                = binance_microstructure_1s.symbol
+                              AND archive.sample_second_ms
+                                = binance_microstructure_1s.sample_second_ms
+                              AND archive.received_ms
+                                >= binance_microstructure_1s.received_ms
+                        )
+                    )
+              )
             """,
             symbol,
             cutoff_ms,

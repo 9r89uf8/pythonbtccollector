@@ -1163,6 +1163,10 @@ async def upsert_polymarket_probability_sample(
     down_mid: Optional[Decimal],
     up_prob_norm: Optional[Decimal],
     down_prob_norm: Optional[Decimal],
+    up_provider_event_ms: Optional[int],
+    up_received_ms: int,
+    down_provider_event_ms: Optional[int],
+    down_received_ms: int,
     provider_event_ms: Optional[int],
     received_ms: int,
     raw: Optional[Mapping[str, Any]],
@@ -1187,6 +1191,10 @@ async def upsert_polymarket_probability_sample(
                     down_mid,
                     up_prob_norm,
                     down_prob_norm,
+                    up_provider_event_ms,
+                    up_received_ms,
+                    down_provider_event_ms,
+                    down_received_ms,
                     provider_event_ms,
                     received_ms,
                     raw
@@ -1198,7 +1206,9 @@ async def upsert_polymarket_probability_sample(
                     $10, $11, $12,
                     $13, $14,
                     $15, $16,
-                    $17::jsonb
+                    $17, $18,
+                    $19, $20,
+                    $21::jsonb
                 )
                 ON CONFLICT (market_id, source, sample_second_ms)
                 DO UPDATE SET
@@ -1212,6 +1222,10 @@ async def upsert_polymarket_probability_sample(
                     down_mid = EXCLUDED.down_mid,
                     up_prob_norm = EXCLUDED.up_prob_norm,
                     down_prob_norm = EXCLUDED.down_prob_norm,
+                    up_provider_event_ms = EXCLUDED.up_provider_event_ms,
+                    up_received_ms = EXCLUDED.up_received_ms,
+                    down_provider_event_ms = EXCLUDED.down_provider_event_ms,
+                    down_received_ms = EXCLUDED.down_received_ms,
                     provider_event_ms = EXCLUDED.provider_event_ms,
                     received_ms = EXCLUDED.received_ms,
                     raw = EXCLUDED.raw
@@ -1230,6 +1244,10 @@ async def upsert_polymarket_probability_sample(
                 down_mid,
                 up_prob_norm,
                 down_prob_norm,
+                up_provider_event_ms,
+                up_received_ms,
+                down_provider_event_ms,
+                down_received_ms,
                 provider_event_ms,
                 received_ms,
                 json.dumps(raw, default=str) if raw is not None else None,
@@ -2501,6 +2519,28 @@ async def fetch_market_microstructure_rows(
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
+            WITH candidates AS (
+                SELECT
+                    0 AS source_priority,
+                    live.*
+                FROM binance_microstructure_1s live
+                WHERE live.market_id = $1
+                  AND live.symbol = 'BTCUSDT'
+
+                UNION ALL
+
+                SELECT
+                    1 AS source_priority,
+                    archived.*
+                FROM binance_microstructure_1s_flip_archive archived
+                WHERE archived.market_id = $1
+                  AND archived.symbol = 'BTCUSDT'
+            ),
+            preferred AS (
+                SELECT DISTINCT ON (symbol, sample_second_ms) *
+                FROM candidates
+                ORDER BY symbol, sample_second_ms, source_priority
+            )
             SELECT
                 sample_second_ms,
                 schema_version,
@@ -2587,9 +2627,7 @@ async def fetch_market_microstructure_rows(
                 oi_http_lag_ms,
                 connection_errors,
                 received_ms
-            FROM binance_microstructure_1s
-            WHERE market_id = $1
-              AND symbol = 'BTCUSDT'
+            FROM preferred
             ORDER BY sample_second_ms ASC
             LIMIT 300
             """,

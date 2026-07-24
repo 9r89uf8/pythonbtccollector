@@ -131,6 +131,13 @@ columns, and are serialized as strings by the API.
 - Stores Polymarket's official Chainlink open/close prices, winner or split
   result, official payouts, winning token ID, and resolution timestamp when
   available. Probability quotes are never used to infer the winner.
+- Runs an independent idempotent post-resolution evaluator for the final
+  20 seconds, preserving all strict threshold crossings and causal T-20 through
+  T-1 cutoff records for both positive and negative examples.
+- Tracks Up and Down probability component timestamps independently so a fresh
+  update on one token cannot make a stale opposite-side quote appear fresh.
+- Archives every available microstructure second for confirmed-flip and
+  ambiguous markets before normal microstructure retention may remove it.
 
 ## Five-Minute Market Windows
 
@@ -154,12 +161,18 @@ PostgreSQL is the historical source of record. The main tables are:
 - `polymarket_btc_5m_markets`, `polymarket_probability_samples`, and
   `polymarket_btc_5m_resolutions` for discovered markets, probability history,
   and official Polymarket resolution metadata
+- `polymarket_btc_5m_flip_evaluations`,
+  `polymarket_btc_5m_flip_events`, and
+  `polymarket_btc_5m_flip_cutoffs` for versioned permanent classifications,
+  observed threshold crossings, and causal T-20 through T-1 research records
 - `binance_futures_snapshots`
 - `binance_futures_oi_5m_summaries`
 - `binance_flow_1s`
 - `binance_book_1s`
 - `binance_microstructure_1s` for the optional receipt-time-aligned research
   summary
+- `binance_microstructure_1s_flip_archive` for permanent copies of every
+  available second from confirmed-flip and ambiguous markets
 
 Prices in `price_samples` use `NUMERIC(38,18)`. Its primary key is
 `(instrument_id, sample_second_ms)`, and a duplicate sample for the same
@@ -285,6 +298,9 @@ Current routes:
 - `GET /healthz`
 - `GET /prices/latest?provider=...&symbol=...`
 - `GET /markets?limit=3&include_current=false&before_market_id=...`
+- `GET /markets/flips?within_seconds=20&kind=any_crossing`
+- `GET /markets/flips/distribution?max_seconds=20`
+- `GET /markets/{market_id}/flips`
 - `GET /markets/latest?provider=...&symbol=...`
 - `GET /markets/{market_id}?provider=...&symbol=...`
 - `GET /markets/current/sources`
@@ -312,6 +328,10 @@ microstructure availability counts, and raises the response schema version to
 `books,flow,cross_market,liquidations,quality`; all five are returned by default.
 Missing seconds remain `null`, and older markets without microstructure still
 return normally. These larger JSON responses support gzip compression.
+For a market whose ordinary microstructure rows have expired, the same route
+fills each second from `binance_microstructure_1s_flip_archive` when a permanent
+copy exists. A current-table row wins over an archived copy for the same
+second.
 
 Downloads remain schema version `2` and do not include microstructure. They omit
 the market start/end millisecond fields and per-row `timestamp_ms`, retain the
@@ -467,8 +487,12 @@ BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
 
 It defaults off so applying a schema/code update does not silently begin a new
 high-rate dataset. Enable it only after applying `schema.sql` and adding the
-single production override manually. The collector deletes rows older than the
-configured retention once per UTC day. It checks the table plus indexes once
+single production override manually. Once per UTC day, the collector considers
+rows older than the configured retention, but deletes them only when the
+definition-v1 flip evaluation is `retention_safe`. Archive-required rows also
+need an archive row for the exact symbol/second whose `received_ms` is at least
+as new as the live row. Missing, failed, or stale archival therefore fails
+closed. The collector checks the table plus indexes once
 per minute, warns at the lower relation threshold, and pauses only new
 microstructure writes at the upper threshold; the critical futures live,
 snapshot, flow, and book paths continue. The size gate is hysteretic: after it

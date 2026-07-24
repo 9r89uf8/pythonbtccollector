@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -38,11 +38,20 @@ from price_collector.microstructure_api import (
     parse_microstructure_groups,
     serialize_microstructure_row,
 )
+from price_collector.flip_research import (
+    FLIP_DEFINITION_VERSION,
+    fetch_flip_distribution,
+    fetch_flip_markets,
+    fetch_market_flip_analysis,
+)
 
 
 DEFAULT_PROVIDER = "binance_spot"
 DEFAULT_SYMBOL = "BTCUSDT"
 SERVICE_NAME = "price-api"
+FlipKind = Literal["any_crossing", "decisive_flip", "cutoff_reversal"]
+FlipDirection = Literal["up_to_down", "down_to_up"]
+FlipWinner = Literal["Up", "Down"]
 DOWNLOAD_FLOW_FIELDS = (
     "taker_imbalance",
     "cvd_10s",
@@ -205,6 +214,622 @@ def serialize_market_index_item(
     }
 
 
+def _mapping_value(
+    row: Mapping[str, Any],
+    *names: str,
+    default: Any = None,
+) -> Any:
+    for name in names:
+        if name in row:
+            return row[name]
+    return default
+
+
+def _decimal_string_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError("flip research decimal values must not be binary floats")
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("flip research decimal values must be finite")
+        return format(value, "f")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        parsed = Decimal(value)
+        if not parsed.is_finite():
+            raise ValueError("flip research decimal values must be finite")
+        return format(parsed, "f")
+    raise TypeError("flip research decimal values must be Decimal strings or null")
+
+
+def _integer_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError("flip research integer values must not be booleans")
+    return int(value)
+
+
+def _serialize_decisive_flip(row: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    direction = _mapping_value(
+        row,
+        "decisive_flip_direction",
+        "decisive_direction",
+    )
+    observed_ms_before_end = _mapping_value(
+        row,
+        "decisive_flip_ms_before_end",
+        "decisive_observed_ms_before_end",
+        "decisive_ms_before_end",
+    )
+    if direction is None and observed_ms_before_end is None:
+        return None
+    return {
+        "direction": direction,
+        "observed_ms_before_end": _integer_or_none(observed_ms_before_end),
+    }
+
+
+def _serialize_flip_archive(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": _mapping_value(row, "archive_status"),
+        "source_microstructure_rows": _integer_or_none(
+            _mapping_value(
+                row,
+                "source_microstructure_rows",
+                "source_microstructure_row_count",
+                "archive_source_row_count",
+            )
+        ),
+        "archived_microstructure_rows": _integer_or_none(
+            _mapping_value(
+                row,
+                "archived_microstructure_rows",
+                "archived_microstructure_row_count",
+                "archive_row_count",
+                "archive_archived_row_count",
+            )
+        ),
+        "retention_safe": _mapping_value(row, "retention_safe"),
+        "archived_at_ms": _integer_or_none(
+            _mapping_value(row, "archived_at_ms", "archived_ms")
+        ),
+    }
+
+
+def serialize_flip_market_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    market_id = int(row["market_id"])
+    return {
+        "market_id": market_id,
+        "market_start_ms": int(row["market_start_ms"]),
+        "market_end_ms": int(row["market_end_ms"]),
+        "evaluation_status": _mapping_value(row, "evaluation_status"),
+        "price_to_beat": _decimal_string_or_none(
+            _mapping_value(
+                row,
+                "price_to_beat",
+                "official_open_price",
+                "chainlink_open_price",
+            )
+        ),
+        "official_close": _decimal_string_or_none(
+            _mapping_value(
+                row,
+                "official_close",
+                "official_close_price",
+                "chainlink_close_price",
+            )
+        ),
+        "winner": _mapping_value(row, "winner", "official_winner"),
+        "matching_crossing_count": int(
+            _mapping_value(row, "matching_crossing_count", default=0) or 0
+        ),
+        "total_crossing_count_last_20s": int(
+            _mapping_value(
+                row,
+                "total_crossing_count_last_20s",
+                "crossing_count",
+                "observed_crossing_count",
+                default=0,
+            )
+            or 0
+        ),
+        "first_crossing_ms_before_end": _integer_or_none(
+            _mapping_value(
+                row,
+                "first_crossing_ms_before_end",
+                "first_crossing_observed_ms_before_end",
+            )
+        ),
+        "last_crossing_ms_before_end": _integer_or_none(
+            _mapping_value(
+                row,
+                "last_crossing_ms_before_end",
+                "last_crossing_observed_ms_before_end",
+            )
+        ),
+        "decisive_flip": _serialize_decisive_flip(row),
+        "archive": _serialize_flip_archive(row),
+        "flip_detail_url": f"/markets/{market_id}/flips",
+        "data_url": f"/markets/{market_id}/data",
+    }
+
+
+def serialize_flip_event(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "event_sequence": int(row["event_sequence"]),
+        "direction": row["direction"],
+        "previous_side": _mapping_value(row, "previous_side", "from_side"),
+        "new_side": _mapping_value(row, "new_side", "to_side"),
+        "previous_chainlink_price": _decimal_string_or_none(
+            _mapping_value(
+                row,
+                "previous_chainlink_price",
+                "previous_price",
+                "from_price",
+            )
+        ),
+        "new_chainlink_price": _decimal_string_or_none(
+            _mapping_value(
+                row,
+                "new_chainlink_price",
+                "new_price",
+                "to_price",
+            )
+        ),
+        "previous_sample_second_ms": _integer_or_none(
+            _mapping_value(row, "previous_sample_second_ms")
+        ),
+        "new_sample_second_ms": _integer_or_none(
+            _mapping_value(
+                row,
+                "new_sample_second_ms",
+                "sample_second_ms",
+            )
+        ),
+        "previous_provider_event_ms": _integer_or_none(
+            _mapping_value(row, "previous_provider_event_ms")
+        ),
+        "new_provider_event_ms": _integer_or_none(
+            _mapping_value(
+                row,
+                "new_provider_event_ms",
+                "provider_event_ms",
+            )
+        ),
+        "previous_received_ms": _integer_or_none(
+            _mapping_value(row, "previous_received_ms")
+        ),
+        "new_received_ms": _integer_or_none(
+            _mapping_value(row, "new_received_ms", "received_ms")
+        ),
+        "observation_gap_ms": _integer_or_none(
+            _mapping_value(row, "observation_gap_ms")
+        ),
+        "observed_ms_before_end": int(row["observed_ms_before_end"]),
+        "is_decisive": bool(row["is_decisive"]),
+        "observation_precision": _mapping_value(
+            row,
+            "observation_precision",
+            default="one_second_summary",
+        ),
+    }
+
+
+def serialize_flip_cutoff(row: Mapping[str, Any]) -> dict[str, Any]:
+    microstructure = _mapping_value(row, "microstructure")
+    if microstructure is not None and not isinstance(microstructure, Mapping):
+        raise TypeError("cutoff microstructure must be a mapping or null")
+
+    return {
+        "seconds_before_end": int(row["seconds_before_end"]),
+        "cutoff_ms": _integer_or_none(_mapping_value(row, "cutoff_ms")),
+        "chainlink": {
+            "price": _decimal_string_or_none(
+                _mapping_value(
+                    row,
+                    "chainlink_price",
+                    "causal_chainlink_price",
+                )
+            ),
+            "sample_second_ms": _integer_or_none(
+                _mapping_value(row, "chainlink_sample_second_ms")
+            ),
+            "provider_event_ms": _integer_or_none(
+                _mapping_value(row, "chainlink_provider_event_ms")
+            ),
+            "received_ms": _integer_or_none(
+                _mapping_value(row, "chainlink_received_ms")
+            ),
+            "age_ms": _integer_or_none(
+                _mapping_value(
+                    row,
+                    "chainlink_age_ms",
+                    "chainlink_source_age_ms",
+                    "price_age_ms",
+                )
+            ),
+            "received_age_ms": _integer_or_none(
+                _mapping_value(row, "chainlink_received_age_ms")
+            ),
+            "fresh": _mapping_value(row, "chainlink_fresh"),
+        },
+        "signed_distance": _decimal_string_or_none(
+            _mapping_value(
+                row,
+                "signed_distance",
+                "price_distance",
+                "signed_distance_to_price_to_beat",
+            )
+        ),
+        "absolute_distance": _decimal_string_or_none(
+            _mapping_value(
+                row,
+                "absolute_distance",
+                "absolute_price_distance",
+                "absolute_distance_to_price_to_beat",
+            )
+        ),
+        "apparent_side": _mapping_value(row, "apparent_side"),
+        "probabilities": {
+            "up": {
+                "bid": _decimal_string_or_none(
+                    _mapping_value(row, "up_bid")
+                ),
+                "ask": _decimal_string_or_none(
+                    _mapping_value(
+                        row,
+                        "up_probability",
+                        "up_ask",
+                    )
+                ),
+                "mid": _decimal_string_or_none(
+                    _mapping_value(row, "up_mid")
+                ),
+                "normalized": _decimal_string_or_none(
+                    _mapping_value(row, "up_prob_norm")
+                ),
+                "provider_event_ms": _integer_or_none(
+                    _mapping_value(
+                        row,
+                        "up_probability_provider_event_ms",
+                    )
+                ),
+                "received_ms": _integer_or_none(
+                    _mapping_value(row, "up_probability_received_ms")
+                ),
+                "source_age_ms": _integer_or_none(
+                    _mapping_value(row, "up_probability_source_age_ms")
+                ),
+                "received_age_ms": _integer_or_none(
+                    _mapping_value(row, "up_probability_received_age_ms")
+                ),
+            },
+            "down": {
+                "bid": _decimal_string_or_none(
+                    _mapping_value(row, "down_bid")
+                ),
+                "ask": _decimal_string_or_none(
+                    _mapping_value(
+                        row,
+                        "down_probability",
+                        "down_ask",
+                    )
+                ),
+                "mid": _decimal_string_or_none(
+                    _mapping_value(row, "down_mid")
+                ),
+                "normalized": _decimal_string_or_none(
+                    _mapping_value(row, "down_prob_norm")
+                ),
+                "provider_event_ms": _integer_or_none(
+                    _mapping_value(
+                        row,
+                        "down_probability_provider_event_ms",
+                    )
+                ),
+                "received_ms": _integer_or_none(
+                    _mapping_value(row, "down_probability_received_ms")
+                ),
+                "source_age_ms": _integer_or_none(
+                    _mapping_value(row, "down_probability_source_age_ms")
+                ),
+                "received_age_ms": _integer_or_none(
+                    _mapping_value(row, "down_probability_received_age_ms")
+                ),
+            },
+            "sample_second_ms": _integer_or_none(
+                _mapping_value(row, "probability_sample_second_ms")
+            ),
+            "provider_event_ms": _integer_or_none(
+                _mapping_value(row, "probability_provider_event_ms")
+            ),
+            "received_ms": _integer_or_none(
+                _mapping_value(row, "probability_received_ms")
+            ),
+            "age_ms": _integer_or_none(
+                _mapping_value(
+                    row,
+                    "probability_age_ms",
+                    "probability_source_age_ms",
+                )
+            ),
+            "received_age_ms": _integer_or_none(
+                _mapping_value(row, "probability_received_age_ms")
+            ),
+            "fresh": _mapping_value(row, "probability_fresh"),
+        },
+        "official_winner": _mapping_value(
+            row,
+            "official_winner",
+            "winner",
+        ),
+        "flipped_after_cutoff": _mapping_value(row, "flipped_after_cutoff"),
+        "microstructure_sample_second_ms": _integer_or_none(
+            _mapping_value(row, "microstructure_sample_second_ms")
+        ),
+        "microstructure_available": _mapping_value(
+            row,
+            "microstructure_available",
+            default=microstructure is not None,
+        ),
+        "microstructure": (
+            None
+            if microstructure is None
+            else serialize_microstructure_row(microstructure)
+        ),
+        "quality_flags": list(
+            _mapping_value(row, "quality_flags", default=()) or ()
+        ),
+    }
+
+
+def serialize_market_flip_analysis(
+    analysis: Mapping[str, Any],
+    *,
+    now_ms: int,
+) -> dict[str, Any]:
+    evaluation = analysis["evaluation"]
+    events = analysis.get("events") or []
+    cutoffs = analysis.get("cutoffs") or []
+    market_id = int(evaluation["market_id"])
+    return {
+        "schema_version": 1,
+        "definition_version": int(
+            _mapping_value(
+                evaluation,
+                "definition_version",
+                default=FLIP_DEFINITION_VERSION,
+            )
+        ),
+        "server_time_ms": now_ms,
+        "market": {
+            "market_id": market_id,
+            "market_start_ms": int(evaluation["market_start_ms"]),
+            "market_end_ms": int(evaluation["market_end_ms"]),
+            "price_to_beat": _decimal_string_or_none(
+                _mapping_value(
+                    evaluation,
+                    "price_to_beat",
+                    "official_open_price",
+                    "chainlink_open_price",
+                )
+            ),
+            "official_close": _decimal_string_or_none(
+                _mapping_value(
+                    evaluation,
+                    "official_close",
+                    "official_close_price",
+                    "chainlink_close_price",
+                )
+            ),
+            "winner": _mapping_value(
+                evaluation,
+                "winner",
+                "official_winner",
+            ),
+        },
+        "evaluation": {
+            "status": _mapping_value(evaluation, "evaluation_status"),
+            "observation_precision": _mapping_value(
+                evaluation,
+                "observation_precision",
+            ),
+            "analysis_start_ms": _integer_or_none(
+                _mapping_value(evaluation, "analysis_start_ms")
+            ),
+            "analysis_end_ms": _integer_or_none(
+                _mapping_value(evaluation, "analysis_end_ms")
+            ),
+            "crossing_count": int(
+                _mapping_value(
+                    evaluation,
+                    "crossing_count",
+                    "observed_crossing_count",
+                    default=0,
+                )
+                or 0
+            ),
+            "touch_count": int(
+                _mapping_value(evaluation, "touch_count", default=0) or 0
+            ),
+            "first_crossing_ms_before_end": _integer_or_none(
+                _mapping_value(
+                    evaluation,
+                    "first_crossing_ms_before_end",
+                    "first_crossing_observed_ms_before_end",
+                )
+            ),
+            "last_crossing_ms_before_end": _integer_or_none(
+                _mapping_value(
+                    evaluation,
+                    "last_crossing_ms_before_end",
+                    "last_crossing_observed_ms_before_end",
+                )
+            ),
+            "decisive_flip": _serialize_decisive_flip(evaluation),
+            "chainlink": {
+                "observation_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "chainlink_observation_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+                "strict_observation_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "chainlink_strict_observation_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+                "first_provider_event_ms": _integer_or_none(
+                    _mapping_value(
+                        evaluation,
+                        "chainlink_first_provider_event_ms",
+                    )
+                ),
+                "last_provider_event_ms": _integer_or_none(
+                    _mapping_value(
+                        evaluation,
+                        "chainlink_last_provider_event_ms",
+                    )
+                ),
+                "max_gap_ms": _integer_or_none(
+                    _mapping_value(
+                        evaluation,
+                        "chainlink_max_gap_ms",
+                        "max_observation_gap_ms",
+                    )
+                ),
+            },
+            "cutoff_coverage": {
+                "chainlink_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "chainlink_cutoff_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+                "fresh_chainlink_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "fresh_chainlink_cutoff_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+                "probability_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "probability_cutoff_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+                "fresh_probability_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "fresh_probability_cutoff_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+                "microstructure_count": int(
+                    _mapping_value(
+                        evaluation,
+                        "microstructure_cutoff_count",
+                        default=0,
+                    )
+                    or 0
+                ),
+            },
+            "quality_flags": list(
+                _mapping_value(
+                    evaluation,
+                    "quality_flags",
+                    default=(),
+                )
+                or ()
+            ),
+            "evaluated_at_ms": _integer_or_none(
+                _mapping_value(evaluation, "evaluated_at_ms", "evaluated_ms")
+            ),
+        },
+        "events": [
+            serialize_flip_event(event)
+            for event in events
+        ],
+        "cutoffs": [
+            serialize_flip_cutoff(cutoff)
+            for cutoff in cutoffs
+        ],
+        "archive": _serialize_flip_archive(evaluation),
+        "data_url": f"/markets/{market_id}/data",
+    }
+
+
+def serialize_flip_distribution(
+    distribution: Mapping[str, Any],
+    *,
+    max_seconds: int,
+    now_ms: int,
+) -> dict[str, Any]:
+    population = distribution.get("population") or {}
+    return {
+        "schema_version": 1,
+        "definition_version": FLIP_DEFINITION_VERSION,
+        "server_time_ms": now_ms,
+        "max_seconds": max_seconds,
+        "population": {
+            "resolved_markets": int(population.get("resolved_markets") or 0),
+            "eligible_markets": int(population.get("eligible_markets") or 0),
+            "ambiguous_markets": int(population.get("ambiguous_markets") or 0),
+            "markets_with_any_crossing": int(
+                population.get("markets_with_any_crossing") or 0
+            ),
+        },
+        "crossings_by_time": [
+            {
+                "from_ms_before_end": int(row["from_ms_before_end"]),
+                "to_ms_before_end": int(row["to_ms_before_end"]),
+                "crossing_event_count": int(row["crossing_event_count"]),
+                "unique_market_count": int(row["unique_market_count"]),
+                "decisive_flip_market_count": int(
+                    row["decisive_flip_market_count"]
+                ),
+                "to_up_count": int(row["to_up_count"]),
+                "to_down_count": int(row["to_down_count"]),
+                "cumulative_unique_markets_within_window": int(
+                    row["cumulative_unique_markets_within_window"]
+                ),
+                "cumulative_market_rate": _decimal_string_or_none(
+                    row.get("cumulative_market_rate")
+                ),
+            }
+            for row in distribution.get("crossings_by_time") or []
+        ],
+        "cutoff_reversals": [
+            {
+                "seconds_before_end": int(row["seconds_before_end"]),
+                "eligible_markets": int(row["eligible_markets"]),
+                "markets_reversed_by_close": int(
+                    row["markets_reversed_by_close"]
+                ),
+                "reversal_rate": _decimal_string_or_none(
+                    row.get("reversal_rate")
+                ),
+            }
+            for row in distribution.get("cutoff_reversals") or []
+        ],
+    }
+
+
 def serialize_download_series_item(item: Mapping[str, Any]) -> dict[str, Any]:
     exported = dict(item)
     exported.pop("freshness", None)
@@ -292,6 +917,18 @@ def requested_microstructure_groups(
         return parse_microstructure_groups(microstructure_groups)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def validate_flip_date_range(
+    *,
+    start_ms: Optional[int],
+    end_ms: Optional[int],
+) -> None:
+    if start_ms is not None and end_ms is not None and start_ms >= end_ms:
+        raise HTTPException(
+            status_code=422,
+            detail="start_ms must be less than end_ms",
+        )
 
 
 @asynccontextmanager
@@ -405,6 +1042,110 @@ async def markets_index(
             else None
         ),
     }
+
+
+@app.get("/markets/flips")
+async def markets_flips(
+    request: Request,
+    within_seconds: int = Query(20, ge=1, le=20),
+    kind: FlipKind = Query("any_crossing"),
+    direction: Optional[FlipDirection] = Query(None),
+    winner: Optional[FlipWinner] = Query(None),
+    limit: int = Query(20, ge=1, le=50),
+    before_market_id: Optional[int] = Query(None, ge=0),
+    start_ms: Optional[int] = Query(None, ge=0),
+    end_ms: Optional[int] = Query(None, ge=0),
+) -> dict[str, Any]:
+    validate_flip_date_range(start_ms=start_ms, end_ms=end_ms)
+    now_ms = current_utc_epoch_ms()
+    rows = await fetch_flip_markets(
+        get_pool(request),
+        definition_version=FLIP_DEFINITION_VERSION,
+        within_seconds=within_seconds,
+        kind=kind,
+        direction=direction,
+        winner=winner,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        before_market_id=before_market_id,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    filters: dict[str, Any] = {
+        "within_seconds": within_seconds,
+        "kind": kind,
+    }
+    for name, value in (
+        ("direction", direction),
+        ("winner", winner),
+        ("start_ms", start_ms),
+        ("end_ms", end_ms),
+    ):
+        if value is not None:
+            filters[name] = value
+
+    return {
+        "schema_version": 1,
+        "definition_version": FLIP_DEFINITION_VERSION,
+        "server_time_ms": now_ms,
+        "filters": filters,
+        "markets": [
+            serialize_flip_market_item(row)
+            for row in page_rows
+        ],
+        "next_before_market_id": (
+            int(page_rows[-1]["market_id"])
+            if has_more and page_rows
+            else None
+        ),
+    }
+
+
+@app.get("/markets/flips/distribution")
+async def markets_flips_distribution(
+    request: Request,
+    max_seconds: int = Query(20, ge=1, le=20),
+    direction: Optional[FlipDirection] = Query(None),
+    start_ms: Optional[int] = Query(None, ge=0),
+    end_ms: Optional[int] = Query(None, ge=0),
+) -> dict[str, Any]:
+    validate_flip_date_range(start_ms=start_ms, end_ms=end_ms)
+    now_ms = current_utc_epoch_ms()
+    distribution = await fetch_flip_distribution(
+        get_pool(request),
+        definition_version=FLIP_DEFINITION_VERSION,
+        max_seconds=max_seconds,
+        direction=direction,
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+    return serialize_flip_distribution(
+        distribution,
+        max_seconds=max_seconds,
+        now_ms=now_ms,
+    )
+
+
+@app.get("/markets/{market_id}/flips")
+async def markets_flips_by_id(
+    request: Request,
+    market_id: int,
+) -> dict[str, Any]:
+    analysis = await fetch_market_flip_analysis(
+        get_pool(request),
+        market_id=market_id,
+        definition_version=FLIP_DEFINITION_VERSION,
+    )
+    if analysis is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no flip analysis found for market_id={market_id}",
+        )
+    return serialize_market_flip_analysis(
+        analysis,
+        now_ms=current_utc_epoch_ms(),
+    )
 
 
 @app.get("/markets/current/sources")

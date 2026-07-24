@@ -27,6 +27,7 @@ from price_collector.db import (
     upsert_polymarket_btc_5m_resolution,
     upsert_polymarket_probability_sample,
 )
+from price_collector.flip_research import flip_evaluator_loop
 from price_collector.market import MarketWindow, market_for_sample_second
 
 
@@ -97,6 +98,14 @@ class ProbabilityState:
     up_ask: Optional[Decimal] = None
     down_bid: Optional[Decimal] = None
     down_ask: Optional[Decimal] = None
+    up_bid_provider_event_ms: Optional[int] = None
+    up_bid_received_ms: Optional[int] = None
+    up_ask_provider_event_ms: Optional[int] = None
+    up_ask_received_ms: Optional[int] = None
+    down_bid_provider_event_ms: Optional[int] = None
+    down_bid_received_ms: Optional[int] = None
+    down_ask_provider_event_ms: Optional[int] = None
+    down_ask_received_ms: Optional[int] = None
     latest_provider_event_ms: Optional[int] = None
     latest_received_ms: Optional[int] = None
     latest_event_type: Optional[str] = None
@@ -120,13 +129,21 @@ class ProbabilityState:
         if asset_id == self.up_token_id:
             if replace or bid is not None:
                 self.up_bid = bid
+                self.up_bid_provider_event_ms = provider_event_ms
+                self.up_bid_received_ms = received_ms
             if replace or ask is not None:
                 self.up_ask = ask
+                self.up_ask_provider_event_ms = provider_event_ms
+                self.up_ask_received_ms = received_ms
         elif asset_id == self.down_token_id:
             if replace or bid is not None:
                 self.down_bid = bid
+                self.down_bid_provider_event_ms = provider_event_ms
+                self.down_bid_received_ms = received_ms
             if replace or ask is not None:
                 self.down_ask = ask
+                self.down_ask_provider_event_ms = provider_event_ms
+                self.down_ask_received_ms = received_ms
         else:
             return False
 
@@ -136,6 +153,58 @@ class ProbabilityState:
             event_type=event_type,
         )
         return True
+
+    def outcome_observation_ms(
+        self,
+        outcome: str,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Return the oldest component timestamp used by one outcome quote."""
+
+        if outcome == "Up":
+            components = (
+                (
+                    self.up_bid,
+                    self.up_bid_provider_event_ms,
+                    self.up_bid_received_ms,
+                ),
+                (
+                    self.up_ask,
+                    self.up_ask_provider_event_ms,
+                    self.up_ask_received_ms,
+                ),
+            )
+        elif outcome == "Down":
+            components = (
+                (
+                    self.down_bid,
+                    self.down_bid_provider_event_ms,
+                    self.down_bid_received_ms,
+                ),
+                (
+                    self.down_ask,
+                    self.down_ask_provider_event_ms,
+                    self.down_ask_received_ms,
+                ),
+            )
+        else:
+            raise ValueError(f"unknown probability outcome: {outcome!r}")
+
+        observed = [
+            (provider_event_ms, received_ms)
+            for value, provider_event_ms, received_ms in components
+            if value is not None
+        ]
+        if not observed or any(received_ms is None for _, received_ms in observed):
+            return None, None
+        known_provider_events = [
+            provider_event_ms
+            for provider_event_ms, _ in observed
+            if provider_event_ms is not None
+        ]
+        return (
+            min(known_provider_events) if known_provider_events else None,
+            min(int(received_ms) for _, received_ms in observed),
+        )
 
     def mark_resolved(
         self,
@@ -186,6 +255,14 @@ class ProbabilityState:
             "up_ask": self.up_ask,
             "down_bid": self.down_bid,
             "down_ask": self.down_ask,
+            "up_bid_provider_event_ms": self.up_bid_provider_event_ms,
+            "up_bid_received_ms": self.up_bid_received_ms,
+            "up_ask_provider_event_ms": self.up_ask_provider_event_ms,
+            "up_ask_received_ms": self.up_ask_received_ms,
+            "down_bid_provider_event_ms": self.down_bid_provider_event_ms,
+            "down_bid_received_ms": self.down_bid_received_ms,
+            "down_ask_provider_event_ms": self.down_ask_provider_event_ms,
+            "down_ask_received_ms": self.down_ask_received_ms,
         }
 
 
@@ -201,6 +278,10 @@ class ProbabilitySnapshot:
     down_mid: Optional[Decimal]
     up_prob_norm: Optional[Decimal]
     down_prob_norm: Optional[Decimal]
+    up_provider_event_ms: Optional[int]
+    up_received_ms: int
+    down_provider_event_ms: Optional[int]
+    down_received_ms: int
     provider_event_ms: Optional[int]
     received_ms: int
     raw: Mapping[str, Any]
@@ -1399,9 +1480,18 @@ def build_probability_snapshot(
     if state.resolved:
         return None
 
+    up_provider_event_ms, up_received_ms = state.outcome_observation_ms("Up")
+    down_provider_event_ms, down_received_ms = state.outcome_observation_ms(
+        "Down"
+    )
+    if up_received_ms is None or down_received_ms is None:
+        return None
     if state.latest_received_ms is None:
         return None
-    if now_ms - state.latest_received_ms > stale_ms:
+    if (
+        now_ms - up_received_ms > stale_ms
+        or now_ms - down_received_ms > stale_ms
+    ):
         return None
 
     if state.up_ask is None or state.down_ask is None:
@@ -1422,7 +1512,14 @@ def build_probability_snapshot(
         down_mid=down_mid,
         up_prob_norm=up_prob_norm,
         down_prob_norm=down_prob_norm,
+        up_provider_event_ms=up_provider_event_ms,
+        up_received_ms=up_received_ms,
+        down_provider_event_ms=down_provider_event_ms,
+        down_received_ms=down_received_ms,
         provider_event_ms=state.latest_provider_event_ms,
+        # The row-level timestamp is the newest event and is therefore the
+        # causal availability bound. Per-outcome timestamps above deliberately
+        # retain the oldest component used to assess quote freshness.
         received_ms=state.latest_received_ms,
         raw=state.raw_snapshot(),
     )
@@ -1466,6 +1563,10 @@ async def sample_probability_once(
         down_mid=snapshot.down_mid,
         up_prob_norm=snapshot.up_prob_norm,
         down_prob_norm=snapshot.down_prob_norm,
+        up_provider_event_ms=snapshot.up_provider_event_ms,
+        up_received_ms=snapshot.up_received_ms,
+        down_provider_event_ms=snapshot.down_provider_event_ms,
+        down_received_ms=snapshot.down_received_ms,
         provider_event_ms=snapshot.provider_event_ms,
         received_ms=snapshot.received_ms,
         raw=snapshot.raw,
@@ -1811,6 +1912,9 @@ async def run_collector(settings: Settings) -> None:
     resolution_task: Optional[asyncio.Task] = asyncio.create_task(
         resolution_reconciler_loop(settings, pool)
     )
+    flip_task: Optional[asyncio.Task] = asyncio.create_task(
+        flip_evaluator_loop(settings, pool)
+    )
     try:
         attempt = 0
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1936,6 +2040,8 @@ async def run_collector(settings: Settings) -> None:
                         window=current_window,
                     )
     finally:
+        if flip_task is not None:
+            await cancel_and_drain_task(flip_task)
         if resolution_task is not None:
             await cancel_and_drain_task(resolution_task)
         if current_task is not None:

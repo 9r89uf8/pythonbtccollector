@@ -314,7 +314,7 @@ def test_write_gate_pauses_at_cap_and_resumes_only_below_warning():
     assert gate.paused is False
 
 
-def test_retention_delete_uses_symbol_leading_primary_key():
+def test_retention_delete_is_indexed_and_fails_closed_without_safe_evaluation():
     pool = FakePool()
     asyncio.run(
         runtime.delete_expired_microstructure_rows(
@@ -326,8 +326,31 @@ def test_retention_delete_uses_symbol_leading_primary_key():
     )
 
     query, args = pool.connection.calls[0]
+    normalized_query = " ".join(query.split())
     assert "WHERE symbol = $1" in query
     assert "sample_second_ms < $2" in query
+    assert "USING polymarket_btc_5m_flip_evaluations AS evaluation" in query
+    assert "evaluation.market_id = binance_microstructure_1s.market_id" in query
+    assert "evaluation.definition_version = 1" in query
+    assert "evaluation.retention_safe = TRUE" in query
+    assert "evaluation.archive_status = 'not_required'" in query
+    assert "evaluation.archive_status = 'complete'" in query
+    assert (
+        "FROM binance_microstructure_1s_flip_archive AS archive"
+        in normalized_query
+    )
+    assert (
+        "archive.symbol = binance_microstructure_1s.symbol"
+        in normalized_query
+    )
+    assert (
+        "archive.sample_second_ms = binance_microstructure_1s.sample_second_ms"
+        in normalized_query
+    )
+    assert (
+        "archive.received_ms >= binance_microstructure_1s.received_ms"
+        in normalized_query
+    )
     assert args == ("BTCUSDT", 7 * runtime.MILLISECONDS_PER_DAY)
 
 

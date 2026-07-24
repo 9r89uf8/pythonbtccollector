@@ -216,6 +216,11 @@ CREATE TABLE IF NOT EXISTS polymarket_probability_samples (
     up_prob_norm NUMERIC(18, 8),
     down_prob_norm NUMERIC(18, 8),
 
+    up_provider_event_ms BIGINT,
+    up_received_ms BIGINT,
+    down_provider_event_ms BIGINT,
+    down_received_ms BIGINT,
+
     provider_event_ms BIGINT,
     received_ms BIGINT NOT NULL,
 
@@ -239,6 +244,12 @@ CREATE TABLE IF NOT EXISTS polymarket_probability_samples (
     CHECK (up_prob_norm IS NULL OR (up_prob_norm >= 0 AND up_prob_norm <= 1)),
     CHECK (down_prob_norm IS NULL OR (down_prob_norm >= 0 AND down_prob_norm <= 1))
 );
+
+ALTER TABLE polymarket_probability_samples
+    ADD COLUMN IF NOT EXISTS up_provider_event_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS up_received_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS down_provider_event_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS down_received_ms BIGINT;
 
 CREATE INDEX IF NOT EXISTS polymarket_probability_samples_market_idx
     ON polymarket_probability_samples (market_id, sample_second_ms);
@@ -531,6 +542,479 @@ CREATE INDEX IF NOT EXISTS binance_microstructure_1s_market_idx
 REVOKE ALL ON binance_microstructure_1s FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON binance_microstructure_1s TO price_writer;
 GRANT SELECT ON binance_microstructure_1s TO price_reader;
+
+-- Permanent, versioned post-resolution labels for final-window flip research.
+-- One row is retained for every evaluated market so non-flips remain available
+-- as the denominator for distribution and training queries.
+CREATE TABLE IF NOT EXISTS polymarket_btc_5m_flip_evaluations (
+    market_id BIGINT NOT NULL REFERENCES polymarket_btc_5m_markets(market_id),
+    definition_version SMALLINT NOT NULL,
+
+    evaluation_status TEXT NOT NULL,
+    observation_precision TEXT NOT NULL DEFAULT 'one_second_summary',
+
+    price_to_beat NUMERIC(38, 18) NOT NULL,
+    official_close_price NUMERIC(38, 18) NOT NULL,
+    official_winner TEXT,
+    analysis_start_ms BIGINT NOT NULL,
+    analysis_end_ms BIGINT NOT NULL,
+
+    crossing_count INTEGER NOT NULL DEFAULT 0,
+    touch_count INTEGER NOT NULL DEFAULT 0,
+    first_crossing_ms_before_end BIGINT,
+    last_crossing_ms_before_end BIGINT,
+    decisive_event_sequence INTEGER,
+    decisive_flip_ms_before_end BIGINT,
+    decisive_flip_direction TEXT,
+
+    chainlink_observation_count INTEGER NOT NULL DEFAULT 0,
+    chainlink_strict_observation_count INTEGER NOT NULL DEFAULT 0,
+    chainlink_first_provider_event_ms BIGINT,
+    chainlink_last_provider_event_ms BIGINT,
+    chainlink_max_gap_ms BIGINT,
+    chainlink_cutoff_count INTEGER NOT NULL DEFAULT 0,
+    fresh_chainlink_cutoff_count INTEGER NOT NULL DEFAULT 0,
+    probability_cutoff_count INTEGER NOT NULL DEFAULT 0,
+    fresh_probability_cutoff_count INTEGER NOT NULL DEFAULT 0,
+    microstructure_cutoff_count INTEGER NOT NULL DEFAULT 0,
+    quality_flags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+
+    archive_status TEXT NOT NULL DEFAULT 'pending',
+    source_microstructure_row_count INTEGER NOT NULL DEFAULT 0,
+    archived_microstructure_row_count INTEGER NOT NULL DEFAULT 0,
+    retention_safe BOOLEAN NOT NULL DEFAULT FALSE,
+
+    evaluated_ms BIGINT NOT NULL,
+    archived_ms BIGINT,
+    evaluation_attempts INTEGER NOT NULL DEFAULT 1,
+    next_retry_ms BIGINT,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (market_id, definition_version),
+
+    CHECK (definition_version >= 1),
+    CHECK (
+        evaluation_status IN ('confirmed_flip', 'non_flip', 'ambiguous')
+    ),
+    CHECK (price_to_beat > 0),
+    CHECK (official_close_price > 0),
+    CHECK (official_winner IS NULL OR official_winner IN ('Up', 'Down')),
+    CHECK (official_winner IS NOT NULL OR evaluation_status = 'ambiguous'),
+    CHECK (analysis_start_ms >= 0),
+    CHECK (analysis_end_ms = analysis_start_ms + 20000),
+    CHECK (crossing_count >= 0),
+    CHECK (touch_count >= 0),
+    CHECK (
+        first_crossing_ms_before_end IS NULL
+        OR first_crossing_ms_before_end BETWEEN 1 AND 20000
+    ),
+    CHECK (
+        last_crossing_ms_before_end IS NULL
+        OR last_crossing_ms_before_end BETWEEN 1 AND 20000
+    ),
+    CHECK (
+        decisive_flip_ms_before_end IS NULL
+        OR decisive_flip_ms_before_end BETWEEN 1 AND 20000
+    ),
+    CHECK (
+        decisive_flip_direction IS NULL
+        OR decisive_flip_direction IN ('up_to_down', 'down_to_up')
+    ),
+    CHECK (decisive_event_sequence IS NULL OR decisive_event_sequence >= 1),
+    CHECK (chainlink_observation_count >= 0),
+    CHECK (chainlink_strict_observation_count >= 0),
+    CHECK (chainlink_max_gap_ms IS NULL OR chainlink_max_gap_ms >= 0),
+    CHECK (chainlink_cutoff_count BETWEEN 0 AND 20),
+    CHECK (fresh_chainlink_cutoff_count BETWEEN 0 AND chainlink_cutoff_count),
+    CHECK (probability_cutoff_count BETWEEN 0 AND 20),
+    CHECK (
+        fresh_probability_cutoff_count BETWEEN 0 AND probability_cutoff_count
+    ),
+    CHECK (microstructure_cutoff_count BETWEEN 0 AND 20),
+    CHECK (
+        archive_status IN ('not_required', 'pending', 'complete', 'failed')
+    ),
+    CHECK (source_microstructure_row_count >= 0),
+    CHECK (archived_microstructure_row_count >= 0),
+    CHECK (
+        NOT retention_safe
+        OR archive_status IN ('not_required', 'complete')
+    ),
+    CHECK (
+        archive_status NOT IN ('pending', 'failed')
+        OR retention_safe = FALSE
+    ),
+    CHECK (
+        archive_status <> 'complete'
+        OR source_microstructure_row_count
+            = archived_microstructure_row_count
+    ),
+    CHECK (
+        archive_status <> 'not_required'
+        OR (
+            evaluation_status = 'non_flip'
+            AND archived_microstructure_row_count = 0
+        )
+    ),
+    CHECK (
+        evaluation_status NOT IN ('confirmed_flip', 'ambiguous')
+        OR archive_status <> 'not_required'
+    ),
+    CHECK (evaluated_ms >= 0),
+    CHECK (archived_ms IS NULL OR archived_ms >= evaluated_ms),
+    CHECK (evaluation_attempts >= 1),
+    CHECK (next_retry_ms IS NULL OR next_retry_ms >= evaluated_ms),
+    CHECK (
+        crossing_count > 0
+        OR (
+            first_crossing_ms_before_end IS NULL
+            AND last_crossing_ms_before_end IS NULL
+            AND decisive_event_sequence IS NULL
+            AND decisive_flip_ms_before_end IS NULL
+            AND decisive_flip_direction IS NULL
+        )
+    ),
+    CHECK (evaluation_status <> 'confirmed_flip' OR crossing_count > 0),
+    CHECK (evaluation_status <> 'non_flip' OR crossing_count = 0)
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_flip_evaluations_status_idx
+    ON polymarket_btc_5m_flip_evaluations (
+        definition_version,
+        evaluation_status,
+        market_id DESC
+    );
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_flip_evaluations_retry_idx
+    ON polymarket_btc_5m_flip_evaluations (next_retry_ms, market_id)
+    WHERE retention_safe = FALSE;
+
+-- Immutable observed strict-side crossings. A new definition version creates
+-- a new event sequence instead of rewriting a prior classification.
+CREATE TABLE IF NOT EXISTS polymarket_btc_5m_flip_events (
+    market_id BIGINT NOT NULL,
+    definition_version SMALLINT NOT NULL,
+    event_sequence INTEGER NOT NULL,
+
+    previous_side TEXT NOT NULL,
+    new_side TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    previous_price NUMERIC(38, 18) NOT NULL,
+    new_price NUMERIC(38, 18) NOT NULL,
+
+    previous_sample_second_ms BIGINT NOT NULL,
+    sample_second_ms BIGINT NOT NULL,
+    previous_provider_event_ms BIGINT NOT NULL,
+    provider_event_ms BIGINT NOT NULL,
+    previous_received_ms BIGINT NOT NULL,
+    received_ms BIGINT NOT NULL,
+    observation_gap_ms BIGINT NOT NULL,
+    observed_ms_before_end BIGINT NOT NULL,
+
+    is_decisive BOOLEAN NOT NULL DEFAULT FALSE,
+    observation_precision TEXT NOT NULL DEFAULT 'one_second_summary',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (market_id, definition_version, event_sequence),
+    FOREIGN KEY (market_id, definition_version)
+        REFERENCES polymarket_btc_5m_flip_evaluations (
+            market_id,
+            definition_version
+        ),
+
+    CHECK (definition_version >= 1),
+    CHECK (event_sequence >= 1),
+    CHECK (previous_side IN ('Up', 'Down')),
+    CHECK (new_side IN ('Up', 'Down')),
+    CHECK (previous_side <> new_side),
+    CHECK (direction IN ('up_to_down', 'down_to_up')),
+    CHECK (
+        (previous_side = 'Up' AND new_side = 'Down'
+            AND direction = 'up_to_down')
+        OR
+        (previous_side = 'Down' AND new_side = 'Up'
+            AND direction = 'down_to_up')
+    ),
+    CHECK (previous_price > 0),
+    CHECK (new_price > 0),
+    CHECK (previous_sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms >= previous_sample_second_ms),
+    CHECK (previous_provider_event_ms >= 0),
+    CHECK (provider_event_ms >= previous_provider_event_ms),
+    CHECK (previous_received_ms >= 0),
+    CHECK (received_ms >= 0),
+    CHECK (observation_gap_ms >= 0),
+    CHECK (observed_ms_before_end BETWEEN 1 AND 20000)
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_flip_events_time_idx
+    ON polymarket_btc_5m_flip_events (
+        definition_version,
+        observed_ms_before_end,
+        market_id DESC
+    );
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_flip_events_direction_time_idx
+    ON polymarket_btc_5m_flip_events (
+        definition_version,
+        direction,
+        observed_ms_before_end,
+        market_id DESC
+    );
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_flip_events_decisive_time_idx
+    ON polymarket_btc_5m_flip_events (
+        definition_version,
+        observed_ms_before_end,
+        market_id DESC
+    )
+    WHERE is_decisive = TRUE;
+
+-- Permanent T-20 through T-1 causal training observations. The microstructure
+-- columns intentionally mirror every value/quality field in
+-- binance_microstructure_1s, but remain nullable when that second was absent.
+CREATE TABLE IF NOT EXISTS polymarket_btc_5m_flip_cutoffs (
+    market_id BIGINT NOT NULL,
+    definition_version SMALLINT NOT NULL,
+    seconds_before_end SMALLINT NOT NULL,
+    cutoff_ms BIGINT NOT NULL,
+
+    chainlink_sample_second_ms BIGINT,
+    chainlink_price NUMERIC(38, 18),
+    chainlink_provider_event_ms BIGINT,
+    chainlink_received_ms BIGINT,
+    chainlink_source_age_ms BIGINT,
+    chainlink_received_age_ms BIGINT,
+    chainlink_fresh BOOLEAN NOT NULL DEFAULT FALSE,
+
+    price_distance NUMERIC(38, 18),
+    absolute_price_distance NUMERIC(38, 18),
+    apparent_side TEXT,
+
+    probability_sample_second_ms BIGINT,
+    up_bid NUMERIC(18, 8),
+    up_ask NUMERIC(18, 8),
+    up_mid NUMERIC(18, 8),
+    down_bid NUMERIC(18, 8),
+    down_ask NUMERIC(18, 8),
+    down_mid NUMERIC(18, 8),
+    up_prob_norm NUMERIC(18, 8),
+    down_prob_norm NUMERIC(18, 8),
+    probability_provider_event_ms BIGINT,
+    probability_received_ms BIGINT,
+    probability_source_age_ms BIGINT,
+    probability_received_age_ms BIGINT,
+    up_probability_provider_event_ms BIGINT,
+    up_probability_received_ms BIGINT,
+    up_probability_source_age_ms BIGINT,
+    up_probability_received_age_ms BIGINT,
+    down_probability_provider_event_ms BIGINT,
+    down_probability_received_ms BIGINT,
+    down_probability_source_age_ms BIGINT,
+    down_probability_received_age_ms BIGINT,
+    probability_fresh BOOLEAN NOT NULL DEFAULT FALSE,
+
+    official_winner TEXT,
+    flipped_after_cutoff BOOLEAN,
+
+    microstructure_symbol TEXT,
+    microstructure_sample_second_ms BIGINT,
+    schema_version SMALLINT,
+    sample_span_ms BIGINT,
+    sample_jitter_ms BIGINT,
+    collector_healthy BOOLEAN,
+
+    spot_mid NUMERIC(38, 18),
+    spot_bid NUMERIC(38, 18),
+    spot_ask NUMERIC(38, 18),
+    spot_spread_bps NUMERIC(20, 8),
+    spot_weighted_mid_offset_bps NUMERIC(20, 8),
+    spot_imbalance_1 NUMERIC(20, 8),
+    spot_imbalance_5 NUMERIC(20, 8),
+    spot_imbalance_10 NUMERIC(20, 8),
+    spot_bid_depth_usdt_10 NUMERIC(38, 18),
+    spot_ask_depth_usdt_10 NUMERIC(38, 18),
+    spot_book_age_ms BIGINT,
+    spot_book_lag_ms BIGINT,
+    spot_snapshot_bbo_ofi_usdt NUMERIC(38, 18),
+    spot_book_snapshot_count INTEGER,
+
+    spot_buy_usdt NUMERIC(38, 18),
+    spot_sell_usdt NUMERIC(38, 18),
+    spot_trade_id_span INTEGER,
+    spot_aggtrade_count INTEGER,
+    spot_max_aggtrade_usdt NUMERIC(38, 18),
+    spot_vwap NUMERIC(38, 18),
+    spot_trade_high NUMERIC(38, 18),
+    spot_trade_low NUMERIC(38, 18),
+    spot_last_trade NUMERIC(38, 18),
+    spot_trade_age_ms BIGINT,
+    spot_trade_lag_mean_ms NUMERIC(20, 8),
+    spot_trade_lag_max_ms BIGINT,
+
+    fut_mid NUMERIC(38, 18),
+    fut_bid NUMERIC(38, 18),
+    fut_ask NUMERIC(38, 18),
+    fut_spread_bps NUMERIC(20, 8),
+    fut_weighted_mid_offset_bps NUMERIC(20, 8),
+    fut_imbalance_1 NUMERIC(20, 8),
+    fut_imbalance_5 NUMERIC(20, 8),
+    fut_imbalance_10 NUMERIC(20, 8),
+    fut_bid_depth_usdt_10 NUMERIC(38, 18),
+    fut_ask_depth_usdt_10 NUMERIC(38, 18),
+    fut_book_age_ms BIGINT,
+    fut_book_lag_ms BIGINT,
+    fut_snapshot_bbo_ofi_usdt NUMERIC(38, 18),
+    fut_book_snapshot_count INTEGER,
+
+    fut_buy_usdt NUMERIC(38, 18),
+    fut_sell_usdt NUMERIC(38, 18),
+    fut_rpi_buy_usdt NUMERIC(38, 18),
+    fut_rpi_sell_usdt NUMERIC(38, 18),
+    fut_trade_id_span INTEGER,
+    fut_aggtrade_count INTEGER,
+    fut_max_aggtrade_usdt NUMERIC(38, 18),
+    fut_vwap NUMERIC(38, 18),
+    fut_trade_high NUMERIC(38, 18),
+    fut_trade_low NUMERIC(38, 18),
+    fut_last_trade NUMERIC(38, 18),
+    fut_trade_age_ms BIGINT,
+    fut_trade_lag_mean_ms NUMERIC(20, 8),
+    fut_trade_lag_max_ms BIGINT,
+
+    perp_spot_basis_bps NUMERIC(20, 8),
+    spot_fut_book_skew_ms BIGINT,
+
+    mark_price NUMERIC(38, 18),
+    index_price NUMERIC(38, 18),
+    mark_index_basis_bps NUMERIC(20, 8),
+    funding_rate NUMERIC(38, 18),
+    seconds_to_funding BIGINT,
+    mark_age_ms BIGINT,
+    mark_lag_ms BIGINT,
+
+    open_interest_btc NUMERIC(38, 18),
+    open_interest_usdt NUMERIC(38, 18),
+    oi_age_ms BIGINT,
+    oi_exchange_age_ms BIGINT,
+    oi_http_lag_ms BIGINT,
+
+    long_liq_usdt NUMERIC(38, 18),
+    short_liq_usdt NUMERIC(38, 18),
+    liq_snapshot_count INTEGER,
+    liq_lag_mean_ms NUMERIC(20, 8),
+    connection_errors INTEGER,
+
+    microstructure_received_ms BIGINT,
+    microstructure_available BOOLEAN NOT NULL DEFAULT FALSE,
+    quality_flags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (market_id, definition_version, seconds_before_end),
+    FOREIGN KEY (market_id, definition_version)
+        REFERENCES polymarket_btc_5m_flip_evaluations (
+            market_id,
+            definition_version
+        ),
+
+    CHECK (definition_version >= 1),
+    CHECK (seconds_before_end BETWEEN 1 AND 20),
+    CHECK (cutoff_ms >= 0),
+    CHECK (
+        chainlink_sample_second_ms IS NULL
+        OR chainlink_sample_second_ms % 1000 = 0
+    ),
+    CHECK (chainlink_price IS NULL OR chainlink_price > 0),
+    CHECK (
+        chainlink_received_age_ms IS NULL
+        OR chainlink_received_age_ms >= 0
+    ),
+    CHECK (absolute_price_distance IS NULL OR absolute_price_distance >= 0),
+    CHECK (
+        apparent_side IS NULL
+        OR apparent_side IN ('Up', 'Down', 'tie')
+    ),
+    CHECK (
+        probability_sample_second_ms IS NULL
+        OR probability_sample_second_ms % 1000 = 0
+    ),
+    CHECK (up_bid IS NULL OR up_bid BETWEEN 0 AND 1),
+    CHECK (up_ask IS NULL OR up_ask BETWEEN 0 AND 1),
+    CHECK (up_mid IS NULL OR up_mid BETWEEN 0 AND 1),
+    CHECK (down_bid IS NULL OR down_bid BETWEEN 0 AND 1),
+    CHECK (down_ask IS NULL OR down_ask BETWEEN 0 AND 1),
+    CHECK (down_mid IS NULL OR down_mid BETWEEN 0 AND 1),
+    CHECK (up_prob_norm IS NULL OR up_prob_norm BETWEEN 0 AND 1),
+    CHECK (down_prob_norm IS NULL OR down_prob_norm BETWEEN 0 AND 1),
+    CHECK (
+        probability_received_age_ms IS NULL
+        OR probability_received_age_ms >= 0
+    ),
+    CHECK (
+        up_probability_received_age_ms IS NULL
+        OR up_probability_received_age_ms >= 0
+    ),
+    CHECK (
+        down_probability_received_age_ms IS NULL
+        OR down_probability_received_age_ms >= 0
+    ),
+    CHECK (official_winner IS NULL OR official_winner IN ('Up', 'Down')),
+    CHECK (
+        microstructure_sample_second_ms IS NULL
+        OR microstructure_sample_second_ms % 1000 = 0
+    ),
+    CHECK (
+        microstructure_available
+        OR (
+            microstructure_symbol IS NULL
+            AND microstructure_sample_second_ms IS NULL
+            AND microstructure_received_ms IS NULL
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_btc_5m_flip_cutoffs_distribution_idx
+    ON polymarket_btc_5m_flip_cutoffs (
+        definition_version,
+        seconds_before_end,
+        flipped_after_cutoff,
+        market_id DESC
+    );
+
+-- Permanent full-market evidence for confirmed and ambiguous flips. INCLUDING
+-- ALL preserves the exact financial types and constraints without introducing
+-- JSON or a second TTL. Indexes are named explicitly so repeated schema runs
+-- remain inspectable and never create duplicate LIKE-generated indexes.
+CREATE TABLE IF NOT EXISTS binance_microstructure_1s_flip_archive (
+    LIKE binance_microstructure_1s INCLUDING ALL EXCLUDING INDEXES,
+    PRIMARY KEY (symbol, sample_second_ms)
+);
+
+CREATE INDEX IF NOT EXISTS binance_microstructure_1s_flip_archive_market_idx
+    ON binance_microstructure_1s_flip_archive (market_id, sample_second_ms);
+
+REVOKE ALL ON polymarket_btc_5m_flip_evaluations FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON polymarket_btc_5m_flip_evaluations TO price_writer;
+GRANT SELECT ON polymarket_btc_5m_flip_evaluations TO price_reader;
+
+REVOKE ALL ON polymarket_btc_5m_flip_events FROM PUBLIC;
+REVOKE UPDATE, DELETE ON polymarket_btc_5m_flip_events FROM price_writer;
+GRANT SELECT, INSERT ON polymarket_btc_5m_flip_events TO price_writer;
+GRANT SELECT ON polymarket_btc_5m_flip_events TO price_reader;
+
+REVOKE ALL ON polymarket_btc_5m_flip_cutoffs FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON polymarket_btc_5m_flip_cutoffs TO price_writer;
+GRANT SELECT ON polymarket_btc_5m_flip_cutoffs TO price_reader;
+
+REVOKE ALL ON binance_microstructure_1s_flip_archive FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON binance_microstructure_1s_flip_archive TO price_writer;
+GRANT SELECT ON binance_microstructure_1s_flip_archive TO price_reader;
 
 CREATE TABLE IF NOT EXISTS binance_futures_oi_5m_summaries (
     symbol TEXT NOT NULL,

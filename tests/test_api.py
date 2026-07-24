@@ -759,6 +759,404 @@ def microstructure_row(**updates):
     return row
 
 
+def flip_market_row(**updates):
+    row = {
+        "market_id": 5_944_864,
+        "market_start_ms": 1_783_459_200_000,
+        "market_end_ms": 1_783_459_500_000,
+        "evaluation_status": "confirmed_flip",
+        "price_to_beat": Decimal("63337.115841440165000000"),
+        "official_close_price": Decimal("63336.719008471390000000"),
+        "official_winner": "Down",
+        "matching_crossing_count": 2,
+        "total_crossing_count_last_20s": 3,
+        "first_crossing_ms_before_end": 4_800,
+        "last_crossing_ms_before_end": 1_700,
+        "decisive_flip_direction": "up_to_down",
+        "decisive_flip_ms_before_end": 1_700,
+        "archive_status": "complete",
+        "source_microstructure_row_count": 299,
+        "archived_microstructure_row_count": 299,
+        "retention_safe": True,
+        "archived_ms": 1_783_459_560_000,
+    }
+    row.update(updates)
+    return row
+
+
+def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_flip_markets(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs == {
+            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "within_seconds": 5,
+            "kind": "any_crossing",
+            "direction": "up_to_down",
+            "winner": "Down",
+            "start_ms": 1_783_000_000_000,
+            "end_ms": 1_784_000_000_000,
+            "before_market_id": 5_944_900,
+            "limit": 3,
+        }
+        return [
+            flip_market_row(),
+            flip_market_row(
+                market_id=5_944_863,
+                market_start_ms=1_783_458_900_000,
+                market_end_ms=1_783_459_200_000,
+                matching_crossing_count=1,
+            ),
+            flip_market_row(
+                market_id=5_944_862,
+                market_start_ms=1_783_458_600_000,
+                market_end_ms=1_783_458_900_000,
+            ),
+        ]
+
+    monkeypatch.setattr(api, "fetch_flip_markets", fake_fetch_flip_markets)
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+
+    response = client.get(
+        "/markets/flips"
+        "?within_seconds=5"
+        "&kind=any_crossing"
+        "&direction=up_to_down"
+        "&winner=Down"
+        "&limit=2"
+        "&before_market_id=5944900"
+        "&start_ms=1783000000000"
+        "&end_ms=1784000000000"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 1
+    assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
+    assert body["server_time_ms"] == 1_783_460_100_123
+    assert body["filters"] == {
+        "within_seconds": 5,
+        "kind": "any_crossing",
+        "direction": "up_to_down",
+        "winner": "Down",
+        "start_ms": 1_783_000_000_000,
+        "end_ms": 1_784_000_000_000,
+    }
+    assert len(body["markets"]) == 2
+    assert body["next_before_market_id"] == 5_944_863
+    market = body["markets"][0]
+    assert market["price_to_beat"] == "63337.115841440165000000"
+    assert market["official_close"] == "63336.719008471390000000"
+    assert market["matching_crossing_count"] == 2
+    assert market["decisive_flip"] == {
+        "direction": "up_to_down",
+        "observed_ms_before_end": 1_700,
+    }
+    assert market["archive"] == {
+        "status": "complete",
+        "source_microstructure_rows": 299,
+        "archived_microstructure_rows": 299,
+        "retention_safe": True,
+        "archived_at_ms": 1_783_459_560_000,
+    }
+    assert market["flip_detail_url"] == "/markets/5944864/flips"
+    assert market["data_url"] == "/markets/5944864/data"
+
+
+def test_markets_flips_returns_empty_list_with_200(client, monkeypatch):
+    async def fake_fetch_flip_markets(pool, **kwargs):
+        assert kwargs["limit"] == 21
+        return []
+
+    monkeypatch.setattr(api, "fetch_flip_markets", fake_fetch_flip_markets)
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+
+    response = client.get("/markets/flips")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": 1,
+        "definition_version": api.FLIP_DEFINITION_VERSION,
+        "server_time_ms": 1_783_460_100_123,
+        "filters": {
+            "within_seconds": 20,
+            "kind": "any_crossing",
+        },
+        "markets": [],
+        "next_before_market_id": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "within_seconds=0",
+        "within_seconds=21",
+        "limit=0",
+        "limit=51",
+        "kind=unknown",
+        "direction=sideways",
+        "winner=up",
+        "before_market_id=-1",
+        "start_ms=-1",
+        "end_ms=-1",
+    ],
+)
+def test_markets_flips_rejects_invalid_query_before_database_access(
+    client,
+    monkeypatch,
+    query,
+):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid flip query must not access PostgreSQL")
+
+    monkeypatch.setattr(api, "fetch_flip_markets", unexpected_fetch)
+
+    response = client.get(f"/markets/flips?{query}")
+
+    assert response.status_code == 422
+
+
+def test_markets_flips_rejects_reversed_date_range_before_database_access(
+    client,
+    monkeypatch,
+):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid flip date range must not access PostgreSQL")
+
+    monkeypatch.setattr(api, "fetch_flip_markets", unexpected_fetch)
+
+    response = client.get("/markets/flips?start_ms=2000&end_ms=2000")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "start_ms must be less than end_ms"}
+
+
+def test_markets_flips_distribution_serializes_rates_and_keeps_zero_buckets(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_flip_distribution(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs == {
+            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "max_seconds": 5,
+            "direction": "up_to_down",
+            "start_ms": 1_783_000_000_000,
+            "end_ms": 1_784_000_000_000,
+        }
+        return {
+            "population": {
+                "resolved_markets": 2_050,
+                "eligible_markets": 2_012,
+                "ambiguous_markets": 38,
+                "markets_with_any_crossing": 214,
+            },
+            "crossings_by_time": [
+                {
+                    "from_ms_before_end": 5_000,
+                    "to_ms_before_end": 4_000,
+                    "crossing_event_count": 0,
+                    "unique_market_count": 0,
+                    "decisive_flip_market_count": 0,
+                    "to_up_count": 0,
+                    "to_down_count": 0,
+                    "cumulative_unique_markets_within_window": 33,
+                    "cumulative_market_rate": Decimal("0.01640159"),
+                }
+            ],
+            "cutoff_reversals": [
+                {
+                    "seconds_before_end": 5,
+                    "eligible_markets": 2_008,
+                    "markets_reversed_by_close": 151,
+                    "reversal_rate": Decimal("0.07519920"),
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        api,
+        "fetch_flip_distribution",
+        fake_fetch_flip_distribution,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+
+    response = client.get(
+        "/markets/flips/distribution"
+        "?max_seconds=5"
+        "&direction=up_to_down"
+        "&start_ms=1783000000000"
+        "&end_ms=1784000000000"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
+    assert body["max_seconds"] == 5
+    assert body["population"]["eligible_markets"] == 2_012
+    assert body["crossings_by_time"][0]["crossing_event_count"] == 0
+    assert body["crossings_by_time"][0]["cumulative_market_rate"] == "0.01640159"
+    assert body["cutoff_reversals"][0]["reversal_rate"] == "0.07519920"
+
+
+def test_markets_flip_detail_serializes_events_cutoffs_and_microstructure(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_market_flip_analysis(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs == {
+            "market_id": 5_944_864,
+            "definition_version": api.FLIP_DEFINITION_VERSION,
+        }
+        return {
+            "evaluation": {
+                **flip_market_row(),
+                "definition_version": api.FLIP_DEFINITION_VERSION,
+                "crossing_count": 3,
+                "touch_count": 1,
+                "observation_precision": "one_second_summary",
+                "analysis_start_ms": 1_783_459_480_000,
+                "analysis_end_ms": 1_783_459_500_000,
+                "chainlink_observation_count": 19,
+                "chainlink_strict_observation_count": 18,
+                "chainlink_first_provider_event_ms": 1_783_459_480_100,
+                "chainlink_last_provider_event_ms": 1_783_459_499_100,
+                "chainlink_max_gap_ms": 2_000,
+                "chainlink_cutoff_count": 20,
+                "fresh_chainlink_cutoff_count": 19,
+                "probability_cutoff_count": 20,
+                "fresh_probability_cutoff_count": 18,
+                "microstructure_cutoff_count": 19,
+                "quality_flags": ["missing_microstructure_cutoff"],
+                "evaluated_ms": 1_783_459_540_000,
+            },
+            "events": [
+                {
+                    "event_sequence": 1,
+                    "direction": "up_to_down",
+                    "previous_side": "Up",
+                    "new_side": "Down",
+                    "previous_price": Decimal("63337.20"),
+                    "new_price": Decimal("63336.90"),
+                    "previous_sample_second_ms": 1_783_459_497_000,
+                    "sample_second_ms": 1_783_459_498_000,
+                    "previous_provider_event_ms": 1_783_459_497_100,
+                    "provider_event_ms": 1_783_459_498_100,
+                    "previous_received_ms": 1_783_459_497_150,
+                    "received_ms": 1_783_459_498_150,
+                    "observation_gap_ms": 1_000,
+                    "observed_ms_before_end": 1_900,
+                    "is_decisive": True,
+                    "observation_precision": "one_second_summary",
+                }
+            ],
+            "cutoffs": [
+                {
+                    "seconds_before_end": 5,
+                    "cutoff_ms": 1_783_459_495_000,
+                    "chainlink_price": Decimal("63337.18"),
+                    "chainlink_sample_second_ms": 1_783_459_494_000,
+                    "chainlink_provider_event_ms": 1_783_459_494_100,
+                    "chainlink_received_ms": 1_783_459_494_150,
+                    "chainlink_source_age_ms": 900,
+                    "chainlink_received_age_ms": 850,
+                    "chainlink_fresh": True,
+                    "price_distance": Decimal("0.064158559835"),
+                    "absolute_price_distance": Decimal("0.064158559835"),
+                    "apparent_side": "Up",
+                    "up_bid": Decimal("0.81"),
+                    "up_ask": Decimal("0.82"),
+                    "up_mid": Decimal("0.815"),
+                    "up_prob_norm": Decimal("0.82"),
+                    "down_bid": Decimal("0.17"),
+                    "down_ask": Decimal("0.18"),
+                    "down_mid": Decimal("0.175"),
+                    "down_prob_norm": Decimal("0.18"),
+                    "probability_sample_second_ms": 1_783_459_494_000,
+                    "probability_provider_event_ms": 1_783_459_494_100,
+                    "probability_received_ms": 1_783_459_494_175,
+                    "probability_source_age_ms": 950,
+                    "probability_received_age_ms": 850,
+                    "up_probability_provider_event_ms": 1_783_459_494_100,
+                    "up_probability_received_ms": 1_783_459_494_175,
+                    "up_probability_source_age_ms": 900,
+                    "up_probability_received_age_ms": 825,
+                    "down_probability_provider_event_ms": 1_783_459_494_050,
+                    "down_probability_received_ms": 1_783_459_494_150,
+                    "down_probability_source_age_ms": 950,
+                    "down_probability_received_age_ms": 850,
+                    "probability_fresh": True,
+                    "official_winner": "Down",
+                    "flipped_after_cutoff": True,
+                    "microstructure_sample_second_ms": 1_783_459_494_000,
+                    "microstructure_available": True,
+                    "microstructure": microstructure_row(),
+                    "quality_flags": [],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_flip_analysis",
+        fake_fetch_market_flip_analysis,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+
+    response = client.get("/markets/5944864/flips")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["market"]["price_to_beat"] == "63337.115841440165000000"
+    assert body["evaluation"]["status"] == "confirmed_flip"
+    assert body["evaluation"]["crossing_count"] == 3
+    assert body["evaluation"]["chainlink"]["observation_count"] == 19
+    assert body["evaluation"]["cutoff_coverage"] == {
+        "chainlink_count": 20,
+        "fresh_chainlink_count": 19,
+        "probability_count": 20,
+        "fresh_probability_count": 18,
+        "microstructure_count": 19,
+    }
+    assert body["events"][0]["previous_chainlink_price"] == "63337.20"
+    assert body["events"][0]["new_chainlink_price"] == "63336.90"
+    cutoff = body["cutoffs"][0]
+    assert cutoff["signed_distance"] == "0.064158559835"
+    assert cutoff["probabilities"]["up"]["ask"] == "0.82"
+    assert cutoff["probabilities"]["up"]["source_age_ms"] == 900
+    assert cutoff["probabilities"]["down"]["received_age_ms"] == 850
+    assert cutoff["probabilities"]["age_ms"] == 950
+    assert cutoff["probabilities"]["received_age_ms"] == 850
+    assert cutoff["flipped_after_cutoff"] is True
+    assert cutoff["microstructure"]["books"]["spot"]["bid"] == (
+        "65757.900000000000000000"
+    )
+    assert body["archive"]["status"] == "complete"
+    assert body["data_url"] == "/markets/5944864/data"
+
+
+def test_markets_flip_detail_returns_404_when_not_evaluated(client, monkeypatch):
+    async def fake_fetch_market_flip_analysis(pool, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_flip_analysis",
+        fake_fetch_market_flip_analysis,
+    )
+
+    response = client.get("/markets/5944864/flips")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "no flip analysis found for market_id=5944864"
+    }
+
+
 def test_markets_current_data_uses_current_five_minute_market(client, monkeypatch):
     async def fake_fetch_market_download_payload(
         pool,
@@ -1126,7 +1524,7 @@ def test_market_data_rejects_invalid_microstructure_group_selection(
     assert response.status_code == 422
 
 
-def test_openapi_lists_futures_flow_book_and_microstructure_flags(client):
+def test_openapi_lists_data_flags_and_flip_research_routes(client):
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
@@ -1139,6 +1537,16 @@ def test_openapi_lists_futures_flow_book_and_microstructure_flags(client):
         param["name"]
         for param in schema["paths"]["/markets/{market_id}/data"]["get"]["parameters"]
     }
+    flip_list_params = {
+        param["name"]
+        for param in schema["paths"]["/markets/flips"]["get"]["parameters"]
+    }
+    flip_distribution_params = {
+        param["name"]
+        for param in schema["paths"]["/markets/flips/distribution"]["get"][
+            "parameters"
+        ]
+    }
 
     assert "include_flow" in current_data_params
     assert "include_book" in current_data_params
@@ -1148,6 +1556,23 @@ def test_openapi_lists_futures_flow_book_and_microstructure_flags(client):
     assert "include_book" in market_data_params
     assert "include_microstructure" in market_data_params
     assert "microstructure_groups" in market_data_params
+    assert flip_list_params == {
+        "within_seconds",
+        "kind",
+        "direction",
+        "winner",
+        "limit",
+        "before_market_id",
+        "start_ms",
+        "end_ms",
+    }
+    assert flip_distribution_params == {
+        "max_seconds",
+        "direction",
+        "start_ms",
+        "end_ms",
+    }
+    assert "/markets/{market_id}/flips" in schema["paths"]
 
 
 def test_markets_current_data_passes_display_fill_options(client, monkeypatch):

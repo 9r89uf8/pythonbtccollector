@@ -100,6 +100,9 @@ const microstructureLive = await apiGet("/markets/current/microstructure/live");
 | `GET` | `/healthz` | API/database health | PostgreSQL |
 | `GET` | `/prices/latest` | Latest stored price for one source | PostgreSQL |
 | `GET` | `/markets` | Discover recent market IDs and data availability | PostgreSQL |
+| `GET` | `/markets/flips` | Find markets with final-window crossings or cutoff reversals | PostgreSQL |
+| `GET` | `/markets/flips/distribution` | Aggregate crossing-time and cutoff-reversal distributions | PostgreSQL |
+| `GET` | `/markets/{market_id}/flips` | Versioned flip analysis, events, and T-20 through T-1 evidence | PostgreSQL |
 | `GET` | `/markets/latest` | Latest stored five-minute market for one source | PostgreSQL |
 | `GET` | `/markets/{market_id}` | One source's five-minute OHLC and samples | PostgreSQL |
 | `GET` | `/markets/current/sources` | Current-window source comparison | PostgreSQL |
@@ -345,6 +348,332 @@ This keeps discovery responses small while the detail route supplies the
 three prices, flow, book, open-interest, and Polymarket probability series for
 the selected market. For an active dashboard, `/markets/current/data` remains
 available and its response also contains `market.market_id`.
+
+## Flip Research
+
+The flip routes use permanent, versioned post-resolution records. They do not
+infer a result from the final Up/Down quote. The threshold is Polymarket's
+official Chainlink `priceToBeat`, and the label is the official market winner.
+
+The evaluated interval is half-open:
+
+```text
+[market_end_ms - 20,000, market_end_ms)
+```
+
+An exact threshold equality is a `tie`, not Up or Down. The dataset keeps these
+concepts separate:
+
+- `any_crossing`: every observed strict-side threshold crossing in the final
+  window.
+- `decisive_flip`: the last observed crossing into the official winning side.
+- `cutoff_reversal`: the strict side visible at one exact cutoff differs from
+  the official winner.
+
+A market can have multiple crossings. A crossing bracket wider than 10 seconds
+is retained as evidence but makes the market `ambiguous`, rather than claiming
+an exact confirmed crossing across a stale gap. Missing or stale evidence makes
+an otherwise unconfirmed market `ambiguous`; it is never silently counted as a
+non-flip.
+
+### `GET /markets/flips`
+
+Returns each matching market once, newest first.
+
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `within_seconds` | integer | `20` | Final-window bound from `1` through `20` |
+| `kind` | enum | `any_crossing` | `any_crossing`, `decisive_flip`, or `cutoff_reversal` |
+| `direction` | enum or omitted | omitted | `up_to_down` or `down_to_up` |
+| `winner` | enum or omitted | omitted | Official `Up` or `Down` winner |
+| `limit` | integer | `20` | Number of markets from `1` through `50` |
+| `before_market_id` | integer or omitted | omitted | Exclusive older-page cursor |
+| `start_ms` | integer or omitted | omitted | Inclusive market-start timestamp filter |
+| `end_ms` | integer or omitted | omitted | Exclusive market-start timestamp filter |
+
+For `any_crossing` and `decisive_flip`, `within_seconds=5` means the crossing
+timestamp is inside the final five seconds. For `cutoff_reversal`, it means the
+exact T-5 cutoff record.
+
+```bash
+curl "${API_BASE_URL}/markets/flips?within_seconds=5&kind=any_crossing&limit=20"
+curl "${API_BASE_URL}/markets/flips?within_seconds=10&kind=cutoff_reversal&winner=Down"
+```
+
+Response:
+
+```json
+{
+  "schema_version": 1,
+  "definition_version": 1,
+  "server_time_ms": 1783459600123,
+  "filters": {
+    "within_seconds": 5,
+    "kind": "any_crossing"
+  },
+  "markets": [
+    {
+      "market_id": 5944864,
+      "market_start_ms": 1783459200000,
+      "market_end_ms": 1783459500000,
+      "price_to_beat": "63337.115841440165000000",
+      "official_close": "63336.719008471390000000",
+      "winner": "Down",
+      "evaluation_status": "confirmed_flip",
+      "matching_crossing_count": 2,
+      "total_crossing_count_last_20s": 3,
+      "first_crossing_ms_before_end": 4800,
+      "last_crossing_ms_before_end": 1700,
+      "decisive_flip": {
+        "direction": "up_to_down",
+        "observed_ms_before_end": 1700
+      },
+      "archive": {
+        "status": "complete",
+        "source_microstructure_rows": 299,
+        "archived_microstructure_rows": 299,
+        "retention_safe": true,
+        "archived_at_ms": 1783459525000
+      },
+      "flip_detail_url": "/markets/5944864/flips",
+      "data_url": "/markets/5944864/data"
+    }
+  ],
+  "next_before_market_id": 5944800
+}
+```
+
+An empty search is HTTP `200` with `markets: []` and a null cursor. Pass a
+non-null cursor back unchanged as `before_market_id`.
+
+### `GET /markets/{market_id}/flips`
+
+Returns the stored evaluation, every observed crossing, and all twenty cutoff
+records ordered T-20 through T-1.
+
+```bash
+curl --compressed "${API_BASE_URL}/markets/5944864/flips"
+```
+
+The response has this top-level shape:
+
+```json
+{
+  "schema_version": 1,
+  "definition_version": 1,
+  "server_time_ms": 1783459600123,
+  "market": {
+    "market_id": 5944864,
+    "market_start_ms": 1783459200000,
+    "market_end_ms": 1783459500000,
+    "price_to_beat": "63337.115841440165000000",
+    "official_close": "63336.719008471390000000",
+    "winner": "Down"
+  },
+  "evaluation": {
+    "status": "confirmed_flip",
+    "observation_precision": "one_second_summary",
+    "analysis_start_ms": 1783459480000,
+    "analysis_end_ms": 1783459500000,
+    "crossing_count": 3,
+    "touch_count": 0,
+    "first_crossing_ms_before_end": 4800,
+    "last_crossing_ms_before_end": 1700,
+    "decisive_flip": {
+      "direction": "up_to_down",
+      "observed_ms_before_end": 1700
+    },
+    "chainlink": {
+      "observation_count": 20,
+      "strict_observation_count": 20,
+      "first_provider_event_ms": 1783459480000,
+      "last_provider_event_ms": 1783459498300,
+      "max_gap_ms": 1000
+    },
+    "cutoff_coverage": {
+      "chainlink_count": 20,
+      "fresh_chainlink_count": 20,
+      "probability_count": 20,
+      "fresh_probability_count": 20,
+      "microstructure_count": 19
+    },
+    "quality_flags": [
+      "missing_microstructure_cutoffs"
+    ],
+    "evaluated_at_ms": 1783459524000
+  },
+  "events": [
+    {
+      "event_sequence": 1,
+      "direction": "up_to_down",
+      "previous_side": "Up",
+      "new_side": "Down",
+      "previous_chainlink_price": "63337.250000000000000000",
+      "new_chainlink_price": "63336.990000000000000000",
+      "previous_sample_second_ms": 1783459497000,
+      "new_sample_second_ms": 1783459498000,
+      "previous_provider_event_ms": 1783459497300,
+      "new_provider_event_ms": 1783459498300,
+      "previous_received_ms": 1783459497420,
+      "new_received_ms": 1783459498420,
+      "observation_gap_ms": 1000,
+      "observed_ms_before_end": 1700,
+      "is_decisive": true,
+      "observation_precision": "one_second_summary"
+    }
+  ],
+  "cutoffs": [
+    {
+      "seconds_before_end": 20,
+      "cutoff_ms": 1783459480000,
+      "chainlink": {
+        "price": "63338.010000000000000000",
+        "sample_second_ms": 1783459479000,
+        "provider_event_ms": 1783459479000,
+        "received_ms": 1783459479100,
+        "age_ms": 1000,
+        "received_age_ms": 900,
+        "fresh": true
+      },
+      "signed_distance": "0.894158559835000000",
+      "absolute_distance": "0.894158559835000000",
+      "apparent_side": "Up",
+      "probabilities": {
+        "up": {
+          "bid": "0.60000000",
+          "ask": "0.61000000",
+          "mid": "0.60500000",
+          "normalized": "0.61000000",
+          "provider_event_ms": 1783459479500,
+          "received_ms": 1783459479600,
+          "source_age_ms": 500,
+          "received_age_ms": 400
+        },
+        "down": {
+          "bid": "0.38000000",
+          "ask": "0.39000000",
+          "mid": "0.38500000",
+          "normalized": "0.39000000",
+          "provider_event_ms": 1783459479400,
+          "received_ms": 1783459479550,
+          "source_age_ms": 600,
+          "received_age_ms": 450
+        },
+        "sample_second_ms": 1783459479000,
+        "provider_event_ms": 1783459479500,
+        "received_ms": 1783459479600,
+        "age_ms": 600,
+        "received_age_ms": 450,
+        "fresh": true
+      },
+      "official_winner": "Down",
+      "flipped_after_cutoff": true,
+      "microstructure_sample_second_ms": 1783459479000,
+      "microstructure_available": true,
+      "microstructure": {
+        "collector_healthy": true,
+        "books": {},
+        "flow": {},
+        "cross_market": {},
+        "liquidations": {},
+        "quality": {}
+      },
+      "quality_flags": []
+    }
+  ],
+  "archive": {
+    "status": "complete",
+    "source_microstructure_rows": 299,
+    "archived_microstructure_rows": 299,
+    "retention_safe": true,
+    "archived_at_ms": 1783459525000
+  },
+  "data_url": "/markets/5944864/data"
+}
+```
+
+The cutoff `microstructure` object uses the same nested groups documented under
+**Optional `microstructure`**. It is null when that exact prior one-second
+receipt interval was not collected. Missing collected seconds stay missing.
+The timestamps inside `probabilities.up` and `probabilities.down` represent the
+oldest non-null bid/ask component used for that outcome, so their ages expose a
+stale half of a composite quote. The enclosing `provider_event_ms` and
+`received_ms` remain the row-level causal availability bound, while the
+enclosing age fields report the worst component age. Historical source rows
+created before component timestamps were introduced retain their prices but
+report `fresh: false` and the `unknown_probability_component_freshness` quality
+flag.
+
+The route returns HTTP `404` when that market has no evaluation for the current
+definition version. That can be temporary while an ended market still awaits
+complete official resolution data or the evaluator's retry loop.
+
+### `GET /markets/flips/distribution`
+
+Returns one-second crossing buckets and one cutoff-reversal row for every
+requested second.
+
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `max_seconds` | integer | `20` | Produce T-1 through this second, from `1` through `20` |
+| `direction` | enum or omitted | omitted | Restrict crossing counts by direction; cutoff denominators and reversal counts use the matching source side |
+| `start_ms` | integer or omitted | omitted | Inclusive market-start timestamp filter |
+| `end_ms` | integer or omitted | omitted | Exclusive market-start timestamp filter |
+
+```bash
+curl "${API_BASE_URL}/markets/flips/distribution?max_seconds=20"
+```
+
+Response:
+
+```json
+{
+  "schema_version": 1,
+  "definition_version": 1,
+  "server_time_ms": 1783459600123,
+  "max_seconds": 20,
+  "population": {
+    "resolved_markets": 2050,
+    "eligible_markets": 2012,
+    "ambiguous_markets": 38,
+    "markets_with_any_crossing": 214
+  },
+  "crossings_by_time": [
+    {
+      "from_ms_before_end": 5000,
+      "to_ms_before_end": 4000,
+      "crossing_event_count": 16,
+      "unique_market_count": 15,
+      "decisive_flip_market_count": 12,
+      "to_up_count": 7,
+      "to_down_count": 9,
+      "cumulative_unique_markets_within_window": 33,
+      "cumulative_market_rate": "0.01640159"
+    }
+  ],
+  "cutoff_reversals": [
+    {
+      "seconds_before_end": 5,
+      "eligible_markets": 2008,
+      "markets_reversed_by_close": 151,
+      "reversal_rate": "0.07519920"
+    }
+  ]
+}
+```
+
+A `5000` to `4000` crossing bucket is `(4000, 5000]` milliseconds before
+expiry. Counts distinguish events from distinct markets so repeated crossings
+do not inflate the market rate. Each cutoff denominator excludes a missing,
+tie, future-timestamped, or stale Chainlink observation. With a direction
+filter, the cutoff denominator is also restricted to apparent `Up` for
+`up_to_down` or apparent `Down` for `down_to_up`; the top-level population
+denominator remains direction-independent. Probability freshness requires both
+receive age and, when present, provider-source age to be within 15 seconds.
+Rates are decimal strings, not JSON floating-point values.
+
+All three flip routes return HTTP `422` for enum/range violations or when both
+date bounds are present and `start_ms >= end_ms`.
 
 ## Single-Source Market Summary
 
@@ -999,10 +1328,12 @@ Its normal price and optional datasets are unchanged, every grid row has
 ```
 
 The API queries by `market_id` and ordered `sample_second_ms`, returning at most
-300 rows; there is no microstructure pagination. It does not read historical
-microstructure from Redis. These responses can be several hundred kilobytes, so
-clients should allow gzip compression; `fetch` does so automatically, and
-command-line callers can use `curl --compressed`.
+300 rows; there is no microstructure pagination. For each second it prefers the
+ordinary retention-managed table, then falls back to the permanent flip archive
+when one exists. It does not read historical microstructure from Redis. These
+responses can be several hundred kilobytes, so clients should allow gzip
+compression; `fetch` does so automatically, and command-line callers can use
+`curl --compressed`.
 
 The data routes return HTTP `404` when the selected market window does not
 exist. The current route uses `{"detail":"no current market data found"}`;

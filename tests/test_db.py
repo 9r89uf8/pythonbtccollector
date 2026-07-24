@@ -542,6 +542,10 @@ def test_upsert_polymarket_probability_sample_updates_duplicate_source_second_ro
 
     assert "ON CONFLICT (market_id, source, sample_second_ms)" in source
     assert "DO UPDATE SET" in source
+    assert "up_provider_event_ms = EXCLUDED.up_provider_event_ms" in source
+    assert "up_received_ms = EXCLUDED.up_received_ms" in source
+    assert "down_provider_event_ms = EXCLUDED.down_provider_event_ms" in source
+    assert "down_received_ms = EXCLUDED.down_received_ms" in source
 
 
 def test_upsert_binance_futures_snapshot_updates_duplicate_symbol_second_rows():
@@ -1488,7 +1492,7 @@ def test_fetch_market_download_payload_query_includes_optional_futures_joins():
     assert "f.sample_second_ms - 300000" in source
 
 
-def test_fetch_market_microstructure_rows_uses_market_index_order():
+def test_fetch_market_microstructure_rows_prefers_live_rows_and_falls_back_to_archive():
     class FakeAcquire:
         def __init__(self, connection):
             self.connection = connection
@@ -1531,8 +1535,16 @@ def test_fetch_market_microstructure_rows_uses_market_index_order():
 
     query, args = pool.connection.calls[0]
     assert "FROM binance_microstructure_1s" in query
-    assert "WHERE market_id = $1" in query
-    assert "symbol = 'BTCUSDT'" in query
+    assert "FROM binance_microstructure_1s_flip_archive" in query
+    assert "live.market_id = $1" in query
+    assert "archived.market_id = $1" in query
+    assert "live.symbol = 'BTCUSDT'" in query
+    assert "archived.symbol = 'BTCUSDT'" in query
+    assert "0 AS source_priority" in query
+    assert "1 AS source_priority" in query
+    assert "UNION ALL" in query
+    assert "DISTINCT ON (symbol, sample_second_ms)" in query
+    assert "ORDER BY symbol, sample_second_ms, source_priority" in query
     assert "ORDER BY sample_second_ms ASC" in query
     assert "LIMIT 300" in query
     assert args == (5_944_864,)

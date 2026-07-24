@@ -304,6 +304,356 @@ rollback step.
 For an update that changes the market data/download contract, repeat the
 completed-market API check from **Check Services** above.
 
+## Permanent Flip Research Archive
+
+The flip evaluator runs as an independent retrying task inside
+`price-collector-polymarket-probabilities`. It waits for a completed official
+resolution with both Chainlink open and close prices, then permanently stores
+the versioned evaluation, every final-20-second crossing, and causal T-20
+through T-1 cutoff records.
+
+Confirmed flips and ambiguous markets also receive a typed copy of every
+available row from their complete five-minute
+`binance_microstructure_1s` window. Ordinary retention fails closed:
+microstructure rows cannot expire until the current definition's evaluation is
+`retention_safe`; an archive-required market becomes safe only after copied
+and source row counts match. Retention also checks each archived key and its
+`received_ms`, so a late or newer live-table write remains protected until the
+evaluator synchronizes that exact row.
+
+Here, permanent means no application TTL and inclusion in verified PostgreSQL
+backups. Continue monitoring disk and backup capacity; the droplet cannot
+provide literal unbounded storage.
+
+### Deploy schema and runtime
+
+Run this only after the change is pushed to GitHub. Schema must be applied
+before any affected service is restarted.
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+
+sudo install -d -o postgres -g postgres -m 0750 \
+  /var/lib/price-collector/backups
+sudo -u postgres pg_dump -Fc -d price_collector \
+  -f "/var/lib/price-collector/backups/price_collector_before_flip_$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector \
+  -f /opt/price-collector/schema.sql
+
+sudo systemctl restart \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api
+```
+
+No new systemd unit or production environment key is required. Do not replace
+either file under `/etc/price-collector` with an example file.
+
+### Verify backfill, archive safety, and API
+
+The initial backfill is automatic. The oldest complete official resolutions are
+processed first. Repeat the following query until `remaining` is zero; a
+non-zero value while the service is actively advancing is not a failure.
+
+```bash
+set -euo pipefail
+
+sudo systemctl status \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api \
+  --no-pager
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector <<'SQL'
+WITH eligible AS (
+    SELECT resolution.market_id
+    FROM polymarket_btc_5m_resolutions AS resolution
+    WHERE resolution.resolution_status = 'resolved'
+      AND resolution.resolution_type IS NOT NULL
+      AND resolution.chainlink_open_price IS NOT NULL
+      AND resolution.chainlink_close_price IS NOT NULL
+), current_evaluations AS (
+    SELECT *
+    FROM polymarket_btc_5m_flip_evaluations
+    WHERE definition_version = 1
+      AND observation_precision <> 'evaluation_failed'
+)
+SELECT
+    count(*) AS eligible,
+    count(evaluation.market_id) AS evaluated,
+    count(*) - count(evaluation.market_id) AS remaining,
+    count(*) FILTER (
+        WHERE evaluation.evaluation_status = 'confirmed_flip'
+    ) AS confirmed_flips,
+    count(*) FILTER (
+        WHERE evaluation.evaluation_status = 'non_flip'
+    ) AS non_flips,
+    count(*) FILTER (
+        WHERE evaluation.evaluation_status = 'ambiguous'
+    ) AS ambiguous,
+    count(*) FILTER (
+        WHERE evaluation.market_id IS NOT NULL
+          AND NOT evaluation.retention_safe
+    ) AS retention_unsafe
+FROM eligible
+LEFT JOIN current_evaluations AS evaluation USING (market_id);
+
+SELECT
+    evaluation_status,
+    archive_status,
+    count(*) AS markets,
+    sum(source_microstructure_row_count) AS source_rows,
+    sum(archived_microstructure_row_count) AS archived_rows,
+    bool_and(retention_safe) AS all_retention_safe
+FROM polymarket_btc_5m_flip_evaluations
+WHERE definition_version = 1
+GROUP BY evaluation_status, archive_status
+ORDER BY evaluation_status, archive_status;
+
+SELECT
+    count(*) AS evaluated_markets,
+    count(*) FILTER (WHERE cutoff_rows = 20) AS markets_with_20_cutoffs,
+    min(cutoff_rows) AS minimum_cutoff_rows,
+    max(cutoff_rows) AS maximum_cutoff_rows
+FROM (
+    SELECT evaluation.market_id, count(cutoff.*) AS cutoff_rows
+    FROM polymarket_btc_5m_flip_evaluations AS evaluation
+    LEFT JOIN polymarket_btc_5m_flip_cutoffs AS cutoff
+      ON cutoff.market_id = evaluation.market_id
+     AND cutoff.definition_version = evaluation.definition_version
+    WHERE evaluation.definition_version = 1
+      AND evaluation.observation_precision <> 'evaluation_failed'
+    GROUP BY evaluation.market_id
+) AS coverage;
+
+SELECT
+    evaluation.market_id,
+    evaluation.source_microstructure_row_count,
+    evaluation.archived_microstructure_row_count,
+    count(archive.*) AS counted_archive_rows
+FROM polymarket_btc_5m_flip_evaluations AS evaluation
+LEFT JOIN binance_microstructure_1s_flip_archive AS archive
+  ON archive.market_id = evaluation.market_id
+WHERE evaluation.definition_version = 1
+  AND evaluation.archive_status = 'complete'
+GROUP BY
+    evaluation.market_id,
+    evaluation.source_microstructure_row_count,
+    evaluation.archived_microstructure_row_count
+HAVING evaluation.source_microstructure_row_count
+       <> evaluation.archived_microstructure_row_count
+    OR evaluation.archived_microstructure_row_count <> count(archive.*);
+
+SELECT
+    live.market_id,
+    live.sample_second_ms,
+    live.received_ms AS live_received_ms,
+    archive.received_ms AS archive_received_ms
+FROM binance_microstructure_1s AS live
+JOIN polymarket_btc_5m_flip_evaluations AS evaluation
+  ON evaluation.market_id = live.market_id
+ AND evaluation.definition_version = 1
+LEFT JOIN binance_microstructure_1s_flip_archive AS archive
+  ON archive.symbol = live.symbol
+ AND archive.sample_second_ms = live.sample_second_ms
+WHERE evaluation.archive_status = 'complete'
+  AND (
+        archive.sample_second_ms IS NULL
+        OR archive.received_ms < live.received_ms
+  )
+ORDER BY live.market_id, live.sample_second_ms
+LIMIT 100;
+SQL
+
+curl -fsS http://127.0.0.1:9000/healthz
+curl -fsS \
+  'http://127.0.0.1:9000/markets/flips?within_seconds=20&kind=any_crossing&limit=3'
+curl -fsS \
+  'http://127.0.0.1:9000/markets/flips/distribution?max_seconds=20'
+
+FLIP_MARKET_ID="$(
+  sudo -u postgres psql -At -d price_collector -c \
+    "SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 1 AND observation_precision <> 'evaluation_failed' ORDER BY market_id DESC LIMIT 1"
+)"
+if [ -n "${FLIP_MARKET_ID}" ]; then
+  curl -fsS "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips"
+  curl -fsS --compressed \
+    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/data?include_microstructure=true"
+fi
+
+REMAINING="$(
+  sudo -u postgres psql -At -d price_collector -c \
+    "WITH eligible AS (SELECT market_id FROM polymarket_btc_5m_resolutions WHERE resolution_status = 'resolved' AND resolution_type IS NOT NULL AND chainlink_open_price IS NOT NULL AND chainlink_close_price IS NOT NULL), completed AS (SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 1 AND observation_precision <> 'evaluation_failed') SELECT count(*) FROM eligible LEFT JOIN completed USING (market_id) WHERE completed.market_id IS NULL"
+)"
+if [ "${REMAINING}" != "0" ]; then
+  echo "flip backfill still has ${REMAINING} markets; repeat verification before the post-deploy backup" >&2
+  exit 1
+fi
+
+POST_FLIP_BACKUP="/var/lib/price-collector/backups/price_collector_after_flip_$(date -u +%Y%m%dT%H%M%SZ).dump"
+sudo -u postgres pg_dump -Fc -d price_collector -f "${POST_FLIP_BACKUP}"
+BACKUP_TOC="$(mktemp)"
+trap 'rm -f "${BACKUP_TOC}"' EXIT
+sudo -u postgres pg_restore -l "${POST_FLIP_BACKUP}" >"${BACKUP_TOC}"
+for table in \
+  polymarket_btc_5m_flip_evaluations \
+  polymarket_btc_5m_flip_events \
+  polymarket_btc_5m_flip_cutoffs \
+  binance_microstructure_1s_flip_archive
+do
+  grep -Fq " TABLE public ${table} " "${BACKUP_TOC}" || {
+    echo "backup is missing table definition: ${table}" >&2
+    exit 1
+  }
+  grep -Fq " TABLE DATA public ${table} " "${BACKUP_TOC}" || {
+    echo "backup is missing table data entry: ${table}" >&2
+    exit 1
+  }
+done
+rm -f "${BACKUP_TOC}"
+trap - EXIT
+
+sudo journalctl \
+  -u price-collector-polymarket-probabilities \
+  -u price-collector-binance-futures \
+  -u price-api \
+  -n 200 \
+  --no-pager
+```
+
+Both archive mismatch queries must return zero rows after backfill. A market can
+legitimately have fewer than 300 source/archive rows; completeness means every
+available source row was copied, not that missing seconds were fabricated.
+Investigate `archive_status='failed'`, a non-advancing `remaining` count, or
+evaluator/archive exceptions in the bounded journal output before allowing an
+old market's evidence to be treated as safe.
+
+### Seven-day storage canary
+
+Record a baseline after the initial backfill, then run the same query daily for
+at least seven days:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector <<'SQL'
+SELECT
+    clock_timestamp() AS measured_at,
+    pg_total_relation_size(
+        'polymarket_btc_5m_flip_evaluations'
+    ) AS evaluations_bytes,
+    pg_size_pretty(pg_total_relation_size(
+        'polymarket_btc_5m_flip_evaluations'
+    )) AS evaluations_pretty,
+    pg_total_relation_size(
+        'polymarket_btc_5m_flip_events'
+    ) AS events_bytes,
+    pg_size_pretty(pg_total_relation_size(
+        'polymarket_btc_5m_flip_events'
+    )) AS events_pretty,
+    pg_total_relation_size(
+        'polymarket_btc_5m_flip_cutoffs'
+    ) AS cutoffs_bytes,
+    pg_size_pretty(pg_total_relation_size(
+        'polymarket_btc_5m_flip_cutoffs'
+    )) AS cutoffs_pretty,
+    pg_total_relation_size(
+        'binance_microstructure_1s_flip_archive'
+    ) AS microstructure_archive_bytes,
+    pg_size_pretty(pg_total_relation_size(
+        'binance_microstructure_1s_flip_archive'
+    )) AS microstructure_archive_pretty,
+    pg_database_size(current_database()) AS database_total_bytes,
+    pg_size_pretty(
+        pg_database_size(current_database())
+    ) AS database_total_pretty;
+
+SELECT
+    count(*) FILTER (
+        WHERE observation_precision <> 'evaluation_failed'
+    ) AS evaluations,
+    count(*) FILTER (
+        WHERE observation_precision <> 'evaluation_failed'
+          AND evaluation_status = 'confirmed_flip'
+    ) AS confirmed_flips,
+    count(*) FILTER (
+        WHERE observation_precision <> 'evaluation_failed'
+          AND evaluation_status = 'ambiguous'
+    ) AS ambiguous,
+    count(*) FILTER (
+        WHERE observation_precision = 'evaluation_failed'
+    ) AS evaluation_failures,
+    count(*) FILTER (
+        WHERE observation_precision <> 'evaluation_failed'
+          AND NOT retention_safe
+    ) AS retention_unsafe,
+    (
+        SELECT count(*)
+        FROM polymarket_btc_5m_flip_events
+        WHERE definition_version = 1
+    ) AS crossing_events
+FROM polymarket_btc_5m_flip_evaluations
+WHERE definition_version = 1;
+
+SELECT count(*) AS markets_without_20_cutoffs
+FROM (
+    SELECT evaluation.market_id, count(cutoff.*) AS cutoff_rows
+    FROM polymarket_btc_5m_flip_evaluations AS evaluation
+    LEFT JOIN polymarket_btc_5m_flip_cutoffs AS cutoff
+      ON cutoff.market_id = evaluation.market_id
+     AND cutoff.definition_version = evaluation.definition_version
+    WHERE evaluation.definition_version = 1
+      AND evaluation.observation_precision <> 'evaluation_failed'
+    GROUP BY evaluation.market_id
+) AS coverage
+WHERE cutoff_rows <> 20;
+
+SELECT count(*) AS archive_count_mismatches
+FROM polymarket_btc_5m_flip_evaluations AS evaluation
+WHERE evaluation.definition_version = 1
+  AND evaluation.archive_status = 'complete'
+  AND (
+        evaluation.source_microstructure_row_count
+            <> evaluation.archived_microstructure_row_count
+        OR evaluation.archived_microstructure_row_count <> (
+            SELECT count(*)
+            FROM binance_microstructure_1s_flip_archive AS archive
+            WHERE archive.market_id = evaluation.market_id
+        )
+  );
+
+SELECT count(*) AS unsynchronized_live_archive_rows
+FROM binance_microstructure_1s AS live
+JOIN polymarket_btc_5m_flip_evaluations AS evaluation
+  ON evaluation.market_id = live.market_id
+ AND evaluation.definition_version = 1
+LEFT JOIN binance_microstructure_1s_flip_archive AS archive
+  ON archive.symbol = live.symbol
+ AND archive.sample_second_ms = live.sample_second_ms
+WHERE evaluation.archive_status = 'complete'
+  AND (
+        archive.sample_second_ms IS NULL
+        OR archive.received_ms < live.received_ms
+  );
+SQL
+```
+
+Use the measured seven-day deltas, not the starter archive estimate, to
+annualize storage. Evaluation and event counts should grow monotonically as
+markets resolve; investigate regressions or unexplained rate discontinuities
+rather than expecting static denominators. Accept the canary only after cutoff
+coverage remains 20 rows per completed evaluation, both archive mismatch counts
+remain zero, the verified post-deploy backup includes all four permanent
+tables, and there are no unexplained evaluation failures or retention-unsafe
+evaluations. This canary does not prove or close the separately deferred
+high-resolution Phase 4 partition/retention risks.
+
 ## Chainlink Accepted-Event Idle Watchdog
 
 The Chainlink RTDS connection can remain open while accepted BTC/USD price
