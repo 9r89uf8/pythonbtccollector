@@ -351,6 +351,9 @@ available and its response also contains `market.market_id`.
 
 ## Flip Research
 
+For a focused, copy/paste dashboard integration guide for these endpoints, see
+[`FLIP_RESEARCH_API.md`](FLIP_RESEARCH_API.md).
+
 The flip routes use permanent, versioned post-resolution records. They do not
 infer a result from the final Up/Down quote. The threshold is Polymarket's
 official Chainlink `priceToBeat`, and the label is the official market winner.
@@ -372,9 +375,11 @@ concepts separate:
 
 A market can have multiple crossings. A crossing bracket wider than 10 seconds
 is retained as evidence but makes the market `ambiguous`, rather than claiming
-an exact confirmed crossing across a stale gap. Missing or stale evidence makes
-an otherwise unconfirmed market `ambiguous`; it is never silently counted as a
-non-flip.
+an exact confirmed crossing across a stale gap. Missing or stale Chainlink
+threshold evidence makes an otherwise unconfirmed market `ambiguous`; it is
+never silently counted as a non-flip. Missing probability or microstructure
+evidence adds coverage and quality flags but does not by itself change the
+evaluation status.
 
 ### `GET /markets/flips`
 
@@ -595,6 +600,10 @@ The response has this top-level shape:
 The cutoff `microstructure` object uses the same nested groups documented under
 **Optional `microstructure`**. It is null when that exact prior one-second
 receipt interval was not collected. Missing collected seconds stay missing.
+Each event's `observed_ms_before_end` is the new opposite-side observation's
+provider timestamp, not an interpolated threshold-crossing instant. Use the
+previous/new provider timestamps and `observation_gap_ms` as the observed
+crossing bracket.
 The timestamps inside `probabilities.up` and `probabilities.down` represent the
 oldest non-null bid/ask component used for that outcome, so their ages expose a
 stale half of a composite quote. The enclosing `provider_event_ms` and
@@ -664,16 +673,22 @@ Response:
 
 A `5000` to `4000` crossing bucket is `(4000, 5000]` milliseconds before
 expiry. Counts distinguish events from distinct markets so repeated crossings
-do not inflate the market rate. Each cutoff denominator excludes a missing,
-tie, future-timestamped, or stale Chainlink observation. With a direction
-filter, the cutoff denominator is also restricted to apparent `Up` for
-`up_to_down` or apparent `Down` for `down_to_up`; the top-level population
-denominator remains direction-independent. Probability freshness requires both
-receive age and, when present, provider-source age to be within 15 seconds.
-Rates are decimal strings, not JSON floating-point values.
+do not inflate the market rate. Ambiguous markets are excluded from the
+top-level eligible count and crossing-time calculations.
+`markets_with_any_crossing` respects `max_seconds` and `direction`; the other
+top-level population counts remain direction-independent. Each cutoff
+denominator independently excludes a missing, tie, future-timestamped, or stale
+Chainlink observation, but can include an otherwise ambiguous market when that
+exact cutoff is fresh and strict. With a direction filter, the cutoff
+denominator is also restricted to apparent `Up` for `up_to_down` or apparent
+`Down` for `down_to_up`. Probability freshness requires both receive age and,
+when present, provider-source age to be within 15 seconds. Rates are decimal
+strings, not JSON floating-point values.
 
-All three flip routes return HTTP `422` for enum/range violations or when both
-date bounds are present and `start_ms >= end_ms`.
+The list and distribution routes return HTTP `422` for enum/range violations
+or when both date bounds are present and `start_ms >= end_ms`. The detail route
+has no supported query parameters and returns HTTP `404` when the current
+definition has no completed evaluation.
 
 ## Single-Source Market Summary
 
@@ -1334,6 +1349,11 @@ when one exists. It does not read historical microstructure from Redis. These
 responses can be several hundred kilobytes, so clients should allow gzip
 compression; `fetch` does so automatically, and command-line callers can use
 `curl --compressed`.
+
+Permanent full-market archive fallback is created for `confirmed_flip` and
+`ambiguous` evaluations. A `non_flip` evaluation has
+`archive.status="not_required"`, so its ordinary microstructure can disappear
+after normal retention.
 
 The data routes return HTTP `404` when the selected market window does not
 exist. The current route uses `{"detail":"no current market data found"}`;
