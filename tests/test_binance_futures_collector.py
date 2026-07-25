@@ -122,7 +122,7 @@ def test_build_snapshot_without_current_trade_keeps_rest_snapshot_fields():
         open_interest_payload=open_interest_payload(time=None),
         premium_index_payload=premium_index_payload(),
         futures_trade=None,
-        received_ms=1_783_459_499_999,
+        received_ms=1_783_459_500_700,
     )
 
     assert snapshot.open_interest_time_ms is None
@@ -135,25 +135,64 @@ def test_build_snapshot_without_current_trade_keeps_rest_snapshot_fields():
     assert snapshot.raw["aggTrade"] is None
 
 
-def test_build_snapshot_falls_back_to_premium_index_then_received_ms_for_row_time():
-    premium_snapshot = collector.build_binance_futures_snapshot(
+@pytest.mark.parametrize(
+    "premium_time_ms",
+    [
+        None,
+        1_783_459_500_500,
+        1_783_459_502_500,
+    ],
+)
+def test_build_snapshot_uses_observation_second_for_unaligned_premium_time(
+    premium_time_ms,
+):
+    snapshot = collector.build_binance_futures_snapshot(
         symbol="BTCUSDT",
         open_interest_payload=open_interest_payload(time=1_783_459_499_456),
-        premium_index_payload=premium_index_payload(time=1_783_459_500_500),
+        premium_index_payload=premium_index_payload(time=premium_time_ms),
         futures_trade=sequenced_futures_trade(),
         received_ms=1_783_459_501_700,
     )
 
-    received_snapshot = collector.build_binance_futures_snapshot(
+    assert snapshot.sample_second_ms == 1_783_459_501_000
+    assert snapshot.premium_index_time_ms == premium_time_ms
+
+
+def test_build_snapshot_repeated_premium_time_keeps_distinct_observation_seconds():
+    snapshots = [
+        collector.build_binance_futures_snapshot(
+            symbol="BTCUSDT",
+            open_interest_payload=open_interest_payload(),
+            premium_index_payload=premium_index_payload(time=1_783_459_500_500),
+            futures_trade=sequenced_futures_trade(),
+            received_ms=received_ms,
+        )
+        for received_ms in (1_783_459_500_700, 1_783_459_501_700)
+    ]
+
+    assert [snapshot.sample_second_ms for snapshot in snapshots] == [
+        1_783_459_500_000,
+        1_783_459_501_000,
+    ]
+    assert [snapshot.premium_index_time_ms for snapshot in snapshots] == [
+        1_783_459_500_500,
+        1_783_459_500_500,
+    ]
+
+
+def test_build_snapshot_lagging_premium_time_uses_new_market_boundary():
+    snapshot = collector.build_binance_futures_snapshot(
         symbol="BTCUSDT",
-        open_interest_payload=open_interest_payload(time=1_783_459_499_456),
-        premium_index_payload=premium_index_payload(time=None),
+        open_interest_payload=open_interest_payload(),
+        premium_index_payload=premium_index_payload(time=1_783_459_499_900),
         futures_trade=sequenced_futures_trade(),
-        received_ms=1_783_459_501_700,
+        received_ms=1_783_459_500_100,
     )
 
-    assert premium_snapshot.sample_second_ms == 1_783_459_500_000
-    assert received_snapshot.sample_second_ms == 1_783_459_501_000
+    assert snapshot.premium_index_time_ms == 1_783_459_499_900
+    assert snapshot.sample_second_ms == 1_783_459_500_000
+    assert snapshot.window.market_start_ms == 1_783_459_500_000
+    assert snapshot.window.market_end_ms == 1_783_459_800_000
 
 
 def test_build_snapshot_rejects_unexpected_symbol():

@@ -135,8 +135,17 @@ def _validate_symbol(payload: Mapping[str, Any], *, expected_symbol: str, endpoi
 
 
 def _sample_second_ms_for_source_time(source_time_ms: Optional[int], received_ms: int) -> int:
-    timestamp_ms = source_time_ms if source_time_ms is not None and source_time_ms > 0 else received_ms
-    return (timestamp_ms // 1000) * 1000
+    observation_second_ms = (received_ms // 1000) * 1000
+    if source_time_ms is None or source_time_ms <= 0:
+        return observation_second_ms
+
+    source_second_ms = (source_time_ms // 1000) * 1000
+    if source_second_ms != observation_second_ms:
+        # Binance can repeat or lag premiumIndex.time across consecutive polls.
+        # Retain that timestamp as source provenance, but key the causal snapshot
+        # to the UTC second of the completed snapshot observation.
+        return observation_second_ms
+    return source_second_ms
 
 
 def build_binance_futures_snapshot(
@@ -454,6 +463,15 @@ async def collect_once(
             "futures_last_source": "binance_futures_agg_trade",
             "futures_last_available": snapshot.futures_last_price is not None,
             "futures_last_price_time_ms": snapshot.futures_last_price_time_ms,
+            "premium_index_time_ms": snapshot.premium_index_time_ms,
+            "sample_second_source": (
+                "premium_index"
+                if snapshot.premium_index_time_ms is not None
+                and snapshot.premium_index_time_ms > 0
+                and (snapshot.premium_index_time_ms // 1000) * 1000
+                == snapshot.sample_second_ms
+                else "snapshot_observation"
+            ),
             "open_interest_time_ms": snapshot.open_interest_time_ms,
             "received_ms": snapshot.received_ms,
         },
