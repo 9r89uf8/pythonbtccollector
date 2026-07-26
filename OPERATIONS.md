@@ -481,10 +481,15 @@ curl -fsS \
 
 FLIP_MARKET_ID="$(
   sudo -u postgres psql -At -d price_collector -c \
-    "SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 1 AND observation_precision <> 'evaluation_failed' ORDER BY market_id DESC LIMIT 1"
+    "SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 1 AND observation_precision <> 'evaluation_failed' AND crossing_count > 0 ORDER BY market_id DESC LIMIT 1"
 )"
 if [ -n "${FLIP_MARKET_ID}" ]; then
   curl -fsS "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips"
+  curl -fsS --compressed \
+    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips/data" \
+    | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"market_id": payload["market"]["market_id"], "selection": payload["selection"], "availability": payload["availability"]}, indent=2))'
+  curl -fsS -D - -o /dev/null \
+    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips/download"
   curl -fsS --compressed \
     "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/data?include_microstructure=true"
 fi

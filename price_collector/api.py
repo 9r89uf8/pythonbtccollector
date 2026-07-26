@@ -52,6 +52,9 @@ SERVICE_NAME = "price-api"
 FlipKind = Literal["any_crossing", "decisive_flip", "cutoff_reversal"]
 FlipDirection = Literal["up_to_down", "down_to_up"]
 FlipWinner = Literal["Up", "Down"]
+FlipDataView = Literal["event_window", "full"]
+DEFAULT_FLIP_EVENT_WINDOW_BEFORE_SECONDS = 30
+MAX_FLIP_EVENT_WINDOW_BEFORE_SECONDS = 120
 DOWNLOAD_FLOW_FIELDS = (
     "taker_imbalance",
     "cvd_10s",
@@ -354,6 +357,8 @@ def serialize_flip_market_item(row: Mapping[str, Any]) -> dict[str, Any]:
         "archive": _serialize_flip_archive(row),
         "flip_detail_url": f"/markets/{market_id}/flips",
         "data_url": f"/markets/{market_id}/data",
+        "evidence_url": f"/markets/{market_id}/flips/data",
+        "evidence_download_url": f"/markets/{market_id}/flips/download",
     }
 
 
@@ -418,7 +423,11 @@ def serialize_flip_event(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def serialize_flip_cutoff(row: Mapping[str, Any]) -> dict[str, Any]:
+def serialize_flip_cutoff(
+    row: Mapping[str, Any],
+    *,
+    microstructure_groups: tuple[str, ...] = MICROSTRUCTURE_GROUPS,
+) -> dict[str, Any]:
     microstructure = _mapping_value(row, "microstructure")
     if microstructure is not None and not isinstance(microstructure, Mapping):
         raise TypeError("cutoff microstructure must be a mapping or null")
@@ -578,7 +587,10 @@ def serialize_flip_cutoff(row: Mapping[str, Any]) -> dict[str, Any]:
         "microstructure": (
             None
             if microstructure is None
-            else serialize_microstructure_row(microstructure)
+            else serialize_microstructure_row(
+                microstructure,
+                groups=microstructure_groups,
+            )
         ),
         "quality_flags": list(
             _mapping_value(row, "quality_flags", default=()) or ()
@@ -590,6 +602,7 @@ def serialize_market_flip_analysis(
     analysis: Mapping[str, Any],
     *,
     now_ms: int,
+    microstructure_groups: tuple[str, ...] = MICROSTRUCTURE_GROUPS,
 ) -> dict[str, Any]:
     evaluation = analysis["evaluation"]
     events = analysis.get("events") or []
@@ -766,12 +779,281 @@ def serialize_market_flip_analysis(
             for event in events
         ],
         "cutoffs": [
-            serialize_flip_cutoff(cutoff)
+            serialize_flip_cutoff(
+                cutoff,
+                microstructure_groups=microstructure_groups,
+            )
             for cutoff in cutoffs
         ],
         "archive": _serialize_flip_archive(evaluation),
         "data_url": f"/markets/{market_id}/data",
+        "evidence_url": f"/markets/{market_id}/flips/data",
+        "evidence_download_url": f"/markets/{market_id}/flips/download",
     }
+
+
+def _contains_non_null_data(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(_contains_non_null_data(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_non_null_data(item) for item in value)
+    return value is not None
+
+
+def summarize_flip_series_availability(
+    series: list[Mapping[str, Any]],
+) -> dict[str, int]:
+    def count_mapping(name: str) -> int:
+        return sum(
+            _contains_non_null_data(item.get(name))
+            for item in series
+        )
+
+    return {
+        "series_rows": len(series),
+        "binance_price_rows": sum(
+            (item.get("prices") or {}).get("binance") is not None
+            for item in series
+        ),
+        "chainlink_price_rows": sum(
+            (item.get("prices") or {}).get("chainlink") is not None
+            for item in series
+        ),
+        "probability_rows": count_mapping("probabilities"),
+        "futures_rows": count_mapping("futures"),
+        "open_interest_rows": count_mapping("open_interest"),
+        "flow_rows": count_mapping("flow"),
+        "book_rows": count_mapping("book"),
+        "microstructure_rows": sum(
+            item.get("microstructure") is not None
+            for item in series
+        ),
+        "microstructure_healthy_rows": sum(
+            isinstance(item.get("microstructure"), Mapping)
+            and item["microstructure"].get("collector_healthy") is True
+            for item in series
+        ),
+    }
+
+
+def select_flip_anchor_event(
+    events: list[Mapping[str, Any]],
+    *,
+    event_sequence: Optional[int],
+) -> tuple[Optional[Mapping[str, Any]], str]:
+    if event_sequence is not None:
+        selected = next(
+            (
+                event
+                for event in events
+                if int(event["event_sequence"]) == event_sequence
+            ),
+            None,
+        )
+        if selected is None:
+            raise LookupError(
+                f"no flip event_sequence={event_sequence} found"
+            )
+        return selected, "requested_event_sequence"
+
+    decisive = next(
+        (event for event in events if event.get("is_decisive") is True),
+        None,
+    )
+    if decisive is not None:
+        return decisive, "decisive_event"
+    if not events:
+        return None, "market_end_fallback"
+    return (
+        max(events, key=lambda event: int(event["event_sequence"])),
+        "latest_event_fallback",
+    )
+
+
+def build_flip_evidence_bundle(
+    analysis: Mapping[str, Any],
+    market_payload: Mapping[str, Any],
+    *,
+    anchor_event: Optional[Mapping[str, Any]],
+    anchor_reason: str,
+    view: FlipDataView,
+    before_seconds: int,
+    requested_event_sequence: Optional[int],
+    now_ms: int,
+    microstructure_groups: tuple[str, ...] = MICROSTRUCTURE_GROUPS,
+) -> dict[str, Any]:
+    serialized_flip = serialize_market_flip_analysis(
+        analysis,
+        now_ms=now_ms,
+        microstructure_groups=microstructure_groups,
+    )
+    payload_market = market_payload.get("market")
+    full_series_value = market_payload.get("series")
+    if not isinstance(payload_market, Mapping):
+        raise TypeError("market evidence payload must contain market metadata")
+    if not isinstance(full_series_value, list):
+        raise TypeError("market evidence payload series must be a list")
+
+    full_series = list(full_series_value)
+    market_start_ms = int(payload_market["market_start_ms"])
+    market_end_ms = int(payload_market["market_end_ms"])
+    anchor_sample_second_ms = (
+        market_end_ms
+        if anchor_event is None
+        else int(anchor_event["sample_second_ms"])
+    )
+
+    if view == "event_window":
+        requested_start_ms = (
+            anchor_sample_second_ms - before_seconds * 1_000
+        )
+        window_start_ms = max(market_start_ms, requested_start_ms)
+        clipped_at_market_start = window_start_ms != requested_start_ms
+    else:
+        window_start_ms = market_start_ms
+        clipped_at_market_start = False
+
+    selected_series = [
+        item
+        for item in full_series
+        if window_start_ms
+        <= int(item["timestamp_ms"])
+        < market_end_ms
+    ]
+    selected_microstructure_seconds = {
+        int(item["timestamp_ms"])
+        for item in selected_series
+        if item.get("microstructure") is not None
+    }
+
+    compact_cutoffs: list[dict[str, Any]] = []
+    reused_cutoff_microstructure_rows = 0
+    for cutoff in serialized_flip["cutoffs"]:
+        compact_cutoff = dict(cutoff)
+        microstructure_second_ms = compact_cutoff.get(
+            "microstructure_sample_second_ms"
+        )
+        can_reuse_series_row = (
+            compact_cutoff.get("microstructure") is not None
+            and microstructure_second_ms is not None
+            and int(microstructure_second_ms)
+            in selected_microstructure_seconds
+        )
+        if can_reuse_series_row:
+            compact_cutoff.pop("microstructure", None)
+            compact_cutoff["microstructure_reused_from_series"] = True
+            reused_cutoff_microstructure_rows += 1
+        else:
+            compact_cutoff["microstructure_reused_from_series"] = False
+        compact_cutoffs.append(compact_cutoff)
+
+    market = {
+        **dict(payload_market),
+        "price_to_beat": serialized_flip["market"]["price_to_beat"],
+        "official_close": serialized_flip["market"]["official_close"],
+        "winner": serialized_flip["market"]["winner"],
+    }
+    serialized_anchor = (
+        None
+        if anchor_event is None
+        else serialize_flip_event(anchor_event)
+    )
+    selected_availability = summarize_flip_series_availability(
+        selected_series
+    )
+    full_availability = summarize_flip_series_availability(full_series)
+    market_id = int(market["market_id"])
+    evidence_query_parts = [f"view={view}"]
+    if view == "event_window":
+        evidence_query_parts.append(f"before_seconds={before_seconds}")
+    if requested_event_sequence is not None:
+        evidence_query_parts.append(
+            f"event_sequence={requested_event_sequence}"
+        )
+    if microstructure_groups != MICROSTRUCTURE_GROUPS:
+        evidence_query_parts.append(
+            "microstructure_groups=" + ",".join(microstructure_groups)
+        )
+    evidence_query = "?" + "&".join(evidence_query_parts)
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "definition_version": serialized_flip["definition_version"],
+        "market_data_schema_version": int(
+            market_payload.get("schema_version") or 0
+        ),
+        "data_scope": "curated_public_api",
+        "server_time_ms": now_ms,
+        "market": market,
+        "selection": {
+            "view": view,
+            "anchor": {
+                "selection_reason": anchor_reason,
+                "sample_second_ms": anchor_sample_second_ms,
+                "event": serialized_anchor,
+            },
+            "window": {
+                "before_seconds": (
+                    before_seconds if view == "event_window" else None
+                ),
+                "start_ms": window_start_ms,
+                "end_ms_exclusive": market_end_ms,
+                "row_count": len(selected_series),
+                "rows_before_anchor": sum(
+                    int(item["timestamp_ms"]) < anchor_sample_second_ms
+                    for item in selected_series
+                ),
+                "rows_at_or_after_anchor_second": sum(
+                    int(item["timestamp_ms"]) >= anchor_sample_second_ms
+                    for item in selected_series
+                ),
+                "clipped_at_market_start": clipped_at_market_start,
+            },
+        },
+        "availability": {
+            "selected_window": selected_availability,
+            "full_market": full_availability,
+        },
+        "flip": {
+            "evaluation": serialized_flip["evaluation"],
+            "events": serialized_flip["events"],
+            "cutoffs": compact_cutoffs,
+            "archive": serialized_flip["archive"],
+            "cutoff_microstructure_rows_reused_from_series": (
+                reused_cutoff_microstructure_rows
+            ),
+        },
+        "series": selected_series,
+        "navigation": {
+            "older_page_cursor": market_id,
+            "list_parameter": "before_market_id",
+            "preserve_list_filters": True,
+        },
+        "links": {
+            "flip_list": "/markets/flips",
+            "flip_detail": f"/markets/{market_id}/flips",
+            "evidence": (
+                f"/markets/{market_id}/flips/data{evidence_query}"
+            ),
+            "evidence_download": (
+                f"/markets/{market_id}/flips/download{evidence_query}"
+            ),
+            "full_market_data": (
+                f"/markets/{market_id}/data"
+                "?include_probabilities=true"
+                "&include_futures=true"
+                "&include_oi=true"
+                "&include_flow=true"
+                "&include_book=true"
+                "&include_microstructure=true"
+            ),
+        },
+    }
+    if "previous_5m_oi_summary" in market_payload:
+        result["previous_5m_oi_summary"] = market_payload[
+            "previous_5m_oi_summary"
+        ]
+    return result
 
 
 def serialize_flip_distribution(
@@ -1148,6 +1430,102 @@ async def markets_flips_by_id(
     )
 
 
+@app.get("/markets/{market_id}/flips/data")
+async def markets_flip_data_by_id(
+    request: Request,
+    market_id: int,
+    view: FlipDataView = Query("event_window"),
+    before_seconds: int = Query(
+        DEFAULT_FLIP_EVENT_WINDOW_BEFORE_SECONDS,
+        ge=0,
+        le=MAX_FLIP_EVENT_WINDOW_BEFORE_SECONDS,
+        description=(
+            "One-second rows before the selected anchor; applied only "
+            "when view=event_window"
+        ),
+    ),
+    event_sequence: Optional[int] = Query(
+        None,
+        ge=1,
+        description=(
+            "Crossing to anchor; defaults to the decisive crossing and "
+            "then the latest crossing, or market end when no event exists"
+        ),
+    ),
+    microstructure_groups: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated microstructure groups: "
+            + ", ".join(MICROSTRUCTURE_GROUPS)
+        ),
+    ),
+) -> dict[str, Any]:
+    selected_microstructure_groups = requested_microstructure_groups(
+        include_microstructure=True,
+        microstructure_groups=microstructure_groups,
+    )
+    return await market_flip_evidence_payload(
+        request,
+        market_id=market_id,
+        view=view,
+        before_seconds=before_seconds,
+        event_sequence=event_sequence,
+        microstructure_groups=selected_microstructure_groups,
+    )
+
+
+@app.get("/markets/{market_id}/flips/download")
+async def markets_flip_download_by_id(
+    request: Request,
+    market_id: int,
+    view: FlipDataView = Query("event_window"),
+    before_seconds: int = Query(
+        DEFAULT_FLIP_EVENT_WINDOW_BEFORE_SECONDS,
+        ge=0,
+        le=MAX_FLIP_EVENT_WINDOW_BEFORE_SECONDS,
+        description=(
+            "One-second rows before the selected anchor; applied only "
+            "when view=event_window"
+        ),
+    ),
+    event_sequence: Optional[int] = Query(
+        None,
+        ge=1,
+        description=(
+            "Crossing to anchor; defaults to the decisive crossing and "
+            "then the latest crossing, or market end when no event exists"
+        ),
+    ),
+    microstructure_groups: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated microstructure groups: "
+            + ", ".join(MICROSTRUCTURE_GROUPS)
+        ),
+    ),
+) -> Response:
+    selected_microstructure_groups = requested_microstructure_groups(
+        include_microstructure=True,
+        microstructure_groups=microstructure_groups,
+    )
+    payload = await market_flip_evidence_payload(
+        request,
+        market_id=market_id,
+        view=view,
+        before_seconds=before_seconds,
+        event_sequence=event_sequence,
+        microstructure_groups=selected_microstructure_groups,
+    )
+    filename = f"btc_5m_flip_{market_id}_{view}.json"
+    return Response(
+        content=json.dumps(payload, default=str, separators=(",", ":")),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
+
+
 @app.get("/markets/current/sources")
 async def markets_current_sources(request: Request) -> dict[str, Any]:
     now_ms = current_utc_epoch_ms()
@@ -1474,6 +1852,79 @@ async def market_sources_response(
         )
 
     return serialize_market_sources_summary(summary, now_ms=now_ms)
+
+
+async def market_flip_evidence_payload(
+    request: Request,
+    *,
+    market_id: int,
+    view: FlipDataView,
+    before_seconds: int,
+    event_sequence: Optional[int],
+    microstructure_groups: tuple[str, ...],
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    analysis = await fetch_market_flip_analysis(
+        get_pool(request),
+        market_id=market_id,
+        definition_version=FLIP_DEFINITION_VERSION,
+    )
+    if analysis is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no flip analysis found for market_id={market_id}",
+        )
+
+    events = list(analysis.get("events") or [])
+    try:
+        anchor_event, anchor_reason = select_flip_anchor_event(
+            events,
+            event_sequence=event_sequence,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{exc} for market_id={market_id}",
+        ) from exc
+
+    market_payload = await fetch_market_download_payload(
+        get_pool(request),
+        market_id=market_id,
+        server_time_ms=now_ms,
+        include_probabilities=True,
+        include_futures=True,
+        include_oi=True,
+        include_flow=True,
+        include_book=True,
+        fill_display=False,
+        max_carry_forward_ms=10_000,
+    )
+    if market_payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no market data found for market_id={market_id}",
+        )
+
+    microstructure_rows = await fetch_market_microstructure_rows(
+        get_pool(request),
+        market_id=market_id,
+    )
+    merge_microstructure_history(
+        market_payload,
+        microstructure_rows,
+        groups=microstructure_groups,
+    )
+    return build_flip_evidence_bundle(
+        analysis,
+        market_payload,
+        anchor_event=anchor_event,
+        anchor_reason=anchor_reason,
+        view=view,
+        before_seconds=before_seconds,
+        requested_event_sequence=event_sequence,
+        now_ms=now_ms,
+        microstructure_groups=microstructure_groups,
+    )
 
 
 async def market_download_response(

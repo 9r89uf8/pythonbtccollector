@@ -103,6 +103,8 @@ const microstructureLive = await apiGet("/markets/current/microstructure/live");
 | `GET` | `/markets/flips` | Find markets with final-window crossings or cutoff reversals | PostgreSQL |
 | `GET` | `/markets/flips/distribution` | Aggregate crossing-time and cutoff-reversal distributions | PostgreSQL |
 | `GET` | `/markets/{market_id}/flips` | Versioned flip analysis, events, and T-20 through T-1 evidence | PostgreSQL |
+| `GET` | `/markets/{market_id}/flips/data` | Agent-ready event window or full all-layer flip evidence | PostgreSQL |
+| `GET` | `/markets/{market_id}/flips/download` | Download the same flip evidence JSON as an attachment | PostgreSQL |
 | `GET` | `/markets/latest` | Latest stored five-minute market for one source | PostgreSQL |
 | `GET` | `/markets/{market_id}` | One source's five-minute OHLC and samples | PostgreSQL |
 | `GET` | `/markets/current/sources` | Current-window source comparison | PostgreSQL |
@@ -441,7 +443,9 @@ Response:
         "archived_at_ms": 1783459525000
       },
       "flip_detail_url": "/markets/5944864/flips",
-      "data_url": "/markets/5944864/data"
+      "data_url": "/markets/5944864/data",
+      "evidence_url": "/markets/5944864/flips/data",
+      "evidence_download_url": "/markets/5944864/flips/download"
     }
   ],
   "next_before_market_id": 5944800
@@ -593,7 +597,9 @@ The response has this top-level shape:
     "retention_safe": true,
     "archived_at_ms": 1783459525000
   },
-  "data_url": "/markets/5944864/data"
+  "data_url": "/markets/5944864/data",
+  "evidence_url": "/markets/5944864/flips/data",
+  "evidence_download_url": "/markets/5944864/flips/download"
 }
 ```
 
@@ -616,6 +622,181 @@ flag.
 The route returns HTTP `404` when that market has no evaluation for the current
 definition version. That can be temporary while an ended market still awaits
 complete official resolution data or the evaluator's retry loop.
+
+### `GET /markets/{market_id}/flips/data`
+
+Returns one self-contained, agent-oriented evidence bundle. It combines the
+flip evaluation and crossing records with the curated representation of every
+current API one-second layer: Binance and Chainlink prices, Polymarket
+probabilities, futures, open interest, flow, book, and archive-aware
+microstructure. This means every layer, not literally every PostgreSQL or raw
+capture column. Display filling is always off, so missing observations remain
+null.
+
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `view` | enum | `event_window` | `event_window` or `full` |
+| `before_seconds` | integer `0`-`120` | `30` | Prior one-second slots included before the anchor; ignored by `view=full` |
+| `event_sequence` | positive integer or omitted | omitted | Anchor a specific stored crossing |
+| `microstructure_groups` | comma-separated enum or omitted | all groups | Any subset of `books`, `flow`, `cross_market`, `liquidations`, and `quality` |
+
+Without `event_sequence`, the endpoint anchors on the decisive crossing. If an
+evaluation has crossings but no decisive marker, it explicitly reports
+`selection.anchor.selection_reason="latest_event_fallback"` and uses the last
+crossing. For an evaluated market with no crossing event, it uses
+`selection.anchor.selection_reason="market_end_fallback"`, sets `event` to
+null, and anchors at `market_end_ms`. An event anchor is the new opposite-side
+observation's one-second sample, not an interpolated crossing instant.
+
+The default half-open series window is:
+
+```text
+[anchor.new_sample_second_ms - 30,000, market_end_ms)
+```
+
+It is clipped at `market_start_ms` when necessary. Because evaluated crossings
+occur in the final twenty seconds, the default normally returns 31 through 50
+one-second rows. `view=full` returns the original 300-row market grid. The
+`view` and `before_seconds` options slice only `series`; every stored crossing
+and all twenty causal cutoff rows remain in `flip`.
+
+```bash
+curl --compressed \
+  "${API_BASE_URL}/markets/5944864/flips/data"
+
+curl --compressed \
+  "${API_BASE_URL}/markets/5944864/flips/data?view=full"
+
+curl --compressed \
+  "${API_BASE_URL}/markets/5944864/flips/data?event_sequence=2&before_seconds=15&microstructure_groups=books,flow,quality"
+```
+
+Top-level response shape:
+
+```json
+{
+  "schema_version": 1,
+  "definition_version": 1,
+  "market_data_schema_version": 3,
+  "data_scope": "curated_public_api",
+  "server_time_ms": 1783459600123,
+  "market": {
+    "market_id": 5944864,
+    "market_start_ms": 1783459200000,
+    "market_end_ms": 1783459500000,
+    "seconds_expected": 300,
+    "price_to_beat": "63337.115841440165000000",
+    "official_close": "63336.719008471390000000",
+    "winner": "Down"
+  },
+  "selection": {
+    "view": "event_window",
+    "anchor": {
+      "selection_reason": "decisive_event",
+      "sample_second_ms": 1783459498000,
+      "event": {
+        "event_sequence": 1,
+        "direction": "up_to_down",
+        "new_sample_second_ms": 1783459498000,
+        "new_provider_event_ms": 1783459498300,
+        "observed_ms_before_end": 1700,
+        "is_decisive": true
+      }
+    },
+    "window": {
+      "before_seconds": 30,
+      "start_ms": 1783459468000,
+      "end_ms_exclusive": 1783459500000,
+      "row_count": 32,
+      "rows_before_anchor": 30,
+      "rows_at_or_after_anchor_second": 2,
+      "clipped_at_market_start": false
+    }
+  },
+  "availability": {
+    "selected_window": {
+      "series_rows": 32,
+      "binance_price_rows": 32,
+      "chainlink_price_rows": 31,
+      "probability_rows": 32,
+      "futures_rows": 32,
+      "open_interest_rows": 32,
+      "flow_rows": 32,
+      "book_rows": 32,
+      "microstructure_rows": 31,
+      "microstructure_healthy_rows": 30
+    },
+    "full_market": {
+      "series_rows": 300
+    }
+  },
+  "flip": {
+    "evaluation": {},
+    "events": [],
+    "cutoffs": [],
+    "archive": {},
+    "cutoff_microstructure_rows_reused_from_series": 19
+  },
+  "series": [],
+  "navigation": {
+    "older_page_cursor": 5944864,
+    "list_parameter": "before_market_id",
+    "preserve_list_filters": true
+  },
+  "links": {}
+}
+```
+
+Both availability objects use the same ten row-count fields shown for
+`selected_window`. A generated series slot is counted only for a source whose
+requested object contains a non-null value. Coverage therefore stays explicit
+instead of treating a 300-slot grid as 300 collected observations.
+
+`flip.cutoffs` retains every causal Chainlink/probability/reversal field. When a
+cutoff's microstructure sample is already present in `series`, its duplicate
+`microstructure` object is omitted and
+`microstructure_reused_from_series=true`; join it by
+`microstructure_sample_second_ms`. If that second is outside a caller-shortened
+window, the cutoff keeps its inline microstructure object so the response does
+not lose evidence.
+
+The response may also include `previous_5m_oi_summary`. Use
+`navigation.older_page_cursor` as the exclusive `before_market_id` value in the
+next `/markets/flips` call while preserving the same list filters. The cursor is
+only a seed; it does not promise that an older match exists. Do not assume
+`market_id - 1` is another matching flip. The returned `links.evidence` and
+`links.evidence_download` preserve the applied view, lookback, event selection,
+and non-default microstructure groups.
+
+The route returns HTTP `404` when the evaluation, explicitly requested
+crossing, or ordinary market data is unavailable. Invalid view, bounds, or
+group selection returns HTTP `422`.
+
+### `GET /markets/{market_id}/flips/download`
+
+Accepts the same four query parameters and returns the identical evidence
+bundle with:
+
+```http
+Content-Type: application/json
+Content-Disposition: attachment; filename="btc_5m_flip_5944864_event_window.json"
+```
+
+This is the route to use for a download button. Unlike the ordinary compact
+`/markets/{market_id}/download`, it preserves source timestamps, freshness,
+flip analysis, and microstructure. The API still does not expose separate raw
+trade/depth capture through either route.
+
+With the same-origin proxy used elsewhere in this guide, the button can follow
+the query-preserving link from the loaded bundle:
+
+```javascript
+downloadButton.addEventListener("click", () => {
+  window.location.assign(
+    `${API_BASE_URL}${bundle.links.evidence_download}`,
+  );
+});
+```
 
 ### `GET /markets/flips/distribution`
 

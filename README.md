@@ -301,6 +301,8 @@ Current routes:
 - `GET /markets/flips?within_seconds=20&kind=any_crossing`
 - `GET /markets/flips/distribution?max_seconds=20`
 - `GET /markets/{market_id}/flips`
+- `GET /markets/{market_id}/flips/data?view=event_window`
+- `GET /markets/{market_id}/flips/download?view=event_window`
 - `GET /markets/latest?provider=...&symbol=...`
 - `GET /markets/{market_id}?provider=...&symbol=...`
 - `GET /markets/current/sources`
@@ -333,11 +335,19 @@ fills each second from `binance_microstructure_1s_flip_archive` when a permanent
 copy exists. A current-table row wins over an archived copy for the same
 second.
 
-Downloads remain schema version `2` and do not include microstructure. They omit
-the market start/end millisecond fields and per-row `timestamp_ms`, retain the
-equivalent UTC `*_at` strings, and format official Chainlink open/close values
-to two decimal places. The data routes retain their full timing and precision
-fields.
+The ordinary current/by-ID downloads remain schema version `2` and do not
+include microstructure. They omit the market start/end millisecond fields and
+per-row `timestamp_ms`, retain the equivalent UTC `*_at` strings, and format
+official Chainlink open/close values to two decimal places. The data routes
+retain their full timing and precision fields.
+
+The two flip-evidence routes combine the versioned evaluation, every crossing,
+all T-20 through T-1 causal cutoffs, and every current curated market-data layer
+in one response. Their default `event_window` view returns thirty one-second
+slots before the decisive crossing through the market's half-open end; `full`
+returns the 300-slot grid. The `/flips/download` response is identical but has
+an attachment filename. Both use the permanent microstructure archive fallback,
+leave missing values null, and never carry data forward for display.
 
 `GET /markets/current/microstructure/live` reads the three source-price keys and
 the latest finalized microstructure key with one Redis `MGET`. It returns simple
@@ -359,6 +369,8 @@ response examples, field semantics, and the recommended dashboard update flow.
 See [`FLIP_RESEARCH_API.md`](FLIP_RESEARCH_API.md) for the focused dashboard
 integration guide to flip search, detail, distributions, pagination, and
 permanent archive fallback.
+See [`FLIP_AGENT_API.md`](FLIP_AGENT_API.md) for the compact list/evidence/cursor
+loop intended for LLM and programmatic research agents.
 See [`FRONTEND_API.md`](FRONTEND_API.md) for the complete frontend API
 reference.
 
@@ -372,6 +384,7 @@ schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
 OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
 MICROSTRUCTURE_API.md  Focused live/history microstructure API usage guide
 FLIP_RESEARCH_API.md   Focused dashboard guide for permanent flip research
+FLIP_AGENT_API.md      Agent workflow for compact or full flip evidence bundles
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 requirements.txt       Python runtime and test dependencies
 ```

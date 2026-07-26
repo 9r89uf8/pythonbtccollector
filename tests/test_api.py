@@ -784,6 +784,173 @@ def flip_market_row(**updates):
     return row
 
 
+def flip_evidence_event(
+    *,
+    event_sequence=1,
+    sample_second_ms=1_783_459_498_000,
+    is_decisive=True,
+):
+    return {
+        "event_sequence": event_sequence,
+        "direction": "up_to_down",
+        "previous_side": "Up",
+        "new_side": "Down",
+        "previous_price": Decimal("63337.250000000000000001"),
+        "new_price": Decimal("63336.990000000000000009"),
+        "previous_sample_second_ms": sample_second_ms - 1_000,
+        "sample_second_ms": sample_second_ms,
+        "previous_provider_event_ms": sample_second_ms - 889,
+        "provider_event_ms": sample_second_ms + 222,
+        "previous_received_ms": sample_second_ms - 667,
+        "received_ms": sample_second_ms + 444,
+        "observation_gap_ms": 1_111,
+        "observed_ms_before_end": 1_778,
+        "is_decisive": is_decisive,
+        "observation_precision": "one_second_summary",
+    }
+
+
+def flip_evidence_cutoff(
+    *,
+    sample_second_ms=1_783_459_490_000,
+):
+    return {
+        "seconds_before_end": 10,
+        "cutoff_ms": 1_783_459_490_000,
+        "chainlink_price": Decimal("63337.180000000000000007"),
+        "chainlink_sample_second_ms": sample_second_ms,
+        "chainlink_provider_event_ms": sample_second_ms + 111,
+        "chainlink_received_ms": sample_second_ms + 222,
+        "chainlink_source_age_ms": 889,
+        "chainlink_received_age_ms": 778,
+        "chainlink_fresh": True,
+        "price_distance": Decimal("0.064158559835000007"),
+        "absolute_price_distance": Decimal("0.064158559835000007"),
+        "apparent_side": "Up",
+        "up_bid": Decimal("0.81000000"),
+        "up_ask": Decimal("0.82000000"),
+        "down_bid": Decimal("0.17000000"),
+        "down_ask": Decimal("0.18000000"),
+        "probability_fresh": True,
+        "official_winner": "Down",
+        "flipped_after_cutoff": True,
+        "microstructure_sample_second_ms": sample_second_ms,
+        "microstructure_available": True,
+        "microstructure": microstructure_row(
+            sample_second_ms=sample_second_ms,
+            collector_healthy=False,
+        ),
+        "quality_flags": [],
+    }
+
+
+def flip_evidence_analysis(*, events=None, cutoffs=None):
+    if events is None:
+        events = [flip_evidence_event()]
+    if cutoffs is None:
+        cutoffs = [flip_evidence_cutoff()]
+    return {
+        "evaluation": {
+            **flip_market_row(),
+            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "crossing_count": len(events),
+            "touch_count": 0,
+            "observation_precision": "one_second_summary",
+            "analysis_start_ms": 1_783_459_480_000,
+            "analysis_end_ms": 1_783_459_500_000,
+            "chainlink_observation_count": 20,
+            "chainlink_strict_observation_count": 20,
+            "chainlink_cutoff_count": 20,
+            "fresh_chainlink_cutoff_count": 20,
+            "probability_cutoff_count": 20,
+            "fresh_probability_cutoff_count": 20,
+            "microstructure_cutoff_count": len(cutoffs),
+            "quality_flags": [],
+            "evaluated_ms": 1_783_459_540_000,
+        },
+        "events": events,
+        "cutoffs": cutoffs,
+    }
+
+
+def flip_evidence_market_payload():
+    payload = market_data_payload(
+        include_probabilities=True,
+        include_futures=True,
+        include_oi=True,
+        include_flow=True,
+        include_book=True,
+    )
+    template = payload["series"][0]
+    series = []
+    for offset in range(300):
+        timestamp_ms = 1_783_459_200_000 + offset * 1_000
+        item = deepcopy(template)
+        item.update(
+            {
+                "t": offset,
+                "timestamp_ms": timestamp_ms,
+                "timestamp_at": datetime.fromtimestamp(
+                    timestamp_ms / 1_000,
+                    tz=timezone.utc,
+                )
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+        )
+        series.append(item)
+    payload["series"] = series
+    return payload
+
+
+def install_flip_evidence_sources(
+    client,
+    monkeypatch,
+    *,
+    analysis=None,
+    microstructure_rows=(),
+):
+    if analysis is None:
+        analysis = flip_evidence_analysis()
+    calls = {"market": [], "microstructure": []}
+
+    async def fake_fetch_market_flip_analysis(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs == {
+            "market_id": 5_944_864,
+            "definition_version": api.FLIP_DEFINITION_VERSION,
+        }
+        return deepcopy(analysis)
+
+    async def fake_fetch_market_download_payload(pool, **kwargs):
+        assert pool is client.fake_pool
+        calls["market"].append(kwargs)
+        return flip_evidence_market_payload()
+
+    async def fake_fetch_market_microstructure_rows(pool, *, market_id):
+        assert pool is client.fake_pool
+        calls["microstructure"].append(market_id)
+        return deepcopy(list(microstructure_rows))
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_flip_analysis",
+        fake_fetch_market_flip_analysis,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        fake_fetch_market_download_payload,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        fake_fetch_market_microstructure_rows,
+    )
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+    return calls
+
+
 def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
     client,
     monkeypatch,
@@ -863,6 +1030,11 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
     }
     assert market["flip_detail_url"] == "/markets/5944864/flips"
     assert market["data_url"] == "/markets/5944864/data"
+    assert market["evidence_url"] == "/markets/5944864/flips/data"
+    assert (
+        market["evidence_download_url"]
+        == "/markets/5944864/flips/download"
+    )
 
 
 def test_markets_flips_returns_empty_list_with_200(client, monkeypatch):
@@ -1137,6 +1309,11 @@ def test_markets_flip_detail_serializes_events_cutoffs_and_microstructure(
     )
     assert body["archive"]["status"] == "complete"
     assert body["data_url"] == "/markets/5944864/data"
+    assert body["evidence_url"] == "/markets/5944864/flips/data"
+    assert (
+        body["evidence_download_url"]
+        == "/markets/5944864/flips/download"
+    )
 
 
 def test_markets_flip_detail_returns_404_when_not_evaluated(client, monkeypatch):
@@ -1155,6 +1332,470 @@ def test_markets_flip_detail_returns_404_when_not_evaluated(client, monkeypatch)
     assert response.json() == {
         "detail": "no flip analysis found for market_id=5944864"
     }
+
+
+def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
+    client,
+    monkeypatch,
+):
+    microstructure_rows = [
+        microstructure_row(
+            sample_second_ms=1_783_459_300_000,
+            collector_healthy=True,
+        ),
+        microstructure_row(
+            sample_second_ms=1_783_459_468_000,
+            collector_healthy=True,
+        ),
+        microstructure_row(
+            sample_second_ms=1_783_459_490_000,
+            collector_healthy=False,
+        ),
+    ]
+    calls = install_flip_evidence_sources(
+        client,
+        monkeypatch,
+        microstructure_rows=microstructure_rows,
+    )
+
+    response = client.get("/markets/5944864/flips/data")
+
+    assert response.status_code == 200
+    assert calls["market"] == [
+        {
+            "market_id": 5_944_864,
+            "server_time_ms": 1_783_460_100_123,
+            "include_probabilities": True,
+            "include_futures": True,
+            "include_oi": True,
+            "include_flow": True,
+            "include_book": True,
+            "fill_display": False,
+            "max_carry_forward_ms": 10_000,
+        }
+    ]
+    assert calls["microstructure"] == [5_944_864]
+
+    body = response.json()
+    assert body["schema_version"] == 1
+    assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
+    assert body["market_data_schema_version"] == 3
+    assert body["data_scope"] == "curated_public_api"
+    assert body["server_time_ms"] == 1_783_460_100_123
+    assert body["market"]["price_to_beat"] == (
+        "63337.115841440165000000"
+    )
+    assert body["market"]["official_close"] == "63336.719008471390000000"
+
+    anchor = body["selection"]["anchor"]
+    assert anchor["selection_reason"] == "decisive_event"
+    assert anchor["sample_second_ms"] == 1_783_459_498_000
+    assert anchor["event"]["event_sequence"] == 1
+    assert anchor["event"]["previous_chainlink_price"] == (
+        "63337.250000000000000001"
+    )
+    assert anchor["event"]["new_chainlink_price"] == (
+        "63336.990000000000000009"
+    )
+    assert (
+        anchor["event"]["previous_provider_event_ms"]
+        == 1_783_459_497_111
+    )
+    assert anchor["event"]["new_provider_event_ms"] == 1_783_459_498_222
+    assert anchor["event"]["new_sample_second_ms"] == 1_783_459_498_000
+
+    window = body["selection"]["window"]
+    assert window == {
+        "before_seconds": 30,
+        "start_ms": 1_783_459_468_000,
+        "end_ms_exclusive": 1_783_459_500_000,
+        "row_count": 32,
+        "rows_before_anchor": 30,
+        "rows_at_or_after_anchor_second": 2,
+        "clipped_at_market_start": False,
+    }
+    assert body["series"][0]["timestamp_ms"] == 1_783_459_468_000
+    assert body["series"][0]["timestamp_at"] == "2026-07-07T21:24:28Z"
+    assert body["series"][-1]["timestamp_ms"] == 1_783_459_499_000
+    assert body["series"][-1]["timestamp_at"] == "2026-07-07T21:24:59Z"
+
+    assert body["availability"]["selected_window"] == {
+        "series_rows": 32,
+        "binance_price_rows": 32,
+        "chainlink_price_rows": 32,
+        "probability_rows": 32,
+        "futures_rows": 32,
+        "open_interest_rows": 32,
+        "flow_rows": 32,
+        "book_rows": 32,
+        "microstructure_rows": 2,
+        "microstructure_healthy_rows": 1,
+    }
+    assert body["availability"]["full_market"] == {
+        "series_rows": 300,
+        "binance_price_rows": 300,
+        "chainlink_price_rows": 300,
+        "probability_rows": 300,
+        "futures_rows": 300,
+        "open_interest_rows": 300,
+        "flow_rows": 300,
+        "book_rows": 300,
+        "microstructure_rows": 3,
+        "microstructure_healthy_rows": 2,
+    }
+
+    row_by_second = {
+        row["timestamp_ms"]: row
+        for row in body["series"]
+    }
+    archived_row = row_by_second[1_783_459_490_000]["microstructure"]
+    assert archived_row["collector_healthy"] is False
+    assert archived_row["books"]["spot"]["bid"] == (
+        "65757.900000000000000000"
+    )
+    assert archived_row["cross_market"]["funding_rate"] == (
+        "0.000100000000000000"
+    )
+    assert archived_row["quality"]["received_ms"] == 1_783_459_201_250
+
+    assert body["flip"]["cutoff_microstructure_rows_reused_from_series"] == 1
+    cutoff = body["flip"]["cutoffs"][0]
+    assert cutoff["chainlink"]["price"] == "63337.180000000000000007"
+    assert cutoff["chainlink"]["provider_event_ms"] == 1_783_459_490_111
+    assert cutoff["microstructure_reused_from_series"] is True
+    assert "microstructure" not in cutoff
+    assert body["previous_5m_oi_summary"]["sum_open_interest"] == "74000.123"
+    assert body["navigation"] == {
+        "older_page_cursor": 5_944_864,
+        "list_parameter": "before_market_id",
+        "preserve_list_filters": True,
+    }
+
+
+def test_flip_cutoff_microstructure_stays_inline_when_series_slot_is_null(
+    client,
+    monkeypatch,
+):
+    install_flip_evidence_sources(client, monkeypatch)
+
+    response = client.get("/markets/5944864/flips/data")
+
+    assert response.status_code == 200
+    body = response.json()
+    row_by_second = {
+        row["timestamp_ms"]: row
+        for row in body["series"]
+    }
+    assert row_by_second[1_783_459_490_000]["microstructure"] is None
+    assert body["flip"]["cutoff_microstructure_rows_reused_from_series"] == 0
+    cutoff = body["flip"]["cutoffs"][0]
+    assert cutoff["microstructure_reused_from_series"] is False
+    assert cutoff["microstructure"]["collector_healthy"] is False
+    assert cutoff["microstructure"]["books"]["spot"]["bid"] == (
+        "65757.900000000000000000"
+    )
+
+
+def test_flip_microstructure_groups_filter_series_cutoff_and_links(
+    client,
+    monkeypatch,
+):
+    install_flip_evidence_sources(
+        client,
+        monkeypatch,
+        microstructure_rows=[
+            microstructure_row(sample_second_ms=1_783_459_498_000)
+        ],
+    )
+
+    response = client.get(
+        "/markets/5944864/flips/data"
+        "?view=event_window"
+        "&before_seconds=1"
+        "&event_sequence=1"
+        "&microstructure_groups=books,quality"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    row_by_second = {
+        row["timestamp_ms"]: row
+        for row in body["series"]
+    }
+    series_microstructure = row_by_second[
+        1_783_459_498_000
+    ]["microstructure"]
+    assert set(series_microstructure) == {
+        "collector_healthy",
+        "books",
+        "quality",
+    }
+
+    cutoff = body["flip"]["cutoffs"][0]
+    assert cutoff["microstructure_reused_from_series"] is False
+    assert set(cutoff["microstructure"]) == {
+        "collector_healthy",
+        "books",
+        "quality",
+    }
+    expected_query = (
+        "?view=event_window"
+        "&before_seconds=1"
+        "&event_sequence=1"
+        "&microstructure_groups=books,quality"
+    )
+    assert body["links"]["evidence"] == (
+        f"/markets/5944864/flips/data{expected_query}"
+    )
+    assert body["links"]["evidence_download"] == (
+        f"/markets/5944864/flips/download{expected_query}"
+    )
+
+
+def test_markets_flip_data_event_sequence_overrides_decisive_anchor(
+    client,
+    monkeypatch,
+):
+    requested_event = flip_evidence_event(
+        event_sequence=1,
+        sample_second_ms=1_783_459_485_000,
+        is_decisive=False,
+    )
+    decisive_event = flip_evidence_event(
+        event_sequence=2,
+        sample_second_ms=1_783_459_498_000,
+        is_decisive=True,
+    )
+    analysis = flip_evidence_analysis(
+        events=[requested_event, decisive_event],
+        cutoffs=[],
+    )
+    install_flip_evidence_sources(
+        client,
+        monkeypatch,
+        analysis=analysis,
+    )
+
+    response = client.get(
+        "/markets/5944864/flips/data"
+        "?event_sequence=1&before_seconds=3"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    anchor = body["selection"]["anchor"]
+    assert anchor["selection_reason"] == "requested_event_sequence"
+    assert anchor["sample_second_ms"] == 1_783_459_485_000
+    assert anchor["event"]["event_sequence"] == 1
+    assert anchor["event"]["is_decisive"] is False
+    assert anchor["event"]["new_sample_second_ms"] == 1_783_459_485_000
+    assert body["selection"]["window"] == {
+        "before_seconds": 3,
+        "start_ms": 1_783_459_482_000,
+        "end_ms_exclusive": 1_783_459_500_000,
+        "row_count": 18,
+        "rows_before_anchor": 3,
+        "rows_at_or_after_anchor_second": 15,
+        "clipped_at_market_start": False,
+    }
+
+
+def test_select_flip_anchor_event_falls_back_to_latest_event():
+    selected, reason = api.select_flip_anchor_event(
+        [
+            {"event_sequence": 2, "is_decisive": False},
+            {"event_sequence": 9, "is_decisive": False},
+            {"event_sequence": 4, "is_decisive": False},
+        ],
+        event_sequence=None,
+    )
+
+    assert selected["event_sequence"] == 9
+    assert reason == "latest_event_fallback"
+
+
+def test_markets_flip_data_full_view_returns_all_300_rows(
+    client,
+    monkeypatch,
+):
+    install_flip_evidence_sources(client, monkeypatch)
+
+    response = client.get(
+        "/markets/5944864/flips/data?view=full&before_seconds=0"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selection"]["view"] == "full"
+    assert body["selection"]["window"] == {
+        "before_seconds": None,
+        "start_ms": 1_783_459_200_000,
+        "end_ms_exclusive": 1_783_459_500_000,
+        "row_count": 300,
+        "rows_before_anchor": 298,
+        "rows_at_or_after_anchor_second": 2,
+        "clipped_at_market_start": False,
+    }
+    assert len(body["series"]) == 300
+    assert body["series"][0]["t"] == 0
+    assert body["series"][-1]["t"] == 299
+    assert body["availability"]["selected_window"] == (
+        body["availability"]["full_market"]
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "view=compact",
+        "before_seconds=-1",
+        "before_seconds=121",
+        "microstructure_groups=books,unknown",
+        "microstructure_groups=",
+    ],
+)
+def test_markets_flip_data_rejects_invalid_query_before_database_access(
+    client,
+    monkeypatch,
+    query,
+):
+    async def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("invalid evidence query must not access PostgreSQL")
+
+    monkeypatch.setattr(api, "fetch_market_flip_analysis", unexpected_fetch)
+    monkeypatch.setattr(api, "fetch_market_download_payload", unexpected_fetch)
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        unexpected_fetch,
+    )
+
+    response = client.get(f"/markets/5944864/flips/data?{query}")
+
+    assert response.status_code == 422
+
+
+def test_markets_flip_data_without_events_uses_market_end_fallback(
+    client,
+    monkeypatch,
+):
+    calls = install_flip_evidence_sources(
+        client,
+        monkeypatch,
+        analysis=flip_evidence_analysis(events=[], cutoffs=[]),
+    )
+
+    response = client.get("/markets/5944864/flips/data")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selection"]["anchor"] == {
+        "selection_reason": "market_end_fallback",
+        "sample_second_ms": 1_783_459_500_000,
+        "event": None,
+    }
+    assert body["selection"]["window"] == {
+        "before_seconds": 30,
+        "start_ms": 1_783_459_470_000,
+        "end_ms_exclusive": 1_783_459_500_000,
+        "row_count": 30,
+        "rows_before_anchor": 30,
+        "rows_at_or_after_anchor_second": 0,
+        "clipped_at_market_start": False,
+    }
+    assert body["series"][0]["timestamp_ms"] == 1_783_459_470_000
+    assert body["series"][-1]["timestamp_ms"] == 1_783_459_499_000
+    assert len(calls["market"]) == 1
+    assert calls["microstructure"] == [5_944_864]
+
+
+@pytest.mark.parametrize(
+    ("case", "query", "detail"),
+    [
+        (
+            "missing_analysis",
+            "",
+            "no flip analysis found for market_id=5944864",
+        ),
+        (
+            "missing_event_sequence",
+            "?event_sequence=99",
+            "no flip event_sequence=99 found for market_id=5944864",
+        ),
+    ],
+)
+def test_markets_flip_data_returns_404_before_market_data_query(
+    client,
+    monkeypatch,
+    case,
+    query,
+    detail,
+):
+    if case == "missing_analysis":
+        analysis = None
+    else:
+        analysis = flip_evidence_analysis()
+
+    async def fake_fetch_market_flip_analysis(pool, **kwargs):
+        assert pool is client.fake_pool
+        return deepcopy(analysis)
+
+    async def unexpected_market_fetch(*args, **kwargs):
+        raise AssertionError("404 evidence lookup must not query market data")
+
+    monkeypatch.setattr(
+        api,
+        "fetch_market_flip_analysis",
+        fake_fetch_market_flip_analysis,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_download_payload",
+        unexpected_market_fetch,
+    )
+    monkeypatch.setattr(
+        api,
+        "fetch_market_microstructure_rows",
+        unexpected_market_fetch,
+    )
+
+    response = client.get(f"/markets/5944864/flips/data{query}")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": detail}
+
+
+def test_markets_flip_download_matches_json_endpoint_and_sets_filename(
+    client,
+    monkeypatch,
+):
+    calls = install_flip_evidence_sources(
+        client,
+        monkeypatch,
+        microstructure_rows=[
+            microstructure_row(sample_second_ms=1_783_459_498_000)
+        ],
+    )
+    query = (
+        "?event_sequence=1"
+        "&before_seconds=5"
+        "&microstructure_groups=books,quality"
+    )
+
+    data_response = client.get(f"/markets/5944864/flips/data{query}")
+    download_response = client.get(
+        f"/markets/5944864/flips/download{query}"
+    )
+
+    assert data_response.status_code == 200
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"] == "application/json"
+    assert download_response.headers["content-disposition"] == (
+        'attachment; filename="btc_5m_flip_5944864_event_window.json"'
+    )
+    assert download_response.json() == data_response.json()
+    assert len(calls["market"]) == 2
+    assert calls["microstructure"] == [5_944_864, 5_944_864]
 
 
 def test_markets_current_data_uses_current_five_minute_market(client, monkeypatch):
@@ -1547,6 +2188,18 @@ def test_openapi_lists_data_flags_and_flip_research_routes(client):
             "parameters"
         ]
     }
+    evidence_data_params = {
+        param["name"]: param
+        for param in schema["paths"]["/markets/{market_id}/flips/data"]["get"][
+            "parameters"
+        ]
+    }
+    evidence_download_params = {
+        param["name"]: param
+        for param in schema["paths"][
+            "/markets/{market_id}/flips/download"
+        ]["get"]["parameters"]
+    }
 
     assert "include_flow" in current_data_params
     assert "include_book" in current_data_params
@@ -1573,6 +2226,27 @@ def test_openapi_lists_data_flags_and_flip_research_routes(client):
         "end_ms",
     }
     assert "/markets/{market_id}/flips" in schema["paths"]
+    expected_evidence_params = {
+        "market_id",
+        "view",
+        "before_seconds",
+        "event_sequence",
+        "microstructure_groups",
+    }
+    assert set(evidence_data_params) == expected_evidence_params
+    assert set(evidence_download_params) == expected_evidence_params
+    assert evidence_data_params["view"]["schema"]["default"] == "event_window"
+    assert evidence_data_params["view"]["schema"]["enum"] == [
+        "event_window",
+        "full",
+    ]
+    assert evidence_data_params["before_seconds"]["schema"]["default"] == 30
+    assert evidence_data_params["before_seconds"]["schema"]["minimum"] == 0
+    assert evidence_data_params["before_seconds"]["schema"]["maximum"] == 120
+    assert evidence_data_params["event_sequence"]["schema"]["anyOf"] == [
+        {"type": "integer", "minimum": 1},
+        {"type": "null"},
+    ]
 
 
 def test_markets_current_data_passes_display_fill_options(client, monkeypatch):

@@ -1,13 +1,14 @@
 # Flip Research Dashboard API
 
 This is the focused dashboard integration guide for the permanent BTC
-five-minute flip-research API. It covers the three flip endpoints and the
-archive-aware historical data call used to load a selected market's complete
-evidence.
+five-minute flip-research API. It covers flip discovery, detail, distributions,
+agent-ready evidence bundles, downloads, and the archive-aware historical data
+call used to load a selected market's complete evidence.
 
 The complete application contract remains in
 [`FRONTEND_API.md`](FRONTEND_API.md). Microstructure field definitions are also
-documented in [`MICROSTRUCTURE_API.md`](MICROSTRUCTURE_API.md).
+documented in [`MICROSTRUCTURE_API.md`](MICROSTRUCTURE_API.md). For the shortest
+LLM-oriented cursor workflow, see [`FLIP_AGENT_API.md`](FLIP_AGENT_API.md).
 
 ## What the Dashboard Can Call
 
@@ -15,6 +16,8 @@ documented in [`MICROSTRUCTURE_API.md`](MICROSTRUCTURE_API.md).
 | --- | --- | --- |
 | `GET` | `/markets/flips` | Find matching markets and paginate newest to oldest |
 | `GET` | `/markets/{market_id}/flips` | Load one market's evaluation, crossings, and T-20 through T-1 evidence |
+| `GET` | `/markets/{market_id}/flips/data` | Load a compact event window or complete all-layer evidence bundle |
+| `GET` | `/markets/{market_id}/flips/download` | Download the identical evidence bundle |
 | `GET` | `/markets/flips/distribution` | Build crossing-time and cutoff-reversal charts |
 | `GET` | `/markets/{market_id}/data?include_microstructure=true` | Load the selected market's 300-second series, using the permanent archive when necessary |
 
@@ -128,8 +131,9 @@ null when `archive.status` is `not_required`.
 ## Recommended Dashboard Flow
 
 1. Load `/markets/flips` for the searchable results table.
-2. When the user selects a market, load its flip detail and complete market data
-   in parallel.
+2. When the user selects a market, load its default event-window evidence
+   bundle. Request `view=full` only when the complete 300-second history is
+   needed.
 3. Load `/markets/flips/distribution` for aggregate charts.
 4. Use the returned exclusive cursor for older result pages.
 
@@ -148,17 +152,7 @@ async function loadFlipPage(filters = {}) {
 }
 
 async function loadFlipMarket(marketId) {
-  return Promise.all([
-    apiGet(`/markets/${marketId}/flips`),
-    apiGet(`/markets/${marketId}/data`, {
-      include_probabilities: true,
-      include_futures: true,
-      include_oi: true,
-      include_flow: true,
-      include_book: true,
-      include_microstructure: true,
-    }),
-  ]).then(([flip, data]) => ({ flip, data }));
+  return apiGet(`/markets/${marketId}/flips/data`);
 }
 
 async function loadFlipDistribution(filters = {}) {
@@ -174,6 +168,13 @@ async function loadFlipDistribution(filters = {}) {
 Leave `fill_display` at its default `false` on the research data call. The
 dashboard should display missing evidence as missing rather than carry values
 forward.
+
+The evidence bundle enforces that behavior and always requests every current
+curated one-second layer. Its default half-open series slice starts thirty
+one-second slots before the decisive crossing and ends at the market boundary.
+It still returns every crossing and all twenty cutoff records. See
+[`FLIP_AGENT_API.md`](FLIP_AGENT_API.md) for anchor fallbacks, availability
+counts, cursor iteration, group selection, and attachment examples.
 
 ## Find Matching Markets
 
@@ -248,7 +249,9 @@ multiple times.
         "archived_at_ms": 1783459525000
       },
       "flip_detail_url": "/markets/5944864/flips",
-      "data_url": "/markets/5944864/data"
+      "data_url": "/markets/5944864/data",
+      "evidence_url": "/markets/5944864/flips/data",
+      "evidence_download_url": "/markets/5944864/flips/download"
     }
   ],
   "next_before_market_id": 5944864
@@ -265,8 +268,7 @@ Field details:
   active filter.
 - `price_to_beat`, `official_close`, and every other financial decimal are JSON
   strings.
-- Use `flip_detail_url` and `data_url` as relative paths under the same API
-  base.
+- Use the four `*_url` values as relative paths under the same API base.
 
 An empty search returns HTTP `200`, `markets: []`, and
 `next_before_market_id: null`.
@@ -309,6 +311,8 @@ The response contains:
 - `cutoffs`: exactly T-20 through T-1, ordered in that direction.
 - `archive`: archive state and source/copied row counts.
 - `data_url`: relative path for the full 300-second market series.
+- `evidence_url`: relative path for the default agent-ready compact bundle.
+- `evidence_download_url`: relative path for the matching attachment route.
 
 Neither `events` nor `cutoffs` is paginated.
 
@@ -443,7 +447,9 @@ Important response shape:
     "retention_safe": true,
     "archived_at_ms": 1783459525000
   },
-  "data_url": "/markets/5944864/data"
+  "data_url": "/markets/5944864/data",
+  "evidence_url": "/markets/5944864/flips/data",
+  "evidence_download_url": "/markets/5944864/flips/download"
 }
 ```
 
@@ -613,8 +619,10 @@ Group names are case-sensitive. Sending `microstructure_groups` without
 The response does not identify whether an individual second came from the live
 table or permanent archive; both use the same schema.
 
-The `/markets/{market_id}/download` endpoint does not include microstructure.
-Use `/data?include_microstructure=true` for archived evidence.
+The ordinary `/markets/{market_id}/download` endpoint does not include
+microstructure. Use `/data?include_microstructure=true`, or use
+`/markets/{market_id}/flips/download` for one attachment containing flip
+analysis and archive-aware curated evidence.
 
 ## Errors and Empty States
 

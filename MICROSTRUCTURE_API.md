@@ -639,8 +639,11 @@ PostgreSQL remains the source of record.
   `BINANCE_MICROSTRUCTURE_RETENTION_DAYS`, which defaults to 30 days.
   Confirmed-flip and ambiguous markets can instead be served from the permanent
   flip archive, which has no application TTL.
-- The `/download` routes do not include microstructure and do not accept
-  `include_microstructure` or `microstructure_groups`.
+- The ordinary `/markets/current/download` and
+  `/markets/{market_id}/download` routes do not include microstructure and do
+  not accept `include_microstructure` or `microstructure_groups`. The separate
+  `/markets/{market_id}/flips/download` evidence attachment does include
+  archive-aware microstructure and accepts `microstructure_groups`.
 - The live endpoint does not support group filtering.
 - Live microstructure is finalized once per second; Redis reduces API latency
   but does not make the underlying observations subsecond.
