@@ -45,6 +45,96 @@ def test_settings_include_polymarket_chainlink_defaults(monkeypatch):
     )
 
 
+def test_settings_include_polymarket_twap_defaults(monkeypatch):
+    twap_keys = (
+        "POLYMARKET_TWAP_ENABLED",
+        "POLYMARKET_TWAP_PROVIDER_CODE",
+        "POLYMARKET_TWAP_SYMBOL",
+        "POLYMARKET_TWAP_RTD_SYMBOL",
+        "POLYMARKET_TWAP_TOPIC",
+        "POLYMARKET_TWAP_WINDOW_SECONDS",
+        "POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS",
+        "POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS",
+        "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
+    )
+    for key in twap_keys:
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings()
+
+    assert settings.POLYMARKET_TWAP_ENABLED is True
+    assert (
+        settings.POLYMARKET_TWAP_PROVIDER_CODE
+        == "polymarket_chainlink_twap_rtds"
+    )
+    assert settings.POLYMARKET_TWAP_SYMBOL == "BTCUSD_TWAP_30S"
+    assert settings.POLYMARKET_TWAP_RTD_SYMBOL == "btc/usd"
+    assert settings.POLYMARKET_TWAP_TOPIC == "crypto_prices_twap_thirty"
+    assert settings.POLYMARKET_TWAP_WINDOW_SECONDS == 30
+    assert settings.POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS == 10_000
+    assert settings.POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS == 10_000
+    assert settings.POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS == 5
+
+
+@pytest.mark.parametrize("window_s", (29, 31, 60))
+def test_settings_reject_non_30_second_twap_window(monkeypatch, window_s):
+    monkeypatch.setenv("POLYMARKET_TWAP_WINDOW_SECONDS", str(window_s))
+
+    with pytest.raises(
+        ValidationError,
+        match="POLYMARKET_TWAP_WINDOW_SECONDS",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    (
+        ("POLYMARKET_TWAP_PROVIDER_CODE", "wrong_provider"),
+        ("POLYMARKET_TWAP_SYMBOL", "ETHUSD_TWAP_30S"),
+        ("POLYMARKET_TWAP_RTD_SYMBOL", "eth/usd"),
+        ("POLYMARKET_TWAP_TOPIC", "crypto_prices_twap_sixty"),
+    ),
+)
+def test_enabled_twap_rejects_noncanonical_feed_identity(
+    monkeypatch,
+    field_name,
+    invalid_value,
+):
+    monkeypatch.setenv("POLYMARKET_TWAP_ENABLED", "true")
+    monkeypatch.setenv(field_name, invalid_value)
+
+    with pytest.raises(ValidationError, match=field_name):
+        Settings()
+
+
+def test_disabled_twap_allows_dormant_noncanonical_provider(monkeypatch):
+    monkeypatch.setenv("POLYMARKET_TWAP_ENABLED", "false")
+    monkeypatch.setenv("POLYMARKET_TWAP_PROVIDER_CODE", "unused_provider")
+
+    settings = Settings()
+
+    assert settings.POLYMARKET_TWAP_ENABLED is False
+    assert settings.POLYMARKET_TWAP_PROVIDER_CODE == "unused_provider"
+
+
+@pytest.mark.parametrize("shutdown_seconds", (0, 10.001, 60))
+def test_twap_shutdown_budget_is_bounded_for_systemd(
+    monkeypatch,
+    shutdown_seconds,
+):
+    monkeypatch.setenv(
+        "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
+        str(shutdown_seconds),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
+    ):
+        Settings()
+
+
 @pytest.mark.parametrize("idle_timeout_ms", (4_999, 60_001))
 def test_settings_reject_invalid_chainlink_accepted_event_idle_timeout(
     monkeypatch,

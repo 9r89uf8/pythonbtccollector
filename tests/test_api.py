@@ -12,6 +12,7 @@ from price_collector.live_cache import (
     CHAINLINK_LIVE_KEY,
     FUTURES_LIVE_KEY,
     MICROSTRUCTURE_LIVE_KEY,
+    TWAP_LIVE_KEY,
     LiveCachePayloadError,
     LivePrice,
 )
@@ -186,6 +187,34 @@ def test_prices_latest_can_query_polymarket_chainlink_btcusd(client, monkeypatch
     assert body["provider_event_ms"] == 1_783_459_200_123
 
 
+def test_prices_latest_can_query_polymarket_chainlink_twap(client, monkeypatch):
+    async def fake_fetch_latest_price(pool, provider_code, symbol):
+        assert provider_code == "polymarket_chainlink_twap_rtds"
+        assert symbol == "BTCUSD_TWAP_30S"
+        return {
+            "provider": provider_code,
+            "symbol": symbol,
+            "price": Decimal("123455.987654321098765432"),
+            "sample_second_ms": 1_783_459_200_000,
+            "sample_second_at": utc_dt(2026, 7, 7, 21, 0, 0),
+            "provider_event_ms": 1_783_459_200_123,
+            "received_ms": 1_783_459_200_250,
+            "market_id": 5_944_864,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+        }
+
+    monkeypatch.setattr(api, "fetch_latest_price", fake_fetch_latest_price)
+
+    response = client.get(
+        "/prices/latest?provider=polymarket_chainlink_twap_rtds"
+        "&symbol=BTCUSD_TWAP_30S"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["price"] == "123455.987654321098765432"
+
+
 def test_prices_latest_returns_404_when_no_sample_exists(client, monkeypatch):
     async def fake_fetch_latest_price(pool, provider_code, symbol):
         return None
@@ -288,6 +317,7 @@ def test_markets_index_defaults_to_three_completed_markets(client, monkeypatch):
                 "market_end_at": utc_dt(2026, 7, 7, 21, 15, 0),
                 "binance_sample_count": 300,
                 "chainlink_sample_count": 298,
+                "twap_sample_count": 10,
                 "futures_sample_count": 60,
                 "open_interest_sample_count": 60,
                 "flow_sample_count": 300,
@@ -302,6 +332,7 @@ def test_markets_index_defaults_to_three_completed_markets(client, monkeypatch):
                 "market_end_at": utc_dt(2026, 7, 7, 21, 10, 0),
                 "binance_sample_count": 300,
                 "chainlink_sample_count": 299,
+                "twap_sample_count": 9,
                 "futures_sample_count": 60,
                 "open_interest_sample_count": 59,
                 "flow_sample_count": 300,
@@ -316,6 +347,7 @@ def test_markets_index_defaults_to_three_completed_markets(client, monkeypatch):
                 "market_end_at": utc_dt(2026, 7, 7, 21, 5, 0),
                 "binance_sample_count": 299,
                 "chainlink_sample_count": 297,
+                "twap_sample_count": 10,
                 "futures_sample_count": 60,
                 "open_interest_sample_count": 60,
                 "flow_sample_count": 298,
@@ -342,7 +374,7 @@ def test_markets_index_defaults_to_three_completed_markets(client, monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == 2
     assert body["server_time_ms"] == 1_783_460_100_000
     assert [market["market_id"] for market in body["markets"]] == [
         5_944_866,
@@ -359,6 +391,7 @@ def test_markets_index_defaults_to_three_completed_markets(client, monkeypatch):
         "availability": {
             "binance": 300,
             "chainlink": 298,
+            "twap": 10,
             "futures": 60,
             "open_interest": 60,
             "flow": 300,
@@ -415,6 +448,7 @@ def test_markets_index_passes_include_current_and_exclusive_cursor(
     assert body["markets"][0]["availability"] == {
         "binance": 120,
         "chainlink": 0,
+        "twap": 0,
         "futures": 0,
         "open_interest": 0,
         "flow": 0,
@@ -441,7 +475,7 @@ def test_markets_index_returns_empty_list_with_200(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {
-        "schema_version": 1,
+        "schema_version": 2,
         "server_time_ms": 1_783_459_920_123,
         "markets": [],
         "next_before_market_id": None,
@@ -591,6 +625,7 @@ def market_data_payload(
         "prices": {
             "binance": "123000.00",
             "chainlink": "122998.12",
+            "twap": "122997.987654321098765432",
         },
         "freshness": {
             "binance": {
@@ -600,6 +635,11 @@ def market_data_payload(
             "chainlink": {
                 "source_age_ms": 300,
                 "received_age_ms": 225,
+            },
+            "twap": {
+                "source_age_ms": 290,
+                "received_age_ms": 215,
+                "is_carried_forward": False,
             },
         },
     }
@@ -653,7 +693,7 @@ def market_data_payload(
         }
 
     payload = {
-        "schema_version": 2,
+        "schema_version": 4,
         "market": {
             "market_id": 5_944_864,
             "market_start_ms": 1_783_459_200_000,
@@ -664,6 +704,19 @@ def market_data_payload(
             "chainlink_resolution": {
                 "open": None,
                 "close": None,
+                "status": "pending",
+                "source": None,
+            },
+            "settlement": {
+                "reference": "chainlink_twap",
+                "window_s": 30,
+                "source_url": (
+                    "https://data.chain.link/streams/"
+                    "btc-usd-twap-30s-streams"
+                ),
+                "rule_version": "btc-5m-twap-30",
+                "price_to_beat": None,
+                "official_final_price": None,
                 "status": "pending",
                 "source": None,
             },
@@ -767,6 +820,12 @@ def flip_market_row(**updates):
         "evaluation_status": "confirmed_flip",
         "price_to_beat": Decimal("63337.115841440165000000"),
         "official_close_price": Decimal("63336.719008471390000000"),
+        "settlement_reference": "chainlink_twap",
+        "settlement_window_s": 30,
+        "settlement_source_url": (
+            "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+        ),
+        "settlement_rule_version": "btc-5m-twap-30",
         "official_winner": "Down",
         "matching_crossing_count": 2,
         "total_crossing_count_last_20s": 3,
@@ -806,7 +865,7 @@ def flip_evidence_event(
         "observation_gap_ms": 1_111,
         "observed_ms_before_end": 1_778,
         "is_decisive": is_decisive,
-        "observation_precision": "one_second_summary",
+        "observation_precision": "exact_twap_event",
     }
 
 
@@ -855,7 +914,7 @@ def flip_evidence_analysis(*, events=None, cutoffs=None):
             "definition_version": api.FLIP_DEFINITION_VERSION,
             "crossing_count": len(events),
             "touch_count": 0,
-            "observation_precision": "one_second_summary",
+            "observation_precision": "exact_twap_event",
             "analysis_start_ms": 1_783_459_480_000,
             "analysis_end_ms": 1_783_459_500_000,
             "chainlink_observation_count": 20,
@@ -1000,7 +1059,7 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == 2
     assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
     assert body["server_time_ms"] == 1_783_460_100_123
     assert body["filters"] == {
@@ -1016,6 +1075,16 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
     market = body["markets"][0]
     assert market["price_to_beat"] == "63337.115841440165000000"
     assert market["official_close"] == "63336.719008471390000000"
+    assert market["settlement"] == {
+        "reference": "chainlink_twap",
+        "window_s": 30,
+        "source_url": (
+            "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+        ),
+        "rule_version": "btc-5m-twap-30",
+        "price_to_beat": "63337.115841440165000000",
+        "official_final_price": "63336.719008471390000000",
+    }
     assert market["matching_crossing_count"] == 2
     assert market["decisive_flip"] == {
         "direction": "up_to_down",
@@ -1049,7 +1118,7 @@ def test_markets_flips_returns_empty_list_with_200(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {
-        "schema_version": 1,
+        "schema_version": 2,
         "definition_version": api.FLIP_DEFINITION_VERSION,
         "server_time_ms": 1_783_460_100_123,
         "filters": {
@@ -1286,16 +1355,17 @@ def test_markets_flip_detail_serializes_events_cutoffs_and_microstructure(
     assert body["market"]["price_to_beat"] == "63337.115841440165000000"
     assert body["evaluation"]["status"] == "confirmed_flip"
     assert body["evaluation"]["crossing_count"] == 3
-    assert body["evaluation"]["chainlink"]["observation_count"] == 19
+    assert body["evaluation"]["twap"]["observation_count"] == 19
     assert body["evaluation"]["cutoff_coverage"] == {
-        "chainlink_count": 20,
-        "fresh_chainlink_count": 19,
+        "twap_count": 20,
+        "fresh_twap_count": 19,
         "probability_count": 20,
         "fresh_probability_count": 18,
         "microstructure_count": 19,
     }
-    assert body["events"][0]["previous_chainlink_price"] == "63337.20"
-    assert body["events"][0]["new_chainlink_price"] == "63336.90"
+    assert body["events"][0]["previous_twap_price"] == "63337.20"
+    assert body["events"][0]["new_twap_price"] == "63336.90"
+    assert body["cutoffs"][0]["twap"]["price"] == "63337.18"
     cutoff = body["cutoffs"][0]
     assert cutoff["signed_distance"] == "0.064158559835"
     assert cutoff["probabilities"]["up"]["ask"] == "0.82"
@@ -1377,9 +1447,9 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
     assert calls["microstructure"] == [5_944_864]
 
     body = response.json()
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == 2
     assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
-    assert body["market_data_schema_version"] == 3
+    assert body["market_data_schema_version"] == 4
     assert body["data_scope"] == "curated_public_api"
     assert body["server_time_ms"] == 1_783_460_100_123
     assert body["market"]["price_to_beat"] == (
@@ -1391,10 +1461,10 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
     assert anchor["selection_reason"] == "decisive_event"
     assert anchor["sample_second_ms"] == 1_783_459_498_000
     assert anchor["event"]["event_sequence"] == 1
-    assert anchor["event"]["previous_chainlink_price"] == (
+    assert anchor["event"]["previous_twap_price"] == (
         "63337.250000000000000001"
     )
-    assert anchor["event"]["new_chainlink_price"] == (
+    assert anchor["event"]["new_twap_price"] == (
         "63336.990000000000000009"
     )
     assert (
@@ -1423,6 +1493,7 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
         "series_rows": 32,
         "binance_price_rows": 32,
         "chainlink_price_rows": 32,
+        "twap_price_rows": 32,
         "probability_rows": 32,
         "futures_rows": 32,
         "open_interest_rows": 32,
@@ -1435,6 +1506,7 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
         "series_rows": 300,
         "binance_price_rows": 300,
         "chainlink_price_rows": 300,
+        "twap_price_rows": 300,
         "probability_rows": 300,
         "futures_rows": 300,
         "open_interest_rows": 300,
@@ -1460,8 +1532,8 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
 
     assert body["flip"]["cutoff_microstructure_rows_reused_from_series"] == 1
     cutoff = body["flip"]["cutoffs"][0]
-    assert cutoff["chainlink"]["price"] == "63337.180000000000000007"
-    assert cutoff["chainlink"]["provider_event_ms"] == 1_783_459_490_111
+    assert cutoff["twap"]["price"] == "63337.180000000000000007"
+    assert cutoff["twap"]["provider_event_ms"] == 1_783_459_490_111
     assert cutoff["microstructure_reused_from_series"] is True
     assert "microstructure" not in cutoff
     assert body["previous_5m_oi_summary"]["sum_open_interest"] == "74000.123"
@@ -1840,7 +1912,7 @@ def test_markets_current_data_uses_current_five_minute_market(client, monkeypatc
 
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 2
+    assert body["schema_version"] == 4
     assert body["market"]["market_id"] == 5_944_864
     assert body["market"]["market_start_ms"] == 1_783_459_200_000
     assert body["market"]["market_end_ms"] == 1_783_459_500_000
@@ -2003,7 +2075,7 @@ def test_markets_data_by_id_can_include_selected_microstructure_groups(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 3
+    assert body["schema_version"] == 4
     assert body["availability"] == {
         "microstructure_rows": 1,
         "microstructure_healthy_rows": 1,
@@ -2298,6 +2370,11 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
             source_timestamp_ms=1_783_459_247_000,
             received_ms=1_783_459_247_100,
         ),
+        TWAP_LIVE_KEY: LivePrice(
+            value="62036.987654321098765432",
+            source_timestamp_ms=1_783_459_247_500,
+            received_ms=1_783_459_247_600,
+        ),
         FUTURES_LIVE_KEY: LivePrice(
             value="62099.10",
             source_timestamp_ms=1_783_459_250_000,
@@ -2317,6 +2394,8 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
     assert body["prices"]["binance_spot"]["source_age_ms"] == 223
     assert body["prices"]["binance_spot"]["received_age_ms"] == 173
     assert body["prices"]["chainlink"]["source_age_ms"] == 3_123
+    assert body["prices"]["twap"]["value"] == "62036.987654321098765432"
+    assert body["prices"]["twap"]["source_age_ms"] == 2_623
     assert body["futures"]["last"]["source_age_ms"] == 123
     assert body["futures"]["last"]["received_age_ms"] == 73
     assert body["futures"]["last"]["time_ms"] == 1_783_459_250_000
@@ -2329,7 +2408,12 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
         "futures",
     }
     assert client.fake_live_cache.requested_keys == [
-        [BINANCE_SPOT_LIVE_KEY, CHAINLINK_LIVE_KEY, FUTURES_LIVE_KEY]
+        [
+            BINANCE_SPOT_LIVE_KEY,
+            CHAINLINK_LIVE_KEY,
+            TWAP_LIVE_KEY,
+            FUTURES_LIVE_KEY,
+        ]
     ]
     assert client.fake_pool.acquire_calls == 0
 
@@ -2371,6 +2455,11 @@ def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_ma
             source_timestamp_ms=1_783_459_499_000,
             received_ms=1_783_459_499_100,
         ),
+        TWAP_LIVE_KEY: LivePrice(
+            value="65720.918273645546372819",
+            source_timestamp_ms=1_783_459_499_010,
+            received_ms=1_783_459_499_110,
+        ),
         FUTURES_LIVE_KEY: LivePrice(
             value="65723.70",
             source_timestamp_ms=1_783_459_499_800,
@@ -2389,7 +2478,7 @@ def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_ma
     assert response.status_code == 200
     assert response.headers["content-encoding"] == "gzip"
     body = response.json()
-    assert body["schema_version"] == 1
+    assert body["schema_version"] == 2
     assert body["server_time_ms"] == 1_783_459_500_123
     assert body["market_id"] == 5_944_864
     assert body["sample_second_ms"] == 1_783_459_499_000
@@ -2397,6 +2486,7 @@ def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_ma
     assert body["prices"] == {
         "binance_spot": "65758.01",
         "chainlink": "65721.23639093849",
+        "twap": "65720.918273645546372819",
         "futures": "65723.70",
     }
     assert body["microstructure"]["collector_healthy"] is True
@@ -2407,6 +2497,7 @@ def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_ma
         [
             BINANCE_SPOT_LIVE_KEY,
             CHAINLINK_LIVE_KEY,
+            TWAP_LIVE_KEY,
             FUTURES_LIVE_KEY,
             MICROSTRUCTURE_LIVE_KEY,
         ]
@@ -2429,6 +2520,7 @@ def test_markets_current_microstructure_live_uses_current_market_when_snapshot_m
     assert body["prices"] == {
         "binance_spot": None,
         "chainlink": None,
+        "twap": None,
         "futures": None,
     }
     assert body["microstructure"] is None
@@ -2603,7 +2695,7 @@ def test_serialize_download_payload_is_compact_without_mutating_source():
 
     exported = api.serialize_download_payload(payload)
 
-    assert exported["schema_version"] == 2
+    assert exported["schema_version"] == 4
     assert "market_start_ms" not in exported["market"]
     assert "market_end_ms" not in exported["market"]
     assert exported["market"]["market_start_at"] == "2026-07-07T21:00:00Z"
@@ -2665,7 +2757,7 @@ def test_markets_download_preserves_official_resolution_metadata(client, monkeyp
 
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == 2
+    assert body["schema_version"] == 4
     assert body["market"]["chainlink_resolution"]["open"] == "63337.12"
     assert body["market"]["chainlink_resolution"]["close"] == "63336.72"
     assert "market_start_ms" not in body["market"]
@@ -2732,6 +2824,7 @@ def test_markets_download_filename_includes_requested_optional_layers(client, mo
     assert body["series"][0]["prices"] == {
         "binance": "123000.00",
         "chainlink": "122998.12",
+        "twap": "122997.987654321098765432",
         "futures": "62075.12",
     }
     assert "futures" not in body["series"][0]

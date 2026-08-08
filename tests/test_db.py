@@ -631,6 +631,7 @@ def test_fetch_recent_market_windows_uses_time_cursor_and_real_observations():
         "is_complete": True,
         "binance_sample_count": 300,
         "chainlink_sample_count": 298,
+        "twap_sample_count": 297,
         "futures_sample_count": 60,
         "open_interest_sample_count": 60,
         "flow_sample_count": 300,
@@ -685,6 +686,8 @@ def test_fetch_recent_market_windows_uses_time_cursor_and_real_observations():
     assert "ORDER BY mw.market_id DESC LIMIT $4::INTEGER" in normalized_query
     assert normalized_query.count("OR EXISTS") == 4
     assert "FROM price_samples" in normalized_query
+    assert "AS twap_id" in normalized_query
+    assert "AS twap_sample_count" in normalized_query
     assert "FROM binance_futures_snapshots" in normalized_query
     assert "FROM binance_flow_1s" in normalized_query
     assert "FROM binance_book_1s" in normalized_query
@@ -742,6 +745,119 @@ def test_schema_seeds_polymarket_chainlink_provider_and_instrument():
     assert "Polymarket RTDS Chainlink BTC/USD" in schema
     assert "'BTCUSD'" in schema
     assert "'crypto_prices_chainlink:btc/usd'" in schema
+
+
+def test_schema_persists_exact_twap_events_sessions_gaps_and_distinct_seed():
+    schema = (ROOT / "schema.sql").read_text()
+    events = _schema_create_table_statement(schema, "polymarket_twap_events")
+    sessions = _schema_create_table_statement(schema, "polymarket_twap_sessions")
+    gaps = _schema_create_table_statement(schema, "polymarket_twap_gaps")
+
+    assert "PRIMARY KEY (connection_id, receive_sequence)" in events
+    assert "price_e18 NUMERIC(78, 0) NOT NULL" in events
+    assert "price NUMERIC(38, 18) NOT NULL" in events
+    assert "received_wall_ns BIGINT NOT NULL" in events
+    assert "received_monotonic_ns BIGINT NOT NULL" in events
+    assert "UNIQUE (" not in events
+    assert "provider_event_ms <=" not in events
+    assert "connection_id UUID PRIMARY KEY" in sessions
+    assert "subscribed_monotonic_ns >= connected_monotonic_ns" in sessions
+    assert "subscribed_wall_ns >= connected_wall_ns" not in sessions
+    assert "PRIMARY KEY (connection_id, detected_wall_ns, reason)" in gaps
+    assert "polymarket_twap_events_source_time_idx" in schema
+    assert "'polymarket_chainlink_twap_rtds'" in schema
+    assert "'BTCUSD_TWAP_30S'" in schema
+    assert "'crypto_prices_twap_thirty:btc/usd'" in schema
+
+
+def test_market_settlement_constraints_are_added_on_in_place_schema_upgrade():
+    schema = (ROOT / "schema.sql").read_text()
+
+    for constraint_name in (
+        "polymarket_btc_5m_markets_settlement_reference_check",
+        "polymarket_btc_5m_markets_settlement_window_check",
+        "polymarket_btc_5m_markets_settlement_complete_check",
+    ):
+        assert f"conname =\n                '{constraint_name}'" in schema
+        assert f"ADD CONSTRAINT\n                {constraint_name}" in schema
+    assert "FROM pg_constraint" in schema
+    assert "'polymarket_btc_5m_markets'::regclass" in schema
+
+
+def test_fresh_database_grants_restore_reader_writer_separation():
+    schema = (ROOT / "schema.sql").read_text()
+
+    assert "GRANT USAGE ON SCHEMA public TO price_writer, price_reader" in schema
+    assert (
+        "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, price_reader"
+        in schema
+    )
+    assert "ON ALL TABLES IN SCHEMA public TO price_writer" in schema
+    assert "GRANT SELECT ON ALL TABLES IN SCHEMA public TO price_reader" in schema
+    assert (
+        "REVOKE UPDATE, DELETE\n    ON polymarket_btc_5m_flip_events "
+        "FROM price_writer"
+        in schema
+    )
+    assert "ON ALL SEQUENCES IN SCHEMA public TO price_writer" in schema
+    assert "GRANT SELECT ON TABLES TO price_reader" in schema
+
+
+def test_record_twap_event_is_atomic_append_plus_latest_second_materialization():
+    calls = []
+
+    class Connection:
+        def transaction(self):
+            return _FakeAsyncContext(self)
+
+        async def execute(self, query, *args):
+            calls.append((" ".join(query.split()), args))
+            return "INSERT 0 1"
+
+    class Pool:
+        def __init__(self):
+            self.connection = Connection()
+
+        def acquire(self):
+            return _FakeAsyncContext(self.connection)
+
+    connection_id = UUID("12345678-1234-5678-1234-567812345678")
+    event_ms = 1_783_459_200_987
+    sample_second_ms = 1_783_459_200_000
+    price_e18 = 63_337_115_841_440_165_000_000
+    asyncio.run(
+        db.record_polymarket_twap_event(
+            Pool(),
+            instrument_id=7,
+            connection_id=connection_id,
+            receive_sequence=9,
+            topic="crypto_prices_twap_thirty",
+            symbol="btc/usd",
+            window_s=30,
+            provider_event_ms=event_ms,
+            provider_message_ms=event_ms + 10,
+            received_wall_ns=(event_ms + 20) * 1_000_000 + 123,
+            received_monotonic_ns=987_654_321,
+            price_e18=price_e18,
+            price=Decimal("63337.115841440165"),
+            sample_second_ms=sample_second_ms,
+            window=MarketWindow(
+                market_id=sample_second_ms // 300_000,
+                market_start_ms=sample_second_ms,
+                market_end_ms=sample_second_ms + 300_000,
+            ),
+        )
+    )
+
+    assert len(calls) == 3
+    assert "INSERT INTO market_windows" in calls[0][0]
+    assert "INSERT INTO polymarket_twap_events" in calls[1][0]
+    assert "ON CONFLICT (connection_id, receive_sequence) DO NOTHING" in calls[1][0]
+    assert calls[1][1][12] == Decimal(price_e18)
+    assert "INSERT INTO price_samples" in calls[2][0]
+    assert "'payload.full_accuracy_value'" in calls[2][0]
+    assert "EXCLUDED.provider_event_ms" in calls[2][0]
+    assert "EXCLUDED.received_ms" in calls[2][0]
 
 
 def test_schema_includes_polymarket_probability_tables():
@@ -972,6 +1088,13 @@ def market_download_rows():
                 "market_end_ms": market_end_ms,
                 "market_start_at": market_start_at,
                 "market_end_at": market_end_at,
+                "settlement_reference": "chainlink_twap",
+                "settlement_window_s": 30,
+                "settlement_source_url": (
+                    "https://data.chain.link/streams/"
+                    "btc-usd-twap-30s-streams"
+                ),
+                "settlement_rule_version": "btc-5m-twap-30",
                 "sample_second_ms": market_start_ms + (t * 1000),
                 "binance_provider_event_ms": (
                     market_start_ms - 100 if t == 0 else None
@@ -993,6 +1116,19 @@ def market_download_rows():
                     market_start_ms - 800 if t == 0 else None
                 ),
                 "chainlink_price": Decimal("122998.125") if t == 0 else None,
+                "twap_sample_second_ms": (
+                    market_start_ms if t == 0 else None
+                ),
+                "twap_provider_event_ms": (
+                    market_start_ms - 500 if t == 0 else None
+                ),
+                "twap_provider_message_ms": (
+                    market_start_ms - 400 if t == 0 else None
+                ),
+                "twap_received_ms": (
+                    market_start_ms - 300 if t == 0 else None
+                ),
+                "twap_price": Decimal("122999.875") if t == 0 else None,
                 "up_bid": Decimal("0.47") if t == 1 else None,
                 "up_ask": Decimal("0.485") if t == 1 else None,
                 "up_mid": Decimal("0.48") if t == 1 else None,
@@ -1022,7 +1158,7 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     )
 
     assert payload is not None
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 4
     assert payload["server_time_ms"] == 1_783_459_200_250
     assert payload["market"] == {
         "market_id": 5_944_864,
@@ -1034,6 +1170,18 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
         "chainlink_resolution": {
             "open": None,
             "close": None,
+            "status": "pending",
+            "source": None,
+        },
+        "settlement": {
+            "reference": "chainlink_twap",
+            "window_s": 30,
+            "source_url": (
+                "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+            ),
+            "rule_version": "btc-5m-twap-30",
+            "price_to_beat": None,
+            "official_final_price": None,
             "status": "pending",
             "source": None,
         },
@@ -1055,6 +1203,7 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
     assert payload["series"][0]["prices"] == {
         "binance": "123000.00",
         "chainlink": "122998.13",
+        "twap": "122999.88",
     }
     assert payload["series"][0]["freshness"]["binance"] == {
         "source_ms": 1_783_459_199_900,
@@ -1072,7 +1221,20 @@ def test_build_market_download_payload_returns_300_price_rows_without_probabilit
         "received_age_ms": 1_050,
         "transport_lag_ms": 200,
     }
-    assert payload["series"][1]["prices"] == {"binance": None, "chainlink": None}
+    assert payload["series"][0]["freshness"]["twap"] == {
+        "source_ms": 1_783_459_199_500,
+        "message_ms": 1_783_459_199_600,
+        "received_ms": 1_783_459_199_700,
+        "is_carried_forward": False,
+        "source_age_ms": 750,
+        "received_age_ms": 550,
+        "transport_lag_ms": 200,
+    }
+    assert payload["series"][1]["prices"] == {
+        "binance": None,
+        "chainlink": None,
+        "twap": None,
+    }
     assert "probabilities" not in payload["series"][1]
     assert "futures" not in payload["series"][1]
     assert "open_interest" not in payload["series"][1]
@@ -1110,10 +1272,22 @@ def test_build_market_download_payload_adds_official_chainlink_and_winner_metada
     )
 
     assert payload is not None
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 4
     assert payload["market"]["chainlink_resolution"] == {
         "open": "63337.115841440165",
         "close": "63336.71900847139",
+        "status": "official",
+        "source": "polymarket_gamma_event_metadata",
+    }
+    assert payload["market"]["settlement"] == {
+        "reference": "chainlink_twap",
+        "window_s": 30,
+        "source_url": (
+            "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+        ),
+        "rule_version": "btc-5m-twap-30",
+        "price_to_beat": "63337.115841440165",
+        "official_final_price": "63336.71900847139",
         "status": "official",
         "source": "polymarket_gamma_event_metadata",
     }
@@ -1162,7 +1336,7 @@ def test_download_payload_probability_shape_ask_only():
     assert payload is not None
     first = payload["series"][0]
 
-    assert set(first["prices"].keys()) == {"binance", "chainlink"}
+    assert set(first["prices"].keys()) == {"binance", "chainlink", "twap"}
     assert set(first["probabilities"].keys()) == {"up", "down"}
     assert set(first["probabilities"]["up"].keys()) == {"ask"}
     assert set(first["probabilities"]["down"].keys()) == {"ask"}

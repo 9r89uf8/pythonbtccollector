@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Mapping, Optional, Sequence
+from uuid import UUID
 
 import asyncpg
 
@@ -755,6 +756,341 @@ async def upsert_price_sample(
             )
 
 
+def _require_positive_ns(value: int, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
+def _require_nonnegative_count(value: int, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
+async def start_polymarket_twap_session(
+    pool: asyncpg.Pool,
+    *,
+    connection_id: UUID,
+    topic: str,
+    symbol: str,
+    window_s: int,
+    connected_wall_ns: int,
+    connected_monotonic_ns: int,
+    subscribed_wall_ns: int,
+    subscribed_monotonic_ns: int,
+) -> None:
+    """Persist an RTDS TWAP subscription before accepting its first tick."""
+
+    if not isinstance(connection_id, UUID):
+        raise TypeError("connection_id must be UUID")
+    if not topic or not symbol:
+        raise ValueError("topic and symbol must be non-empty")
+    if not isinstance(window_s, int) or isinstance(window_s, bool) or window_s <= 0:
+        raise ValueError("window_s must be a positive integer")
+    _require_positive_ns(connected_wall_ns, "connected_wall_ns")
+    _require_positive_ns(connected_monotonic_ns, "connected_monotonic_ns")
+    _require_positive_ns(subscribed_wall_ns, "subscribed_wall_ns")
+    _require_positive_ns(subscribed_monotonic_ns, "subscribed_monotonic_ns")
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO polymarket_twap_sessions (
+                connection_id,
+                topic,
+                symbol,
+                window_s,
+                connected_wall_ns,
+                connected_monotonic_ns,
+                subscribed_wall_ns,
+                subscribed_monotonic_ns
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (connection_id) DO NOTHING
+            """,
+            connection_id,
+            topic,
+            symbol,
+            window_s,
+            connected_wall_ns,
+            connected_monotonic_ns,
+            subscribed_wall_ns,
+            subscribed_monotonic_ns,
+        )
+
+
+async def record_polymarket_twap_event(
+    pool: asyncpg.Pool,
+    *,
+    instrument_id: int,
+    connection_id: UUID,
+    receive_sequence: int,
+    topic: str,
+    symbol: str,
+    window_s: int,
+    provider_event_ms: int,
+    provider_message_ms: Optional[int],
+    received_wall_ns: int,
+    received_monotonic_ns: int,
+    price_e18: int,
+    price: Decimal,
+    sample_second_ms: int,
+    window: MarketWindow,
+) -> None:
+    """Durably append one exact TWAP event and materialize its source second."""
+
+    if not isinstance(connection_id, UUID):
+        raise TypeError("connection_id must be UUID")
+    if not isinstance(price, Decimal):
+        raise TypeError("price must be Decimal")
+    if not price.is_finite() or price <= 0:
+        raise ValueError("price must be finite and positive")
+    if not isinstance(price_e18, int) or isinstance(price_e18, bool) or price_e18 <= 0:
+        raise ValueError("price_e18 must be a positive integer")
+    exact_price = Decimal(
+        (0, tuple(int(digit) for digit in str(price_e18)), -18)
+    )
+    if price != exact_price:
+        raise ValueError("price must exactly equal price_e18 / 1e18")
+    _require_nonnegative_count(instrument_id, "instrument_id")
+    if instrument_id == 0:
+        raise ValueError("instrument_id must be positive")
+    _require_nonnegative_count(receive_sequence, "receive_sequence")
+    if receive_sequence == 0:
+        raise ValueError("receive_sequence must be positive")
+    if not isinstance(provider_event_ms, int) or isinstance(provider_event_ms, bool):
+        raise TypeError("provider_event_ms must be an integer")
+    if provider_event_ms < 0:
+        raise ValueError("provider_event_ms must be non-negative")
+    if provider_message_ms is not None and (
+        not isinstance(provider_message_ms, int)
+        or isinstance(provider_message_ms, bool)
+        or provider_message_ms < 0
+    ):
+        raise ValueError("provider_message_ms must be non-negative or None")
+    if sample_second_ms != (provider_event_ms // 1000) * 1000:
+        raise ValueError("sample_second_ms must floor provider_event_ms to its second")
+    if window.market_id != sample_second_ms // 300_000:
+        raise ValueError("window does not contain sample_second_ms")
+    if not topic or not symbol:
+        raise ValueError("topic and symbol must be non-empty")
+    if not isinstance(window_s, int) or isinstance(window_s, bool) or window_s <= 0:
+        raise ValueError("window_s must be a positive integer")
+    _require_positive_ns(received_wall_ns, "received_wall_ns")
+    _require_positive_ns(received_monotonic_ns, "received_monotonic_ns")
+
+    received_ms = received_wall_ns // 1_000_000
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await _ensure_market_window(connection, window)
+            await connection.execute(
+                """
+                INSERT INTO polymarket_twap_events (
+                    connection_id,
+                    receive_sequence,
+                    instrument_id,
+                    topic,
+                    symbol,
+                    window_s,
+                    provider_event_ms,
+                    provider_message_ms,
+                    received_wall_ns,
+                    received_monotonic_ns,
+                    sample_second_ms,
+                    market_id,
+                    price_e18,
+                    price
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    $8, $9, $10, $11, $12, $13, $14
+                )
+                ON CONFLICT (connection_id, receive_sequence) DO NOTHING
+                """,
+                connection_id,
+                receive_sequence,
+                instrument_id,
+                topic,
+                symbol,
+                window_s,
+                provider_event_ms,
+                provider_message_ms,
+                received_wall_ns,
+                received_monotonic_ns,
+                sample_second_ms,
+                window.market_id,
+                Decimal(price_e18),
+                price,
+            )
+            await connection.execute(
+                """
+                INSERT INTO price_samples (
+                    instrument_id,
+                    sample_second_ms,
+                    sample_second_at,
+                    market_id,
+                    price,
+                    provider_event_ms,
+                    received_ms,
+                    source_price_field,
+                    provider_message_ms,
+                    source_topic
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    'payload.full_accuracy_value', $8, $9
+                )
+                ON CONFLICT (instrument_id, sample_second_ms)
+                DO UPDATE SET
+                    price = EXCLUDED.price,
+                    provider_event_ms = EXCLUDED.provider_event_ms,
+                    received_ms = EXCLUDED.received_ms,
+                    source_price_field = EXCLUDED.source_price_field,
+                    provider_message_ms = EXCLUDED.provider_message_ms,
+                    source_topic = EXCLUDED.source_topic
+                WHERE (
+                    EXCLUDED.provider_event_ms,
+                    EXCLUDED.received_ms
+                ) >= (
+                    COALESCE(price_samples.provider_event_ms, -1),
+                    price_samples.received_ms
+                )
+                """,
+                instrument_id,
+                sample_second_ms,
+                epoch_ms_to_utc_datetime(sample_second_ms),
+                window.market_id,
+                price,
+                provider_event_ms,
+                received_ms,
+                provider_message_ms,
+                topic,
+            )
+
+
+async def record_polymarket_twap_gap(
+    pool: asyncpg.Pool,
+    *,
+    connection_id: UUID,
+    detected_wall_ns: int,
+    detected_monotonic_ns: int,
+    reason: str,
+    idle_timeout_ms: Optional[int],
+    last_accepted_received_ms: Optional[int],
+    last_provider_event_ms: Optional[int],
+    messages_received_total: int,
+    messages_accepted_total: int,
+    parse_errors_total: int,
+) -> None:
+    """Append an explicit no-replay coverage gap for one TWAP session."""
+
+    if not isinstance(connection_id, UUID):
+        raise TypeError("connection_id must be UUID")
+    _require_positive_ns(detected_wall_ns, "detected_wall_ns")
+    _require_positive_ns(detected_monotonic_ns, "detected_monotonic_ns")
+    if not reason:
+        raise ValueError("reason must be non-empty")
+    if idle_timeout_ms is not None and idle_timeout_ms <= 0:
+        raise ValueError("idle_timeout_ms must be positive or None")
+    for field_name, value in (
+        ("messages_received_total", messages_received_total),
+        ("messages_accepted_total", messages_accepted_total),
+        ("parse_errors_total", parse_errors_total),
+    ):
+        _require_nonnegative_count(value, field_name)
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO polymarket_twap_gaps (
+                connection_id,
+                detected_wall_ns,
+                detected_monotonic_ns,
+                reason,
+                idle_timeout_ms,
+                last_accepted_received_ms,
+                last_provider_event_ms,
+                messages_received_total,
+                messages_accepted_total,
+                parse_errors_total
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (connection_id, detected_wall_ns, reason) DO NOTHING
+            """,
+            connection_id,
+            detected_wall_ns,
+            detected_monotonic_ns,
+            reason,
+            idle_timeout_ms,
+            last_accepted_received_ms,
+            last_provider_event_ms,
+            messages_received_total,
+            messages_accepted_total,
+            parse_errors_total,
+        )
+
+
+async def finish_polymarket_twap_session(
+    pool: asyncpg.Pool,
+    *,
+    connection_id: UUID,
+    disconnected_wall_ns: int,
+    disconnected_monotonic_ns: int,
+    close_reason: str,
+    messages_received_total: int,
+    messages_accepted_total: int,
+    parse_errors_total: int,
+    last_receive_sequence: int,
+    last_accepted_received_ms: Optional[int],
+    last_provider_event_ms: Optional[int],
+) -> None:
+    """Close one TWAP session without erasing its accepted-event history."""
+
+    if not isinstance(connection_id, UUID):
+        raise TypeError("connection_id must be UUID")
+    _require_positive_ns(disconnected_wall_ns, "disconnected_wall_ns")
+    _require_positive_ns(disconnected_monotonic_ns, "disconnected_monotonic_ns")
+    if not close_reason:
+        raise ValueError("close_reason must be non-empty")
+    for field_name, value in (
+        ("messages_received_total", messages_received_total),
+        ("messages_accepted_total", messages_accepted_total),
+        ("parse_errors_total", parse_errors_total),
+        ("last_receive_sequence", last_receive_sequence),
+    ):
+        _require_nonnegative_count(value, field_name)
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            UPDATE polymarket_twap_sessions
+            SET disconnected_wall_ns = $2,
+                disconnected_monotonic_ns = $3,
+                close_reason = $4,
+                messages_received_total = $5,
+                messages_accepted_total = $6,
+                parse_errors_total = $7,
+                last_receive_sequence = $8,
+                last_accepted_received_ms = $9,
+                last_provider_event_ms = $10,
+                updated_at = now()
+            WHERE connection_id = $1
+              AND disconnected_wall_ns IS NULL
+            """,
+            connection_id,
+            disconnected_wall_ns,
+            disconnected_monotonic_ns,
+            close_reason,
+            messages_received_total,
+            messages_accepted_total,
+            parse_errors_total,
+            last_receive_sequence,
+            last_accepted_received_ms,
+            last_provider_event_ms,
+        )
+
+
 async def upsert_polymarket_btc_5m_market(
     pool: asyncpg.Pool,
     *,
@@ -773,6 +1109,10 @@ async def upsert_polymarket_btc_5m_market(
     active: Optional[bool],
     closed: Optional[bool],
     archived: Optional[bool],
+    settlement_reference: str,
+    settlement_window_s: Optional[int],
+    settlement_source_url: Optional[str],
+    settlement_rule_version: Optional[str],
     raw_gamma: Mapping[str, Any],
     seen_ms: int,
 ) -> None:
@@ -799,6 +1139,10 @@ async def upsert_polymarket_btc_5m_market(
                     active,
                     closed,
                     archived,
+                    settlement_reference,
+                    settlement_window_s,
+                    settlement_source_url,
+                    settlement_rule_version,
                     raw_gamma,
                     first_seen_ms,
                     last_seen_ms
@@ -808,7 +1152,8 @@ async def upsert_polymarket_btc_5m_market(
                     $6, $7, $8, $9, $10,
                     $11, $12, $13, $14,
                     $15, $16, $17,
-                    $18::jsonb, $19, $20
+                    $18, $19, $20, $21,
+                    $22::jsonb, $23, $24
                 )
                 ON CONFLICT (market_id)
                 DO UPDATE SET
@@ -828,6 +1173,10 @@ async def upsert_polymarket_btc_5m_market(
                     active = EXCLUDED.active,
                     closed = EXCLUDED.closed,
                     archived = EXCLUDED.archived,
+                    settlement_reference = EXCLUDED.settlement_reference,
+                    settlement_window_s = EXCLUDED.settlement_window_s,
+                    settlement_source_url = EXCLUDED.settlement_source_url,
+                    settlement_rule_version = EXCLUDED.settlement_rule_version,
                     raw_gamma = EXCLUDED.raw_gamma,
                     last_seen_ms = EXCLUDED.last_seen_ms,
                     updated_at = now()
@@ -849,6 +1198,10 @@ async def upsert_polymarket_btc_5m_market(
                 active,
                 closed,
                 archived,
+                settlement_reference,
+                settlement_window_s,
+                settlement_source_url,
+                settlement_rule_version,
                 json.dumps(raw_gamma, default=str),
                 seen_ms,
                 seen_ms,
@@ -874,6 +1227,10 @@ async def fetch_due_polymarket_resolutions(
                 pm.down_token_id,
                 pm.up_outcome,
                 pm.down_outcome,
+                pm.settlement_reference,
+                pm.settlement_window_s,
+                pm.settlement_source_url,
+                pm.settlement_rule_version,
                 mw.market_end_ms,
                 COALESCE(resolution.resolution_status, 'pending')
                     AS resolution_status,
@@ -1694,7 +2051,12 @@ async def fetch_recent_market_windows(
                     max(i.instrument_id) FILTER (
                         WHERE p.provider_code = 'polymarket_chainlink_rtds'
                           AND i.symbol = 'BTCUSD'
-                    ) AS chainlink_id
+                    ) AS chainlink_id,
+                    max(i.instrument_id) FILTER (
+                        WHERE p.provider_code =
+                                'polymarket_chainlink_twap_rtds'
+                          AND i.symbol = 'BTCUSD_TWAP_30S'
+                    ) AS twap_id
                 FROM instruments i
                 JOIN providers p ON p.provider_id = i.provider_id
             ),
@@ -1715,7 +2077,11 @@ async def fetch_recent_market_windows(
                         SELECT 1
                         FROM price_samples ps
                         WHERE ps.market_id = mw.market_id
-                          AND ps.instrument_id IN (ids.binance_id, ids.chainlink_id)
+                          AND ps.instrument_id IN (
+                                ids.binance_id,
+                                ids.chainlink_id,
+                                ids.twap_id
+                          )
                     )
                     OR EXISTS (
                         SELECT 1
@@ -1764,6 +2130,8 @@ async def fetch_recent_market_windows(
                     AS binance_sample_count,
                 COALESCE(price_counts.chainlink_count, 0)::INTEGER
                     AS chainlink_sample_count,
+                COALESCE(price_counts.twap_count, 0)::INTEGER
+                    AS twap_sample_count,
                 COALESCE(futures_counts.futures_count, 0)::INTEGER
                     AS futures_sample_count,
                 COALESCE(futures_counts.open_interest_count, 0)::INTEGER
@@ -1783,10 +2151,17 @@ async def fetch_recent_market_windows(
                     ) AS binance_count,
                     count(*) FILTER (
                         WHERE ps.instrument_id = ids.chainlink_id
-                    ) AS chainlink_count
+                    ) AS chainlink_count,
+                    count(*) FILTER (
+                        WHERE ps.instrument_id = ids.twap_id
+                    ) AS twap_count
                 FROM price_samples ps
                 WHERE ps.market_id = candidates.market_id
-                  AND ps.instrument_id IN (ids.binance_id, ids.chainlink_id)
+                  AND ps.instrument_id IN (
+                        ids.binance_id,
+                        ids.chainlink_id,
+                        ids.twap_id
+                  )
             ) price_counts ON TRUE
             LEFT JOIN LATERAL (
                 SELECT
@@ -1970,12 +2345,18 @@ async def fetch_market_summaries_for_btc_sources(
                 (p.provider_code = 'binance_spot' AND i.symbol = 'BTCUSDT')
                 OR
                 (p.provider_code = 'polymarket_chainlink_rtds' AND i.symbol = 'BTCUSD')
+                OR
+                (
+                    p.provider_code = 'polymarket_chainlink_twap_rtds'
+                    AND i.symbol = 'BTCUSD_TWAP_30S'
+                )
               )
             ORDER BY
                 CASE p.provider_code
                     WHEN 'binance_spot' THEN 0
                     WHEN 'polymarket_chainlink_rtds' THEN 1
-                    ELSE 2
+                    WHEN 'polymarket_chainlink_twap_rtds' THEN 2
+                    ELSE 3
                 END,
                 i.symbol ASC,
                 ps.sample_second_ms ASC
@@ -2012,6 +2393,10 @@ def build_market_download_payload(
         chainlink_message_ms = row.get("chainlink_provider_message_ms")
         chainlink_received_ms = row.get("chainlink_received_ms")
         chainlink_sample_second_ms = row.get("chainlink_sample_second_ms")
+        twap_source_ms = row.get("twap_provider_event_ms")
+        twap_message_ms = row.get("twap_provider_message_ms")
+        twap_received_ms = row.get("twap_received_ms")
+        twap_sample_second_ms = row.get("twap_sample_second_ms")
         futures_last_price_time_ms = row.get("futures_last_price_time_ms")
         premium_index_time_ms = row.get("premium_index_time_ms")
         open_interest_time_ms = row.get("open_interest_time_ms")
@@ -2030,6 +2415,7 @@ def build_market_download_payload(
             "prices": {
                 "binance": decimal_2dp_or_none(row["binance_price"]),
                 "chainlink": decimal_2dp_or_none(row["chainlink_price"]),
+                "twap": decimal_2dp_or_none(row.get("twap_price")),
             },
             "freshness": {
                 "binance": {
@@ -2053,6 +2439,20 @@ def build_market_download_payload(
                         server_time_ms=server_time_ms,
                         source_time_ms=chainlink_source_ms,
                         received_ms=chainlink_received_ms,
+                    ),
+                },
+                "twap": {
+                    "source_ms": twap_source_ms,
+                    "message_ms": twap_message_ms,
+                    "received_ms": twap_received_ms,
+                    "is_carried_forward": (
+                        twap_sample_second_ms is not None
+                        and int(twap_sample_second_ms) != sample_second_ms
+                    ),
+                    **freshness_meta(
+                        server_time_ms=server_time_ms,
+                        source_time_ms=twap_source_ms,
+                        received_ms=twap_received_ms,
                     ),
                 },
                 "futures_last": {
@@ -2184,7 +2584,7 @@ def build_market_download_payload(
         chainlink_status = "pending"
 
     payload = {
-        "schema_version": 2,
+        "schema_version": 4,
         "server_time_ms": server_time_ms,
         "market": {
             "market_id": int(first["market_id"]),
@@ -2196,6 +2596,16 @@ def build_market_download_payload(
             "chainlink_resolution": {
                 "open": chainlink_open,
                 "close": chainlink_close,
+                "status": chainlink_status,
+                "source": first.get("resolution_chainlink_source"),
+            },
+            "settlement": {
+                "reference": first.get("settlement_reference"),
+                "window_s": first.get("settlement_window_s"),
+                "source_url": first.get("settlement_source_url"),
+                "rule_version": first.get("settlement_rule_version"),
+                "price_to_beat": chainlink_open,
+                "official_final_price": chainlink_close,
                 "status": chainlink_status,
                 "source": first.get("resolution_chainlink_source"),
             },
@@ -2288,6 +2698,20 @@ async def fetch_market_download_payload(
                   AND p.provider_code = 'polymarket_chainlink_rtds'
                   AND i.symbol = 'BTCUSD'
             ),
+            twap AS (
+                SELECT
+                    ps.sample_second_ms,
+                    ps.price,
+                    ps.provider_event_ms AS twap_provider_event_ms,
+                    ps.provider_message_ms AS twap_provider_message_ms,
+                    ps.received_ms AS twap_received_ms
+                FROM price_samples ps
+                JOIN instruments i ON i.instrument_id = ps.instrument_id
+                JOIN providers p ON p.provider_id = i.provider_id
+                WHERE ps.market_id = $1
+                  AND p.provider_code = 'polymarket_chainlink_twap_rtds'
+                  AND i.symbol = 'BTCUSD_TWAP_30S'
+            ),
             probs AS (
                 SELECT *
                 FROM polymarket_probability_samples
@@ -2371,6 +2795,10 @@ async def fetch_market_download_payload(
                 pm.condition_id,
                 pm.up_token_id,
                 pm.down_token_id,
+                pm.settlement_reference,
+                pm.settlement_window_s,
+                pm.settlement_source_url,
+                pm.settlement_rule_version,
 
                 resolution.resolution_status,
                 resolution.resolution_type,
@@ -2398,6 +2826,12 @@ async def fetch_market_download_payload(
                 c.chainlink_provider_event_ms,
                 c.chainlink_provider_message_ms,
                 c.chainlink_received_ms,
+
+                t.sample_second_ms AS twap_sample_second_ms,
+                t.price AS twap_price,
+                t.twap_provider_event_ms,
+                t.twap_provider_message_ms,
+                t.twap_received_ms,
 
                 probs.up_bid,
                 probs.up_ask,
@@ -2484,6 +2918,21 @@ async def fetch_market_download_payload(
                 ORDER BY cl.sample_second_ms DESC
                 LIMIT 1
             ) c ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM twap tw
+                WHERE (
+                    $2::BOOLEAN
+                    AND tw.sample_second_ms <= s.sample_second_ms
+                    AND tw.sample_second_ms >= s.sample_second_ms - $3::BIGINT
+                )
+                OR (
+                    NOT $2::BOOLEAN
+                    AND tw.sample_second_ms = s.sample_second_ms
+                )
+                ORDER BY tw.sample_second_ms DESC
+                LIMIT 1
+            ) t ON TRUE
             LEFT JOIN probs ON probs.sample_second_ms = s.sample_second_ms
             LEFT JOIN futures f ON f.sample_second_ms = s.sample_second_ms
             LEFT JOIN flow ON flow.sample_second_ms = s.sample_second_ms

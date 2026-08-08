@@ -32,6 +32,7 @@ Check the local API from inside the droplet:
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/prices/latest
 curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
+curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
@@ -49,14 +50,14 @@ curl -fsS --compressed "http://127.0.0.1:9000/markets/${MARKET_ID}/data?include_
 curl -fsS "http://127.0.0.1:9000/markets/${MARKET_ID}/download" | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"schema_version": payload["schema_version"], "market": payload["market"]}, indent=2))'
 ```
 
-The ordinary data and download responses should use schema version `2` and include
-`market.chainlink_resolution` and `market.resolution`. A recently completed
+The ordinary data and download responses should use schema version `4` and include
+`market.settlement` and `market.resolution`. A recently completed
 market can legitimately remain `pending` until Polymarket publishes official
 resolution data. The data response keeps `market_start_ms`, `market_end_ms`,
 and `series[].timestamp_ms`. The download omits those three fields, retains the
-corresponding UTC `*_at` strings, and formats official Chainlink open/close
-values to two decimal places. The microstructure opt-in data response should use
-schema version `3` and report row, healthy-row, and missing-second counts. A
+corresponding UTC `*_at` strings, and formats the official Price to Beat and
+final price to two decimal places. The microstructure opt-in data response also
+uses schema version `4` and reports row, healthy-row, and missing-second counts. A
 completed market from before microstructure collection legitimately reports
 zero rows and 300 missing seconds rather than returning `404`.
 
@@ -150,6 +151,21 @@ POLYMARKET_RESOLUTION_BATCH_SIZE=20
 POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30
 ```
 
+For the TWAP-only rollout, also review and add these non-secret keys manually
+to `/etc/price-collector/collector.env`; do not replace that production file:
+
+```text
+POLYMARKET_TWAP_ENABLED=true
+POLYMARKET_TWAP_PROVIDER_CODE=polymarket_chainlink_twap_rtds
+POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_30S
+POLYMARKET_TWAP_RTD_SYMBOL=btc/usd
+POLYMARKET_TWAP_TOPIC=crypto_prices_twap_thirty
+POLYMARKET_TWAP_WINDOW_SECONDS=30
+POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000
+POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000
+POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
+```
+
 Apply `schema.sql`, confirm the new table grants for `price_writer` and
 `price_reader`, and review the environment file before restarting the four
 collector services and `price-api`.
@@ -169,6 +185,128 @@ curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
 curl http://127.0.0.1:9000/markets/current/microstructure/live
 ```
+
+## Destructive TWAP-Only Clean Reset
+
+Use this procedure only when the old market history is intentionally being
+discarded. It irreversibly drops exactly the PostgreSQL database
+`price_collector` and flushes Redis database 0. It does not drop PostgreSQL
+roles, any other database, or change either production environment file.
+
+Run these commands only after the completed change has been pushed to GitHub:
+
+```bash
+set -euo pipefail
+
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+
+sudo systemctl stop \
+  price-api \
+  price-collector-polymarket-probabilities \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d postgres -c \
+  "SELECT datname FROM pg_database WHERE datname = 'price_collector';"
+sudo -u postgres dropdb --force price_collector
+sudo -u postgres createdb price_collector
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector <<'SQL'
+REVOKE ALL ON DATABASE price_collector FROM PUBLIC;
+GRANT CONNECT ON DATABASE price_collector TO price_writer;
+GRANT CONNECT ON DATABASE price_collector TO price_reader;
+
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO price_writer;
+GRANT USAGE ON SCHEMA public TO price_reader;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+GRANT SELECT, INSERT, UPDATE ON TABLES TO price_writer;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+GRANT USAGE, SELECT ON SEQUENCES TO price_writer;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+GRANT SELECT ON TABLES TO price_reader;
+SQL
+
+sudo -u postgres psql --single-transaction -v ON_ERROR_STOP=1 \
+  -d price_collector \
+  -f /opt/price-collector/schema.sql
+
+redis-cli -h 127.0.0.1 -p 6379 -n 0 FLUSHDB
+
+sudo systemctl start \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities
+sudo systemctl start price-api
+```
+
+The default privileges are installed before `schema.sql` so the schema's
+later table-specific revocations remain effective, including immutable flip
+events and reader exclusion from `raw_capture`. Schema application must finish
+before any service is restarted.
+
+Verify all services, the exact TWAP instrument, durable events, the live cache,
+and the read-only API:
+
+```bash
+sudo systemctl status \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api \
+  redis-server \
+  --no-pager
+
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  -u price-collector-polymarket-probabilities \
+  -n 200 \
+  --no-pager
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "
+SELECT p.provider_code, i.symbol, i.stream_name
+FROM instruments i
+JOIN providers p ON p.provider_id = i.provider_id
+WHERE p.provider_code IN (
+    'polymarket_chainlink_rtds',
+    'polymarket_chainlink_twap_rtds'
+)
+ORDER BY p.provider_code, i.symbol;
+"
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "
+SELECT count(*) AS twap_events,
+       max(provider_event_ms) AS latest_provider_event_ms,
+       max(received_wall_ns / 1000000) AS latest_received_ms
+FROM polymarket_twap_events;
+"
+
+redis-cli -h 127.0.0.1 -p 6379 -n 0 MGET \
+  btc:live:binance_spot \
+  btc:live:chainlink \
+  btc:live:chainlink_twap_30s \
+  btc:live:futures
+
+curl -fsS http://127.0.0.1:9000/healthz
+curl -fsS \
+  "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
+curl -fsS http://127.0.0.1:9000/markets/current/live
+```
+
+Immediately after restart, a latest-price request can return `404` until the
+first accepted TWAP event is durably written. Retry it after the Chainlink
+collector journal reports an accepted TWAP tick. A collected Polymarket market
+must report `settlement_reference = 'chainlink_twap'`,
+`settlement_window_s = 30`, and rule version `btc-5m-twap-30`; unknown rules
+must remain absent rather than being classified from standard Chainlink spot.
 
 ### Optional Binance microstructure summary rollout
 
@@ -271,7 +409,7 @@ leading, internal, and trailing one-second keys rather than counting only rows
 that happened to be written. The Redis `EXISTS` result should be `1`; its
 decoded `sample_second_ms` should advance once per second. The live endpoint
 should report `served_from: "redis"` without a PostgreSQL dependency, while the
-data endpoint should report schema version `3`. The final header check should
+data endpoint should report schema version `4`. The final header check should
 include `content-encoding: gzip`.
 
 `BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS` bounds only finalized rows
@@ -376,14 +514,19 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector <<'SQL'
 WITH eligible AS (
     SELECT resolution.market_id
     FROM polymarket_btc_5m_resolutions AS resolution
+    JOIN polymarket_btc_5m_markets AS market
+      ON market.market_id = resolution.market_id
     WHERE resolution.resolution_status = 'resolved'
       AND resolution.resolution_type IS NOT NULL
       AND resolution.chainlink_open_price IS NOT NULL
       AND resolution.chainlink_close_price IS NOT NULL
+      AND market.settlement_reference = 'chainlink_twap'
+      AND market.settlement_window_s = 30
+      AND market.settlement_rule_version = 'btc-5m-twap-30'
 ), current_evaluations AS (
     SELECT *
     FROM polymarket_btc_5m_flip_evaluations
-    WHERE definition_version = 1
+    WHERE definition_version = 2
       AND observation_precision <> 'evaluation_failed'
 )
 SELECT
@@ -414,7 +557,7 @@ SELECT
     sum(archived_microstructure_row_count) AS archived_rows,
     bool_and(retention_safe) AS all_retention_safe
 FROM polymarket_btc_5m_flip_evaluations
-WHERE definition_version = 1
+WHERE definition_version = 2
 GROUP BY evaluation_status, archive_status
 ORDER BY evaluation_status, archive_status;
 
@@ -429,7 +572,7 @@ FROM (
     LEFT JOIN polymarket_btc_5m_flip_cutoffs AS cutoff
       ON cutoff.market_id = evaluation.market_id
      AND cutoff.definition_version = evaluation.definition_version
-    WHERE evaluation.definition_version = 1
+    WHERE evaluation.definition_version = 2
       AND evaluation.observation_precision <> 'evaluation_failed'
     GROUP BY evaluation.market_id
 ) AS coverage;
@@ -442,7 +585,7 @@ SELECT
 FROM polymarket_btc_5m_flip_evaluations AS evaluation
 LEFT JOIN binance_microstructure_1s_flip_archive AS archive
   ON archive.market_id = evaluation.market_id
-WHERE evaluation.definition_version = 1
+WHERE evaluation.definition_version = 2
   AND evaluation.archive_status = 'complete'
 GROUP BY
     evaluation.market_id,
@@ -460,7 +603,7 @@ SELECT
 FROM binance_microstructure_1s AS live
 JOIN polymarket_btc_5m_flip_evaluations AS evaluation
   ON evaluation.market_id = live.market_id
- AND evaluation.definition_version = 1
+ AND evaluation.definition_version = 2
 LEFT JOIN binance_microstructure_1s_flip_archive AS archive
   ON archive.symbol = live.symbol
  AND archive.sample_second_ms = live.sample_second_ms
@@ -481,7 +624,7 @@ curl -fsS \
 
 FLIP_MARKET_ID="$(
   sudo -u postgres psql -At -d price_collector -c \
-    "SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 1 AND observation_precision <> 'evaluation_failed' AND crossing_count > 0 ORDER BY market_id DESC LIMIT 1"
+    "SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 2 AND observation_precision <> 'evaluation_failed' AND crossing_count > 0 ORDER BY market_id DESC LIMIT 1"
 )"
 if [ -n "${FLIP_MARKET_ID}" ]; then
   curl -fsS "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips"
@@ -496,7 +639,7 @@ fi
 
 REMAINING="$(
   sudo -u postgres psql -At -d price_collector -c \
-    "WITH eligible AS (SELECT market_id FROM polymarket_btc_5m_resolutions WHERE resolution_status = 'resolved' AND resolution_type IS NOT NULL AND chainlink_open_price IS NOT NULL AND chainlink_close_price IS NOT NULL), completed AS (SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 1 AND observation_precision <> 'evaluation_failed') SELECT count(*) FROM eligible LEFT JOIN completed USING (market_id) WHERE completed.market_id IS NULL"
+    "WITH eligible AS (SELECT resolution.market_id FROM polymarket_btc_5m_resolutions resolution JOIN polymarket_btc_5m_markets market USING (market_id) WHERE resolution_status = 'resolved' AND resolution_type IS NOT NULL AND chainlink_open_price IS NOT NULL AND chainlink_close_price IS NOT NULL AND market.settlement_reference = 'chainlink_twap' AND market.settlement_window_s = 30 AND market.settlement_rule_version = 'btc-5m-twap-30'), completed AS (SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 2 AND observation_precision <> 'evaluation_failed') SELECT count(*) FROM eligible LEFT JOIN completed USING (market_id) WHERE completed.market_id IS NULL"
 )"
 if [ "${REMAINING}" != "0" ]; then
   echo "flip backfill still has ${REMAINING} markets; repeat verification before the post-deploy backup" >&2
@@ -601,10 +744,10 @@ SELECT
     (
         SELECT count(*)
         FROM polymarket_btc_5m_flip_events
-        WHERE definition_version = 1
+        WHERE definition_version = 2
     ) AS crossing_events
 FROM polymarket_btc_5m_flip_evaluations
-WHERE definition_version = 1;
+WHERE definition_version = 2;
 
 SELECT count(*) AS markets_without_20_cutoffs
 FROM (
@@ -613,7 +756,7 @@ FROM (
     LEFT JOIN polymarket_btc_5m_flip_cutoffs AS cutoff
       ON cutoff.market_id = evaluation.market_id
      AND cutoff.definition_version = evaluation.definition_version
-    WHERE evaluation.definition_version = 1
+    WHERE evaluation.definition_version = 2
       AND evaluation.observation_precision <> 'evaluation_failed'
     GROUP BY evaluation.market_id
 ) AS coverage
@@ -621,7 +764,7 @@ WHERE cutoff_rows <> 20;
 
 SELECT count(*) AS archive_count_mismatches
 FROM polymarket_btc_5m_flip_evaluations AS evaluation
-WHERE evaluation.definition_version = 1
+WHERE evaluation.definition_version = 2
   AND evaluation.archive_status = 'complete'
   AND (
         evaluation.source_microstructure_row_count
@@ -637,7 +780,7 @@ SELECT count(*) AS unsynchronized_live_archive_rows
 FROM binance_microstructure_1s AS live
 JOIN polymarket_btc_5m_flip_evaluations AS evaluation
   ON evaluation.market_id = live.market_id
- AND evaluation.definition_version = 1
+ AND evaluation.definition_version = 2
 LEFT JOIN binance_microstructure_1s_flip_archive AS archive
   ON archive.symbol = live.symbol
  AND archive.sample_second_ms = live.sample_second_ms
@@ -3029,7 +3172,11 @@ flag unless a separate raw-capture failure justifies that action.
 Redis is the live-card cache only. PostgreSQL remains the historical source.
 
 ```bash
-redis-cli -h 127.0.0.1 MGET btc:live:binance_spot btc:live:chainlink btc:live:futures
+redis-cli -h 127.0.0.1 MGET \
+  btc:live:binance_spot \
+  btc:live:chainlink \
+  btc:live:chainlink_twap_30s \
+  btc:live:futures
 ```
 
 Each populated key should look like:
@@ -3109,7 +3256,8 @@ LIMIT 10;
 `pending` rows with a future `next_check_ms` are scheduled for another attempt.
 Terminal `resolved` rows use `resolution_type` to distinguish a normal
 `winner` from a `split`. Their `next_check_ms` becomes `NULL` after official
-Chainlink open/close metadata is also stored.
+The exact Price to Beat and official final-price metadata are also stored; the
+associated market row identifies the TWAP settlement rule and source URL.
 
 ## Confirm Local-Only Binding
 

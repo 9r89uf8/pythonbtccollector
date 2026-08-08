@@ -20,10 +20,23 @@ from price_collector.binance_microstructure import MICROSTRUCTURE_VALUE_COLUMNS
 
 LOGGER = logging.getLogger("price_collector.flip_research")
 
-FLIP_DEFINITION_VERSION = 1
+SPOT_FLIP_DEFINITION_VERSION = 1
+TWAP_FLIP_DEFINITION_VERSION = 2
+FLIP_DEFINITION_VERSION = TWAP_FLIP_DEFINITION_VERSION
 FLIP_WINDOW_SECONDS = 20
 CHAINLINK_CUTOFF_FRESH_MS = 10_000
 MAX_CONFIRMED_CROSSING_GAP_MS = CHAINLINK_CUTOFF_FRESH_MS
+# Live RTDS measurements show the one-second TWAP frames normally arrive
+# roughly 1.2--2.8 seconds after their provider timestamp.  Freshness is a
+# causal-age guard, while the independent density checks below prevent this
+# allowance from hiding missing one-second observations.
+TWAP_CUTOFF_FRESH_MS = 5_000
+TWAP_MAX_OBSERVATION_GAP_MS = 1_500
+# Coverage is anchored outside both edges of the final 20-second window: the
+# last raw source event before T-20 through the first persisted event after the
+# market boundary. This prevents survivor-selected bounds from hiding a hole.
+TWAP_MIN_COVERAGE_SPAN_MS = FLIP_WINDOW_SECONDS * 1000
+TWAP_MIN_COVERAGE_EVENT_COUNT = FLIP_WINDOW_SECONDS + 1
 PROBABILITY_CUTOFF_FRESH_MS = 15_000
 FLIP_FINALIZATION_GRACE_MS = 30_000
 FLIP_EVALUATOR_POLL_SECONDS = 5
@@ -51,6 +64,7 @@ class ChainlinkObservation:
     provider_event_ms: int
     received_ms: int
     provider_message_ms: Optional[int] = None
+    received_wall_ns: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +218,87 @@ def _chainlink_from_row(row: Mapping[str, Any]) -> ChainlinkObservation:
             if row.get("provider_message_ms") is not None
             else None
         ),
+        received_wall_ns=(
+            int(row["received_wall_ns"])
+            if row.get("received_wall_ns") is not None
+            else None
+        ),
+    )
+
+
+def _observation_received_by(
+    observation: ChainlinkObservation,
+    cutoff_ms: int,
+) -> bool:
+    if observation.received_wall_ns is not None:
+        return observation.received_wall_ns <= cutoff_ms * 1_000_000
+    return observation.received_ms <= cutoff_ms
+
+
+def _observation_received_before(
+    observation: ChainlinkObservation,
+    boundary_ms: int,
+) -> bool:
+    if observation.received_wall_ns is not None:
+        return observation.received_wall_ns < boundary_ms * 1_000_000
+    return observation.received_ms < boundary_ms
+
+
+def _observation_received_order_ns(observation: ChainlinkObservation) -> int:
+    return (
+        observation.received_wall_ns
+        if observation.received_wall_ns is not None
+        else observation.received_ms * 1_000_000
+    )
+
+
+def normalize_gap_interval_ms(
+    *,
+    gap_start_provider_ms: Optional[int],
+    gap_end_provider_ms: Optional[int],
+    gap_start_wall_ns: int,
+    gap_end_wall_ns: Optional[int],
+) -> tuple[int, Optional[int], str]:
+    """Choose one coherent clock for a persisted gap interval."""
+
+    provider_bounds_valid = gap_start_provider_ms is not None and (
+        (
+            gap_end_provider_ms is not None
+            and gap_end_provider_ms > gap_start_provider_ms
+        )
+        or (
+            gap_end_provider_ms is None
+            and gap_end_wall_ns is None
+        )
+    )
+    if provider_bounds_valid:
+        return gap_start_provider_ms, gap_end_provider_ms, "provider"
+
+    wall_start_ms = gap_start_wall_ns // 1_000_000
+    if gap_end_wall_ns is None:
+        return wall_start_ms, None, "wall"
+    wall_end_ms = gap_end_wall_ns // 1_000_000
+    return min(wall_start_ms, wall_end_ms), max(
+        wall_start_ms,
+        wall_end_ms,
+    ), "wall"
+
+
+def gap_interval_overlaps_final_window(
+    *,
+    gap_start_ms: int,
+    gap_end_ms: Optional[int],
+    market_end_ms: int,
+) -> bool:
+    """Return whether a half-open source gap overlaps the final 20 seconds.
+
+    A missing recovery event leaves the gap open. Bounds are normalized onto
+    one clock before reaching this helper.
+    """
+
+    window_start_ms = market_end_ms - FLIP_WINDOW_SECONDS * 1000
+    return gap_start_ms < market_end_ms and (
+        gap_end_ms is None or gap_end_ms > window_start_ms
     )
 
 
@@ -261,7 +356,7 @@ def _latest_causal_chainlink(
         observation
         for observation in observations
         if observation.provider_event_ms <= cutoff_ms
-        and observation.received_ms <= cutoff_ms
+        and _observation_received_by(observation, cutoff_ms)
     )
     return max(
         candidates,
@@ -269,6 +364,7 @@ def _latest_causal_chainlink(
             item.provider_event_ms,
             item.sample_second_ms,
             item.received_ms,
+            _observation_received_order_ns(item),
         ),
         default=None,
     )
@@ -321,6 +417,7 @@ def _build_cutoffs(
     chainlink: Sequence[ChainlinkObservation],
     probabilities: Sequence[ProbabilityObservation],
     microstructure_rows: Iterable[Mapping[str, Any]],
+    definition_version: int,
 ) -> tuple[CutoffObservation, ...]:
     microstructure = _microstructure_by_second(microstructure_rows)
     cutoffs: list[CutoffObservation] = []
@@ -338,10 +435,16 @@ def _build_cutoffs(
             if chainlink_observation is not None
             else None
         )
-        chainlink_fresh = (
-            source_age_ms is not None
-            and 0 <= source_age_ms <= CHAINLINK_CUTOFF_FRESH_MS
-        )
+        if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+            chainlink_fresh = (
+                source_age_ms is not None
+                and 0 <= source_age_ms < TWAP_CUTOFF_FRESH_MS
+            )
+        else:
+            chainlink_fresh = (
+                source_age_ms is not None
+                and 0 <= source_age_ms <= CHAINLINK_CUTOFF_FRESH_MS
+            )
 
         apparent_side: Optional[str] = None
         signed_distance: Optional[Decimal] = None
@@ -466,6 +569,7 @@ def _build_crossings(
     threshold: Decimal,
     winner: Optional[str],
     observations: Sequence[ChainlinkObservation],
+    observation_precision: str = "one_second_summary",
 ) -> tuple[FlipEvent, ...]:
     interval_start_ms = market_end_ms - FLIP_WINDOW_SECONDS * 1000
     causal = sorted(
@@ -473,12 +577,13 @@ def _build_crossings(
             observation
             for observation in observations
             if observation.provider_event_ms < market_end_ms
-            and observation.received_ms < market_end_ms
+            and _observation_received_before(observation, market_end_ms)
         ),
         key=lambda item: (
             item.provider_event_ms,
             item.sample_second_ms,
             item.received_ms,
+            _observation_received_order_ns(item),
         ),
     )
 
@@ -518,6 +623,7 @@ def _build_crossings(
                             market_end_ms - observation.provider_event_ms
                         ),
                         decisive=False,
+                        observation_precision=observation_precision,
                     )
                 )
 
@@ -542,6 +648,44 @@ def _build_crossings(
     )
 
 
+def _crossing_coverage_gap_ms(
+    event: FlipEvent,
+    observations: Sequence[ChainlinkObservation],
+    *,
+    market_end_ms: int,
+) -> int:
+    """Return the largest raw source-time gap bracketing one crossing.
+
+    Flip events intentionally connect strict-side observations across equality
+    touches.  Completeness must therefore inspect every intervening raw TWAP
+    frame instead of mistaking a valid tie for a missing observation.
+    """
+
+    provider_times = sorted(
+        {
+            observation.provider_event_ms
+            for observation in observations
+            if event.previous_provider_event_ms
+            <= observation.provider_event_ms
+            <= event.provider_event_ms
+            and _observation_received_before(observation, market_end_ms)
+        }
+    )
+    if not provider_times:
+        return event.observation_gap_ms
+    if provider_times[0] > event.previous_provider_event_ms:
+        provider_times.insert(0, event.previous_provider_event_ms)
+    if provider_times[-1] < event.provider_event_ms:
+        provider_times.append(event.provider_event_ms)
+    return max(
+        (
+            current - previous
+            for previous, current in zip(provider_times, provider_times[1:])
+        ),
+        default=0,
+    )
+
+
 def analyze_market(
     *,
     market_id: int,
@@ -554,6 +698,7 @@ def analyze_market(
     chainlink_rows: Sequence[Mapping[str, Any]],
     probability_rows: Sequence[Mapping[str, Any]],
     microstructure_rows: Sequence[Mapping[str, Any]],
+    source_gap_rows: Sequence[Mapping[str, Any]] = (),
     definition_version: int = FLIP_DEFINITION_VERSION,
 ) -> FlipAnalysis:
     """Classify one resolved market without performing I/O."""
@@ -574,6 +719,11 @@ def analyze_market(
             threshold=threshold,
             winner=official_winner,
             observations=chainlink,
+            observation_precision=(
+                "exact_twap_event"
+                if definition_version == TWAP_FLIP_DEFINITION_VERSION
+                else "one_second_summary"
+            ),
         )
         if threshold is not None
         else ()
@@ -585,6 +735,7 @@ def analyze_market(
         chainlink=chainlink,
         probabilities=probabilities,
         microstructure_rows=microstructure_rows,
+        definition_version=definition_version,
     )
 
     official_complete = (
@@ -594,17 +745,109 @@ def analyze_market(
         and official_winner is not None
     )
     all_cutoffs_fresh = all(cutoff.chainlink_fresh for cutoff in cutoffs)
-    crossings_have_fresh_brackets = all(
-        event.observation_gap_ms <= MAX_CONFIRMED_CROSSING_GAP_MS
-        for event in events
+    maximum_crossing_gap_ms = (
+        TWAP_MAX_OBSERVATION_GAP_MS
+        if definition_version == TWAP_FLIP_DEFINITION_VERSION
+        else MAX_CONFIRMED_CROSSING_GAP_MS
     )
-    if not official_complete:
+    crossing_coverage_gaps = [
+        _crossing_coverage_gap_ms(
+            event,
+            chainlink,
+            market_end_ms=market_end_ms,
+        )
+        for event in events
+    ]
+    crossings_have_fresh_brackets = all(
+        gap_ms <= maximum_crossing_gap_ms
+        for gap_ms in crossing_coverage_gaps
+    )
+    selected_cutoff_event_times = sorted(
+        {
+            cutoff.chainlink.provider_event_ms
+            for cutoff in cutoffs
+            if cutoff.chainlink is not None
+        }
+    )
+    flip_window_start_ms = market_end_ms - FLIP_WINDOW_SECONDS * 1000
+    pre_window_event_ms = max(
+        (
+            observation.provider_event_ms
+            for observation in chainlink
+            if observation.provider_event_ms < flip_window_start_ms
+        ),
+        default=None,
+    )
+    post_boundary_event_ms = min(
+        (
+            observation.provider_event_ms
+            for observation in chainlink
+            if observation.provider_event_ms > market_end_ms
+        ),
+        default=None,
+    )
+    if pre_window_event_ms is not None and post_boundary_event_ms is not None:
+        causal_interval_start_ms = pre_window_event_ms
+        causal_interval_end_ms = post_boundary_event_ms
+        causal_interval_event_times = sorted(
+            {
+                observation.provider_event_ms
+                for observation in chainlink
+                if causal_interval_start_ms
+                <= observation.provider_event_ms
+                <= causal_interval_end_ms
+            }
+        )
+    else:
+        causal_interval_start_ms = None
+        causal_interval_end_ms = None
+        causal_interval_event_times = []
+    causal_interval_gaps = [
+        current - previous
+        for previous, current in zip(
+            causal_interval_event_times,
+            causal_interval_event_times[1:],
+        )
+    ]
+    causal_interval_span_ms = (
+        causal_interval_end_ms - causal_interval_start_ms
+        if causal_interval_start_ms is not None
+        and causal_interval_end_ms is not None
+        else None
+    )
+    expected_causal_interval_event_count = (
+        causal_interval_span_ms // 1000 + 1
+        if causal_interval_span_ms is not None
+        else None
+    )
+    twap_cutoffs_dense = (
+        all_cutoffs_fresh
+        and causal_interval_span_ms is not None
+        and causal_interval_span_ms >= TWAP_MIN_COVERAGE_SPAN_MS
+        and len(causal_interval_event_times) >= TWAP_MIN_COVERAGE_EVENT_COUNT
+        and expected_causal_interval_event_count is not None
+        and len(causal_interval_event_times)
+            >= expected_causal_interval_event_count
+        and (
+            not causal_interval_gaps
+            or max(causal_interval_gaps) <= TWAP_MAX_OBSERVATION_GAP_MS
+        )
+    )
+    known_source_gap = (
+        definition_version == TWAP_FLIP_DEFINITION_VERSION
+        and bool(source_gap_rows)
+    )
+    if not official_complete or known_source_gap:
         evaluation_status = EVALUATION_AMBIGUOUS
     elif events and crossings_have_fresh_brackets:
         evaluation_status = EVALUATION_CONFIRMED_FLIP
     elif events:
         evaluation_status = EVALUATION_AMBIGUOUS
-    elif all_cutoffs_fresh:
+    elif (
+        twap_cutoffs_dense
+        if definition_version == TWAP_FLIP_DEFINITION_VERSION
+        else all_cutoffs_fresh
+    ):
         evaluation_status = EVALUATION_NON_FLIP
     else:
         evaluation_status = EVALUATION_AMBIGUOUS
@@ -617,12 +860,13 @@ def analyze_market(
             if analysis_start_ms
             <= observation.provider_event_ms
             < market_end_ms
-            and observation.received_ms < market_end_ms
+            and _observation_received_before(observation, market_end_ms)
         ),
         key=lambda item: (
             item.provider_event_ms,
             item.sample_second_ms,
             item.received_ms,
+            _observation_received_order_ns(item),
         ),
     )
     strict_window_observations = [
@@ -695,10 +939,37 @@ def analyze_market(
         ),
         data_quality={
             "official_complete": official_complete,
+            "source_reference": (
+                "chainlink_twap_30s"
+                if definition_version == TWAP_FLIP_DEFINITION_VERSION
+                else "chainlink_spot"
+            ),
+            "known_source_gap_count": len(source_gap_rows),
             "all_cutoffs_fresh": all_cutoffs_fresh,
+            "twap_cutoffs_dense": twap_cutoffs_dense,
+            "distinct_cutoff_event_count": len(selected_cutoff_event_times),
+            "twap_causal_interval_start_ms": causal_interval_start_ms,
+            "twap_causal_interval_end_ms": causal_interval_end_ms,
+            "twap_pre_window_event_ms": pre_window_event_ms,
+            "twap_post_boundary_event_ms": post_boundary_event_ms,
+            "twap_causal_interval_span_ms": causal_interval_span_ms,
+            "twap_causal_interval_event_count": len(
+                causal_interval_event_times
+            ),
+            "twap_causal_interval_expected_event_count": (
+                expected_causal_interval_event_count
+            ),
+            "twap_causal_interval_max_gap_ms": (
+                max(causal_interval_gaps) if causal_interval_gaps else None
+            ),
+            "crossing_coverage_max_gap_ms": (
+                max(crossing_coverage_gaps)
+                if crossing_coverage_gaps
+                else None
+            ),
             "stale_crossing_count": sum(
-                event.observation_gap_ms > MAX_CONFIRMED_CROSSING_GAP_MS
-                for event in events
+                gap_ms > maximum_crossing_gap_ms
+                for gap_ms in crossing_coverage_gaps
             ),
             "missing_chainlink_cutoffs": (
                 FLIP_WINDOW_SECONDS
@@ -898,8 +1169,33 @@ class FlipArchiveVerificationError(RuntimeError):
     pass
 
 
+def market_rule_supports_flip_definition(
+    market: Mapping[str, Any],
+    definition_version: int,
+) -> bool:
+    if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+        return (
+            market.get("settlement_reference") == "chainlink_twap"
+            and market.get("settlement_window_s") == 30
+            and market.get("settlement_source_url")
+            == "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+            and market.get("settlement_rule_version") == "btc-5m-twap-30"
+        )
+    if definition_version == SPOT_FLIP_DEFINITION_VERSION:
+        return (
+            market.get("settlement_reference") == "chainlink_spot"
+            and market.get("settlement_rule_version") is not None
+        )
+    return False
+
+
 def _quality_flags(analysis: FlipAnalysis) -> list[str]:
     flags: list[str] = []
+    observation_name = (
+        "twap"
+        if analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+        else "chainlink"
+    )
     if analysis.resolution_type != "winner":
         flags.append("official_resolution_not_winner")
     if analysis.threshold is None:
@@ -909,7 +1205,12 @@ def _quality_flags(analysis: FlipAnalysis) -> list[str]:
     if analysis.winner not in {STRICT_UP, STRICT_DOWN}:
         flags.append("missing_official_winner")
     if analysis.fresh_cutoff_count < FLIP_WINDOW_SECONDS:
-        flags.append("incomplete_fresh_chainlink_cutoffs")
+        flags.append(f"incomplete_fresh_{observation_name}_cutoffs")
+    if (
+        analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+        and not analysis.data_quality.get("twap_cutoffs_dense")
+    ):
+        flags.append("incomplete_dense_twap_cutoffs")
     if analysis.probability_cutoff_count < FLIP_WINDOW_SECONDS:
         flags.append("missing_probability_cutoffs")
     if analysis.fresh_probability_cutoff_count < FLIP_WINDOW_SECONDS:
@@ -920,15 +1221,30 @@ def _quality_flags(analysis: FlipAnalysis) -> list[str]:
         flags.append("threshold_touch_observed")
     if analysis.data_quality.get("stale_crossing_count"):
         flags.append("stale_crossing_gap")
+    if analysis.data_quality.get("known_source_gap_count"):
+        flags.append("twap_stream_gap")
+    if (
+        analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+        and analysis.chainlink_observation_count == 0
+    ):
+        flags.append("missing_twap")
     return flags
 
 
-def _cutoff_quality_flags(cutoff: CutoffObservation) -> list[str]:
+def _cutoff_quality_flags(
+    cutoff: CutoffObservation,
+    definition_version: int = FLIP_DEFINITION_VERSION,
+) -> list[str]:
     flags: list[str] = []
+    observation_name = (
+        "twap"
+        if definition_version == TWAP_FLIP_DEFINITION_VERSION
+        else "chainlink"
+    )
     if cutoff.chainlink is None:
-        flags.append("missing_chainlink")
+        flags.append(f"missing_{observation_name}")
     elif not cutoff.chainlink_fresh:
-        flags.append("stale_chainlink")
+        flags.append(f"stale_{observation_name}")
     if cutoff.apparent_side == TIE:
         flags.append("threshold_touch")
     if cutoff.probability is None:
@@ -957,7 +1273,11 @@ def _evaluation_arguments(
         analysis.market_id,
         analysis.definition_version,
         analysis.evaluation_status,
-        "one_second_summary",
+        (
+            "exact_twap_event"
+            if analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+            else "one_second_summary"
+        ),
         analysis.threshold,
         analysis.official_close,
         analysis.winner,
@@ -1091,7 +1411,7 @@ def _cutoff_arguments(
             else None
         ),
         microstructure is not None,
-        _cutoff_quality_flags(cutoff),
+        _cutoff_quality_flags(cutoff, analysis.definition_version),
     )
 
 
@@ -1116,6 +1436,12 @@ async def fetch_due_flip_markets(
                 r.chainlink_open_price,
                 r.chainlink_close_price,
                 r.winner,
+                pm.settlement_reference,
+                pm.settlement_window_s,
+                pm.settlement_source_url,
+                pm.settlement_rule_version,
+                twap_watermark.provider_event_ms
+                    AS twap_persistence_watermark_event_ms,
                 evaluation.evaluation_status AS existing_evaluation_status,
                 evaluation.observation_precision
                     AS existing_observation_precision,
@@ -1125,14 +1451,43 @@ async def fetch_due_flip_markets(
                     AS evaluation_attempts,
                 evaluation.next_retry_ms
             FROM polymarket_btc_5m_resolutions r
+            JOIN polymarket_btc_5m_markets pm ON pm.market_id = r.market_id
             JOIN market_windows mw ON mw.market_id = r.market_id
             LEFT JOIN {EVALUATION_TABLE} evaluation
               ON evaluation.market_id = r.market_id
              AND evaluation.definition_version = $2
+            LEFT JOIN LATERAL (
+                SELECT event.provider_event_ms
+                FROM polymarket_twap_events event
+                WHERE event.topic = 'crypto_prices_twap_thirty'
+                  AND event.symbol = 'btc/usd'
+                  AND event.window_s = 30
+                  AND event.provider_event_ms > mw.market_end_ms
+                ORDER BY
+                    event.provider_event_ms ASC,
+                    event.received_wall_ns ASC
+                LIMIT 1
+            ) twap_watermark ON TRUE
             WHERE r.resolution_status = 'resolved'
               AND r.resolution_type IS NOT NULL
               AND r.chainlink_open_price IS NOT NULL
               AND r.chainlink_close_price IS NOT NULL
+              AND (
+                    (
+                        $2::SMALLINT = {TWAP_FLIP_DEFINITION_VERSION}
+                        AND pm.settlement_reference = 'chainlink_twap'
+                        AND pm.settlement_window_s = 30
+                        AND pm.settlement_source_url =
+                            'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                        AND pm.settlement_rule_version = 'btc-5m-twap-30'
+                        AND twap_watermark.provider_event_ms > mw.market_end_ms
+                    )
+                    OR (
+                        $2::SMALLINT = {SPOT_FLIP_DEFINITION_VERSION}
+                        AND pm.settlement_reference = 'chainlink_spot'
+                        AND pm.settlement_rule_version IS NOT NULL
+                    )
+              )
               AND mw.market_end_ms <= $1::BIGINT - $3::BIGINT
               AND (
                     evaluation.market_id IS NULL
@@ -1177,31 +1532,306 @@ async def _load_market_inputs(
     connection: Any,
     *,
     market_id: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    chainlink_rows = await connection.fetch(
-        """
-        SELECT
-            ps.sample_second_ms,
-            ps.price,
-            ps.provider_event_ms,
-            ps.provider_message_ms,
-            ps.received_ms
-        FROM price_samples ps
-        JOIN instruments instrument
-          ON instrument.instrument_id = ps.instrument_id
-        JOIN providers provider
-          ON provider.provider_id = instrument.provider_id
-        WHERE ps.market_id = $1
-          AND provider.provider_code = 'polymarket_chainlink_rtds'
-          AND instrument.symbol = 'BTCUSD'
-          AND ps.provider_event_ms IS NOT NULL
-        ORDER BY
-            ps.provider_event_ms ASC,
-            ps.sample_second_ms ASC,
-            ps.received_ms ASC
-        """,
-        market_id,
-    )
+    definition_version: int = FLIP_DEFINITION_VERSION,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+        # Deliberately source-time global: an event at the exact ending
+        # boundary is keyed to the following market in its materialized row,
+        # but still brackets this market's close and must remain queryable.
+        chainlink_rows = await connection.fetch(
+            """
+            SELECT
+                event.sample_second_ms,
+                event.price,
+                event.provider_event_ms,
+                event.provider_message_ms,
+                event.received_wall_ns,
+                (event.received_wall_ns / 1000000)::BIGINT AS received_ms
+            FROM polymarket_twap_events event
+            JOIN market_windows target ON target.market_id = $1
+            WHERE event.topic = 'crypto_prices_twap_thirty'
+              AND event.symbol = 'btc/usd'
+              AND event.window_s = 30
+              AND event.provider_event_ms >= target.market_start_ms
+              AND event.provider_event_ms <= COALESCE(
+                    (
+                        SELECT MIN(watermark.provider_event_ms)
+                        FROM polymarket_twap_events watermark
+                        WHERE watermark.topic =
+                                'crypto_prices_twap_thirty'
+                          AND watermark.symbol = 'btc/usd'
+                          AND watermark.window_s = 30
+                          AND watermark.provider_event_ms >
+                                target.market_end_ms
+                    ),
+                    target.market_end_ms
+              )
+            ORDER BY
+                event.provider_event_ms ASC,
+                event.received_wall_ns ASC,
+                event.connection_id ASC,
+                event.receive_sequence ASC
+            """,
+            market_id,
+        )
+        source_gap_rows = await connection.fetch(
+            """
+            WITH target AS (
+                SELECT market_start_ms, market_end_ms
+                FROM market_windows
+                WHERE market_id = $1
+            ),
+            feed_sessions AS (
+                SELECT
+                    session.*,
+                    ROW_NUMBER() OVER (
+                        ORDER BY
+                            session.created_at ASC,
+                            session.connected_wall_ns ASC,
+                            session.connection_id ASC
+                    ) AS session_order
+                FROM polymarket_twap_sessions session
+                WHERE session.topic = 'crypto_prices_twap_thirty'
+                  AND session.symbol = 'btc/usd'
+                  AND session.window_s = 30
+            ),
+            session_event_bounds AS (
+                SELECT
+                    session.*,
+                    last_event.provider_event_ms
+                        AS last_event_provider_ms,
+                    last_event.received_wall_ns
+                        AS last_event_received_wall_ns
+                FROM feed_sessions session
+                LEFT JOIN LATERAL (
+                    SELECT
+                        event.provider_event_ms,
+                        event.received_wall_ns
+                    FROM polymarket_twap_events event
+                    WHERE event.connection_id = session.connection_id
+                      AND event.topic = 'crypto_prices_twap_thirty'
+                      AND event.symbol = 'btc/usd'
+                      AND event.window_s = 30
+                    ORDER BY event.receive_sequence DESC
+                    LIMIT 1
+                ) last_event ON TRUE
+            ),
+            session_recoveries AS (
+                SELECT
+                    current.connection_id,
+                    next_session.connection_id AS next_connection_id,
+                    next_session.subscribed_wall_ns
+                        AS next_subscribed_wall_ns,
+                    recovery.provider_event_ms
+                        AS recovery_provider_event_ms,
+                    recovery.received_wall_ns
+                        AS recovery_received_wall_ns
+                FROM session_event_bounds current
+                LEFT JOIN LATERAL (
+                    SELECT future.connection_id, future.subscribed_wall_ns
+                    FROM feed_sessions future
+                    WHERE future.session_order > current.session_order
+                    ORDER BY future.session_order ASC
+                    LIMIT 1
+                ) next_session ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT
+                        event.provider_event_ms,
+                        event.received_wall_ns
+                    FROM feed_sessions future
+                    JOIN polymarket_twap_events event
+                      ON event.connection_id = future.connection_id
+                     AND event.topic = 'crypto_prices_twap_thirty'
+                     AND event.symbol = 'btc/usd'
+                     AND event.window_s = 30
+                    WHERE future.session_order > current.session_order
+                    ORDER BY
+                        future.session_order ASC,
+                        event.receive_sequence ASC
+                    LIMIT 1
+                ) recovery ON TRUE
+            ),
+            explicit_intervals AS (
+                SELECT
+                    gap.connection_id,
+                    recovery.next_connection_id,
+                    'explicit_gap'::TEXT AS interval_kind,
+                    gap.reason,
+                    COALESCE(
+                        gap.last_provider_event_ms,
+                        session.last_event_provider_ms
+                    ) AS gap_start_provider_ms,
+                    recovery.recovery_provider_event_ms
+                        AS gap_end_provider_ms,
+                    COALESCE(
+                        session.last_event_received_wall_ns,
+                        gap.last_accepted_received_ms * 1000000,
+                        session.subscribed_wall_ns
+                    ) AS gap_start_wall_ns,
+                    recovery.recovery_received_wall_ns AS gap_end_wall_ns,
+                    gap.detected_wall_ns,
+                    recovery.next_subscribed_wall_ns
+                FROM polymarket_twap_gaps gap
+                JOIN session_event_bounds session
+                  ON session.connection_id = gap.connection_id
+                JOIN session_recoveries recovery
+                  ON recovery.connection_id = gap.connection_id
+            ),
+            session_transition_intervals AS (
+                SELECT
+                    session.connection_id,
+                    recovery.next_connection_id,
+                    CASE
+                        WHEN session.disconnected_wall_ns IS NULL
+                            THEN 'orphan_session_reconnect'
+                        WHEN session.close_reason = 'cancelled'
+                            THEN 'cancelled_session_reconnect'
+                        ELSE 'session_reconnect'
+                    END AS interval_kind,
+                    COALESCE(
+                        session.close_reason,
+                        'missing_session_finish'
+                    ) AS reason,
+                    COALESCE(
+                        session.last_event_provider_ms,
+                        session.last_provider_event_ms
+                    ) AS gap_start_provider_ms,
+                    recovery.recovery_provider_event_ms
+                        AS gap_end_provider_ms,
+                    COALESCE(
+                        session.last_event_received_wall_ns,
+                        session.last_accepted_received_ms * 1000000,
+                        session.subscribed_wall_ns
+                    ) AS gap_start_wall_ns,
+                    recovery.recovery_received_wall_ns AS gap_end_wall_ns,
+                    session.disconnected_wall_ns AS detected_wall_ns,
+                    recovery.next_subscribed_wall_ns
+                FROM session_event_bounds session
+                JOIN session_recoveries recovery
+                  ON recovery.connection_id = session.connection_id
+                WHERE recovery.next_connection_id IS NOT NULL
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM polymarket_twap_gaps explicit_gap
+                        WHERE explicit_gap.connection_id =
+                            session.connection_id
+                  )
+            ),
+            intervals AS (
+                SELECT * FROM explicit_intervals
+                UNION ALL
+                SELECT * FROM session_transition_intervals
+            ),
+            interval_basis AS (
+                SELECT
+                    interval.*,
+                    CASE
+                        WHEN interval.gap_start_provider_ms IS NOT NULL
+                         AND (
+                                interval.gap_end_provider_ms >
+                                    interval.gap_start_provider_ms
+                                OR (
+                                    interval.gap_end_provider_ms IS NULL
+                                    AND interval.gap_end_wall_ns IS NULL
+                                )
+                             )
+                            THEN 'provider'
+                        ELSE 'wall'
+                    END AS time_basis
+                FROM intervals interval
+            ),
+            normalized_intervals AS (
+                SELECT
+                    interval.*,
+                    CASE interval.time_basis
+                        WHEN 'provider' THEN
+                            interval.gap_start_provider_ms
+                        WHEN 'wall' THEN
+                            CASE
+                                WHEN interval.gap_end_wall_ns IS NULL THEN
+                                    interval.gap_start_wall_ns / 1000000
+                                ELSE LEAST(
+                                    interval.gap_start_wall_ns,
+                                    interval.gap_end_wall_ns
+                                ) / 1000000
+                            END
+                    END::BIGINT AS gap_start_ms,
+                    CASE interval.time_basis
+                        WHEN 'provider' THEN
+                            interval.gap_end_provider_ms
+                        WHEN 'wall' THEN
+                            CASE
+                                WHEN interval.gap_end_wall_ns IS NULL THEN NULL
+                                ELSE GREATEST(
+                                    interval.gap_start_wall_ns,
+                                    interval.gap_end_wall_ns
+                                ) / 1000000
+                            END
+                    END::BIGINT AS gap_end_ms
+                FROM interval_basis interval
+            )
+            SELECT
+                interval.connection_id,
+                interval.next_connection_id,
+                interval.interval_kind,
+                interval.reason,
+                interval.gap_start_ms,
+                interval.gap_end_ms,
+                interval.gap_start_provider_ms,
+                interval.gap_end_provider_ms,
+                interval.gap_start_wall_ns,
+                interval.gap_end_wall_ns,
+                interval.detected_wall_ns,
+                interval.next_subscribed_wall_ns,
+                interval.time_basis
+            FROM normalized_intervals interval
+            CROSS JOIN target
+            WHERE (
+                    interval.gap_start_ms < target.market_end_ms
+                    AND COALESCE(
+                        interval.gap_end_ms,
+                        9223372036854775807::BIGINT
+                    ) > target.market_end_ms - 20000
+                  )
+            ORDER BY
+                interval.gap_start_ms ASC,
+                interval.connection_id ASC
+            """,
+            market_id,
+        )
+    elif definition_version == SPOT_FLIP_DEFINITION_VERSION:
+        chainlink_rows = await connection.fetch(
+            """
+            SELECT
+                ps.sample_second_ms,
+                ps.price,
+                ps.provider_event_ms,
+                ps.provider_message_ms,
+                ps.received_ms
+            FROM price_samples ps
+            JOIN instruments instrument
+              ON instrument.instrument_id = ps.instrument_id
+            JOIN providers provider
+              ON provider.provider_id = instrument.provider_id
+            WHERE ps.market_id = $1
+              AND provider.provider_code = 'polymarket_chainlink_rtds'
+              AND instrument.symbol = 'BTCUSD'
+              AND ps.provider_event_ms IS NOT NULL
+            ORDER BY
+                ps.provider_event_ms ASC,
+                ps.sample_second_ms ASC,
+                ps.received_ms ASC
+            """,
+            market_id,
+        )
+        source_gap_rows = []
+    else:
+        raise ValueError(f"unsupported flip definition version: {definition_version}")
     probability_rows = await connection.fetch(
         """
         SELECT
@@ -1236,10 +1866,43 @@ async def _load_market_inputs(
         """,
         market_id,
     )
+    source_gaps = [dict(row) for row in source_gap_rows]
+    if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+        normalized_source_gaps: list[dict[str, Any]] = []
+        for row in source_gaps:
+            gap_start_ms, gap_end_ms, time_basis = normalize_gap_interval_ms(
+                gap_start_provider_ms=(
+                    int(row["gap_start_provider_ms"])
+                    if row.get("gap_start_provider_ms") is not None
+                    else None
+                ),
+                gap_end_provider_ms=(
+                    int(row["gap_end_provider_ms"])
+                    if row.get("gap_end_provider_ms") is not None
+                    else None
+                ),
+                gap_start_wall_ns=int(row["gap_start_wall_ns"]),
+                gap_end_wall_ns=(
+                    int(row["gap_end_wall_ns"])
+                    if row.get("gap_end_wall_ns") is not None
+                    else None
+                ),
+            )
+            row["gap_start_ms"] = gap_start_ms
+            row["gap_end_ms"] = gap_end_ms
+            row["time_basis"] = time_basis
+            if gap_interval_overlaps_final_window(
+                gap_start_ms=gap_start_ms,
+                gap_end_ms=gap_end_ms,
+                market_end_ms=(market_id + 1) * 300_000,
+            ):
+                normalized_source_gaps.append(row)
+        source_gaps = normalized_source_gaps
     return (
         [dict(row) for row in chainlink_rows],
         [dict(row) for row in probability_rows],
         [dict(row) for row in microstructure_rows],
+        source_gaps,
     )
 
 
@@ -1550,6 +2213,11 @@ async def evaluate_flip_market(
 
     evaluated_ms = _now_ms() if now_ms is None else now_ms
     market_id = int(market["market_id"])
+    if not market_rule_supports_flip_definition(market, definition_version):
+        raise ValueError(
+            "market settlement rule is unknown or incompatible with "
+            f"flip definition v{definition_version}"
+        )
     existing_archive_status = market.get("existing_archive_status")
     existing_evaluation_failed = (
         market.get("existing_observation_precision") == "evaluation_failed"
@@ -1597,8 +2265,17 @@ async def evaluate_flip_market(
     evaluation_attempts = int(market.get("evaluation_attempts") or 0) + 1
     async with pool.acquire() as connection:
         async with connection.transaction():
-            chainlink_rows, probability_rows, microstructure_rows = (
-                await _load_market_inputs(connection, market_id=market_id)
+            (
+                chainlink_rows,
+                probability_rows,
+                microstructure_rows,
+                source_gap_rows,
+            ) = (
+                await _load_market_inputs(
+                    connection,
+                    market_id=market_id,
+                    definition_version=definition_version,
+                )
             )
             analysis = analyze_market(
                 market_id=market_id,
@@ -1625,6 +2302,7 @@ async def evaluate_flip_market(
                 chainlink_rows=chainlink_rows,
                 probability_rows=probability_rows,
                 microstructure_rows=microstructure_rows,
+                source_gap_rows=source_gap_rows,
                 definition_version=definition_version,
             )
             await _persist_new_analysis(
@@ -1879,6 +2557,10 @@ async def fetch_flip_markets(
                 evaluation.market_id,
                 mw.market_start_ms,
                 mw.market_end_ms,
+                pm.settlement_reference,
+                pm.settlement_window_s,
+                pm.settlement_source_url,
+                pm.settlement_rule_version,
                 evaluation.evaluation_status,
                 evaluation.price_to_beat,
                 evaluation.official_close_price AS official_close,
@@ -1904,6 +2586,8 @@ async def fetch_flip_markets(
             FROM {EVALUATION_TABLE} evaluation
             JOIN market_windows mw
               ON mw.market_id = evaluation.market_id
+            JOIN polymarket_btc_5m_markets pm
+              ON pm.market_id = evaluation.market_id
             LEFT JOIN LATERAL (
                 SELECT count(*)::INTEGER AS matching_count
                 FROM {EVENT_TABLE} event
@@ -2011,6 +2695,10 @@ async def fetch_market_flip_analysis(
                 evaluation.*,
                 mw.market_start_ms,
                 mw.market_end_ms,
+                pm.settlement_reference,
+                pm.settlement_window_s,
+                pm.settlement_source_url,
+                pm.settlement_rule_version,
                 evaluation.official_close_price AS official_close,
                 evaluation.official_winner AS winner,
                 evaluation.source_microstructure_row_count
@@ -2028,6 +2716,8 @@ async def fetch_market_flip_analysis(
             FROM {EVALUATION_TABLE} evaluation
             JOIN market_windows mw
               ON mw.market_id = evaluation.market_id
+            JOIN polymarket_btc_5m_markets pm
+              ON pm.market_id = evaluation.market_id
             WHERE evaluation.market_id = $1
               AND evaluation.definition_version = $2
               AND evaluation.observation_precision <> 'evaluation_failed'

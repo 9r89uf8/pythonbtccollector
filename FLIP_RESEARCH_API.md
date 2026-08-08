@@ -90,9 +90,10 @@ async function apiGet(path, query = {}) {
 
 ## Definitions the UI Must Keep Separate
 
-The threshold is Polymarket's official Chainlink `priceToBeat`. The result is
-the official resolved winner; it is never inferred from the final probability
-quote.
+The threshold is Polymarket's official TWAP-based `priceToBeat`. Only markets
+that declare settlement reference `chainlink_twap`, window `30`, and rule
+version `btc-5m-twap-30` enter this research set. The result is the official
+resolved winner; it is never inferred from the final probability quote.
 
 | API term | Meaning |
 | --- | --- |
@@ -101,7 +102,7 @@ quote.
 | `cutoff_reversal` | At exactly T-X, the apparent strict side differs from the official winner |
 
 An exact equality with the threshold is a touch/tie, not Up or Down. Multiple
-crossings are retained. Missing or stale Chainlink threshold evidence produces
+crossings are retained. Missing or stale exact TWAP threshold evidence produces
 an `ambiguous` evaluation instead of silently producing `non_flip`. Missing or
 stale probability or microstructure evidence is retained through coverage and
 quality fields but does not by itself change the evaluation status.
@@ -217,8 +218,8 @@ multiple times.
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
+  "schema_version": 2,
+  "definition_version": 2,
   "server_time_ms": 1783459600123,
   "filters": {
     "within_seconds": 5,
@@ -232,6 +233,14 @@ multiple times.
       "evaluation_status": "confirmed_flip",
       "price_to_beat": "63337.115841440165000000",
       "official_close": "63336.719008471390000000",
+      "settlement": {
+        "reference": "chainlink_twap",
+        "window_s": 30,
+        "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+        "rule_version": "btc-5m-twap-30",
+        "price_to_beat": "63337.115841440165000000",
+        "official_final_price": "63336.719008471390000000"
+      },
       "winner": "Down",
       "matching_crossing_count": 2,
       "total_crossing_count_last_20s": 3,
@@ -266,8 +275,9 @@ Field details:
 - `total_crossing_count_last_20s`, first/last crossing fields, and
   `decisive_flip` summarize the complete 20-second evaluation, not only the
   active filter.
-- `price_to_beat`, `official_close`, and every other financial decimal are JSON
-  strings.
+- `settlement` carries the rule identity used to admit and evaluate the market.
+  `price_to_beat`, `official_close`, settlement prices, and every other
+  financial decimal are JSON strings.
 - Use the four `*_url` values as relative paths under the same API base.
 
 An empty search returns HTTP `200`, `markets: []`, and
@@ -305,7 +315,8 @@ curl --compressed "${API_BASE_URL}/markets/5944864/flips"
 
 The response contains:
 
-- `market`: threshold, official close, winner, and window timestamps.
+- `market`: threshold, official close, settlement rule, winner, and window
+  timestamps.
 - `evaluation`: classification, crossing summary, data quality, and coverage.
 - `events`: every crossing ordered by `event_sequence`.
 - `cutoffs`: exactly T-20 through T-1, ordered in that direction.
@@ -320,8 +331,8 @@ Important response shape:
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
+  "schema_version": 2,
+  "definition_version": 2,
   "server_time_ms": 1783459600123,
   "market": {
     "market_id": 5944864,
@@ -329,11 +340,19 @@ Important response shape:
     "market_end_ms": 1783459500000,
     "price_to_beat": "63337.115841440165000000",
     "official_close": "63336.719008471390000000",
+    "settlement": {
+      "reference": "chainlink_twap",
+      "window_s": 30,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+      "rule_version": "btc-5m-twap-30",
+      "price_to_beat": "63337.115841440165000000",
+      "official_final_price": "63336.719008471390000000"
+    },
     "winner": "Down"
   },
   "evaluation": {
     "status": "confirmed_flip",
-    "observation_precision": "one_second_summary",
+    "observation_precision": "exact_twap_event",
     "analysis_start_ms": 1783459480000,
     "analysis_end_ms": 1783459500000,
     "crossing_count": 3,
@@ -344,7 +363,7 @@ Important response shape:
       "direction": "up_to_down",
       "observed_ms_before_end": 1700
     },
-    "chainlink": {
+    "twap": {
       "observation_count": 20,
       "strict_observation_count": 20,
       "first_provider_event_ms": 1783459480000,
@@ -352,8 +371,8 @@ Important response shape:
       "max_gap_ms": 1000
     },
     "cutoff_coverage": {
-      "chainlink_count": 20,
-      "fresh_chainlink_count": 20,
+      "twap_count": 20,
+      "fresh_twap_count": 20,
       "probability_count": 20,
       "fresh_probability_count": 20,
       "microstructure_count": 19
@@ -367,8 +386,8 @@ Important response shape:
       "direction": "up_to_down",
       "previous_side": "Up",
       "new_side": "Down",
-      "previous_chainlink_price": "63337.250000000000000000",
-      "new_chainlink_price": "63336.990000000000000000",
+      "previous_twap_price": "63337.250000000000000000",
+      "new_twap_price": "63336.990000000000000000",
       "previous_sample_second_ms": 1783459497000,
       "new_sample_second_ms": 1783459498000,
       "previous_provider_event_ms": 1783459497300,
@@ -378,14 +397,14 @@ Important response shape:
       "observation_gap_ms": 1000,
       "observed_ms_before_end": 1700,
       "is_decisive": true,
-      "observation_precision": "one_second_summary"
+      "observation_precision": "exact_twap_event"
     }
   ],
   "cutoffs": [
     {
       "seconds_before_end": 20,
       "cutoff_ms": 1783459480000,
-      "chainlink": {
+      "twap": {
         "price": "63338.010000000000000000",
         "sample_second_ms": 1783459479000,
         "provider_event_ms": 1783459479000,
@@ -454,7 +473,7 @@ Important response shape:
 ```
 
 Each cutoff is causal: it uses only evidence that was available at that cutoff.
-Render `chainlink.fresh`, `probabilities.fresh`, `microstructure_available`, and
+Render `twap.fresh`, `probabilities.fresh`, `microstructure_available`, and
 `quality_flags`; do not hide them.
 
 `events[].observed_ms_before_end` is the new opposite-side observation's
@@ -500,8 +519,8 @@ curl --get "${API_BASE_URL}/markets/flips/distribution" \
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
+  "schema_version": 2,
+  "definition_version": 2,
   "server_time_ms": 1783459600123,
   "max_seconds": 20,
   "population": {
@@ -549,9 +568,9 @@ Chart semantics:
   direction-independent.
 - Each cutoff-reversal denominator is evidence-based independently. It can
   include an otherwise ambiguous market when that exact cutoff has fresh,
-  strict Chainlink evidence and an official winner.
+  strict TWAP evidence and an official winner.
 - `cutoff_reversals[].eligible_markets` is calculated independently at each
-  cutoff and excludes missing, tied, future-timestamped, or stale Chainlink
+  cutoff and excludes missing, tied, future-timestamped, or stale TWAP
   evidence.
 - With a direction filter, cutoff denominators are also restricted to the
   relevant apparent starting side. The top-level eligible population remains
@@ -589,7 +608,9 @@ When `include_microstructure=true`:
 - `availability.microstructure_rows`,
   `availability.microstructure_healthy_rows`, and
   `availability.microstructure_missing_seconds` describe coverage.
-- The response uses `schema_version: 3`.
+- The response uses `schema_version: 4`, whether or not microstructure is
+  included. Its `series[].prices.chainlink` field is standard Chainlink spot
+  context; `series[].prices.twap` is the settlement-reference series.
 
 Full five-minute microstructure is archived permanently only for
 `confirmed_flip` and `ambiguous` evaluations. A `non_flip` evaluation uses

@@ -16,6 +16,7 @@ from price_collector.market import MarketWindow
 
 BINANCE_SPOT_LIVE_KEY = "btc:live:binance_spot"
 CHAINLINK_LIVE_KEY = "btc:live:chainlink"
+TWAP_LIVE_KEY = "btc:live:chainlink_twap_30s"
 FUTURES_LIVE_KEY = "btc:live:futures"
 MICROSTRUCTURE_LIVE_KEY = "btc:live:microstructure"
 
@@ -626,6 +627,7 @@ async def build_current_live_payload(
         [
             BINANCE_SPOT_LIVE_KEY,
             CHAINLINK_LIVE_KEY,
+            TWAP_LIVE_KEY,
             FUTURES_LIVE_KEY,
         ]
     )
@@ -643,6 +645,11 @@ async def build_current_live_payload(
             ),
             "chainlink": serialize_live_price(
                 cached.get(CHAINLINK_LIVE_KEY),
+                server_time_ms=server_time_ms,
+                legacy_source_field="provider_event_ms",
+            ),
+            "twap": serialize_live_price(
+                cached.get(TWAP_LIVE_KEY),
                 server_time_ms=server_time_ms,
                 legacy_source_field="provider_event_ms",
             ),
