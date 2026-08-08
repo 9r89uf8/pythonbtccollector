@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -34,6 +35,10 @@ def current_market():
         active=True,
         closed=False,
         archived=False,
+        settlement_reference=collector.SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+        settlement_window_s=collector.SUPPORTED_TWAP_WINDOW_SECONDS,
+        settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
+        settlement_rule_version=collector.SUPPORTED_TWAP_RULE_VERSION,
         raw_gamma={"market": {"id": "market-1"}},
     )
 
@@ -61,8 +66,18 @@ def test_parse_current_market_from_gamma_maps_up_down_tokens_from_json_strings()
                 "active": False,
                 "closed": False,
                 "archived": False,
-                "startDate": "2026-07-07T21:20:00Z",
+                "startDate": "2026-07-06T21:20:00Z",
+                "eventStartTime": "2026-07-07T21:20:00Z",
                 "endDate": "2026-07-07T21:25:00Z",
+                "resolutionSource": collector.SUPPORTED_TWAP_SOURCE_URL,
+                "cryptoMarketConfigId": "btc-5m-twap-30",
+                "cryptoMarketConfig": {
+                    "id": "btc-5m-twap-30",
+                    "asset": "btc",
+                    "duration": "5m",
+                    "twapEnabled": True,
+                    "twapLookbackSeconds": 30,
+                },
             }
         ],
     }
@@ -82,6 +97,71 @@ def test_parse_current_market_from_gamma_maps_up_down_tokens_from_json_strings()
     assert market.closed is False
     assert market.start_ms == 1_783_459_200_000
     assert market.end_ms == 1_783_459_500_000
+    assert market.settlement_reference == "chainlink_twap"
+    assert market.settlement_window_s == 30
+    assert market.settlement_source_url == collector.SUPPORTED_TWAP_SOURCE_URL
+    assert market.settlement_rule_version == "btc-5m-twap-30"
+
+
+def test_market_rule_parser_preserves_legacy_and_fails_unknown_twap_closed():
+    assert collector.parse_market_settlement_rule(
+        {},
+        {
+            "resolutionSource": "https://data.chain.link/streams/btc-usd",
+            "description": "Resolves from the Chainlink BTC/USD data stream.",
+        },
+    ) == (
+        collector.SETTLEMENT_REFERENCE_CHAINLINK_SPOT,
+        None,
+        "https://data.chain.link/streams/btc-usd",
+        collector.LEGACY_SPOT_RULE_VERSION,
+    )
+
+    reference, window_s, source_url, rule_version = (
+        collector.parse_market_settlement_rule(
+            {},
+            {
+                "resolutionSource": collector.SUPPORTED_TWAP_SOURCE_URL,
+                "cryptoMarketConfigId": "btc-5m-twap-30",
+                "cryptoMarketConfig": {
+                    "id": "btc-5m-twap-30",
+                    "asset": "btc",
+                    "duration": "5m",
+                    "twapEnabled": True,
+                    "twapLookbackSeconds": 60,
+                },
+            },
+        )
+    )
+    assert reference == collector.SETTLEMENT_REFERENCE_UNKNOWN
+    assert window_s == 60
+    assert source_url == collector.SUPPORTED_TWAP_SOURCE_URL
+    assert rule_version == "btc-5m-twap-30"
+
+
+def test_store_current_market_refuses_unknown_or_legacy_rules_before_database():
+    for reference in (
+        collector.SETTLEMENT_REFERENCE_UNKNOWN,
+        collector.SETTLEMENT_REFERENCE_CHAINLINK_SPOT,
+    ):
+        unsupported = replace(
+            current_market(),
+            settlement_reference=reference,
+            settlement_window_s=None,
+            settlement_source_url=None,
+            settlement_rule_version=None,
+        )
+        with pytest.raises(
+            collector.GammaDiscoveryError,
+            match="refusing to store",
+        ):
+            asyncio.run(
+                collector.store_current_market(
+                    object(),
+                    unsupported,
+                    seen_ms=1_783_459_200_000,
+                )
+            )
 
 
 def resolved_gamma_event(*, outcome_prices='["0","1"]'):
@@ -101,6 +181,15 @@ def resolved_gamma_event(*, outcome_prices='["0","1"]'):
                 "outcomes": '["Up","Down"]',
                 "outcomePrices": outcome_prices,
                 "clobTokenIds": '["up-token","down-token"]',
+                "resolutionSource": collector.SUPPORTED_TWAP_SOURCE_URL,
+                "cryptoMarketConfigId": "btc-5m-twap-30",
+                "cryptoMarketConfig": {
+                    "id": "btc-5m-twap-30",
+                    "asset": "btc",
+                    "duration": "5m",
+                    "twapEnabled": True,
+                    "twapLookbackSeconds": 30,
+                },
                 "closed": True,
                 "closedTime": "2026-07-07 21:25:17+00",
                 "umaResolutionStatus": "resolved",
@@ -244,6 +333,45 @@ def test_parse_polymarket_resolution_requires_all_stored_market_ids_to_match():
         )
 
 
+def test_resolution_revalidates_live_gamma_twap_rule_and_rejects_changes():
+    changed = resolved_gamma_event()
+    changed["markets"][0]["cryptoMarketConfig"]["twapLookbackSeconds"] = 60
+
+    with pytest.raises(
+        collector.ResolutionParseError,
+        match="canonical Gamma market no longer",
+    ):
+        collector.parse_polymarket_resolution(
+            changed,
+            slug=current_market().slug,
+            gamma_market_id="market-1",
+            condition_id="condition-1",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            expected_settlement_reference="chainlink_twap",
+            expected_settlement_window_s=30,
+            expected_settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
+            expected_settlement_rule_version="btc-5m-twap-30",
+        )
+
+    with pytest.raises(
+        collector.ResolutionParseError,
+        match="contradicts the discovered rule",
+    ):
+        collector.parse_polymarket_resolution(
+            resolved_gamma_event(),
+            slug=current_market().slug,
+            gamma_market_id="market-1",
+            condition_id="condition-1",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            expected_settlement_reference="chainlink_twap",
+            expected_settlement_window_s=60,
+            expected_settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
+            expected_settlement_rule_version="btc-5m-twap-30",
+        )
+
+
 def test_fetch_polymarket_resolution_parses_json_numbers_as_decimal():
     requests = []
 
@@ -274,6 +402,15 @@ def test_fetch_polymarket_resolution_parses_json_numbers_as_decimal():
                         "outcomes":"[\\"Up\\",\\"Down\\"]",
                         "outcomePrices":"[\\"0\\",\\"1\\"]",
                         "clobTokenIds":"[\\"up-token\\",\\"down-token\\"]",
+                        "resolutionSource":"https://data.chain.link/streams/btc-usd-twap-30s-streams",
+                        "cryptoMarketConfigId":"btc-5m-twap-30",
+                        "cryptoMarketConfig":{
+                          "id":"btc-5m-twap-30",
+                          "asset":"btc",
+                          "duration":"5m",
+                          "twapEnabled":true,
+                          "twapLookbackSeconds":30
+                        },
                         "closed":true,
                         "closedTime":"2026-07-07 21:25:17+00",
                         "umaResolutionStatus":"resolved"
@@ -1025,6 +1162,10 @@ def test_run_collector_preloads_and_starts_next_market_before_boundary(monkeypat
             active=True,
             closed=False,
             archived=False,
+            settlement_reference=collector.SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+            settlement_window_s=collector.SUPPORTED_TWAP_WINDOW_SECONDS,
+            settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
+            settlement_rule_version=collector.SUPPORTED_TWAP_RULE_VERSION,
             raw_gamma={"market": {"id": "market"}},
         )
 

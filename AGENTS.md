@@ -12,7 +12,7 @@ The deployed system is:
 - A local PostgreSQL database named `price_collector`, used for historical data
 - A local Redis instance, used only for current live values
 - A Binance Spot collector managed by systemd
-- A Polymarket Chainlink RTDS collector managed by systemd
+- A Polymarket Chainlink spot and 30-second TWAP RTDS collector managed by systemd
 - A Binance USD-M futures, flow, and book collector managed by systemd
 - A Polymarket BTC five-minute probability collector managed by systemd
 - A small read-only FastAPI API managed by systemd
@@ -84,7 +84,7 @@ The corresponding Python entry points are:
 - Use exponential backoff with full jitter, capped at 60 seconds.
 - Proactively reconnect before 24 hours, at about 23 hours 50 minutes.
 
-### Polymarket Chainlink
+### Polymarket Chainlink Spot and TWAP
 
 - Connect only through Polymarket RTDS at
   `wss://ws-live-data.polymarket.com`; do not add a direct Chainlink WebSocket.
@@ -101,6 +101,21 @@ The corresponding Python entry points are:
 - When the accepted-event deadline expires, close and reconnect only the RTDS
   WebSocket using the existing jittered reconnect path. Preserve the cached
   value so its receive age exposes the gap; do not fabricate a fallback.
+- Keep the standard `crypto_prices_chainlink` feed and Redis key
+  `btc:live:chainlink` as context; it is not the five-minute settlement feed.
+- Independently subscribe to `crypto_prices_twap_thirty` with the same
+  `{"symbol":"btc/usd"}` filter and require `payload.window_s = 30`.
+- Parse `payload.full_accuracy_value` as an exact E18 integer/`Decimal`. Never
+  use `payload.value`, binary floating point, standard Chainlink spot, Binance,
+  or a locally computed average as the settlement TWAP.
+- Publish each accepted TWAP tick to Redis key
+  `btc:live:chainlink_twap_30s` before PostgreSQL persistence.
+- Persist every accepted TWAP event, connection session, and explicit no-replay
+  gap durably. The optional `raw_capture` feature is not the TWAP source of
+  record and may not gate this path.
+- Apply an accepted-event idle deadline independently to the TWAP socket.
+  PING/PONG, malformed, wrong-topic, wrong-symbol, and wrong-window frames must
+  not reset it. Preserve the last cached value so gaps remain visible by age.
 
 ### Binance Futures, Flow, and Book
 
@@ -176,7 +191,10 @@ The corresponding Python entry points are:
 
 ### Polymarket Probabilities
 
-- Discover BTC five-minute Up/Down markets through Polymarket Gamma.
+- Discover BTC five-minute Up/Down markets through Polymarket Gamma and collect
+  only markets whose own metadata matches the supported
+  `chainlink_twap`/30-second/`btc-5m-twap-30` rule. Unknown or contradictory
+  settlement rules fail closed.
 - Subscribe only to the discovered Up and Down token IDs through the CLOB
   WebSocket.
 - Store at most one probability snapshot per UTC second in the active market.
@@ -186,7 +204,8 @@ The corresponding Python entry points are:
   freshness of one outcome must never refresh the opposite outcome.
 - Preload the next market before the current market boundary.
 - Reconcile ended markets against official Polymarket Gamma/CLOB resolution
-  data and persist the official Chainlink open/final prices and outcome.
+  data and persist the exact Price to Beat, official final price, settlement
+  rule identity, and outcome.
 - Never infer an official winner from the final Up/Down probability quote.
 - After official open, close, and resolution data are complete, evaluate the
   versioned final-20-second flip definition in the independent retrying loop.
@@ -195,6 +214,8 @@ The corresponding Python entry points are:
   incomplete evidence as a non-flip.
 - Keep flip events immutable within a definition version. A definition change
   creates new versioned rows rather than rewriting prior research labels.
+- Definition version 2 uses exact TWAP events. Standard Chainlink spot remains
+  context only and must never supply v2 crossings or cutoff classifications.
 - Before ordinary microstructure retention removes a confirmed-flip or
   ambiguous market, verify that every available five-minute source row was
   copied to `binance_microstructure_1s_flip_archive`. Retention must fail closed
@@ -207,12 +228,13 @@ The corresponding Python entry points are:
 - Use the source-price keys exactly:
   - `btc:live:binance_spot`
   - `btc:live:chainlink`
+  - `btc:live:chainlink_twap_30s`
   - `btc:live:futures`
 - Store each live price as JSON with only `value`, `source_timestamp_ms`, and
   `received_ms`; price values remain decimal strings.
-- `/markets/current/live` must read all three source-price keys with one Redis
+- `/markets/current/live` must read all four source-price keys with one Redis
   `MGET` and must not query PostgreSQL or run derived models.
-- `/markets/current/microstructure/live` must read the three source-price keys
+- `/markets/current/microstructure/live` must read the four source-price keys
   and `btc:live:microstructure` with one Redis `MGET`; it must not query
   PostgreSQL. Derive its market ID from the cached finalized sample when one
   exists so a boundary or stale snapshot is never assigned to a later market.
@@ -236,6 +258,8 @@ The corresponding Python entry points are:
   - `binance_spot` / `BTCUSDT` / `BTC` / `USDT` / `btcusdt@ticker`
   - `polymarket_chainlink_rtds` / `BTCUSD` / `BTC` / `USD` /
     `crypto_prices_chainlink:btc/usd`
+  - `polymarket_chainlink_twap_rtds` / `BTCUSD_TWAP_30S` / `BTC` / `USD` /
+    `crypto_prices_twap_thirty:btc/usd`
   - `binance_usdm_perp` / `BTCUSDT` / `BTC` / `USDT`
 - Collectors use `DATABASE_URL` with the writer role.
 - The API uses `READ_DATABASE_URL` with the reader role and must not receive the
@@ -350,7 +374,8 @@ Add or update focused tests for each checkpoint. Relevant coverage includes:
 
 - Five-minute market boundary behavior
 - Binance ticker and futures stream parsing
-- Polymarket RTDS subscription and source-timestamp behavior
+- Polymarket spot and TWAP RTDS subscription, E18 precision, window validation,
+  source timestamps, durable sessions/events/gaps, and independent idle deadlines
 - Polymarket probability discovery, state, staleness, and rollover behavior
 - Decimal-only financial calculations
 - Redis-before-PostgreSQL live writes

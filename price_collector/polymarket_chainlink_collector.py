@@ -31,6 +31,7 @@ from price_collector.live_cache import (
     create_live_cache,
 )
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.polymarket_twap import run_polymarket_twap_noncritical
 from price_collector.raw_capture import (
     ChainlinkPriceEvent,
     FeedSession,
@@ -1568,6 +1569,12 @@ async def run_collector(settings: Settings) -> None:
             "accepted_event_idle_timeout_ms": (
                 settings.POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS
             ),
+            "twap_enabled": getattr(
+                settings,
+                "POLYMARKET_TWAP_ENABLED",
+                False,
+            ),
+            "twap_topic": getattr(settings, "POLYMARKET_TWAP_TOPIC", None),
         },
     )
 
@@ -1580,6 +1587,7 @@ async def run_collector(settings: Settings) -> None:
     live_task: Optional["asyncio.Task[Any]"] = None
     history_task: Optional["asyncio.Task[Any]"] = None
     telemetry_task: Optional["asyncio.Task[Any]"] = None
+    twap_task: Optional["asyncio.Task[Any]"] = None
     remove_sigterm_handler = _install_sigterm_cancellation()
     try:
         live_cache = create_live_cache(settings)
@@ -1634,6 +1642,14 @@ async def run_collector(settings: Settings) -> None:
                 raw_capture=raw_capture,
             )
         )
+        if getattr(settings, "POLYMARKET_TWAP_ENABLED", False):
+            twap_task = asyncio.create_task(
+                run_polymarket_twap_noncritical(
+                    settings,
+                    pool,
+                    live_cache=live_cache,
+                )
+            )
         if raw_capture is not None:
             telemetry_task = asyncio.create_task(
                 _run_chainlink_telemetry_noncritical(
@@ -1657,9 +1673,22 @@ async def run_collector(settings: Settings) -> None:
         if remove_sigterm_handler is not None:
             remove_sigterm_handler()
 
-        reader_stopped = await _cancel_and_wait(
-            reader_task,
-            timeout_seconds=CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS,
+        reader_stopped, twap_stopped = await asyncio.gather(
+            _cancel_and_wait(
+                reader_task,
+                timeout_seconds=CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS,
+            ),
+            _cancel_and_wait(
+                twap_task,
+                timeout_seconds=(
+                    getattr(
+                        settings,
+                        "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
+                        5.0,
+                    )
+                    + 2.0
+                ),
+            ),
         )
         if not reader_stopped:
             LOGGER.error(
@@ -1669,6 +1698,13 @@ async def run_collector(settings: Settings) -> None:
                     "timeout_seconds": (
                         CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS
                     ),
+                },
+            )
+        if not twap_stopped:
+            LOGGER.error(
+                "polymarket_twap_shutdown_incomplete",
+                extra={
+                    "event": "polymarket_twap_shutdown_incomplete",
                 },
             )
         delivery_state.close()

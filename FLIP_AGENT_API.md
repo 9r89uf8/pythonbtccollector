@@ -123,11 +123,11 @@ When `event_sequence` is omitted, the API anchors the response to:
 When `event_sequence` is supplied, that exact crossing is the anchor, whether
 or not it is decisive.
 
-For a crossing anchor, the anchor time is the crossing's new Chainlink
-observation. It is an observed one-second-summary crossing, not an interpolated
-instant at which the price must have crossed the threshold. The complete
-crossing bracket remains in `selection.anchor.event` and `flip.events`,
-including the previous and new provider timestamps and prices.
+For a crossing anchor, the anchor time is the crossing's new exact TWAP event.
+It is an observed strict-side transition, not an interpolated instant at which
+the price must have crossed the threshold. The complete crossing bracket
+remains in `selection.anchor.event` and `flip.events`, including the previous
+and new provider timestamps and exact E18 TWAP prices.
 
 For a no-event evaluation, `selection.anchor.sample_second_ms` is
 `market_end_ms`, `selection.anchor.event` is `null`, and the reason is
@@ -199,7 +199,8 @@ The full view returns the normal 300 one-second slots in
 `[market_start_ms, market_end_ms)`. It includes all API-visible historical
 layers for each slot:
 
-- Binance Spot and Chainlink prices and freshness
+- Binance Spot, standard Chainlink context, and settlement TWAP prices and
+  freshness
 - Polymarket Up/Down probability quotes
 - Binance futures last, mark, index, and premium
 - open interest
@@ -212,7 +213,8 @@ carry values forward for this research response.
 
 “Full” means the complete five-minute public API representation. It does not
 include the isolated raw-capture schema, individual raw trades, raw depth
-messages, every raw Chainlink event, secrets, or collector-internal JSON.
+messages, every non-crossing raw source event, secrets, or collector-internal
+JSON. Flip crossings retain their exact TWAP event brackets.
 
 ## Response Contract
 
@@ -220,15 +222,23 @@ Both data views return the same top-level shape:
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
-  "market_data_schema_version": 3,
+  "schema_version": 2,
+  "definition_version": 2,
+  "market_data_schema_version": 4,
   "data_scope": "curated_public_api",
   "server_time_ms": 1783459600123,
   "market": {
     "market_id": 5944864,
     "market_start_ms": 1783459200000,
-    "market_end_ms": 1783459500000
+    "market_end_ms": 1783459500000,
+    "settlement": {
+      "reference": "chainlink_twap",
+      "window_s": 30,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+      "rule_version": "btc-5m-twap-30",
+      "price_to_beat": "63337.115841440165000000",
+      "official_final_price": "63336.719008471390000000"
+    }
   },
   "selection": {
     "view": "event_window",
@@ -240,13 +250,15 @@ Both data views return the same top-level shape:
         "direction": "up_to_down",
         "previous_side": "Up",
         "new_side": "Down",
+        "previous_twap_price": "63337.250000000000000000",
+        "new_twap_price": "63336.990000000000000000",
         "previous_sample_second_ms": 1783459497000,
         "new_sample_second_ms": 1783459498000,
         "previous_provider_event_ms": 1783459497300,
         "new_provider_event_ms": 1783459498300,
         "observed_ms_before_end": 1700,
         "is_decisive": true,
-        "observation_precision": "one_second_summary"
+        "observation_precision": "exact_twap_event"
       }
     },
     "window": {
@@ -264,6 +276,7 @@ Both data views return the same top-level shape:
       "series_rows": 32,
       "binance_price_rows": 32,
       "chainlink_price_rows": 31,
+      "twap_price_rows": 32,
       "probability_rows": 30,
       "futures_rows": 32,
       "open_interest_rows": 32,
@@ -276,6 +289,7 @@ Both data views return the same top-level shape:
       "series_rows": 300,
       "binance_price_rows": 299,
       "chainlink_price_rows": 297,
+      "twap_price_rows": 298,
       "probability_rows": 295,
       "futures_rows": 299,
       "open_interest_rows": 298,
@@ -346,6 +360,7 @@ Each object contains:
 - `series_rows`
 - `binance_price_rows`
 - `chainlink_price_rows`
+- `twap_price_rows`
 - `probability_rows`
 - `futures_rows`
 - `open_interest_rows`
@@ -359,6 +374,11 @@ For a normal completed full grid, `full_market.series_rows` is `300`.
 measure source coverage and can be lower. A row counted for a source can still
 contain nullable fields when only part of that source observation was
 available.
+
+`chainlink_price_rows` measures standard Chainlink spot context.
+`twap_price_rows` measures the independently collected 30-second settlement
+reference. Never substitute one for the other. The top-level
+`market.settlement` object records the exact rule identity for the evidence.
 
 ### Flip evidence and duplicate microstructure
 
@@ -504,6 +524,9 @@ same market again with `view=full`; do not advance the cursor first.
   crossing into the official winning side.
 - The official winner comes from Polymarket resolution data, never from the
   final probability quote.
+- Only definition version `2` uses the exact 30-second TWAP event stream.
+  Standard Chainlink spot is context and must not be used to reconstruct a
+  missing TWAP crossing.
 - `archive.status: "complete"` means every available source microstructure row
   was copied. It does not promise 300 collected rows.
 - Treat long-lived cached evidence as stable only when

@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS polymarket_btc_5m_markets (
     closed BOOLEAN,
     archived BOOLEAN,
 
+    settlement_reference TEXT NOT NULL DEFAULT 'unknown',
+    settlement_window_s SMALLINT,
+    settlement_source_url TEXT,
+    settlement_rule_version TEXT,
+
     raw_gamma JSONB,
     first_seen_ms BIGINT NOT NULL,
     last_seen_ms BIGINT NOT NULL,
@@ -59,8 +64,89 @@ CREATE TABLE IF NOT EXISTS polymarket_btc_5m_markets (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CHECK (market_id >= 0)
+    CHECK (market_id >= 0),
+    CONSTRAINT polymarket_btc_5m_markets_settlement_reference_check CHECK (
+        settlement_reference IN (
+            'chainlink_spot',
+            'chainlink_twap',
+            'unknown'
+        )
+    ),
+    CONSTRAINT polymarket_btc_5m_markets_settlement_window_check CHECK (
+        settlement_window_s IS NULL OR settlement_window_s > 0
+    ),
+    CONSTRAINT polymarket_btc_5m_markets_settlement_complete_check CHECK (
+        settlement_reference <> 'chainlink_twap'
+        OR (
+            settlement_window_s IS NOT NULL
+            AND settlement_source_url IS NOT NULL
+            AND settlement_rule_version IS NOT NULL
+        )
+    )
 );
+
+ALTER TABLE polymarket_btc_5m_markets
+    ADD COLUMN IF NOT EXISTS settlement_reference TEXT
+        NOT NULL DEFAULT 'unknown',
+    ADD COLUMN IF NOT EXISTS settlement_window_s SMALLINT,
+    ADD COLUMN IF NOT EXISTS settlement_source_url TEXT,
+    ADD COLUMN IF NOT EXISTS settlement_rule_version TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'polymarket_btc_5m_markets'::regclass
+          AND conname =
+                'polymarket_btc_5m_markets_settlement_reference_check'
+    ) THEN
+        ALTER TABLE polymarket_btc_5m_markets
+            ADD CONSTRAINT
+                polymarket_btc_5m_markets_settlement_reference_check
+            CHECK (
+                settlement_reference IN (
+                    'chainlink_spot',
+                    'chainlink_twap',
+                    'unknown'
+                )
+            );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'polymarket_btc_5m_markets'::regclass
+          AND conname =
+                'polymarket_btc_5m_markets_settlement_window_check'
+    ) THEN
+        ALTER TABLE polymarket_btc_5m_markets
+            ADD CONSTRAINT
+                polymarket_btc_5m_markets_settlement_window_check
+            CHECK (settlement_window_s IS NULL OR settlement_window_s > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'polymarket_btc_5m_markets'::regclass
+          AND conname =
+                'polymarket_btc_5m_markets_settlement_complete_check'
+    ) THEN
+        ALTER TABLE polymarket_btc_5m_markets
+            ADD CONSTRAINT
+                polymarket_btc_5m_markets_settlement_complete_check
+            CHECK (
+                settlement_reference <> 'chainlink_twap'
+                OR (
+                    settlement_window_s IS NOT NULL
+                    AND settlement_source_url IS NOT NULL
+                    AND settlement_rule_version IS NOT NULL
+                )
+            );
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS polymarket_btc_5m_markets_slug_idx
     ON polymarket_btc_5m_markets (slug);
@@ -194,6 +280,151 @@ CREATE INDEX IF NOT EXISTS price_samples_market_idx
 
 CREATE INDEX IF NOT EXISTS price_samples_instrument_latest_idx
     ON price_samples (instrument_id, sample_second_ms DESC);
+
+-- The free RTDS TWAP relay has no snapshot, history, or replay. These tables
+-- therefore preserve every accepted message and every connection gap instead
+-- of relying on the one-second price_samples materialization alone.
+CREATE TABLE IF NOT EXISTS polymarket_twap_sessions (
+    connection_id UUID PRIMARY KEY,
+    topic TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    window_s SMALLINT NOT NULL,
+
+    connected_wall_ns BIGINT NOT NULL,
+    connected_monotonic_ns BIGINT NOT NULL,
+    subscribed_wall_ns BIGINT NOT NULL,
+    subscribed_monotonic_ns BIGINT NOT NULL,
+
+    disconnected_wall_ns BIGINT,
+    disconnected_monotonic_ns BIGINT,
+    close_reason TEXT,
+    messages_received_total BIGINT NOT NULL DEFAULT 0,
+    messages_accepted_total BIGINT NOT NULL DEFAULT 0,
+    parse_errors_total BIGINT NOT NULL DEFAULT 0,
+    last_receive_sequence BIGINT NOT NULL DEFAULT 0,
+    last_accepted_received_ms BIGINT,
+    last_provider_event_ms BIGINT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (window_s > 0),
+    CHECK (connected_wall_ns > 0),
+    CHECK (connected_monotonic_ns > 0),
+    CHECK (subscribed_monotonic_ns >= connected_monotonic_ns),
+    CHECK (
+        (disconnected_wall_ns IS NULL)
+        = (disconnected_monotonic_ns IS NULL)
+    ),
+    CHECK ((disconnected_wall_ns IS NULL) = (close_reason IS NULL)),
+    CHECK (
+        disconnected_monotonic_ns IS NULL
+        OR disconnected_monotonic_ns >= subscribed_monotonic_ns
+    ),
+    CHECK (messages_received_total >= 0),
+    CHECK (messages_accepted_total >= 0),
+    CHECK (parse_errors_total >= 0),
+    CHECK (last_receive_sequence >= 0),
+    CHECK (messages_accepted_total <= messages_received_total),
+    CHECK (parse_errors_total <= messages_received_total),
+    CHECK (
+        messages_accepted_total + parse_errors_total
+        <= messages_received_total
+    )
+);
+
+CREATE TABLE IF NOT EXISTS polymarket_twap_events (
+    connection_id UUID NOT NULL
+        REFERENCES polymarket_twap_sessions(connection_id),
+    receive_sequence BIGINT NOT NULL,
+    instrument_id BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    topic TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    window_s SMALLINT NOT NULL,
+
+    provider_event_ms BIGINT NOT NULL,
+    provider_message_ms BIGINT,
+    received_wall_ns BIGINT NOT NULL,
+    received_monotonic_ns BIGINT NOT NULL,
+
+    sample_second_ms BIGINT NOT NULL,
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    price_e18 NUMERIC(78, 0) NOT NULL,
+    price NUMERIC(38, 18) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (connection_id, receive_sequence),
+
+    CHECK (receive_sequence >= 1),
+    CHECK (window_s > 0),
+    CHECK (provider_event_ms >= 0),
+    CHECK (provider_message_ms IS NULL OR provider_message_ms >= 0),
+    CHECK (received_wall_ns > 0),
+    CHECK (received_monotonic_ns > 0),
+    CHECK (sample_second_ms % 1000 = 0),
+    CHECK (sample_second_ms = (provider_event_ms / 1000) * 1000),
+    CHECK (sample_second_ms >= market_id * 300000),
+    CHECK (sample_second_ms < (market_id + 1) * 300000),
+    CHECK (price_e18 > 0),
+    CHECK (price > 0),
+    CHECK (price_e18 = price * 1000000000000000000)
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_twap_events_source_time_idx
+    ON polymarket_twap_events (
+        symbol,
+        window_s,
+        provider_event_ms,
+        received_wall_ns
+    );
+
+CREATE INDEX IF NOT EXISTS polymarket_twap_events_market_idx
+    ON polymarket_twap_events (market_id, provider_event_ms);
+
+CREATE TABLE IF NOT EXISTS polymarket_twap_gaps (
+    connection_id UUID NOT NULL
+        REFERENCES polymarket_twap_sessions(connection_id),
+    detected_wall_ns BIGINT NOT NULL,
+    detected_monotonic_ns BIGINT NOT NULL,
+    reason TEXT NOT NULL,
+    idle_timeout_ms BIGINT,
+    last_accepted_received_ms BIGINT,
+    last_provider_event_ms BIGINT,
+    messages_received_total BIGINT NOT NULL,
+    messages_accepted_total BIGINT NOT NULL,
+    parse_errors_total BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (connection_id, detected_wall_ns, reason),
+
+    CHECK (detected_wall_ns > 0),
+    CHECK (detected_monotonic_ns > 0),
+    CHECK (idle_timeout_ms IS NULL OR idle_timeout_ms > 0),
+    CHECK (messages_received_total >= 0),
+    CHECK (messages_accepted_total >= 0),
+    CHECK (parse_errors_total >= 0),
+    CHECK (messages_accepted_total <= messages_received_total),
+    CHECK (parse_errors_total <= messages_received_total),
+    CHECK (
+        messages_accepted_total + parse_errors_total
+        <= messages_received_total
+    )
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_twap_gaps_detected_idx
+    ON polymarket_twap_gaps (detected_wall_ns DESC);
+
+REVOKE ALL ON polymarket_twap_sessions FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE ON polymarket_twap_sessions TO price_writer;
+GRANT SELECT ON polymarket_twap_sessions TO price_reader;
+
+REVOKE ALL ON polymarket_twap_events FROM PUBLIC;
+GRANT SELECT, INSERT ON polymarket_twap_events TO price_writer;
+GRANT SELECT ON polymarket_twap_events TO price_reader;
+
+REVOKE ALL ON polymarket_twap_gaps FROM PUBLIC;
+GRANT SELECT, INSERT ON polymarket_twap_gaps TO price_writer;
+GRANT SELECT ON polymarket_twap_gaps TO price_reader;
 
 CREATE TABLE IF NOT EXISTS polymarket_probability_samples (
     market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
@@ -1279,6 +1510,30 @@ WHERE provider_code = 'polymarket_chainlink_rtds'
 ON CONFLICT (provider_id, symbol) DO NOTHING;
 
 INSERT INTO providers (provider_code, display_name)
+VALUES (
+    'polymarket_chainlink_twap_rtds',
+    'Polymarket RTDS Chainlink BTC/USD 30-second TWAP'
+)
+ON CONFLICT (provider_code) DO NOTHING;
+
+INSERT INTO instruments (
+    provider_id,
+    symbol,
+    base_asset,
+    quote_asset,
+    stream_name
+)
+SELECT
+    provider_id,
+    'BTCUSD_TWAP_30S',
+    'BTC',
+    'USD',
+    'crypto_prices_twap_thirty:btc/usd'
+FROM providers
+WHERE provider_code = 'polymarket_chainlink_twap_rtds'
+ON CONFLICT (provider_id, symbol) DO NOTHING;
+
+INSERT INTO providers (provider_code, display_name)
 VALUES ('binance_usdm_perp', 'Binance USD-M Perpetual Futures')
 ON CONFLICT (provider_code) DO NOTHING;
 
@@ -1298,3 +1553,43 @@ SELECT
 FROM providers
 WHERE provider_code = 'binance_usdm_perp'
 ON CONFLICT (provider_id, symbol) DO NOTHING;
+
+-- A database reset preserves the login roles but removes database-local
+-- privileges. Keep schema.sql sufficient to restore the writer/reader split
+-- without relying on an earlier manual bootstrap session.
+DO $$
+BEGIN
+    EXECUTE format(
+        'GRANT CONNECT ON DATABASE %I TO price_writer, price_reader',
+        current_database()
+    );
+END
+$$;
+
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO price_writer, price_reader;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, price_reader;
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON ALL TABLES IN SCHEMA public TO price_writer;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO price_reader;
+
+-- Crossing events are immutable within a definition version even though the
+-- writer has ordinary DML privileges on the rest of the application schema.
+REVOKE UPDATE, DELETE
+    ON polymarket_btc_5m_flip_events FROM price_writer;
+
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, price_reader;
+GRANT USAGE, SELECT, UPDATE
+    ON ALL SEQUENCES IN SCHEMA public TO price_writer;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE ALL ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO price_writer;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT ON TABLES TO price_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    REVOKE ALL ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO price_writer;

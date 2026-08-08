@@ -27,6 +27,7 @@ from price_collector.live_cache import (
     FUTURES_LIVE_KEY,
     LIVE_CACHE_READ_ERRORS,
     MICROSTRUCTURE_LIVE_KEY,
+    TWAP_LIVE_KEY,
     LiveCachePayloadError,
     build_current_live_payload,
     create_live_cache,
@@ -208,6 +209,7 @@ def serialize_market_index_item(
         "availability": {
             "binance": int(row.get("binance_sample_count") or 0),
             "chainlink": int(row.get("chainlink_sample_count") or 0),
+            "twap": int(row.get("twap_sample_count") or 0),
             "futures": int(row.get("futures_sample_count") or 0),
             "open_interest": int(row.get("open_interest_sample_count") or 0),
             "flow": int(row.get("flow_sample_count") or 0),
@@ -302,28 +304,53 @@ def _serialize_flip_archive(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _serialize_settlement(
+    row: Mapping[str, Any],
+    *,
+    price_to_beat: Any = None,
+    official_final_price: Any = None,
+) -> dict[str, Any]:
+    """Expose the market rule independently from either Chainlink series."""
+
+    return {
+        "reference": _mapping_value(row, "settlement_reference"),
+        "window_s": _integer_or_none(
+            _mapping_value(row, "settlement_window_s")
+        ),
+        "source_url": _mapping_value(row, "settlement_source_url"),
+        "rule_version": _mapping_value(row, "settlement_rule_version"),
+        "price_to_beat": _decimal_string_or_none(price_to_beat),
+        "official_final_price": _decimal_string_or_none(
+            official_final_price
+        ),
+    }
+
+
 def serialize_flip_market_item(row: Mapping[str, Any]) -> dict[str, Any]:
     market_id = int(row["market_id"])
+    price_to_beat = _mapping_value(
+        row,
+        "price_to_beat",
+        "official_open_price",
+        "chainlink_open_price",
+    )
+    official_final_price = _mapping_value(
+        row,
+        "official_close",
+        "official_close_price",
+        "chainlink_close_price",
+    )
     return {
         "market_id": market_id,
         "market_start_ms": int(row["market_start_ms"]),
         "market_end_ms": int(row["market_end_ms"]),
         "evaluation_status": _mapping_value(row, "evaluation_status"),
-        "price_to_beat": _decimal_string_or_none(
-            _mapping_value(
-                row,
-                "price_to_beat",
-                "official_open_price",
-                "chainlink_open_price",
-            )
-        ),
-        "official_close": _decimal_string_or_none(
-            _mapping_value(
-                row,
-                "official_close",
-                "official_close_price",
-                "chainlink_close_price",
-            )
+        "price_to_beat": _decimal_string_or_none(price_to_beat),
+        "official_close": _decimal_string_or_none(official_final_price),
+        "settlement": _serialize_settlement(
+            row,
+            price_to_beat=price_to_beat,
+            official_final_price=official_final_price,
         ),
         "winner": _mapping_value(row, "winner", "official_winner"),
         "matching_crossing_count": int(
@@ -368,7 +395,7 @@ def serialize_flip_event(row: Mapping[str, Any]) -> dict[str, Any]:
         "direction": row["direction"],
         "previous_side": _mapping_value(row, "previous_side", "from_side"),
         "new_side": _mapping_value(row, "new_side", "to_side"),
-        "previous_chainlink_price": _decimal_string_or_none(
+        "previous_twap_price": _decimal_string_or_none(
             _mapping_value(
                 row,
                 "previous_chainlink_price",
@@ -376,7 +403,7 @@ def serialize_flip_event(row: Mapping[str, Any]) -> dict[str, Any]:
                 "from_price",
             )
         ),
-        "new_chainlink_price": _decimal_string_or_none(
+        "new_twap_price": _decimal_string_or_none(
             _mapping_value(
                 row,
                 "new_chainlink_price",
@@ -435,7 +462,7 @@ def serialize_flip_cutoff(
     return {
         "seconds_before_end": int(row["seconds_before_end"]),
         "cutoff_ms": _integer_or_none(_mapping_value(row, "cutoff_ms")),
-        "chainlink": {
+        "twap": {
             "price": _decimal_string_or_none(
                 _mapping_value(
                     row,
@@ -608,8 +635,20 @@ def serialize_market_flip_analysis(
     events = analysis.get("events") or []
     cutoffs = analysis.get("cutoffs") or []
     market_id = int(evaluation["market_id"])
+    price_to_beat = _mapping_value(
+        evaluation,
+        "price_to_beat",
+        "official_open_price",
+        "chainlink_open_price",
+    )
+    official_final_price = _mapping_value(
+        evaluation,
+        "official_close",
+        "official_close_price",
+        "chainlink_close_price",
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "definition_version": int(
             _mapping_value(
                 evaluation,
@@ -622,21 +661,12 @@ def serialize_market_flip_analysis(
             "market_id": market_id,
             "market_start_ms": int(evaluation["market_start_ms"]),
             "market_end_ms": int(evaluation["market_end_ms"]),
-            "price_to_beat": _decimal_string_or_none(
-                _mapping_value(
-                    evaluation,
-                    "price_to_beat",
-                    "official_open_price",
-                    "chainlink_open_price",
-                )
-            ),
-            "official_close": _decimal_string_or_none(
-                _mapping_value(
-                    evaluation,
-                    "official_close",
-                    "official_close_price",
-                    "chainlink_close_price",
-                )
+            "price_to_beat": _decimal_string_or_none(price_to_beat),
+            "official_close": _decimal_string_or_none(official_final_price),
+            "settlement": _serialize_settlement(
+                evaluation,
+                price_to_beat=price_to_beat,
+                official_final_price=official_final_price,
             ),
             "winner": _mapping_value(
                 evaluation,
@@ -683,7 +713,7 @@ def serialize_market_flip_analysis(
                 )
             ),
             "decisive_flip": _serialize_decisive_flip(evaluation),
-            "chainlink": {
+            "twap": {
                 "observation_count": int(
                     _mapping_value(
                         evaluation,
@@ -721,7 +751,7 @@ def serialize_market_flip_analysis(
                 ),
             },
             "cutoff_coverage": {
-                "chainlink_count": int(
+                "twap_count": int(
                     _mapping_value(
                         evaluation,
                         "chainlink_cutoff_count",
@@ -729,7 +759,7 @@ def serialize_market_flip_analysis(
                     )
                     or 0
                 ),
-                "fresh_chainlink_count": int(
+                "fresh_twap_count": int(
                     _mapping_value(
                         evaluation,
                         "fresh_chainlink_cutoff_count",
@@ -817,6 +847,10 @@ def summarize_flip_series_availability(
         ),
         "chainlink_price_rows": sum(
             (item.get("prices") or {}).get("chainlink") is not None
+            for item in series
+        ),
+        "twap_price_rows": sum(
+            (item.get("prices") or {}).get("twap") is not None
             for item in series
         ),
         "probability_rows": count_mapping("probabilities"),
@@ -952,6 +986,7 @@ def build_flip_evidence_bundle(
         "price_to_beat": serialized_flip["market"]["price_to_beat"],
         "official_close": serialized_flip["market"]["official_close"],
         "winner": serialized_flip["market"]["winner"],
+        "settlement": serialized_flip["market"]["settlement"],
     }
     serialized_anchor = (
         None
@@ -977,7 +1012,7 @@ def build_flip_evidence_bundle(
     evidence_query = "?" + "&".join(evidence_query_parts)
 
     result: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "definition_version": serialized_flip["definition_version"],
         "market_data_schema_version": int(
             market_payload.get("schema_version") or 0
@@ -1064,7 +1099,7 @@ def serialize_flip_distribution(
 ) -> dict[str, Any]:
     population = distribution.get("population") or {}
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "definition_version": FLIP_DEFINITION_VERSION,
         "server_time_ms": now_ms,
         "max_seconds": max_seconds,
@@ -1140,6 +1175,23 @@ def serialize_download_market(market: Mapping[str, Any]) -> dict[str, Any]:
     exported.pop("market_start_ms", None)
     exported.pop("market_end_ms", None)
 
+    settlement = exported.get("settlement")
+    if isinstance(settlement, Mapping):
+        formatted_settlement = dict(settlement)
+        formatted_settlement["price_to_beat"] = _format_download_decimal_string(
+            formatted_settlement.get("price_to_beat"),
+            "0.01",
+        )
+        formatted_settlement["official_final_price"] = (
+            _format_download_decimal_string(
+                formatted_settlement.get("official_final_price"),
+                "0.01",
+            )
+        )
+        exported["settlement"] = formatted_settlement
+
+    # Compatibility for older stored payload fixtures. New TWAP-only payloads
+    # use market.settlement and do not conflate it with standard Chainlink spot.
     chainlink_resolution = exported.get("chainlink_resolution")
     if isinstance(chainlink_resolution, Mapping):
         formatted_resolution = dict(chainlink_resolution)
@@ -1148,8 +1200,7 @@ def serialize_download_market(market: Mapping[str, Any]) -> dict[str, Any]:
             "0.01",
         )
         formatted_resolution["close"] = _format_download_decimal_string(
-            formatted_resolution.get("close"),
-            "0.01",
+            formatted_resolution.get("close"), "0.01"
         )
         exported["chainlink_resolution"] = formatted_resolution
 
@@ -1312,7 +1363,7 @@ async def markets_index(
     page_rows = rows[:limit]
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "server_time_ms": now_ms,
         "markets": [
             serialize_market_index_item(row, now_ms=now_ms)
@@ -1368,7 +1419,7 @@ async def markets_flips(
             filters[name] = value
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "definition_version": FLIP_DEFINITION_VERSION,
         "server_time_ms": now_ms,
         "filters": filters,
@@ -1752,6 +1803,7 @@ async def markets_current_microstructure_live(
             [
                 BINANCE_SPOT_LIVE_KEY,
                 CHAINLINK_LIVE_KEY,
+                TWAP_LIVE_KEY,
                 FUTURES_LIVE_KEY,
             ],
             microstructure_key=MICROSTRUCTURE_LIVE_KEY,
@@ -1777,7 +1829,7 @@ async def markets_current_microstructure_live(
         raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "server_time_ms": now_ms,
         "market_id": snapshot_window.market_id,
         "sample_second_ms": snapshot_sample_second_ms,
@@ -1792,6 +1844,11 @@ async def markets_current_microstructure_live(
                 None
                 if prices.get(CHAINLINK_LIVE_KEY) is None
                 else prices[CHAINLINK_LIVE_KEY].value
+            ),
+            "twap": (
+                None
+                if prices.get(TWAP_LIVE_KEY) is None
+                else prices[TWAP_LIVE_KEY].value
             ),
             "futures": (
                 None

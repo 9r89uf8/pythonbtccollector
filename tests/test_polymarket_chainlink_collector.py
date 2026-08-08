@@ -1078,7 +1078,7 @@ def test_startup_frames_do_not_reset_accepted_tick_idle_deadline(
 
         task = asyncio.create_task(
             collector.polymarket_chainlink_reader_loop(
-                reader_settings(idle_timeout_ms=100),
+                reader_settings(idle_timeout_ms=300),
                 state,
                 raw_capture=raw,
             )
@@ -1518,7 +1518,7 @@ def test_raw_disabled_reader_avoids_uuid_and_monotonic_capture_work(monkeypatch)
     asyncio.run(scenario())
 
 
-def chainlink_run_settings(*, raw_enabled):
+def chainlink_run_settings(*, raw_enabled, twap_enabled=False):
     return SimpleNamespace(
         LOG_LEVEL="INFO",
         APP_ENV="test",
@@ -1529,6 +1529,8 @@ def chainlink_run_settings(*, raw_enabled):
         POLYMARKET_CHAINLINK_RTD_SYMBOL="btc/usd",
         POLYMARKET_CHAINLINK_TOPIC="crypto_prices_chainlink",
         POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10_000,
+        POLYMARKET_TWAP_ENABLED=twap_enabled,
+        POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=0.1,
         RAW_CHAINLINK_EVENTS_ENABLED=raw_enabled,
         RAW_FUTURES_TRACE_ENABLED=True,
         RAW_CAPTURE_RETENTION_HOURS=72,
@@ -1539,6 +1541,89 @@ def chainlink_run_settings(*, raw_enabled):
         RAW_CAPTURE_RETENTION_CHECK_SECONDS=60,
         RAW_FUTURES_BUCKET_MS=100,
     )
+
+
+def test_twap_runtime_reuses_live_cache_and_cannot_stop_spot_collector(
+    monkeypatch,
+):
+    async def scenario():
+        spot_started = asyncio.Event()
+        twap_started = asyncio.Event()
+        events = []
+
+        class FakePool:
+            async def close(self):
+                events.append("pool_close")
+
+        class FakeLiveCache:
+            async def close(self):
+                events.append("live_close")
+
+        pool = FakePool()
+        expected_live_cache = FakeLiveCache()
+
+        async def fake_reader(settings, delivery_state, *, raw_capture=None):
+            spot_started.set()
+            await asyncio.Event().wait()
+
+        async def failing_twap(settings, received_pool, *, live_cache=None):
+            assert received_pool is pool
+            assert live_cache is expected_live_cache
+            twap_started.set()
+            raise RuntimeError("isolated TWAP failure")
+
+        async def fake_create_pool(_database_url):
+            return pool
+
+        async def fake_get_instrument_id(_pool, *, provider_code, symbol):
+            assert provider_code == "polymarket_chainlink_rtds"
+            assert symbol == "BTCUSD"
+            return 42
+
+        monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
+        monkeypatch.setattr(
+            collector,
+            "require_collector_database_url",
+            lambda _settings: "postgresql://writer@localhost/price_collector",
+        )
+        monkeypatch.setattr(collector, "create_pool", fake_create_pool)
+        monkeypatch.setattr(collector, "get_instrument_id", fake_get_instrument_id)
+        monkeypatch.setattr(
+            collector,
+            "create_live_cache",
+            lambda _settings: expected_live_cache,
+        )
+        monkeypatch.setattr(
+            collector,
+            "polymarket_chainlink_reader_loop",
+            fake_reader,
+        )
+        monkeypatch.setattr(
+            collector,
+            "run_polymarket_twap_noncritical",
+            failing_twap,
+        )
+        monkeypatch.setattr(collector, "_install_sigterm_cancellation", lambda: None)
+
+        task = asyncio.create_task(
+            collector.run_collector(
+                chainlink_run_settings(
+                    raw_enabled=False,
+                    twap_enabled=True,
+                )
+            )
+        )
+        await asyncio.wait_for(spot_started.wait(), timeout=1)
+        await asyncio.wait_for(twap_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert events == ["live_close", "pool_close"]
+
+    asyncio.run(scenario())
 
 
 def test_chainlink_sigterm_handler_cancels_current_task_and_is_removable(

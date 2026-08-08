@@ -168,13 +168,15 @@ Supported stored spot/oracle combinations are:
 | Provider | Symbol | Source |
 | --- | --- | --- |
 | `binance_spot` | `BTCUSDT` | Binance Spot ticker |
-| `polymarket_chainlink_rtds` | `BTCUSD` | Polymarket Chainlink RTDS |
+| `polymarket_chainlink_rtds` | `BTCUSD` | Standard Chainlink spot context through Polymarket RTDS |
+| `polymarket_chainlink_twap_rtds` | `BTCUSD_TWAP_30S` | Exact 30-second Chainlink TWAP settlement reference |
 
 Calls:
 
 ```bash
 curl "${API_BASE_URL}/prices/latest"
 curl "${API_BASE_URL}/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
+curl "${API_BASE_URL}/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
 ```
 
 Response:
@@ -241,7 +243,7 @@ Response:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1783459250123,
   "markets": [
     {
@@ -254,6 +256,7 @@ Response:
       "availability": {
         "binance": 300,
         "chainlink": 298,
+        "twap": 299,
         "futures": 300,
         "open_interest": 60,
         "flow": 300,
@@ -271,6 +274,7 @@ Response:
       "availability": {
         "binance": 300,
         "chainlink": 300,
+        "twap": 300,
         "futures": 300,
         "open_interest": 60,
         "flow": 299,
@@ -288,6 +292,7 @@ Response:
       "availability": {
         "binance": 299,
         "chainlink": 298,
+        "twap": 297,
         "futures": 300,
         "open_interest": 60,
         "flow": 300,
@@ -306,7 +311,8 @@ that dataset in the market:
 | Field | Dataset |
 | --- | --- |
 | `binance` | Binance Spot price samples |
-| `chainlink` | Polymarket Chainlink RTDS price samples |
+| `chainlink` | Standard Chainlink spot context samples |
+| `twap` | Exact 30-second Chainlink TWAP settlement-reference samples |
 
 | `futures` | Binance USD-M futures snapshots |
 | `open_interest` | Open-interest snapshots |
@@ -356,9 +362,11 @@ available and its response also contains `market.market_id`.
 For a focused, copy/paste dashboard integration guide for these endpoints, see
 [`FLIP_RESEARCH_API.md`](FLIP_RESEARCH_API.md).
 
-The flip routes use permanent, versioned post-resolution records. They do not
-infer a result from the final Up/Down quote. The threshold is Polymarket's
-official Chainlink `priceToBeat`, and the label is the official market winner.
+The flip routes use permanent definition-v2 post-resolution records. They do
+not infer a result from the final Up/Down quote. The threshold is Polymarket's
+exact published `priceToBeat`; crossings use exact 30-second TWAP events, and
+the label is the official market winner. Standard Chainlink spot remains
+context only.
 
 The evaluated interval is half-open:
 
@@ -377,7 +385,7 @@ concepts separate:
 
 A market can have multiple crossings. A crossing bracket wider than 10 seconds
 is retained as evidence but makes the market `ambiguous`, rather than claiming
-an exact confirmed crossing across a stale gap. Missing or stale Chainlink
+an exact confirmed crossing across a stale gap. Missing or stale TWAP
 threshold evidence makes an otherwise unconfirmed market `ambiguous`; it is
 never silently counted as a non-flip. Missing probability or microstructure
 evidence adds coverage and quality flags but does not by itself change the
@@ -411,8 +419,8 @@ Response:
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
+  "schema_version": 2,
+  "definition_version": 2,
   "server_time_ms": 1783459600123,
   "filters": {
     "within_seconds": 5,
@@ -425,6 +433,14 @@ Response:
       "market_end_ms": 1783459500000,
       "price_to_beat": "63337.115841440165000000",
       "official_close": "63336.719008471390000000",
+      "settlement": {
+        "reference": "chainlink_twap",
+        "window_s": 30,
+        "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+        "rule_version": "btc-5m-twap-30",
+        "price_to_beat": "63337.115841440165000000",
+        "official_final_price": "63336.719008471390000000"
+      },
       "winner": "Down",
       "evaluation_status": "confirmed_flip",
       "matching_crossing_count": 2,
@@ -468,8 +484,8 @@ The response has this top-level shape:
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
+  "schema_version": 2,
+  "definition_version": 2,
   "server_time_ms": 1783459600123,
   "market": {
     "market_id": 5944864,
@@ -477,11 +493,19 @@ The response has this top-level shape:
     "market_end_ms": 1783459500000,
     "price_to_beat": "63337.115841440165000000",
     "official_close": "63336.719008471390000000",
+    "settlement": {
+      "reference": "chainlink_twap",
+      "window_s": 30,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+      "rule_version": "btc-5m-twap-30",
+      "price_to_beat": "63337.115841440165000000",
+      "official_final_price": "63336.719008471390000000"
+    },
     "winner": "Down"
   },
   "evaluation": {
     "status": "confirmed_flip",
-    "observation_precision": "one_second_summary",
+    "observation_precision": "exact_twap_event",
     "analysis_start_ms": 1783459480000,
     "analysis_end_ms": 1783459500000,
     "crossing_count": 3,
@@ -492,7 +516,7 @@ The response has this top-level shape:
       "direction": "up_to_down",
       "observed_ms_before_end": 1700
     },
-    "chainlink": {
+    "twap": {
       "observation_count": 20,
       "strict_observation_count": 20,
       "first_provider_event_ms": 1783459480000,
@@ -500,8 +524,8 @@ The response has this top-level shape:
       "max_gap_ms": 1000
     },
     "cutoff_coverage": {
-      "chainlink_count": 20,
-      "fresh_chainlink_count": 20,
+      "twap_count": 20,
+      "fresh_twap_count": 20,
       "probability_count": 20,
       "fresh_probability_count": 20,
       "microstructure_count": 19
@@ -517,8 +541,8 @@ The response has this top-level shape:
       "direction": "up_to_down",
       "previous_side": "Up",
       "new_side": "Down",
-      "previous_chainlink_price": "63337.250000000000000000",
-      "new_chainlink_price": "63336.990000000000000000",
+      "previous_twap_price": "63337.250000000000000000",
+      "new_twap_price": "63336.990000000000000000",
       "previous_sample_second_ms": 1783459497000,
       "new_sample_second_ms": 1783459498000,
       "previous_provider_event_ms": 1783459497300,
@@ -528,14 +552,14 @@ The response has this top-level shape:
       "observation_gap_ms": 1000,
       "observed_ms_before_end": 1700,
       "is_decisive": true,
-      "observation_precision": "one_second_summary"
+      "observation_precision": "exact_twap_event"
     }
   ],
   "cutoffs": [
     {
       "seconds_before_end": 20,
       "cutoff_ms": 1783459480000,
-      "chainlink": {
+      "twap": {
         "price": "63338.010000000000000000",
         "sample_second_ms": 1783459479000,
         "provider_event_ms": 1783459479000,
@@ -627,7 +651,8 @@ complete official resolution data or the evaluator's retry loop.
 
 Returns one self-contained, agent-oriented evidence bundle. It combines the
 flip evaluation and crossing records with the curated representation of every
-current API one-second layer: Binance and Chainlink prices, Polymarket
+current API one-second layer: Binance, standard Chainlink context, and TWAP
+prices, Polymarket
 probabilities, futures, open interest, flow, book, and archive-aware
 microstructure. This means every layer, not literally every PostgreSQL or raw
 capture column. Display filling is always off, so missing observations remain
@@ -675,9 +700,9 @@ Top-level response shape:
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
-  "market_data_schema_version": 3,
+  "schema_version": 2,
+  "definition_version": 2,
+  "market_data_schema_version": 4,
   "data_scope": "curated_public_api",
   "server_time_ms": 1783459600123,
   "market": {
@@ -687,6 +712,14 @@ Top-level response shape:
     "seconds_expected": 300,
     "price_to_beat": "63337.115841440165000000",
     "official_close": "63336.719008471390000000",
+    "settlement": {
+      "reference": "chainlink_twap",
+      "window_s": 30,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+      "rule_version": "btc-5m-twap-30",
+      "price_to_beat": "63337.115841440165000000",
+      "official_final_price": "63336.719008471390000000"
+    },
     "winner": "Down"
   },
   "selection": {
@@ -718,6 +751,7 @@ Top-level response shape:
       "series_rows": 32,
       "binance_price_rows": 32,
       "chainlink_price_rows": 31,
+      "twap_price_rows": 32,
       "probability_rows": 32,
       "futures_rows": 32,
       "open_interest_rows": 32,
@@ -818,8 +852,8 @@ Response:
 
 ```json
 {
-  "schema_version": 1,
-  "definition_version": 1,
+  "schema_version": 2,
+  "definition_version": 2,
   "server_time_ms": 1783459600123,
   "max_seconds": 20,
   "population": {
@@ -859,7 +893,7 @@ top-level eligible count and crossing-time calculations.
 `markets_with_any_crossing` respects `max_seconds` and `direction`; the other
 top-level population counts remain direction-independent. Each cutoff
 denominator independently excludes a missing, tie, future-timestamped, or stale
-Chainlink observation, but can include an otherwise ambiguous market when that
+TWAP observation, but can include an otherwise ambiguous market when that
 exact cutoff is fresh and strict. With a direction filter, the cutoff
 denominator is also restricted to apparent `Up` for `up_to_down` or apparent
 `Down` for `down_to_up`. Probability freshness requires both receive age and,
@@ -936,7 +970,8 @@ requested market.
 
 ## Multi-Source Market Summary
 
-These routes compare the stored Binance Spot and Chainlink RTDS samples:
+These routes compare Binance Spot, standard Chainlink context, and exact
+30-second TWAP samples:
 
 - `GET /markets/current/sources`
 - `GET /markets/{market_id}/sources`
@@ -984,14 +1019,27 @@ Response:
       "latest_sample_second_ms": 1783459499000,
       "latest_provider_event_ms": 1783459499123,
       "latest_received_ms": 1783459499320
+    },
+    {
+      "provider": "polymarket_chainlink_twap_rtds",
+      "symbol": "BTCUSD_TWAP_30S",
+      "quote_asset": "USD",
+      "sample_count": 299,
+      "open": "122997.910000000000000000",
+      "high": "123499.880000000000000000",
+      "low": "122903.120000000000000000",
+      "close": "123454.770000000000000000",
+      "latest_sample_second_ms": 1783459499000,
+      "latest_provider_event_ms": 1783459499000,
+      "latest_received_ms": 1783459499140
     }
   ]
 }
 ```
 
 Only sources that have samples are present in `sources`. The list is ordered
-with Binance Spot before Chainlink. Returns HTTP `404` when neither source has
-samples for the selected market.
+with Binance Spot, standard Chainlink context, then TWAP. Returns HTTP `404`
+when none of those sources has samples for the selected market.
 
 ## Full Market Data Series
 
@@ -1012,10 +1060,10 @@ market window. Future or missing observations remain `null`.
 | `include_oi` | boolean | `false` | Adds `series[].open_interest` and, when available, top-level `previous_5m_oi_summary` |
 | `include_flow` | boolean | `false` | Adds `series[].flow` and `series[].freshness.futures_flow` |
 | `include_book` | boolean | `false` | Adds `series[].book` and `series[].freshness.futures_book` |
-| `include_microstructure` | boolean | `false` | Adds PostgreSQL `series[].microstructure`, availability counts, and response schema version `3` |
+| `include_microstructure` | boolean | `false` | Adds PostgreSQL `series[].microstructure` and availability counts; the response remains schema version `4` |
 | `microstructure_groups` | string or omitted | all groups | Comma-separated subset of `books,flow,cross_market,liquidations,quality`; used only with `include_microstructure=true` |
-| `fill_display` | boolean | `false` | Carries the latest prior Chainlink value into a missing second for display only |
-| `max_carry_forward_ms` | integer | `10000` | Maximum Chainlink display carry-forward age; negative values act as `0` |
+| `fill_display` | boolean | `false` | Independently carries the latest prior standard Chainlink and TWAP values into missing seconds for display only |
+| `max_carry_forward_ms` | integer | `10000` | Maximum display carry-forward age for each Chainlink series; negative values act as `0` |
 
 Boolean query values should be sent as `true` or `false`.
 
@@ -1050,7 +1098,7 @@ These fields are always present on a successful response:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "server_time_ms": 1783459250123,
   "market": {
     "market_id": 5944864,
@@ -1062,6 +1110,16 @@ These fields are always present on a successful response:
     "chainlink_resolution": {
       "open": null,
       "close": null,
+      "status": "pending",
+      "source": null
+    },
+    "settlement": {
+      "reference": "chainlink_twap",
+      "window_s": 30,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+      "rule_version": "btc-5m-twap-30",
+      "price_to_beat": null,
+      "official_final_price": null,
       "status": "pending",
       "source": null
     },
@@ -1085,7 +1143,8 @@ These fields are always present on a successful response:
       "timestamp_at": "2026-07-07T21:00:00Z",
       "prices": {
         "binance": "123000.00",
-        "chainlink": "122998.12"
+        "chainlink": "122998.12",
+        "twap": "122997.84"
       },
       "freshness": {
         "binance": {
@@ -1103,6 +1162,15 @@ These fields are always present on a successful response:
           "source_age_ms": 50123,
           "received_age_ms": 50083,
           "transport_lag_ms": 40
+        },
+        "twap": {
+          "source_ms": 1783459200000,
+          "message_ms": 1783459200025,
+          "received_ms": 1783459200045,
+          "is_carried_forward": false,
+          "source_age_ms": 50123,
+          "received_age_ms": 50078,
+          "transport_lag_ms": 45
         },
         "futures_last": {
           "source_ms": 1783459200000,
@@ -1122,11 +1190,10 @@ These fields are always present on a successful response:
 }
 ```
 
-The base response remains schema version `2`. When
-`include_microstructure=true`, the response is schema version `3` and also
-contains the availability and per-second fields described under
-**Optional `microstructure`** below. The opt-in does not change the existing
-price, freshness, resolution, or other optional dataset shapes.
+The response is schema version `4`, with or without microstructure. Setting
+`include_microstructure=true` adds the availability and per-second fields
+described under **Optional `microstructure`** below; it does not change the
+price, freshness, settlement, resolution, or other optional dataset shapes.
 
 `t` is the zero-based second offset from `market_start_ms`. Price strings in
 this response are rounded to two decimal places. Any value or freshness
@@ -1141,14 +1208,19 @@ keyed by the premium-index timestamp (or its local observation fallback), not by
 the trade timestamp.
 
 
-When `fill_display=true`, only Chainlink is carried forward, and
-`freshness.chainlink.is_carried_forward` reports whether the row uses an older
-sample. Stored data is not changed.
+When `fill_display=true`, standard Chainlink context and settlement TWAP are
+carried independently. `freshness.chainlink.is_carried_forward` and
+`freshness.twap.is_carried_forward` report whether each field uses an older
+sample. One series never fills the other, and stored data is not changed.
 
-### Official market resolution
+### Official settlement and market resolution
 
-`market.chainlink_resolution` and `market.resolution` are always present on the
-data and download routes. They do not require `include_probabilities=true`.
+`market.settlement` and `market.resolution` are always present on the data and
+download routes. They do not require `include_probabilities=true`.
+`market.chainlink_resolution` is retained as a backward-compatible alias for
+the official price pair; despite its legacy name, it is not the standard
+`series[].prices.chainlink` context feed. New clients should use
+`market.settlement`.
 For a completed market they can look like:
 
 ```json
@@ -1157,6 +1229,16 @@ For a completed market they can look like:
     "chainlink_resolution": {
       "open": "63337.115841440165",
       "close": "63336.71900847139",
+      "status": "official",
+      "source": "polymarket_gamma_event_metadata"
+    },
+    "settlement": {
+      "reference": "chainlink_twap",
+      "window_s": 30,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
+      "rule_version": "btc-5m-twap-30",
+      "price_to_beat": "63337.115841440165",
+      "official_final_price": "63336.71900847139",
       "status": "official",
       "source": "polymarket_gamma_event_metadata"
     },
@@ -1176,12 +1258,19 @@ For a completed market they can look like:
 }
 ```
 
-On the data routes, Chainlink `open` and `close` are exact decimal strings from
-Polymarket's official Gamma event metadata. The download routes format those
-two values to fixed two-decimal strings. `chainlink_resolution.status` is:
+On the data routes, `settlement.price_to_beat` and
+`settlement.official_final_price` are exact decimal strings from Polymarket's
+official market metadata. The download routes format those two values to fixed
+two-decimal strings. `settlement.status` is:
 
 - `pending` while either official price is not yet available; or
 - `official` when both official prices are available.
+
+Only markets whose rule identity is `chainlink_twap`, window `30`, and rule
+version `btc-5m-twap-30` are collected after the clean reset. The independently
+captured `series[].prices.twap` is the research evidence for that settlement
+feed. `series[].prices.chainlink` remains standard Chainlink spot context and
+must not be substituted for TWAP.
 
 `resolution.status` is `pending` or `resolved`. While pending,
 `resolution_type` is `null`. A normal resolved binary market has
@@ -1570,8 +1659,10 @@ a smaller export shape:
 - Every `series[].timestamp_ms` is removed; `series[].timestamp_at` and `t` are
   retained.
 - Every `series[].freshness` object is removed.
-- `market.chainlink_resolution.open` and `.close` are formatted as fixed
-  two-decimal strings when present. `null` values remain `null`.
+- `market.settlement.price_to_beat` and `.official_final_price` are formatted
+  as fixed two-decimal strings when present. The legacy
+  `market.chainlink_resolution.open` and `.close` alias is formatted the same
+  way. `null` values remain `null`.
 - With `include_futures=true`, only the futures `last` value is retained. It is
   moved to `series[].prices.futures`; `mark`, `index`, and `premium_bps` are not
   exported.
@@ -1581,8 +1672,9 @@ a smaller export shape:
   `microprice`.
 - Probability, open-interest, resolution, and server-time fields otherwise keep
   their data-route shapes. In particular,
-  `market.chainlink_resolution` and `market.resolution` are always retained in
-  the download, even when `include_probabilities=false`.
+  `market.settlement`, the legacy `market.chainlink_resolution` alias, and
+  `market.resolution` are always retained in the download, even when
+  `include_probabilities=false`.
 
 Exported flow/book formatting is fixed:
 
@@ -1591,6 +1683,7 @@ Exported flow/book formatting is fixed:
   "prices": {
     "binance": "123000.00",
     "chainlink": "122998.12",
+    "twap": "122997.84",
     "futures": "62075.12"
   },
   "flow": {
@@ -1623,17 +1716,18 @@ when the market window does not exist.
 
 ### `GET /markets/current/microstructure/live`
 
-Returns the newest finalized one-second microstructure row and the three latest
+Returns the newest finalized one-second microstructure row and the four latest
 source prices. It takes no query parameters and makes one ordered Redis `MGET`
 for:
 
 - `btc:live:binance_spot`
 - `btc:live:chainlink`
+- `btc:live:chainlink_twap_30s`
 - `btc:live:futures`
 - `btc:live:microstructure`
 
 It never queries PostgreSQL and never stores or returns a five-minute history.
-The ordinary `/markets/current/live` route remains a separate three-key read.
+The ordinary `/markets/current/live` route remains a separate four-key read.
 
 ```bash
 curl --compressed "${API_BASE_URL}/markets/current/microstructure/live"
@@ -1643,7 +1737,7 @@ Abbreviated response:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1784774594250,
   "market_id": 5949248,
   "sample_second_ms": 1784774593000,
@@ -1651,6 +1745,7 @@ Abbreviated response:
   "prices": {
     "binance_spot": "65758.01",
     "chainlink": "65721.23639093849",
+    "twap": "65720.918273645546372819",
     "futures": "65723.70"
   },
   "microstructure": {
@@ -1750,7 +1845,7 @@ transport layer. A Redis connection/read failure returns:
 { "detail": "live cache unavailable" }
 ```
 
-Malformed JSON or an invalid value in any of the four keys returns:
+Malformed JSON or an invalid value in any of the five keys returns:
 
 ```json
 { "detail": "live cache payload invalid" }
@@ -1768,10 +1863,10 @@ responses are not cached in Redis.
 
 ### `GET /markets/current/live`
 
-Reads `btc:live:binance_spot`, `btc:live:chainlink`, and
-`btc:live:futures` with one Redis `MGET`. It does not query PostgreSQL or
-return historical samples, probabilities, mark/index prices, open interest,
-flow, or book data.
+Reads `btc:live:binance_spot`, `btc:live:chainlink`,
+`btc:live:chainlink_twap_30s`, and `btc:live:futures` with one Redis `MGET`.
+It does not query PostgreSQL or return historical samples, probabilities,
+mark/index prices, open interest, flow, or book data.
 
 The compatibility query parameter
 `max_chainlink_carry_forward_ms` is accepted as an integer and defaults to
@@ -1805,6 +1900,14 @@ Response:
       "source_age_ms": 2075,
       "received_age_ms": 729,
       "provider_event_ms": 1783988792000
+    },
+    "twap": {
+      "value": "62289.997412387451928374",
+      "source_timestamp_ms": 1783988792000,
+      "received_ms": 1783988793350,
+      "source_age_ms": 2075,
+      "received_age_ms": 725,
+      "provider_event_ms": 1783988792000
     }
   },
   "futures": {
@@ -1822,20 +1925,23 @@ Response:
 
 `provider_event_ms` and `time_ms` are compatibility aliases for
 `source_timestamp_ms`. Futures `last.value` comes from Binance
-`btcusdt@aggTrade.p`, with `aggTrade.T` as its source timestamp. Chainlink
-comes from Polymarket RTDS topic `crypto_prices_chainlink` filtered to
-`btc/usd`.
+`btcusdt@aggTrade.p`, with `aggTrade.T` as its source timestamp. Standard
+Chainlink context comes from Polymarket RTDS topic `crypto_prices_chainlink`
+filtered to `btc/usd`. `twap` comes from
+`crypto_prices_twap_thirty` with window `30`; it preserves the exact E18
+`full_accuracy_value` decimal string.
 
 Prices are fixed-point strings. Timestamps and ages are JSON integers. If a key
 is absent, that object's value, timestamps, ages, and alias are all `null`, and
 the route still returns HTTP `200`. The endpoint does not reject stale values;
 clients should use both age fields to display freshness.
 
-During a Chainlink feed gap, the collector leaves the last value in Redis while
-its ages grow. The accepted-event watchdog reconnects only the RTDS WebSocket
-when no valid expected event arrives within its configured deadline. Futures
-behaves similarly during a stream gap: the last cached value remains visible
-and ages until a new accepted trade arrives.
+During a standard Chainlink or TWAP feed gap, the collector leaves that source's
+last value in Redis while its ages grow. Each accepted-event watchdog is
+independent; a standard spot event does not make TWAP fresh, and a TWAP event
+does not make standard spot fresh. Futures behaves similarly during a stream
+gap: its last cached value remains visible and ages until a new accepted trade
+arrives.
 
 A Redis connection/read failure returns HTTP `503`:
 

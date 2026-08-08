@@ -14,6 +14,7 @@ from price_collector.live_cache import (
     CHAINLINK_LIVE_KEY,
     FUTURES_LIVE_KEY,
     MICROSTRUCTURE_LIVE_KEY,
+    TWAP_LIVE_KEY,
     LiveCache,
     LiveCachePayloadError,
     LivePrice,
@@ -422,6 +423,12 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
             received_ms=1_783_459_250_075,
         )
         await cache.set_price(
+            TWAP_LIVE_KEY,
+            value=Decimal("62065.987654321098765432"),
+            source_timestamp_ms=1_783_459_249_910,
+            received_ms=1_783_459_250_080,
+        )
+        await cache.set_price(
             FUTURES_LIVE_KEY,
             value=Decimal("62070.11"),
             source_timestamp_ms=1_783_459_249_950,
@@ -436,7 +443,12 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
     payload = asyncio.run(run())
 
     assert redis.mget_calls == [
-        [BINANCE_SPOT_LIVE_KEY, CHAINLINK_LIVE_KEY, FUTURES_LIVE_KEY]
+        [
+            BINANCE_SPOT_LIVE_KEY,
+            CHAINLINK_LIVE_KEY,
+            TWAP_LIVE_KEY,
+            FUTURES_LIVE_KEY,
+        ]
     ]
     assert set(payload) == {
         "server_time_ms",
@@ -456,6 +468,14 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
     }
     assert payload["prices"]["chainlink"]["source_age_ms"] == 223
     assert payload["prices"]["chainlink"]["received_age_ms"] == 48
+    assert payload["prices"]["twap"] == {
+        "value": "62065.987654321098765432",
+        "source_timestamp_ms": 1_783_459_249_910,
+        "received_ms": 1_783_459_250_080,
+        "source_age_ms": 213,
+        "received_age_ms": 43,
+        "provider_event_ms": 1_783_459_249_910,
+    }
     assert payload["futures"]["last"]["source_age_ms"] == 173
     assert payload["futures"]["last"]["received_age_ms"] == 33
     assert payload["futures"]["last"]["time_ms"] == 1_783_459_249_950
@@ -475,6 +495,14 @@ def test_build_current_live_payload_serializes_missing_sources_as_nulls():
     )
 
     assert payload["prices"]["chainlink"] == {
+        "value": None,
+        "source_timestamp_ms": None,
+        "received_ms": None,
+        "source_age_ms": None,
+        "received_age_ms": None,
+        "provider_event_ms": None,
+    }
+    assert payload["prices"]["twap"] == {
         "value": None,
         "source_timestamp_ms": None,
         "received_ms": None,

@@ -33,6 +33,16 @@ from price_collector.market import MarketWindow, market_for_sample_second
 
 LOGGER = logging.getLogger("price_collector.polymarket_probability_collector")
 
+SETTLEMENT_REFERENCE_CHAINLINK_TWAP = "chainlink_twap"
+SETTLEMENT_REFERENCE_CHAINLINK_SPOT = "chainlink_spot"
+SETTLEMENT_REFERENCE_UNKNOWN = "unknown"
+LEGACY_SPOT_RULE_VERSION = "chainlink-spot-v1"
+SUPPORTED_TWAP_WINDOW_SECONDS = 30
+SUPPORTED_TWAP_RULE_VERSION = "btc-5m-twap-30"
+SUPPORTED_TWAP_SOURCE_URL = (
+    "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+)
+
 
 class GammaDiscoveryError(ValueError):
     pass
@@ -63,6 +73,10 @@ class CurrentPolymarketMarket:
     active: Optional[bool]
     closed: Optional[bool]
     archived: Optional[bool]
+    settlement_reference: str
+    settlement_window_s: Optional[int]
+    settlement_source_url: Optional[str]
+    settlement_rule_version: Optional[str]
     raw_gamma: Mapping[str, Any]
 
 
@@ -392,6 +406,30 @@ def _parse_first_time_ms(
     return _parse_epoch_or_iso_ms(value)
 
 
+def _parse_market_start_ms(
+    market: Mapping[str, Any],
+    event: Mapping[str, Any],
+) -> Optional[int]:
+    """Prefer the trading interval boundary over Gamma's creation date."""
+
+    event_start = _coalesce(
+        _first_value(market, "eventStartTime", "event_start_time"),
+        _first_value(event, "eventStartTime", "event_start_time"),
+    )
+    parsed_event_start = _parse_epoch_or_iso_ms(event_start)
+    if parsed_event_start is not None:
+        return parsed_event_start
+    return _parse_first_time_ms(
+        market,
+        event,
+        "startTime",
+        "start_time",
+        "startDate",
+        "start_date",
+        "start_ms",
+    )
+
+
 def _outcome_label(value: Any) -> str:
     if isinstance(value, Mapping):
         for field in ("name", "label", "outcome", "title"):
@@ -408,6 +446,100 @@ def _token_id(value: Any) -> str:
             if token is not None:
                 return str(token)
     return str(value)
+
+
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 and str(value).strip() == str(parsed) else None
+
+
+def parse_market_settlement_rule(
+    event: Mapping[str, Any],
+    market: Mapping[str, Any],
+) -> tuple[str, Optional[int], Optional[str], Optional[str]]:
+    """Normalize one market's own structured rule; contradictions stay unknown."""
+
+    source_values = {
+        str(value).strip().rstrip("/")
+        for value in (
+            _first_value(market, "resolutionSource", "resolution_source"),
+            _first_value(event, "resolutionSource", "resolution_source"),
+        )
+        if value is not None and str(value).strip()
+    }
+    source_url = next(iter(source_values)) if len(source_values) == 1 else None
+
+    config = _first_value(market, "cryptoMarketConfig", "crypto_market_config")
+    if not isinstance(config, Mapping):
+        config = {}
+    config_id_values = {
+        str(value).strip()
+        for value in (
+            _first_value(config, "id"),
+            _first_value(
+                market,
+                "cryptoMarketConfigId",
+                "crypto_market_config_id",
+            ),
+        )
+        if value is not None and str(value).strip()
+    }
+    rule_version = (
+        next(iter(config_id_values)) if len(config_id_values) == 1 else None
+    )
+    window_s = _positive_int_or_none(
+        _first_value(config, "twapLookbackSeconds", "twap_lookback_seconds")
+    )
+    asset = _string_or_none(_first_value(config, "asset"))
+    duration = _string_or_none(_first_value(config, "duration"))
+    twap_enabled = _bool_or_none(
+        _first_value(config, "twapEnabled", "twap_enabled")
+    )
+
+    normalized_source = source_url.lower() if source_url is not None else None
+    if (
+        len(source_values) == 1
+        and len(config_id_values) == 1
+        and normalized_source == SUPPORTED_TWAP_SOURCE_URL
+        and rule_version == SUPPORTED_TWAP_RULE_VERSION
+        and window_s == SUPPORTED_TWAP_WINDOW_SECONDS
+        and asset is not None
+        and asset.strip().lower() == "btc"
+        and duration is not None
+        and duration.strip().lower() == "5m"
+        and twap_enabled is True
+    ):
+        return (
+            SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+            window_s,
+            source_url,
+            rule_version,
+        )
+
+    description = " ".join(
+        str(value).lower()
+        for value in (
+            _first_value(market, "description"),
+            _first_value(event, "description"),
+        )
+        if value is not None
+    )
+    if (
+        source_url is not None
+        and "twap" not in source_url.lower()
+        and "time-weighted average" not in description
+    ):
+        reference = SETTLEMENT_REFERENCE_CHAINLINK_SPOT
+        if rule_version is None:
+            rule_version = LEGACY_SPOT_RULE_VERSION
+    else:
+        reference = SETTLEMENT_REFERENCE_UNKNOWN
+    return reference, window_s, source_url, rule_version
 
 
 def extract_up_down_tokens(
@@ -500,6 +632,13 @@ def parse_current_market_from_gamma(
         else:
             raw_gamma = {"market": market}
 
+        (
+            settlement_reference,
+            settlement_window_s,
+            settlement_source_url,
+            settlement_rule_version,
+        ) = parse_market_settlement_rule(event, market)
+
         return CurrentPolymarketMarket(
             window=window,
             slug=slug,
@@ -514,15 +653,7 @@ def parse_current_market_from_gamma(
                     _first_value(event, "question", "title"),
                 )
             ),
-            start_ms=_parse_first_time_ms(
-                market,
-                event,
-                "startDate",
-                "start_date",
-                "startTime",
-                "start_time",
-                "start_ms",
-            ),
+            start_ms=_parse_market_start_ms(market, event),
             end_ms=_parse_first_time_ms(
                 market,
                 event,
@@ -545,6 +676,10 @@ def parse_current_market_from_gamma(
             archived=_bool_or_none(
                 _coalesce(_first_value(market, "archived"), _first_value(event, "archived"))
             ),
+            settlement_reference=settlement_reference,
+            settlement_window_s=settlement_window_s,
+            settlement_source_url=settlement_source_url,
+            settlement_rule_version=settlement_rule_version,
             raw_gamma=raw_gamma,
         )
 
@@ -573,6 +708,17 @@ async def discover_current_polymarket_market(
         except GammaDiscoveryError:
             current_market = None
         else:
+            if (
+                current_market.settlement_reference
+                != SETTLEMENT_REFERENCE_CHAINLINK_TWAP
+                or current_market.settlement_window_s
+                != SUPPORTED_TWAP_WINDOW_SECONDS
+                or current_market.settlement_rule_version
+                != SUPPORTED_TWAP_RULE_VERSION
+            ):
+                raise GammaDiscoveryError(
+                    "market does not use the supported BTC 5m 30-second TWAP rule"
+                )
             await store_current_market(pool, current_market, seen_ms=seen_ms)
             return current_market
 
@@ -586,6 +732,15 @@ async def discover_current_polymarket_market(
         window=window,
         slug=slug,
     )
+    if (
+        current_market.settlement_reference
+        != SETTLEMENT_REFERENCE_CHAINLINK_TWAP
+        or current_market.settlement_window_s != SUPPORTED_TWAP_WINDOW_SECONDS
+        or current_market.settlement_rule_version != SUPPORTED_TWAP_RULE_VERSION
+    ):
+        raise GammaDiscoveryError(
+            "market does not use the supported BTC 5m 30-second TWAP rule"
+        )
     await store_current_market(pool, current_market, seen_ms=seen_ms)
     return current_market
 
@@ -596,6 +751,15 @@ async def store_current_market(
     *,
     seen_ms: int,
 ) -> None:
+    if (
+        current_market.settlement_reference
+        != SETTLEMENT_REFERENCE_CHAINLINK_TWAP
+        or current_market.settlement_window_s != SUPPORTED_TWAP_WINDOW_SECONDS
+        or current_market.settlement_rule_version != SUPPORTED_TWAP_RULE_VERSION
+    ):
+        raise GammaDiscoveryError(
+            "refusing to store a market without the supported 30-second TWAP rule"
+        )
     await upsert_polymarket_btc_5m_market(
         pool,
         window=current_market.window,
@@ -613,6 +777,10 @@ async def store_current_market(
         active=current_market.active,
         closed=current_market.closed,
         archived=current_market.archived,
+        settlement_reference=current_market.settlement_reference,
+        settlement_window_s=current_market.settlement_window_s,
+        settlement_source_url=current_market.settlement_source_url,
+        settlement_rule_version=current_market.settlement_rule_version,
         raw_gamma=current_market.raw_gamma,
         seen_ms=seen_ms,
     )
@@ -744,6 +912,10 @@ def parse_polymarket_resolution(
     up_token_id: str,
     down_token_id: str,
     clob_data: Any = None,
+    expected_settlement_reference: Optional[str] = None,
+    expected_settlement_window_s: Optional[int] = None,
+    expected_settlement_source_url: Optional[str] = None,
+    expected_settlement_rule_version: Optional[str] = None,
 ) -> PolymarketResolution:
     event, market = _find_gamma_resolution_market(
         gamma_data,
@@ -751,6 +923,29 @@ def parse_polymarket_resolution(
         gamma_market_id=gamma_market_id,
         condition_id=condition_id,
     )
+
+    canonical_rule = parse_market_settlement_rule(event, market)
+    supported_rule = (
+        SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+        SUPPORTED_TWAP_WINDOW_SECONDS,
+        SUPPORTED_TWAP_SOURCE_URL,
+        SUPPORTED_TWAP_RULE_VERSION,
+    )
+    if canonical_rule != supported_rule:
+        raise ResolutionParseError(
+            "canonical Gamma market no longer has the supported BTC 5m "
+            "30-second TWAP settlement rule"
+        )
+    expected_rule = (
+        expected_settlement_reference,
+        expected_settlement_window_s,
+        expected_settlement_source_url,
+        expected_settlement_rule_version,
+    )
+    if any(value is not None for value in expected_rule) and expected_rule != canonical_rule:
+        raise ResolutionParseError(
+            "canonical Gamma settlement rule contradicts the discovered rule"
+        )
 
     metadata = _first_value(event, "eventMetadata", "event_metadata")
     if not isinstance(metadata, Mapping):
@@ -913,6 +1108,10 @@ async def fetch_polymarket_resolution(
         up_token_id=str(market["up_token_id"]),
         down_token_id=str(market["down_token_id"]),
         clob_data=clob_data,
+        expected_settlement_reference=market.get("settlement_reference"),
+        expected_settlement_window_s=market.get("settlement_window_s"),
+        expected_settlement_source_url=market.get("settlement_source_url"),
+        expected_settlement_rule_version=market.get("settlement_rule_version"),
     )
 
 

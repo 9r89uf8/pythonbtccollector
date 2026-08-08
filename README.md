@@ -54,19 +54,23 @@ columns, and are serialized as strings by the API.
 - Reconnects with exponential full-jitter backoff capped at 60 seconds and
   proactively reconnects after about 23 hours 50 minutes.
 
-### Polymarket Chainlink BTC/USD
+### Polymarket Chainlink BTC/USD and 30-second TWAP
 
 `python -m price_collector.polymarket_chainlink_collector`
 
 - Connects to Polymarket RTDS at `wss://ws-live-data.polymarket.com`.
-- Subscribes to topic `crypto_prices_chainlink` with filter
-  `{"symbol":"btc/usd"}`.
-- Parses `payload.value` as the price and `payload.timestamp` as source time.
-- Writes Redis key `btc:live:chainlink` before historical storage.
+- Keeps the standard `crypto_prices_chainlink` / `payload.value` feed as spot
+  context and writes it to `btc:live:chainlink` before historical storage.
+- In parallel, subscribes to `crypto_prices_twap_thirty`, requires
+  `payload.window_s = 30`, parses exact `payload.full_accuracy_value` with
+  `Decimal`, and writes `btc:live:chainlink_twap_30s` before PostgreSQL.
+- Persists every accepted TWAP event plus connection sessions and explicit
+  no-replay gaps. The one-second `price_samples` TWAP series is a materialized
+  display layer; settlement research reads the exact event history.
 - Floors the source payload timestamp to its UTC second and upserts that second
   into PostgreSQL.
-- Proactively reconnects an active-but-unproductive RTDS socket when no valid
-  BTC/USD Chainlink event is accepted for 10 seconds by default. Before the
+- Proactively reconnects either active-but-unproductive RTDS socket when no
+  valid expected-topic BTC/USD event is accepted for 10 seconds by default. Before the
   first accepted tick, the empty RTDS bootstrap frame and the narrowly validated
   `crypto_prices` subscription-history dump are received-only startup frames,
   not parse errors. They, control frames, and malformed frames do not reset that
@@ -128,9 +132,12 @@ columns, and are serialized as strings by the API.
 - Preloads the next market before the current five-minute boundary.
 - Reconciles ended markets against Polymarket Gamma and CLOB REST data, with
   durable retries for resolutions that are not official yet.
-- Stores Polymarket's official Chainlink open/close prices, winner or split
-  result, official payouts, winning token ID, and resolution timestamp when
-  available. Probability quotes are never used to infer the winner.
+- Accepts only markets whose own Gamma rule metadata identifies the supported
+  BTC five-minute 30-second TWAP settlement source. Unknown or contradictory
+  rules fail closed and are not collected.
+- Stores Polymarket's exact published Price to Beat and official final price,
+  rule identity, winner or split result, official payouts, winning token ID,
+  and resolution timestamp. Probability quotes never infer the winner.
 - Runs an independent idempotent post-resolution evaluator for the final
   20 seconds, preserving all strict threshold crossings and causal T-20 through
   T-1 cutoff records for both positive and negative examples.
@@ -157,7 +164,10 @@ For example, `[04:05:00.000, 04:10:00.000)` is one market. A sample at exactly
 PostgreSQL is the historical source of record. The main tables are:
 
 - `providers`, `instruments`, and `market_windows`
-- `price_samples` for Binance Spot and Polymarket Chainlink prices
+- `price_samples` for Binance Spot, standard Chainlink context, and the
+  one-second Chainlink TWAP materialization
+- `polymarket_twap_sessions`, `polymarket_twap_events`, and
+  `polymarket_twap_gaps` for durable exact TWAP evidence and coverage gaps
 - `polymarket_btc_5m_markets`, `polymarket_probability_samples`, and
   `polymarket_btc_5m_resolutions` for discovered markets, probability history,
   and official Polymarket resolution metadata
@@ -247,8 +257,11 @@ funding, open interest, and historical open-interest data; there is no REST
 ticker fallback, and book-derived values are not labeled as last price. The API
 shape is unchanged.
 
-The public Chainlink value remains RTDS `payload.value` delivered through
-`btc:live:chainlink`. With both raw flags `false`, neither collector creates a
+The public standard Chainlink context value remains RTDS `payload.value`
+delivered through `btc:live:chainlink`. The settlement-reference TWAP uses
+exact `payload.full_accuracy_value` and `btc:live:chainlink_twap_30s`; unlike
+optional raw capture, its event/session/gap persistence is always durable while
+TWAP is enabled. With both raw flags `false`, neither legacy raw-capture path creates a
 raw queue, raw writer/maintenance task, raw feed-session record, or dedicated
 raw database connection. The futures reader still records its connection and
 pre-parse receive stamp because those are now part of the public last-price
@@ -267,10 +280,11 @@ Automatic future-partition creation, expired-partition removal, the configured
 72-hour retention behavior, and sustained relation-budget enforcement therefore
 remain known production risks and must not be described as validated.
 
-Redis is not a historical store. The three source-price keys are:
+Redis is not a historical store. The four source-price keys are:
 
 - `btc:live:binance_spot`
 - `btc:live:chainlink`
+- `btc:live:chainlink_twap_30s`
 - `btc:live:futures`
 
 Each value has this shape:
@@ -314,19 +328,19 @@ Current routes:
 - `GET /markets/current/live`
 - `GET /markets/current/microstructure/live`
 
-The data and download responses use schema version `2` by default and always
-include `market.chainlink_resolution` and `market.resolution`, independently of
-the optional series flags. These objects contain only official Polymarket
-Gamma/CLOB data. Ended markets can remain `pending` briefly while the collector
-waits for official resolution; the last Up/Down probability is never treated as
-the winner. The active CLOB connection stays open for a short grace period after
-the market boundary to capture an official resolution event, while durable REST
-reconciliation handles delayed results and fills the official Chainlink values.
+The data and download responses use schema version `4` and always include
+`market.settlement` and `market.resolution`, independently of optional series
+flags. `settlement` names the TWAP reference, 30-second window, rule version,
+source URL, exact Price to Beat, official final price, and official-price
+status/source. `series[].prices.chainlink` remains standard Chainlink spot
+context; `series[].prices.twap` is the settlement-reference feed. Ended markets
+can remain `pending` while official Gamma/CLOB data is incomplete, and the last
+Up/Down probability is never treated as the winner.
 
 The two data routes accept `include_microstructure=true`. That opt-in reads at
 most 300 indexed PostgreSQL rows, adds `series[].microstructure` and
-microstructure availability counts, and raises the response schema version to
-`3`. `microstructure_groups` can select any comma-separated subset of
+microstructure availability counts without changing schema version `4`.
+`microstructure_groups` can select any comma-separated subset of
 `books,flow,cross_market,liquidations,quality`; all five are returned by default.
 Missing seconds remain `null`, and older markets without microstructure still
 return normally. These larger JSON responses support gzip compression.
@@ -335,10 +349,10 @@ fills each second from `binance_microstructure_1s_flip_archive` when a permanent
 copy exists. A current-table row wins over an archived copy for the same
 second.
 
-The ordinary current/by-ID downloads remain schema version `2` and do not
+The ordinary current/by-ID downloads remain schema version `4` and do not
 include microstructure. They omit the market start/end millisecond fields and
 per-row `timestamp_ms`, retain the equivalent UTC `*_at` strings, and format
-official Chainlink open/close values to two decimal places. The data routes
+official benchmark/final values to two decimal places. The data routes
 retain their full timing and precision fields.
 
 The two flip-evidence routes combine the versioned evaluation, every crossing,
@@ -349,11 +363,11 @@ returns the 300-slot grid. The `/flips/download` response is identical but has
 an attachment filename. Both use the permanent microstructure archive fallback,
 leave missing values null, and never carry data forward for display.
 
-`GET /markets/current/microstructure/live` reads the three source-price keys and
+`GET /markets/current/microstructure/live` reads the four source-price keys and
 the latest finalized microstructure key with one Redis `MGET`. It returns simple
 string-or-`null` prices and the nested microstructure groups without querying
-PostgreSQL. `GET /markets/current/live` is unchanged and remains the isolated,
-small three-price response.
+PostgreSQL. `GET /markets/current/live` uses the same four-price one-`MGET`
+path and returns standard Chainlink context separately from `twap`.
 
 `GET /markets` is the frontend discovery route. It returns the newest three
 completed markets by default, newest first, with market timestamps and
@@ -448,6 +462,21 @@ connection close as `proactive_reconnect`, applies the existing jittered
 backoff, and resubscribes without restarting the process. The last Redis value
 is left in place and continues aging until a fresh event arrives.
 
+The same service owns an independent durable TWAP runtime. Its production
+defaults are:
+
+```text
+POLYMARKET_TWAP_ENABLED=true
+POLYMARKET_TWAP_PROVIDER_CODE=polymarket_chainlink_twap_rtds
+POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_30S
+POLYMARKET_TWAP_RTD_SYMBOL=btc/usd
+POLYMARKET_TWAP_TOPIC=crypto_prices_twap_thirty
+POLYMARKET_TWAP_WINDOW_SECONDS=30
+POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000
+POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000
+POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
+```
+
 At minimum, replace the database passwords in:
 
 ```text
@@ -506,7 +535,7 @@ It defaults off so applying a schema/code update does not silently begin a new
 high-rate dataset. Enable it only after applying `schema.sql` and adding the
 single production override manually. Once per UTC day, the collector considers
 rows older than the configured retention, but deletes them only when the
-definition-v1 flip evaluation is `retention_safe`. Archive-required rows also
+  definition-v2 TWAP flip evaluation is `retention_safe`. Archive-required rows also
 need an archive row for the exact symbol/second whose `received_ms` is at least
 as new as the live row. Missing, failed, or stale archival therefore fails
 closed. The collector checks the table plus indexes once
@@ -732,6 +761,7 @@ systemctl status redis-server price-collector price-collector-polymarket-chainli
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/prices/latest
 curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
+curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
 ```

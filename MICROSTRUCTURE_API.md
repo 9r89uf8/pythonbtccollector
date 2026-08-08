@@ -95,7 +95,8 @@ const live = await response.json();
 The endpoint performs one Redis `MGET` for:
 
 - Binance Spot price
-- Chainlink price
+- Standard Chainlink spot-context price
+- 30-second Chainlink TWAP settlement-reference price
 - Binance futures last price
 - Latest finalized microstructure row
 
@@ -108,7 +109,7 @@ This example shows the full response shape. Values are illustrative.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1784774594250,
   "market_id": 5949248,
   "sample_second_ms": 1784774593000,
@@ -116,6 +117,7 @@ This example shows the full response shape. Values are illustrative.
   "prices": {
     "binance_spot": "65758.01",
     "chainlink": "65721.23639093849",
+    "twap": "65720.918273645546372819",
     "futures": "65723.70"
   },
   "microstructure": {
@@ -224,7 +226,7 @@ This example shows the full response shape. Values are illustrative.
 | `market_id` | Five-minute market containing the finalized snapshot |
 | `sample_second_ms` | Start of the finalized one-second receipt interval |
 | `served_from` | Always `"redis"` for this endpoint |
-| `prices` | Latest independently cached source prices |
+| `prices` | Latest independently cached Binance Spot, standard Chainlink context, TWAP settlement-reference, and futures prices |
 | `microstructure` | The latest finalized row, or `null` if one is unavailable |
 
 The interval represented by a row is:
@@ -235,6 +237,9 @@ The interval represented by a row is:
 
 The collector normally publishes the row shortly after that interval closes.
 This is a low-latency path to finalized one-second data, not a subsecond feed.
+`prices.chainlink` is standard Chainlink spot context. `prices.twap` is the
+independent 30-second settlement-reference feed; never use one as a fallback
+for the other.
 
 The Redis key can remain present if the collector stops producing rows.
 `collector_healthy` describes the finalized interval and does not change while
@@ -257,7 +262,7 @@ If no microstructure snapshot exists, the endpoint still returns HTTP `200`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server_time_ms": 1784774594250,
   "market_id": 5949248,
   "sample_second_ms": null,
@@ -265,6 +270,7 @@ If no microstructure snapshot exists, the endpoint still returns HTTP `200`:
   "prices": {
     "binance_spot": "65758.01",
     "chainlink": "65721.23639093849",
+    "twap": "65720.918273645546372819",
     "futures": "65723.70"
   },
   "microstructure": null
@@ -357,7 +363,7 @@ one-second rows.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "server_time_ms": 1784774594250,
   "market": {
     "market_id": 5949248,
@@ -376,7 +382,8 @@ one-second rows.
       "timestamp_ms": 1784774400000,
       "prices": {
         "binance": "65740.10",
-        "chainlink": "65738.82"
+        "chainlink": "65738.82",
+        "twap": "65738.734512398765432109"
       },
       "microstructure": {
         "collector_healthy": true,
@@ -440,7 +447,8 @@ one-second rows.
       "timestamp_ms": 1784774401000,
       "prices": {
         "binance": "65740.20",
-        "chainlink": "65738.82"
+        "chainlink": "65738.82",
+        "twap": "65738.734512398765432109"
       },
       "microstructure": null
     }
