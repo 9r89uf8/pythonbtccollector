@@ -12,6 +12,8 @@ from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
 from price_collector.db import (
     create_read_pool,
+    decimal_fixed_or_none,
+    decimal_string_or_none,
     fetch_market_download_payload,
     fetch_latest_market_id,
     fetch_latest_price,
@@ -19,6 +21,7 @@ from price_collector.db import (
     fetch_market_summaries_for_btc_sources,
     fetch_market_summary,
     fetch_recent_market_windows,
+    fetch_twap_shadow_market_history,
     health_check,
 )
 from price_collector.live_cache import (
@@ -75,6 +78,85 @@ def utc_datetime_to_z(value: datetime) -> str:
 
 def decimal_to_string(value: Decimal) -> str:
     return format(value, "f")
+
+
+def _twap_shadow_error_bps(
+    predicted: Optional[Decimal],
+    actual: Optional[Decimal],
+) -> Optional[Decimal]:
+    if predicted is None or actual is None or actual <= 0:
+        return None
+    return ((predicted - actual) / actual * Decimal("10000")).quantize(
+        Decimal("0.00000001"),
+        rounding=ROUND_HALF_UP,
+    )
+
+
+def serialize_twap_shadow_history(payload: Mapping[str, Any]) -> dict[str, Any]:
+    horizons = (1, 3, 5, 10)
+    errors: dict[int, list[Decimal]] = {horizon: [] for horizon in horizons}
+    samples = []
+    for row in payload["rows"]:
+        actual = row.get("actual_price")
+        prediction_items: dict[str, Any] = {}
+        for horizon in horizons:
+            prefix = f"h{horizon}"
+            predicted = row.get(f"{prefix}_price")
+            error_bps = _twap_shadow_error_bps(predicted, actual)
+            if error_bps is not None:
+                errors[horizon].append(error_bps)
+            prediction_items[prefix] = {
+                "horizon_seconds": horizon,
+                "value": None if predicted is None else decimal_to_string(predicted),
+                "generated_ms": row.get(f"{prefix}_generated_ms"),
+                "known_fraction": decimal_string_or_none(
+                    row.get(f"{prefix}_known_fraction")
+                ),
+                "source_count": row.get(f"{prefix}_source_count"),
+                "estimated_error_bps": decimal_string_or_none(
+                    row.get(f"{prefix}_estimated_error_bps")
+                ),
+                "realized_error_bps": decimal_string_or_none(error_bps),
+            }
+        samples.append(
+            {
+                "target_second_ms": int(row["target_second_ms"]),
+                "actual": {
+                    "value": None if actual is None else decimal_to_string(actual),
+                    "provider_event_ms": row.get("actual_provider_event_ms"),
+                    "received_ms": row.get("actual_received_ms"),
+                },
+                "predictions": prediction_items,
+            }
+        )
+
+    summaries: dict[str, Any] = {}
+    for horizon in horizons:
+        values = errors[horizon]
+        count = len(values)
+        mean = None if not values else sum(values, Decimal("0")) / Decimal(count)
+        mae = (
+            None
+            if not values
+            else sum((abs(value) for value in values), Decimal("0"))
+            / Decimal(count)
+        )
+        summaries[f"h{horizon}"] = {
+            "horizon_seconds": horizon,
+            "paired_count": count,
+            "mean_error_bps": decimal_fixed_or_none(mean, "0.00000001"),
+            "mae_bps": decimal_fixed_or_none(mae, "0.00000001"),
+        }
+
+    return {
+        "market_id": int(payload["market_id"]),
+        "market_start_ms": int(payload["market_start_ms"]),
+        "market_end_ms": int(payload["market_end_ms"]),
+        "model_version": int(payload["model_version"]),
+        "error_definition": "10000 * (prediction - actual) / actual",
+        "summary": summaries,
+        "samples": samples,
+    }
 
 
 def _format_download_decimal_string(value: Any, places: str) -> Any:
@@ -1787,6 +1869,49 @@ async def markets_current_live(
         raise HTTPException(status_code=503, detail="live cache unavailable") from exc
     except LiveCachePayloadError as exc:
         raise HTTPException(status_code=503, detail="live cache payload invalid") from exc
+
+
+async def twap_shadow_market_response(
+    request: Request,
+    *,
+    market_id: int,
+    model_version: int,
+) -> dict[str, Any]:
+    payload = await fetch_twap_shadow_market_history(
+        get_pool(request),
+        market_id=market_id,
+        model_version=model_version,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail="market not found")
+    return serialize_twap_shadow_history(payload)
+
+
+@app.get("/markets/current/twap-shadow")
+async def markets_current_twap_shadow(
+    request: Request,
+    model_version: int = Query(1, ge=1, le=32_767),
+) -> dict[str, Any]:
+    now_ms = current_utc_epoch_ms()
+    window = market_for_sample_second((now_ms // 1_000) * 1_000)
+    return await twap_shadow_market_response(
+        request,
+        market_id=window.market_id,
+        model_version=model_version,
+    )
+
+
+@app.get("/markets/{market_id}/twap-shadow")
+async def markets_twap_shadow(
+    request: Request,
+    market_id: int,
+    model_version: int = Query(1, ge=1, le=32_767),
+) -> dict[str, Any]:
+    return await twap_shadow_market_response(
+        request,
+        market_id=market_id,
+        model_version=model_version,
+    )
 
 
 @app.get("/markets/current/microstructure/live")

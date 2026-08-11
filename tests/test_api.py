@@ -13,6 +13,7 @@ from price_collector.live_cache import (
     FUTURES_LIVE_KEY,
     MICROSTRUCTURE_LIVE_KEY,
     TWAP_LIVE_KEY,
+    TWAP_SHADOW_LIVE_KEY,
     LiveCachePayloadError,
     LivePrice,
 )
@@ -36,6 +37,7 @@ class FakeLiveCache:
         self.closed = False
         self.prices = {}
         self.microstructure_snapshot = None
+        self.twap_shadow_snapshot = None
         self.read_error = None
         self.requested_keys = []
         self.requested_combined_keys = []
@@ -62,6 +64,21 @@ class FakeLiveCache:
         return (
             {key: self.prices.get(key) for key in price_key_list},
             self.microstructure_snapshot,
+        )
+
+    async def get_prices_with_twap_shadow(
+        self,
+        price_keys,
+        *,
+        shadow_key,
+    ):
+        if self.read_error is not None:
+            raise self.read_error
+        price_key_list = list(price_keys)
+        self.requested_combined_keys.append([*price_key_list, shadow_key])
+        return (
+            {key: self.prices.get(key) for key in price_key_list},
+            self.twap_shadow_snapshot,
         )
 
     async def close(self) -> None:
@@ -810,6 +827,49 @@ def microstructure_row(**updates):
     }
     row.update(updates)
     return row
+
+
+def twap_shadow_snapshot():
+    origin_second_ms = 1_783_459_250_000
+    return {
+        "schema_version": 1,
+        "model_version": 1,
+        "origin_second_ms": origin_second_ms,
+        "generated_ms": origin_second_ms + 58,
+        "basis_window_seconds": 1_800,
+        "status": "ready",
+        "quality_flags": ["futures_proxy_polled_latest_wins"],
+        "source_bias_bps": {
+            "futures": "3.81000000",
+            "chainlink_spot": "0.12000000",
+            "binance_spot": "3.55000000",
+        },
+        "basis_sample_counts": {
+            "futures": 1_700,
+            "chainlink_spot": 1_701,
+            "binance_spot": 1_699,
+        },
+        "recent_p90_abs_error_bps": "0.84000000",
+        "predictions": {
+            f"h{horizon}": {
+                "horizon_seconds": horizon,
+                "target_second_ms": origin_second_ms + horizon * 1_000,
+                "target_market_id": (
+                    origin_second_ms + horizon * 1_000
+                )
+                // 300_000,
+                "expected_actual_received_ms": (
+                    origin_second_ms + horizon * 1_000 + 1_800
+                ),
+                "value": "62066.123456789012345678",
+                "known_fraction": "0.90000000",
+                "source_count": 3,
+                "source_spread_bps": "0.25000000",
+                "estimated_error_bps": "0.75000000",
+            }
+            for horizon in (1, 3, 5, 10)
+        },
+    }
 
 
 def flip_market_row(**updates):
@@ -2381,6 +2441,7 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
             received_ms=1_783_459_250_050,
         ),
     }
+    client.fake_live_cache.twap_shadow_snapshot = twap_shadow_snapshot()
 
     response = client.get("/markets/current/live?max_chainlink_carry_forward_ms=7000")
 
@@ -2406,13 +2467,19 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
         "market_end_ms",
         "prices",
         "futures",
+        "twap_shadow",
     }
-    assert client.fake_live_cache.requested_keys == [
+    assert body["twap_shadow"]["generated_age_ms"] == 65
+    assert body["twap_shadow"]["predictions"]["h1"]["value"] == (
+        "62066.123456789012345678"
+    )
+    assert client.fake_live_cache.requested_combined_keys == [
         [
             BINANCE_SPOT_LIVE_KEY,
             CHAINLINK_LIVE_KEY,
             TWAP_LIVE_KEY,
             FUTURES_LIVE_KEY,
+            TWAP_SHADOW_LIVE_KEY,
         ]
     ]
     assert client.fake_pool.acquire_calls == 0
@@ -2437,6 +2504,89 @@ def test_markets_current_live_preserves_cache_error_status(
     assert response.status_code == 503
     assert response.json() == {"detail": detail}
     assert client.fake_pool.acquire_calls == 0
+
+
+def test_twap_shadow_history_returns_predictions_actuals_and_realized_errors(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch(pool, *, market_id, model_version):
+        assert pool is client.fake_pool
+        assert market_id == 5_944_864
+        assert model_version == 1
+        return {
+            "market_id": market_id,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+            "model_version": model_version,
+            "rows": [
+                {
+                    "target_second_ms": 1_783_459_250_000,
+                    "actual_price": Decimal("100"),
+                    "actual_provider_event_ms": 1_783_459_250_000,
+                    "actual_received_ms": 1_783_459_251_800,
+                    "h1_price": Decimal("100.01"),
+                    "h1_generated_ms": 1_783_459_249_050,
+                    "h1_known_fraction": Decimal("1"),
+                    "h1_source_count": 3,
+                    "h1_estimated_error_bps": Decimal("0.75"),
+                    "h3_price": None,
+                    "h3_generated_ms": None,
+                    "h3_known_fraction": None,
+                    "h3_source_count": None,
+                    "h3_estimated_error_bps": None,
+                    "h5_price": None,
+                    "h5_generated_ms": None,
+                    "h5_known_fraction": None,
+                    "h5_source_count": None,
+                    "h5_estimated_error_bps": None,
+                    "h10_price": None,
+                    "h10_generated_ms": None,
+                    "h10_known_fraction": None,
+                    "h10_source_count": None,
+                    "h10_estimated_error_bps": None,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(api, "fetch_twap_shadow_market_history", fake_fetch)
+
+    response = client.get("/markets/5944864/twap-shadow?model_version=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error_definition"] == (
+        "10000 * (prediction - actual) / actual"
+    )
+    assert body["samples"][0]["actual"]["value"] == "100"
+    assert body["samples"][0]["predictions"]["h1"] == {
+        "horizon_seconds": 1,
+        "value": "100.01",
+        "generated_ms": 1_783_459_249_050,
+        "known_fraction": "1",
+        "source_count": 3,
+        "estimated_error_bps": "0.75",
+        "realized_error_bps": "1.00000000",
+    }
+    assert body["summary"]["h1"] == {
+        "horizon_seconds": 1,
+        "paired_count": 1,
+        "mean_error_bps": "1.00000000",
+        "mae_bps": "1.00000000",
+    }
+    assert body["summary"]["h3"]["paired_count"] == 0
+
+
+def test_twap_shadow_history_returns_404_for_unknown_market(client, monkeypatch):
+    async def fake_fetch(pool, *, market_id, model_version):
+        return None
+
+    monkeypatch.setattr(api, "fetch_twap_shadow_market_history", fake_fetch)
+
+    response = client.get("/markets/1/twap-shadow")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "market not found"}
 
 
 def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_market(

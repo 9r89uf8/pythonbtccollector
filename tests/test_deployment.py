@@ -78,6 +78,11 @@ def test_collector_env_example_contains_writer_credentials_only():
     assert "POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000" in lines
     assert "POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000" in lines
     assert "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5" in lines
+    assert "TWAP_SHADOW_ENABLED=false" in lines
+    assert "TWAP_SHADOW_POLL_MS=250" in lines
+    assert "TWAP_SHADOW_RETENTION_DAYS=30" in lines
+    assert "TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES=10000" in lines
+    assert "TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5" in lines
     assert "RAW_FUTURES_BUCKET_MS=100" in lines
     assert "RAW_CAPTURE_QUEUE_MAX_EVENTS=5000" in lines
     assert "RAW_CAPTURE_BATCH_MAX_ROWS=500" in lines

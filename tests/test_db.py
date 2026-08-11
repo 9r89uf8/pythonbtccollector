@@ -770,6 +770,112 @@ def test_schema_persists_exact_twap_events_sessions_gaps_and_distinct_seed():
     assert "'crypto_prices_twap_thirty:btc/usd'" in schema
 
 
+def test_twap_shadow_schema_is_decimal_target_keyed_and_role_separated():
+    schema = (ROOT / "schema.sql").read_text()
+    table = _schema_create_table_statement(
+        schema,
+        "chainlink_twap_shadow_predictions",
+    )
+
+    assert "PRIMARY KEY (target_second_ms, model_version)" in table
+    assert "target_second_ms % 1000 = 0" in table
+    assert "target_second_ms >= market_id * 300000" in table
+    assert "target_second_ms < (market_id + 1) * 300000" in table
+    for horizon in (1, 3, 5, 10):
+        assert f"h{horizon}_price NUMERIC(38, 18)" in table
+        assert f"h{horizon}_known_fraction NUMERIC(10, 8)" in table
+        assert f"h{horizon}_estimated_error_bps NUMERIC(20, 8)" in table
+        assert f"h{horizon}_price IS NOT NULL" in table
+        assert f"h{horizon}_generated_ms IS NOT NULL" in table
+        assert f"h{horizon}_known_fraction IS NOT NULL" in table
+        assert f"h{horizon}_source_count IS NOT NULL" in table
+    assert " DOUBLE" not in table
+    assert " REAL" not in table
+    assert "REVOKE ALL ON chainlink_twap_shadow_predictions FROM PUBLIC" in schema
+    assert (
+        "ON chainlink_twap_shadow_predictions TO price_writer" in schema
+    )
+    assert "GRANT SELECT ON chainlink_twap_shadow_predictions TO price_reader" in schema
+
+
+def test_persist_twap_shadow_batch_is_decimal_and_first_forecast_wins():
+    calls = []
+
+    class Connection:
+        def transaction(self):
+            return _FakeAsyncContext(self)
+
+        async def execute(self, query, *args):
+            calls.append((" ".join(query.split()), args))
+            return "INSERT 0 1"
+
+    class Pool:
+        def __init__(self):
+            self.connection = Connection()
+
+        def acquire(self):
+            return _FakeAsyncContext(self.connection)
+
+    target_ms = 1_783_459_251_000
+    batch = SimpleNamespace(
+        model_version=1,
+        generated_ms=target_ms - 950,
+        forecasts=(
+            SimpleNamespace(
+                horizon_seconds=1,
+                target_second_ms=target_ms,
+                value=Decimal("62066.123456789012345678"),
+                known_fraction=Decimal("1"),
+                source_count=3,
+                estimated_error_bps=Decimal("0.75"),
+            ),
+        ),
+    )
+
+    result = asyncio.run(
+        db.persist_twap_shadow_prediction_batch(Pool(), batch)
+    )
+
+    assert result == 1
+    assert len(calls) == 2
+    query, args = calls[1]
+    assert "INSERT INTO chainlink_twap_shadow_predictions" in query
+    assert "h1_price = EXCLUDED.h1_price" in query
+    assert "WHERE chainlink_twap_shadow_predictions.h1_price IS NULL" in query
+    assert args[0] == target_ms
+    assert args[1] == 1
+    assert args[3] == Decimal("62066.123456789012345678")
+    assert args[5] == Decimal("1")
+    assert args[7] == Decimal("0.75")
+
+
+def test_twap_shadow_preload_and_history_use_causal_exact_twap_seconds():
+    preload_source = inspect.getsource(db.fetch_twap_shadow_preload)
+    history_source = inspect.getsource(db.fetch_twap_shadow_market_history)
+
+    assert "snapshot.futures_last_price_time_ms AS source_ms" in preload_source
+    assert "sample.provider_event_ms AS source_ms" in preload_source
+    assert "snapshot.sample_second_ms >= $1::BIGINT - 1000" in preload_source
+    assert preload_source.count("sample.sample_second_ms >= $1::BIGINT - 1000") == 2
+    assert "sample.received_ms <= $2::BIGINT" in preload_source
+    assert "event.sample_second_ms AS provider_event_ms" in preload_source
+    assert "event.received_wall_ns <= $2::BIGINT * 1000000" in preload_source
+    assert "event.received_wall_ns ASC" in preload_source
+    assert "generate_series" in history_source
+    assert "FROM polymarket_twap_events event" in history_source
+    assert "event.topic = 'crypto_prices_twap_thirty'" in history_source
+    assert "DISTINCT ON (event.sample_second_ms)" in history_source
+    assert "actual.sample_second_ms = target.target_second_ms" in history_source
+
+
+def test_twap_shadow_retention_is_bounded_and_target_time_ordered():
+    source = inspect.getsource(db.delete_expired_twap_shadow_predictions)
+
+    assert "WHERE target_second_ms < $1::BIGINT" in source
+    assert "ORDER BY target_second_ms ASC, model_version ASC" in source
+    assert "LIMIT $2::INTEGER" in source
+
+
 def test_market_settlement_constraints_are_added_on_in_place_schema_upgrade():
     schema = (ROOT / "schema.sql").read_text()
 

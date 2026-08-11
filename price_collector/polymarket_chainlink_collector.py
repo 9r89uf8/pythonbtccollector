@@ -32,6 +32,11 @@ from price_collector.live_cache import (
 )
 from price_collector.market import MarketWindow, market_for_sample_second
 from price_collector.polymarket_twap import run_polymarket_twap_noncritical
+from price_collector.twap_shadow_runtime import (
+    TwapShadowActualSink,
+    create_twap_shadow_actual_sink,
+    run_twap_shadow_noncritical,
+)
 from price_collector.raw_capture import (
     ChainlinkPriceEvent,
     FeedSession,
@@ -1575,6 +1580,16 @@ async def run_collector(settings: Settings) -> None:
                 False,
             ),
             "twap_topic": getattr(settings, "POLYMARKET_TWAP_TOPIC", None),
+            "twap_shadow_enabled": getattr(
+                settings,
+                "TWAP_SHADOW_ENABLED",
+                False,
+            ),
+            "twap_shadow_poll_ms": getattr(
+                settings,
+                "TWAP_SHADOW_POLL_MS",
+                None,
+            ),
         },
     )
 
@@ -1588,6 +1603,8 @@ async def run_collector(settings: Settings) -> None:
     history_task: Optional["asyncio.Task[Any]"] = None
     telemetry_task: Optional["asyncio.Task[Any]"] = None
     twap_task: Optional["asyncio.Task[Any]"] = None
+    shadow_task: Optional["asyncio.Task[Any]"] = None
+    shadow_actual_sink: Optional[TwapShadowActualSink] = None
     remove_sigterm_handler = _install_sigterm_cancellation()
     try:
         live_cache = create_live_cache(settings)
@@ -1642,12 +1659,25 @@ async def run_collector(settings: Settings) -> None:
                 raw_capture=raw_capture,
             )
         )
+        if getattr(settings, "TWAP_SHADOW_ENABLED", False):
+            shadow_actual_sink = create_twap_shadow_actual_sink(settings)
+            shadow_task = asyncio.create_task(
+                run_twap_shadow_noncritical(
+                    settings,
+                    pool,
+                    live_cache=live_cache,
+                    actual_sink=shadow_actual_sink,
+                )
+            )
         if getattr(settings, "POLYMARKET_TWAP_ENABLED", False):
+            twap_kwargs = {"live_cache": live_cache}
+            if shadow_actual_sink is not None:
+                twap_kwargs["event_observer"] = shadow_actual_sink.offer_event
             twap_task = asyncio.create_task(
                 run_polymarket_twap_noncritical(
                     settings,
                     pool,
-                    live_cache=live_cache,
+                    **twap_kwargs,
                 )
             )
         if raw_capture is not None:
@@ -1673,7 +1703,7 @@ async def run_collector(settings: Settings) -> None:
         if remove_sigterm_handler is not None:
             remove_sigterm_handler()
 
-        reader_stopped, twap_stopped = await asyncio.gather(
+        reader_stopped, twap_stopped, shadow_stopped = await asyncio.gather(
             _cancel_and_wait(
                 reader_task,
                 timeout_seconds=CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS,
@@ -1684,6 +1714,17 @@ async def run_collector(settings: Settings) -> None:
                     getattr(
                         settings,
                         "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
+                        5.0,
+                    )
+                    + 2.0
+                ),
+            ),
+            _cancel_and_wait(
+                shadow_task,
+                timeout_seconds=(
+                    getattr(
+                        settings,
+                        "TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
                         5.0,
                     )
                     + 2.0
@@ -1705,6 +1746,13 @@ async def run_collector(settings: Settings) -> None:
                 "polymarket_twap_shutdown_incomplete",
                 extra={
                     "event": "polymarket_twap_shutdown_incomplete",
+                },
+            )
+        if not shadow_stopped:
+            LOGGER.error(
+                "twap_shadow_shutdown_incomplete",
+                extra={
+                    "event": "twap_shadow_shutdown_incomplete",
                 },
             )
         delivery_state.close()

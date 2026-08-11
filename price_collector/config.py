@@ -47,6 +47,16 @@ class Settings(BaseSettings):
         le=10.0,
     )
 
+    TWAP_SHADOW_ENABLED: bool = False
+    TWAP_SHADOW_POLL_MS: int = Field(default=250, ge=100, le=1_000)
+    TWAP_SHADOW_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
+    TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES: int = Field(default=10_000, gt=0)
+    TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS: float = Field(
+        default=5.0,
+        gt=0,
+        le=10.0,
+    )
+
     POLYMARKET_GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_BASE_URL: str = "https://clob.polymarket.com"
     POLYMARKET_CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -142,6 +152,15 @@ class Settings(BaseSettings):
                         f"{field_name} must be {canonical_value!r} when "
                         "POLYMARKET_TWAP_ENABLED=true"
                     )
+        if self.TWAP_SHADOW_ENABLED and not self.POLYMARKET_TWAP_ENABLED:
+            raise ValueError(
+                "POLYMARKET_TWAP_ENABLED must be true when "
+                "TWAP_SHADOW_ENABLED=true"
+            )
+        if self.TWAP_SHADOW_POLL_MS != 250:
+            raise ValueError(
+                "TWAP_SHADOW_POLL_MS must remain 250 for model version 1"
+            )
         if self.RAW_CAPTURE_BATCH_MAX_ROWS > self.RAW_CAPTURE_QUEUE_MAX_EVENTS:
             raise ValueError(
                 "RAW_CAPTURE_BATCH_MAX_ROWS must be less than or equal to "

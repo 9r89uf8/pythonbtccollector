@@ -1518,7 +1518,12 @@ def test_raw_disabled_reader_avoids_uuid_and_monotonic_capture_work(monkeypatch)
     asyncio.run(scenario())
 
 
-def chainlink_run_settings(*, raw_enabled, twap_enabled=False):
+def chainlink_run_settings(
+    *,
+    raw_enabled,
+    twap_enabled=False,
+    shadow_enabled=False,
+):
     return SimpleNamespace(
         LOG_LEVEL="INFO",
         APP_ENV="test",
@@ -1531,6 +1536,11 @@ def chainlink_run_settings(*, raw_enabled, twap_enabled=False):
         POLYMARKET_CHAINLINK_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10_000,
         POLYMARKET_TWAP_ENABLED=twap_enabled,
         POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=0.1,
+        TWAP_SHADOW_ENABLED=shadow_enabled,
+        TWAP_SHADOW_POLL_MS=250,
+        TWAP_SHADOW_RETENTION_DAYS=30,
+        TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES=100,
+        TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=0.1,
         RAW_CHAINLINK_EVENTS_ENABLED=raw_enabled,
         RAW_FUTURES_TRACE_ENABLED=True,
         RAW_CAPTURE_RETENTION_HOURS=72,
@@ -1622,6 +1632,123 @@ def test_twap_runtime_reuses_live_cache_and_cannot_stop_spot_collector(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert events == ["live_close", "pool_close"]
+
+    asyncio.run(scenario())
+
+
+def test_shadow_runtime_reuses_resources_and_observes_exact_twap_after_delivery(
+    monkeypatch,
+):
+    async def scenario():
+        spot_started = asyncio.Event()
+        twap_started = asyncio.Event()
+        shadow_started = asyncio.Event()
+
+        class FakePool:
+            async def close(self):
+                return None
+
+        class FakeLiveCache:
+            async def close(self):
+                return None
+
+        class FakeSink:
+            def offer_event(self, event):
+                return None
+
+        pool = FakePool()
+        live_cache = FakeLiveCache()
+        sink = FakeSink()
+
+        async def fake_reader(settings, delivery_state, *, raw_capture=None):
+            spot_started.set()
+            await asyncio.Event().wait()
+
+        async def fake_twap(
+            settings,
+            received_pool,
+            *,
+            live_cache=None,
+            event_observer=None,
+        ):
+            assert received_pool is pool
+            assert live_cache is live_cache_instance
+            assert event_observer.__self__ is sink
+            twap_started.set()
+            await asyncio.Event().wait()
+
+        async def fake_shadow(
+            settings,
+            received_pool,
+            *,
+            live_cache=None,
+            actual_sink=None,
+        ):
+            assert received_pool is pool
+            assert live_cache is live_cache_instance
+            assert actual_sink is sink
+            shadow_started.set()
+            await asyncio.Event().wait()
+
+        async def fake_create_pool(_database_url):
+            return pool
+
+        async def fake_get_instrument_id(_pool, *, provider_code, symbol):
+            return 42
+
+        live_cache_instance = live_cache
+        monkeypatch.setattr(collector, "setup_logging", lambda _level: None)
+        monkeypatch.setattr(
+            collector,
+            "require_collector_database_url",
+            lambda _settings: "postgresql://writer@localhost/price_collector",
+        )
+        monkeypatch.setattr(collector, "create_pool", fake_create_pool)
+        monkeypatch.setattr(collector, "get_instrument_id", fake_get_instrument_id)
+        monkeypatch.setattr(
+            collector,
+            "create_live_cache",
+            lambda _settings: live_cache,
+        )
+        monkeypatch.setattr(
+            collector,
+            "create_twap_shadow_actual_sink",
+            lambda _settings: sink,
+        )
+        monkeypatch.setattr(
+            collector,
+            "polymarket_chainlink_reader_loop",
+            fake_reader,
+        )
+        monkeypatch.setattr(
+            collector,
+            "run_polymarket_twap_noncritical",
+            fake_twap,
+        )
+        monkeypatch.setattr(
+            collector,
+            "run_twap_shadow_noncritical",
+            fake_shadow,
+        )
+        monkeypatch.setattr(collector, "_install_sigterm_cancellation", lambda: None)
+
+        task = asyncio.create_task(
+            collector.run_collector(
+                chainlink_run_settings(
+                    raw_enabled=False,
+                    twap_enabled=True,
+                    shadow_enabled=True,
+                )
+            )
+        )
+        await asyncio.wait_for(spot_started.wait(), timeout=1)
+        await asyncio.wait_for(twap_started.wait(), timeout=1)
+        await asyncio.wait_for(shadow_started.wait(), timeout=1)
+        assert not task.done()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     asyncio.run(scenario())
 

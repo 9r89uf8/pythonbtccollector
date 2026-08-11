@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Optional
@@ -14,11 +16,20 @@ from price_collector.binance_microstructure import (
 from price_collector.market import MarketWindow
 
 
+LOGGER = logging.getLogger("price_collector.live_cache")
+_SHADOW_DECODE_WARNING_INTERVAL_NS = 60_000_000_000
+_last_shadow_decode_warning_ns: Optional[int] = None
+
+
 BINANCE_SPOT_LIVE_KEY = "btc:live:binance_spot"
 CHAINLINK_LIVE_KEY = "btc:live:chainlink"
 TWAP_LIVE_KEY = "btc:live:chainlink_twap_30s"
+TWAP_SHADOW_LIVE_KEY = "btc:live:chainlink_twap_shadow"
 FUTURES_LIVE_KEY = "btc:live:futures"
 MICROSTRUCTURE_LIVE_KEY = "btc:live:microstructure"
+
+TWAP_SHADOW_HORIZONS = {"h1": 1, "h3": 3, "h5": 5, "h10": 10}
+TWAP_SHADOW_SOURCES = ("futures", "chainlink_spot", "binance_spot")
 
 LIVE_CACHE_WRITE_ERRORS = (RedisError, OSError, TimeoutError)
 LIVE_CACHE_READ_ERRORS = (RedisError, OSError, TimeoutError)
@@ -53,6 +64,12 @@ def _required_int(value: Any, field_name: str) -> int:
     if parsed is None:
         raise LiveCachePayloadError(f"{field_name} is required")
     return parsed
+
+
+def _strict_json_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LiveCachePayloadError(f"{field_name} must be a JSON integer")
+    return value
 
 
 def _redis_payload_text(raw: Any, field_name: str) -> Optional[str]:
@@ -133,6 +150,247 @@ def decode_live_price(raw: Any) -> Optional[LivePrice]:
         ),
         received_ms=_required_int(payload.get("received_ms"), "received_ms"),
     )
+
+
+def _decimal_string(
+    value: Any,
+    field_name: str,
+    *,
+    optional: bool = False,
+    minimum: Optional[Decimal] = None,
+    maximum: Optional[Decimal] = None,
+) -> Optional[str]:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise LiveCachePayloadError(f"{field_name} must be a decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise LiveCachePayloadError(
+            f"{field_name} must be a decimal string"
+        ) from exc
+    if not parsed.is_finite():
+        raise LiveCachePayloadError(f"{field_name} must be a finite decimal string")
+    if minimum is not None and parsed < minimum:
+        raise LiveCachePayloadError(f"{field_name} is below its minimum")
+    if maximum is not None and parsed > maximum:
+        raise LiveCachePayloadError(f"{field_name} is above its maximum")
+    return value
+
+
+def validate_twap_shadow_snapshot(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise LiveCachePayloadError("TWAP shadow payload must be a JSON object")
+    required_fields = {
+        "schema_version",
+        "model_version",
+        "origin_second_ms",
+        "generated_ms",
+        "basis_window_seconds",
+        "status",
+        "quality_flags",
+        "source_bias_bps",
+        "basis_sample_counts",
+        "recent_p90_abs_error_bps",
+        "predictions",
+    }
+    if set(payload) != required_fields:
+        raise LiveCachePayloadError("TWAP shadow payload fields are invalid")
+
+    schema_version = _strict_json_int(
+        payload.get("schema_version"), "schema_version"
+    )
+    model_version = _strict_json_int(
+        payload.get("model_version"), "model_version"
+    )
+    origin_second_ms = _strict_json_int(
+        payload.get("origin_second_ms"), "origin_second_ms"
+    )
+    generated_ms = _strict_json_int(
+        payload.get("generated_ms"), "generated_ms"
+    )
+    basis_window_seconds = _strict_json_int(
+        payload.get("basis_window_seconds"), "basis_window_seconds"
+    )
+    if schema_version != 1 or model_version <= 0:
+        raise LiveCachePayloadError("TWAP shadow version is invalid")
+    if origin_second_ms < 0 or origin_second_ms % 1_000:
+        raise LiveCachePayloadError("origin_second_ms must be a UTC second")
+    if not origin_second_ms <= generated_ms < origin_second_ms + 1_000:
+        raise LiveCachePayloadError("generated_ms is outside its origin second")
+    if basis_window_seconds <= 0:
+        raise LiveCachePayloadError("basis_window_seconds must be positive")
+
+    status = payload.get("status")
+    if status not in {"ready", "degraded", "warming_up", "unavailable"}:
+        raise LiveCachePayloadError("TWAP shadow status is invalid")
+    quality_flags = payload.get("quality_flags")
+    if (
+        not isinstance(quality_flags, list)
+        or any(not isinstance(flag, str) or not flag for flag in quality_flags)
+        or quality_flags != sorted(set(quality_flags))
+    ):
+        raise LiveCachePayloadError("TWAP shadow quality_flags are invalid")
+
+    source_bias_raw = payload.get("source_bias_bps")
+    source_counts_raw = payload.get("basis_sample_counts")
+    if not isinstance(source_bias_raw, Mapping) or set(source_bias_raw) != set(
+        TWAP_SHADOW_SOURCES
+    ):
+        raise LiveCachePayloadError("TWAP shadow source_bias_bps is invalid")
+    if not isinstance(source_counts_raw, Mapping) or set(source_counts_raw) != set(
+        TWAP_SHADOW_SOURCES
+    ):
+        raise LiveCachePayloadError("TWAP shadow basis_sample_counts is invalid")
+    source_bias_bps = {
+        source: _decimal_string(
+            source_bias_raw[source],
+            f"source_bias_bps.{source}",
+            optional=True,
+        )
+        for source in TWAP_SHADOW_SOURCES
+    }
+    basis_sample_counts = {
+        source: _strict_json_int(
+            source_counts_raw[source],
+            f"basis_sample_counts.{source}",
+        )
+        for source in TWAP_SHADOW_SOURCES
+    }
+    if any(value < 0 for value in basis_sample_counts.values()):
+        raise LiveCachePayloadError("TWAP shadow basis sample counts must be nonnegative")
+    recent_error = _decimal_string(
+        payload.get("recent_p90_abs_error_bps"),
+        "recent_p90_abs_error_bps",
+        optional=True,
+        minimum=Decimal("0"),
+    )
+
+    predictions_raw = payload.get("predictions")
+    if not isinstance(predictions_raw, Mapping) or set(predictions_raw) != set(
+        TWAP_SHADOW_HORIZONS
+    ):
+        raise LiveCachePayloadError("TWAP shadow predictions are invalid")
+    predictions: dict[str, Any] = {}
+    prediction_fields = {
+        "horizon_seconds",
+        "target_second_ms",
+        "target_market_id",
+        "expected_actual_received_ms",
+        "value",
+        "known_fraction",
+        "source_count",
+        "source_spread_bps",
+        "estimated_error_bps",
+    }
+    for key, horizon_seconds in TWAP_SHADOW_HORIZONS.items():
+        item = predictions_raw[key]
+        if not isinstance(item, Mapping) or set(item) != prediction_fields:
+            raise LiveCachePayloadError(f"TWAP shadow {key} fields are invalid")
+        parsed_horizon = _strict_json_int(
+            item.get("horizon_seconds"), f"{key}.horizon_seconds"
+        )
+        target_second_ms = _strict_json_int(
+            item.get("target_second_ms"), f"{key}.target_second_ms"
+        )
+        target_market_id = _strict_json_int(
+            item.get("target_market_id"), f"{key}.target_market_id"
+        )
+        expected_actual_received_ms = _strict_json_int(
+            item.get("expected_actual_received_ms"),
+            f"{key}.expected_actual_received_ms",
+        )
+        if parsed_horizon != horizon_seconds:
+            raise LiveCachePayloadError(f"TWAP shadow {key} horizon is invalid")
+        if target_second_ms != origin_second_ms + horizon_seconds * 1_000:
+            raise LiveCachePayloadError(f"TWAP shadow {key} target is invalid")
+        if target_market_id != target_second_ms // 300_000:
+            raise LiveCachePayloadError(f"TWAP shadow {key} market is invalid")
+        if expected_actual_received_ms < target_second_ms:
+            raise LiveCachePayloadError(
+                f"TWAP shadow {key} expected receipt is invalid"
+            )
+        value = _decimal_string(
+            item.get("value"),
+            f"{key}.value",
+            optional=True,
+            minimum=Decimal("0.000000000000000001"),
+        )
+        known_fraction = _decimal_string(
+            item.get("known_fraction"),
+            f"{key}.known_fraction",
+            optional=True,
+            minimum=Decimal("0"),
+            maximum=Decimal("1"),
+        )
+        source_count = _strict_json_int(
+            item.get("source_count"), f"{key}.source_count"
+        )
+        if source_count < 0 or source_count > len(TWAP_SHADOW_SOURCES):
+            raise LiveCachePayloadError(f"TWAP shadow {key} source_count is invalid")
+        source_spread_bps = _decimal_string(
+            item.get("source_spread_bps"),
+            f"{key}.source_spread_bps",
+            optional=True,
+            minimum=Decimal("0"),
+        )
+        estimated_error_bps = _decimal_string(
+            item.get("estimated_error_bps"),
+            f"{key}.estimated_error_bps",
+            optional=True,
+            minimum=Decimal("0"),
+        )
+        if value is None and (
+            known_fraction is not None
+            or source_count != 0
+            or source_spread_bps is not None
+            or estimated_error_bps is not None
+        ):
+            raise LiveCachePayloadError(f"TWAP shadow {key} unavailable shape is invalid")
+        if value is not None and (known_fraction is None or source_count < 1):
+            raise LiveCachePayloadError(f"TWAP shadow {key} available shape is invalid")
+        predictions[key] = {
+            "horizon_seconds": parsed_horizon,
+            "target_second_ms": target_second_ms,
+            "target_market_id": target_market_id,
+            "expected_actual_received_ms": expected_actual_received_ms,
+            "value": value,
+            "known_fraction": known_fraction,
+            "source_count": source_count,
+            "source_spread_bps": source_spread_bps,
+            "estimated_error_bps": estimated_error_bps,
+        }
+
+    return {
+        "schema_version": schema_version,
+        "model_version": model_version,
+        "origin_second_ms": origin_second_ms,
+        "generated_ms": generated_ms,
+        "basis_window_seconds": basis_window_seconds,
+        "status": status,
+        "quality_flags": list(quality_flags),
+        "source_bias_bps": source_bias_bps,
+        "basis_sample_counts": basis_sample_counts,
+        "recent_p90_abs_error_bps": recent_error,
+        "predictions": predictions,
+    }
+
+
+def encode_twap_shadow_snapshot(snapshot: Mapping[str, Any]) -> str:
+    payload = validate_twap_shadow_snapshot(snapshot)
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def decode_twap_shadow_snapshot(raw: Any) -> Optional[dict[str, Any]]:
+    text = _redis_payload_text(raw, "TWAP shadow payload")
+    if text is None:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LiveCachePayloadError("TWAP shadow payload is not valid JSON") from exc
+    return validate_twap_shadow_snapshot(payload)
 
 
 _MICROSTRUCTURE_REQUIRED_INTEGER_FIELDS = frozenset(
@@ -550,6 +808,14 @@ class LiveCache:
             ),
         )
 
+    async def set_twap_shadow_snapshot(
+        self,
+        key: str,
+        *,
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        await self.redis.set(key, encode_twap_shadow_snapshot(snapshot))
+
     async def get_price(self, key: str) -> Optional[LivePrice]:
         return decode_live_price(await self.redis.get(key))
 
@@ -595,6 +861,46 @@ class LiveCache:
         }
         return prices, decode_microstructure_snapshot(raw_values[-1])
 
+    async def get_prices_with_twap_shadow(
+        self,
+        price_keys: Iterable[str],
+        *,
+        shadow_key: str = TWAP_SHADOW_LIVE_KEY,
+    ) -> tuple[dict[str, Optional[LivePrice]], Optional[dict[str, Any]]]:
+        """Read authoritative prices and the optional shadow in one MGET."""
+
+        price_key_list = list(price_keys)
+        all_keys = [*price_key_list, shadow_key]
+        raw_values = await self.redis.mget(all_keys)
+        if len(raw_values) != len(all_keys):
+            raise LiveCachePayloadError(
+                "live cache MGET returned an unexpected value count"
+            )
+        prices = {
+            key: decode_live_price(raw_value)
+            for key, raw_value in zip(price_key_list, raw_values[:-1])
+        }
+        try:
+            shadow = decode_twap_shadow_snapshot(raw_values[-1])
+        except LiveCachePayloadError as exc:
+            global _last_shadow_decode_warning_ns
+            now_ns = time.monotonic_ns()
+            if (
+                _last_shadow_decode_warning_ns is None
+                or now_ns - _last_shadow_decode_warning_ns
+                >= _SHADOW_DECODE_WARNING_INTERVAL_NS
+            ):
+                _last_shadow_decode_warning_ns = now_ns
+                LOGGER.warning(
+                    "twap_shadow_live_cache_payload_ignored",
+                    extra={
+                        "event": "twap_shadow_live_cache_payload_ignored",
+                        "error": repr(exc),
+                    },
+                )
+            shadow = None
+        return prices, shadow
+
     async def close(self) -> None:
         close = getattr(self.redis, "aclose", None)
         if close is not None:
@@ -623,14 +929,23 @@ async def build_current_live_payload(
     window: MarketWindow,
     server_time_ms: int,
 ) -> dict[str, Any]:
-    cached = await live_cache.get_prices(
+    cached, shadow = await live_cache.get_prices_with_twap_shadow(
         [
             BINANCE_SPOT_LIVE_KEY,
             CHAINLINK_LIVE_KEY,
             TWAP_LIVE_KEY,
             FUTURES_LIVE_KEY,
-        ]
+        ],
+        shadow_key=TWAP_SHADOW_LIVE_KEY,
     )
+
+    serialized_shadow = None
+    if shadow is not None:
+        serialized_shadow = dict(shadow)
+        serialized_shadow["generated_age_ms"] = age_ms(
+            server_time_ms,
+            int(shadow["generated_ms"]),
+        )
 
     return {
         "server_time_ms": server_time_ms,
@@ -661,4 +976,5 @@ async def build_current_live_payload(
                 legacy_source_field="time_ms",
             ),
         },
+        "twap_shadow": serialized_shadow,
     }

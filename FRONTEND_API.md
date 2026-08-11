@@ -5,8 +5,9 @@ This is the frontend-facing contract for the read-only FastAPI application in
 `price_collector/api.py`. It covers every application data endpoint, how to
 call it, and the fields returned to a dashboard.
 
-For the concise dashboard migration note covering the removal of both
-prediction engines, see [`DASHBOARD_API_CHANGES.md`](DASHBOARD_API_CHANGES.md).
+The experimental Chainlink TWAP shadow is documented with its live response and
+historical evaluation routes below. It is a research nowcast and never replaces
+the authoritative `prices.twap` value.
 
 ## Access and Base URL
 
@@ -72,6 +73,7 @@ async function apiGet(path, query = {}) {
 }
 
 const live = await apiGet("/markets/current/live");
+const shadowHistory = await apiGet("/markets/current/twap-shadow");
 const microstructureLive = await apiGet("/markets/current/microstructure/live");
 ```
 
@@ -90,6 +92,9 @@ const microstructureLive = await apiGet("/markets/current/microstructure/live");
 - A successful JSON response uses HTTP `200` unless stated otherwise.
 - Missing observations inside a market series are represented by `null`; they
   are not fabricated.
+- TWAP shadow values are experimental predictions. Keep the actual TWAP and
+  shadow visually distinct, and use the batch status, quality flags, and age
+  before displaying a prediction as current.
 - Responses larger than 1,000 bytes are gzip-compressed when the client sends
   `Accept-Encoding: gzip`. Browsers handle this automatically.
 
@@ -113,7 +118,9 @@ const microstructureLive = await apiGet("/markets/current/microstructure/live");
 | `GET` | `/markets/{market_id}/data` | Full series for one market | PostgreSQL |
 | `GET` | `/markets/current/download` | Download current market JSON | PostgreSQL |
 | `GET` | `/markets/{market_id}/download` | Download one market as JSON | PostgreSQL |
-| `GET` | `/markets/current/live` | Lowest-latency current source prices | Redis only |
+| `GET` | `/markets/current/live` | Lowest-latency current source prices plus optional TWAP shadow | Redis only |
+| `GET` | `/markets/current/twap-shadow` | Current market's retained predictions versus actual TWAP | PostgreSQL |
+| `GET` | `/markets/{market_id}/twap-shadow` | Selected market's retained predictions versus actual TWAP | PostgreSQL |
 | `GET` | `/markets/current/microstructure/live` | Latest finalized microstructure second plus source prices | Redis only |
 
 ## Health
@@ -1727,7 +1734,9 @@ for:
 - `btc:live:microstructure`
 
 It never queries PostgreSQL and never stores or returns a five-minute history.
-The ordinary `/markets/current/live` route remains a separate four-key read.
+The ordinary `/markets/current/live` route remains separate and reads the four
+source-price keys plus the optional TWAP shadow key. The microstructure live
+route does not return that experimental shadow.
 
 ```bash
 curl --compressed "${API_BASE_URL}/markets/current/microstructure/live"
@@ -1864,9 +1873,11 @@ responses are not cached in Redis.
 ### `GET /markets/current/live`
 
 Reads `btc:live:binance_spot`, `btc:live:chainlink`,
-`btc:live:chainlink_twap_30s`, and `btc:live:futures` with one Redis `MGET`.
-It does not query PostgreSQL or return historical samples, probabilities,
-mark/index prices, open interest, flow, or book data.
+`btc:live:chainlink_twap_30s`, `btc:live:futures`, and the optional
+`btc:live:chainlink_twap_shadow` with one Redis `MGET`. It does not query
+PostgreSQL or return historical samples, probabilities, mark/index prices,
+open interest, flow, or book data. The four price objects remain authoritative
+observations; top-level `twap_shadow` is explicitly experimental.
 
 The compatibility query parameter
 `max_chainlink_carry_forward_ms` is accepted as an integer and defaults to
@@ -1919,6 +1930,76 @@ Response:
       "received_age_ms": 437,
       "time_ms": 1783988793451
     }
+  },
+  "twap_shadow": {
+    "schema_version": 1,
+    "model_version": 1,
+    "origin_second_ms": 1783988794000,
+    "generated_ms": 1783988794070,
+    "basis_window_seconds": 1800,
+    "status": "ready",
+    "quality_flags": [
+      "flat_hold_future",
+      "futures_proxy_polled_latest_wins"
+    ],
+    "source_bias_bps": {
+      "futures": "3.84210000",
+      "chainlink_spot": "0.11870000",
+      "binance_spot": "3.51740000"
+    },
+    "basis_sample_counts": {
+      "futures": 1768,
+      "chainlink_spot": 1772,
+      "binance_spot": 1769
+    },
+    "recent_p90_abs_error_bps": "0.74000000",
+    "predictions": {
+      "h1": {
+        "horizon_seconds": 1,
+        "target_second_ms": 1783988795000,
+        "target_market_id": 5946629,
+        "expected_actual_received_ms": 1783988796800,
+        "value": "62290.241700000000000000",
+        "known_fraction": "1.00000000",
+        "source_count": 3,
+        "source_spread_bps": "0.21000000",
+        "estimated_error_bps": "0.74000000"
+      },
+      "h3": {
+        "horizon_seconds": 3,
+        "target_second_ms": 1783988797000,
+        "target_market_id": 5946629,
+        "expected_actual_received_ms": 1783988798800,
+        "value": "62290.454200000000000000",
+        "known_fraction": "0.95666667",
+        "source_count": 3,
+        "source_spread_bps": "0.23000000",
+        "estimated_error_bps": "0.74000000"
+      },
+      "h5": {
+        "horizon_seconds": 5,
+        "target_second_ms": 1783988799000,
+        "target_market_id": 5946629,
+        "expected_actual_received_ms": 1783988800800,
+        "value": "62290.801500000000000000",
+        "known_fraction": "0.89000000",
+        "source_count": 3,
+        "source_spread_bps": "0.27000000",
+        "estimated_error_bps": "0.74000000"
+      },
+      "h10": {
+        "horizon_seconds": 10,
+        "target_second_ms": 1783988804000,
+        "target_market_id": 5946629,
+        "expected_actual_received_ms": 1783988805800,
+        "value": "62291.320000000000000000",
+        "known_fraction": "0.72333333",
+        "source_count": 3,
+        "source_spread_bps": "0.33000000",
+        "estimated_error_bps": "0.74000000"
+      }
+    },
+    "generated_age_ms": 5
   }
 }
 ```
@@ -1931,10 +2012,89 @@ filtered to `btc/usd`. `twap` comes from
 `crypto_prices_twap_thirty` with window `30`; it preserves the exact E18
 `full_accuracy_value` decimal string.
 
+When enabled, the shadow emits at most one batch per UTC second. Each batch
+targets the exact source seconds `+1`, `+3`, `+5`, and `+10` from
+`origin_second_ms`. `target_market_id` belongs to the target second, so one or
+more predictions can correctly point into the next five-minute market near a
+boundary. `expected_actual_received_ms` estimates when the corresponding RTDS
+TWAP is likely to become observable; it is not another price timestamp.
+
+The model is a nowcast of the smoothed 30-second feed, not a claim that the BTC
+market itself will move to that value. Version 1 uses only causal information:
+the latest polled Binance futures, Binance Spot, and standard Chainlink spot
+observations, plus per-source basis estimates learned from actual TWAP values
+that were already received. Those basis estimates use a trailing 1,800-second
+window. The inputs are latest-wins Redis observations, so multiple source
+changes between polls can be collapsed. This experimental limitation matters
+most during fast subsecond moves.
+
+Version 1 does not adjust future prices because recent predictions ran high or
+low. `recent_p90_abs_error_bps` and each `estimated_error_bps` are diagnostics;
+they do not feed a forecast-error correction loop. A future feedback model must
+use a new `model_version` so its results do not rewrite version 1.
+Version 1 copies the same recent ensemble-nowcast p90 into every available
+horizon; it is not yet a horizon-specific forecast-error band.
+
+Shadow field guidance:
+
+| Field | Meaning |
+| --- | --- |
+| `origin_second_ms`, `generated_ms` | UTC batch identity and actual generation time within that second |
+| `generated_age_ms` | `max(0, server_time_ms - generated_ms)`, computed by the API |
+| `status` | One of `ready`, `degraded`, `warming_up`, or `unavailable` |
+| `quality_flags` | Sorted diagnostic strings explaining degraded, warming, or unavailable output |
+| `source_bias_bps` | Current causal basis estimate for each input, or `null` until learned |
+| `basis_sample_counts` | Already-received observations supporting each source basis |
+| `known_fraction` | Fraction of the target's modeled averaging window already observed; larger values are more nowcast and less extrapolation |
+| `source_count` | Number of contributing inputs, from zero through three |
+| `source_spread_bps` | Cross-source dispersion after basis adjustment |
+| `estimated_error_bps` | The shared rolling ensemble-nowcast p90 copied to every available horizon; it is not horizon-specific confidence |
+
+During startup the key can be absent, in which case `twap_shadow` is `null` and
+the endpoint still returns HTTP `200`. The causal PostgreSQL replay runs in
+small cancellable chunks and performs a bounded source-history catch-up, but
+the first shadow can take roughly 12 to 15 seconds on the current droplet. A warming batch is an object with
+`status="warming_up"`; unavailable horizons have `value`, `known_fraction`,
+`source_spread_bps`, and `estimated_error_bps` set to `null`, with
+`source_count: 0`. Do not convert those nulls to zero or reuse an older horizon.
+The actual `prices.twap` remains independently available throughout warming.
+
+Redis publication happens before the independent PostgreSQL persistence queue.
+Consequently, the frontend can see a new live batch briefly before the same
+forecasts appear on `/markets/current/twap-shadow`. Redis retains only the
+newest batch, while PostgreSQL retains the first available forecast for each
+target/horizon for later evaluation. If the bounded history queue is full,
+Redis continues to publish the live prediction, but that batch can be absent
+from the historical route. The collector logs the bounded-queue event; clients
+must not assume every live batch is eventually present in PostgreSQL.
+
+For the lowest display latency, poll this endpoint every 250 to 500 ms and
+replace the shadow only when `origin_second_ms` advances. Polling faster does
+not create more than one batch per UTC second. The collector-side
+`TWAP_SHADOW_POLL_MS` is fixed at `250` for model version 1. Always dim or hide
+predictions whose `generated_age_ms` exceeds the dashboard's freshness
+threshold, or whose `status` is not acceptable for that view.
+
+```javascript
+let lastShadowOrigin = null;
+
+setInterval(async () => {
+  const live = await apiGet("/markets/current/live");
+  renderActualTwap(live.prices.twap);
+
+  const shadow = live.twap_shadow;
+  if (shadow && shadow.origin_second_ms !== lastShadowOrigin) {
+    lastShadowOrigin = shadow.origin_second_ms;
+    renderExperimentalTwapShadow(shadow);
+  }
+}, 250);
+```
+
 Prices are fixed-point strings. Timestamps and ages are JSON integers. If a key
 is absent, that object's value, timestamps, ages, and alias are all `null`, and
 the route still returns HTTP `200`. The endpoint does not reject stale values;
-clients should use both age fields to display freshness.
+clients should use both source-price age fields and shadow `generated_age_ms` to
+display freshness.
 
 During a standard Chainlink or TWAP feed gap, the collector leaves that source's
 last value in Redis while its ages grow. Each accepted-event watchdog is
@@ -1949,11 +2109,146 @@ A Redis connection/read failure returns HTTP `503`:
 { "detail": "live cache unavailable" }
 ```
 
-Malformed JSON in any source-price key also returns HTTP `503`:
+Malformed JSON in an authoritative source-price key returns HTTP `503`:
 
 ```json
 { "detail": "live cache payload invalid" }
 ```
+
+The shadow key is optional and isolated. If only its JSON or version-1 shape is
+invalid, the endpoint still returns HTTP `200` with all valid authoritative
+prices and `twap_shadow: null`.
+
+## TWAP Shadow History and Evaluation
+
+### `GET /markets/current/twap-shadow`
+
+### `GET /markets/{market_id}/twap-shadow`
+
+These PostgreSQL-backed routes return the current or selected five-minute
+market as a complete 300-target-second grid. They join retained experimental
+predictions to the final accepted event for each source second in the exact
+`polymarket_twap_events` source-of-record table; actual TWAP is not copied into
+the prediction table.
+
+Query parameters:
+
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `model_version` | integer | `1` | Prediction definition to read, from `1` through `32767` |
+
+Calls:
+
+```bash
+curl --compressed "${API_BASE_URL}/markets/current/twap-shadow"
+curl --compressed "${API_BASE_URL}/markets/5946629/twap-shadow?model_version=1"
+```
+
+Abbreviated response:
+
+```json
+{
+  "market_id": 5946629,
+  "market_start_ms": 1783988700000,
+  "market_end_ms": 1783989000000,
+  "model_version": 1,
+  "error_definition": "10000 * (prediction - actual) / actual",
+  "summary": {
+    "h1": {
+      "horizon_seconds": 1,
+      "paired_count": 296,
+      "mean_error_bps": "-0.04178213",
+      "mae_bps": "0.48211975"
+    },
+    "h3": {
+      "horizon_seconds": 3,
+      "paired_count": 294,
+      "mean_error_bps": "-0.05211048",
+      "mae_bps": "0.52698412"
+    },
+    "h5": {
+      "horizon_seconds": 5,
+      "paired_count": 292,
+      "mean_error_bps": "-0.06311970",
+      "mae_bps": "0.60421891"
+    },
+    "h10": {
+      "horizon_seconds": 10,
+      "paired_count": 287,
+      "mean_error_bps": "-0.08188142",
+      "mae_bps": "0.81192348"
+    }
+  },
+  "samples": [
+    {
+      "target_second_ms": 1783988795000,
+      "actual": {
+        "value": "62290.310000000000000000",
+        "provider_event_ms": 1783988795987,
+        "received_ms": 1783988797732
+      },
+      "predictions": {
+        "h1": {
+          "horizon_seconds": 1,
+          "value": "62290.241700000000000000",
+          "generated_ms": 1783988794070,
+          "known_fraction": "1.00000000",
+          "source_count": 3,
+          "estimated_error_bps": "0.74000000",
+          "realized_error_bps": "-0.01096479"
+        },
+        "h3": {
+          "horizon_seconds": 3,
+          "value": "62290.180000000000000000",
+          "generated_ms": 1783988792091,
+          "known_fraction": "0.95666667",
+          "source_count": 3,
+          "estimated_error_bps": "0.74000000",
+          "realized_error_bps": "-0.02087000"
+        },
+        "h5": {
+          "horizon_seconds": 5,
+          "value": "62290.040000000000000000",
+          "generated_ms": 1783988790084,
+          "known_fraction": "0.89000000",
+          "source_count": 3,
+          "estimated_error_bps": "0.74000000",
+          "realized_error_bps": "-0.04334542"
+        },
+        "h10": {
+          "horizon_seconds": 10,
+          "value": "62289.770000000000000000",
+          "generated_ms": 1783988785099,
+          "known_fraction": "0.72333333",
+          "source_count": 3,
+          "estimated_error_bps": "0.74000000",
+          "realized_error_bps": "-0.08669084"
+        }
+      }
+    }
+  ]
+}
+```
+
+`realized_error_bps` is positive when the prediction was above the actual TWAP
+and negative when it was below. `summary.mean_error_bps` therefore exposes a
+directional bias; `summary.mae_bps` measures magnitude without direction. All
+summary values are calculated only from prediction/actual pairs. If no pairs
+exist, `paired_count` is zero and both metrics are `null`.
+
+Every successful response contains 300 ordered `samples`. A missing retained
+forecast leaves all fields inside that horizon except `horizon_seconds` as
+`null`. A target whose actual RTDS second has not arrived, or was missed during
+a feed gap, has a null `actual` value and null realized errors. This makes
+warming, persistence gaps, and source gaps visible rather than backfilling a
+fabricated result.
+
+The current route chooses the active market from the API server clock. The ID
+route returns HTTP `404` with `{"detail":"market not found"}` only when that
+`market_windows` row does not exist. An existing market with no retained
+predictions still returns HTTP `200` with its 300-second grid. Prediction rows
+are retained for 30 days by default; after expiry, older market responses can
+still contain actual TWAP values while their prediction fields are null.
 
 ## Common Errors
 
@@ -1969,9 +2264,9 @@ Expected statuses are:
 | --- | --- |
 | `404` | The requested source or historical market has no stored data |
 | `405` | The route was called with a method other than `GET` |
-| `422` | A typed path/query value or `microstructure_groups` selection is invalid |
+| `422` | A typed path/query value, shadow model version, or `microstructure_groups` selection is invalid |
 | `500` | An unhandled PostgreSQL-backed request failed |
-| `503` | A live route cannot read Redis, a source-price or microstructure payload is malformed, or `/healthz` cannot query PostgreSQL |
+| `503` | A live route cannot read Redis, an authoritative source-price or microstructure payload is malformed, or `/healthz` cannot query PostgreSQL; malformed optional TWAP shadow data is isolated as `null` |
 
 Use the HTTP status and endpoint context rather than treating the exact
 `detail` text as a stable frontend enum.

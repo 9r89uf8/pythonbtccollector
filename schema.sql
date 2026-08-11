@@ -414,6 +414,147 @@ CREATE TABLE IF NOT EXISTS polymarket_twap_gaps (
 CREATE INDEX IF NOT EXISTS polymarket_twap_gaps_detected_idx
     ON polymarket_twap_gaps (detected_wall_ns DESC);
 
+-- Experimental, versioned short-horizon nowcasts of the exact Chainlink TWAP.
+-- One target second is filled by the immutable h10/h5/h3/h1 forecasts as their
+-- generation seconds arrive. Actual TWAP values remain in the source-of-record
+-- tables and are joined at read time instead of being copied here.
+CREATE TABLE IF NOT EXISTS chainlink_twap_shadow_predictions (
+    target_second_ms BIGINT NOT NULL,
+    model_version SMALLINT NOT NULL,
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+
+    h1_price NUMERIC(38, 18),
+    h1_generated_ms BIGINT,
+    h1_known_fraction NUMERIC(10, 8),
+    h1_source_count SMALLINT,
+    h1_estimated_error_bps NUMERIC(20, 8),
+
+    h3_price NUMERIC(38, 18),
+    h3_generated_ms BIGINT,
+    h3_known_fraction NUMERIC(10, 8),
+    h3_source_count SMALLINT,
+    h3_estimated_error_bps NUMERIC(20, 8),
+
+    h5_price NUMERIC(38, 18),
+    h5_generated_ms BIGINT,
+    h5_known_fraction NUMERIC(10, 8),
+    h5_source_count SMALLINT,
+    h5_estimated_error_bps NUMERIC(20, 8),
+
+    h10_price NUMERIC(38, 18),
+    h10_generated_ms BIGINT,
+    h10_known_fraction NUMERIC(10, 8),
+    h10_source_count SMALLINT,
+    h10_estimated_error_bps NUMERIC(20, 8),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (target_second_ms, model_version),
+
+    CHECK (target_second_ms >= 0 AND target_second_ms % 1000 = 0),
+    CHECK (model_version > 0),
+    CHECK (target_second_ms >= market_id * 300000),
+    CHECK (target_second_ms < (market_id + 1) * 300000),
+    CHECK (
+        (
+            h1_price IS NULL
+            AND h1_generated_ms IS NULL
+            AND h1_known_fraction IS NULL
+            AND h1_source_count IS NULL
+            AND h1_estimated_error_bps IS NULL
+        ) OR (
+            h1_price IS NOT NULL
+            AND h1_generated_ms IS NOT NULL
+            AND h1_known_fraction IS NOT NULL
+            AND h1_source_count IS NOT NULL
+            AND h1_price > 0
+            AND h1_generated_ms >= target_second_ms - 1000
+            AND h1_generated_ms < target_second_ms
+            AND h1_known_fraction BETWEEN 0 AND 1
+            AND h1_source_count BETWEEN 1 AND 3
+            AND (
+                h1_estimated_error_bps IS NULL
+                OR h1_estimated_error_bps >= 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            h3_price IS NULL
+            AND h3_generated_ms IS NULL
+            AND h3_known_fraction IS NULL
+            AND h3_source_count IS NULL
+            AND h3_estimated_error_bps IS NULL
+        ) OR (
+            h3_price IS NOT NULL
+            AND h3_generated_ms IS NOT NULL
+            AND h3_known_fraction IS NOT NULL
+            AND h3_source_count IS NOT NULL
+            AND h3_price > 0
+            AND h3_generated_ms >= target_second_ms - 3000
+            AND h3_generated_ms < target_second_ms - 2000
+            AND h3_known_fraction BETWEEN 0 AND 1
+            AND h3_source_count BETWEEN 1 AND 3
+            AND (
+                h3_estimated_error_bps IS NULL
+                OR h3_estimated_error_bps >= 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            h5_price IS NULL
+            AND h5_generated_ms IS NULL
+            AND h5_known_fraction IS NULL
+            AND h5_source_count IS NULL
+            AND h5_estimated_error_bps IS NULL
+        ) OR (
+            h5_price IS NOT NULL
+            AND h5_generated_ms IS NOT NULL
+            AND h5_known_fraction IS NOT NULL
+            AND h5_source_count IS NOT NULL
+            AND h5_price > 0
+            AND h5_generated_ms >= target_second_ms - 5000
+            AND h5_generated_ms < target_second_ms - 4000
+            AND h5_known_fraction BETWEEN 0 AND 1
+            AND h5_source_count BETWEEN 1 AND 3
+            AND (
+                h5_estimated_error_bps IS NULL
+                OR h5_estimated_error_bps >= 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            h10_price IS NULL
+            AND h10_generated_ms IS NULL
+            AND h10_known_fraction IS NULL
+            AND h10_source_count IS NULL
+            AND h10_estimated_error_bps IS NULL
+        ) OR (
+            h10_price IS NOT NULL
+            AND h10_generated_ms IS NOT NULL
+            AND h10_known_fraction IS NOT NULL
+            AND h10_source_count IS NOT NULL
+            AND h10_price > 0
+            AND h10_generated_ms >= target_second_ms - 10000
+            AND h10_generated_ms < target_second_ms - 9000
+            AND h10_known_fraction BETWEEN 0 AND 1
+            AND h10_source_count BETWEEN 1 AND 3
+            AND (
+                h10_estimated_error_bps IS NULL
+                OR h10_estimated_error_bps >= 0
+            )
+        )
+    )
+);
+
+REVOKE ALL ON chainlink_twap_shadow_predictions FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON chainlink_twap_shadow_predictions TO price_writer;
+GRANT SELECT ON chainlink_twap_shadow_predictions TO price_reader;
+
 REVOKE ALL ON polymarket_twap_sessions FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE ON polymarket_twap_sessions TO price_writer;
 GRANT SELECT ON polymarket_twap_sessions TO price_reader;

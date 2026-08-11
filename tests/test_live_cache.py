@@ -15,12 +15,15 @@ from price_collector.live_cache import (
     FUTURES_LIVE_KEY,
     MICROSTRUCTURE_LIVE_KEY,
     TWAP_LIVE_KEY,
+    TWAP_SHADOW_LIVE_KEY,
     LiveCache,
     LiveCachePayloadError,
     LivePrice,
     build_current_live_payload,
+    decode_twap_shadow_snapshot,
     decode_microstructure_snapshot,
     decode_live_price,
+    encode_twap_shadow_snapshot,
     encode_microstructure_snapshot,
 )
 from price_collector.market import MarketWindow
@@ -56,6 +59,75 @@ def microstructure_cache_row(**updates):
     )
     row.update(updates)
     return row
+
+
+def twap_shadow_snapshot(**updates):
+    origin_second_ms = 1_783_459_250_000
+    predictions = {}
+    for horizon in (1, 3, 5, 10):
+        target_second_ms = origin_second_ms + horizon * 1_000
+        predictions[f"h{horizon}"] = {
+            "horizon_seconds": horizon,
+            "target_second_ms": target_second_ms,
+            "target_market_id": target_second_ms // 300_000,
+            "expected_actual_received_ms": target_second_ms + 1_800,
+            "value": "62066.123456789012345678",
+            "known_fraction": "0.90000000",
+            "source_count": 3,
+            "source_spread_bps": "0.25000000",
+            "estimated_error_bps": "0.75000000",
+        }
+    snapshot = {
+        "schema_version": 1,
+        "model_version": 1,
+        "origin_second_ms": origin_second_ms,
+        "generated_ms": origin_second_ms + 58,
+        "basis_window_seconds": 1_800,
+        "status": "ready",
+        "quality_flags": ["futures_proxy_polled_latest_wins"],
+        "source_bias_bps": {
+            "futures": "3.81000000",
+            "chainlink_spot": "0.12000000",
+            "binance_spot": "3.55000000",
+        },
+        "basis_sample_counts": {
+            "futures": 1_700,
+            "chainlink_spot": 1_701,
+            "binance_spot": 1_699,
+        },
+        "recent_p90_abs_error_bps": "0.84000000",
+        "predictions": predictions,
+    }
+    snapshot.update(updates)
+    return snapshot
+
+
+def test_twap_shadow_snapshot_round_trips_exact_decimal_strings():
+    snapshot = twap_shadow_snapshot()
+
+    encoded = encode_twap_shadow_snapshot(snapshot)
+
+    assert decode_twap_shadow_snapshot(encoded) == snapshot
+    assert json.loads(encoded)["predictions"]["h1"]["value"] == (
+        "62066.123456789012345678"
+    )
+
+
+def test_twap_shadow_snapshot_rejects_binary_float_financial_values():
+    snapshot = twap_shadow_snapshot()
+    snapshot["predictions"]["h1"]["value"] = 62066.12
+
+    with pytest.raises(LiveCachePayloadError, match="decimal string"):
+        encode_twap_shadow_snapshot(snapshot)
+
+
+@pytest.mark.parametrize("bad_value", (True, 1.5, "1"))
+def test_twap_shadow_snapshot_requires_json_integer_timestamps(bad_value):
+    snapshot = twap_shadow_snapshot()
+    snapshot["generated_ms"] = bad_value
+
+    with pytest.raises(LiveCachePayloadError, match="JSON integer"):
+        encode_twap_shadow_snapshot(snapshot)
 
 
 def test_live_cache_set_price_stores_exact_source_price_shape():
@@ -400,7 +472,27 @@ def test_get_prices_with_microstructure_rejects_non_decimal_price_payload():
         )
 
 
-def test_build_current_live_payload_returns_only_source_prices_and_freshness():
+def test_malformed_optional_shadow_does_not_hide_authoritative_prices(caplog):
+    redis = FakeRedis()
+    redis.data[BINANCE_SPOT_LIVE_KEY] = (
+        '{"value":"62000.10","source_timestamp_ms":1,"received_ms":2}'
+    )
+    redis.data[TWAP_SHADOW_LIVE_KEY] = "not-json"
+    cache = LiveCache(redis_client=redis)
+
+    prices, shadow = asyncio.run(
+        cache.get_prices_with_twap_shadow(
+            [BINANCE_SPOT_LIVE_KEY],
+            shadow_key=TWAP_SHADOW_LIVE_KEY,
+        )
+    )
+
+    assert prices[BINANCE_SPOT_LIVE_KEY].value == "62000.10"
+    assert shadow is None
+    assert "twap_shadow_live_cache_payload_ignored" in caplog.text
+
+
+def test_build_current_live_payload_returns_sources_and_shadow_in_one_read():
     redis = FakeRedis()
     cache = LiveCache(redis_client=redis)
     window = MarketWindow(
@@ -434,6 +526,10 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
             source_timestamp_ms=1_783_459_249_950,
             received_ms=1_783_459_250_090,
         )
+        await cache.set_twap_shadow_snapshot(
+            TWAP_SHADOW_LIVE_KEY,
+            snapshot=twap_shadow_snapshot(),
+        )
         return await build_current_live_payload(
             cache,
             window=window,
@@ -448,6 +544,7 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
             CHAINLINK_LIVE_KEY,
             TWAP_LIVE_KEY,
             FUTURES_LIVE_KEY,
+            TWAP_SHADOW_LIVE_KEY,
         ]
     ]
     assert set(payload) == {
@@ -457,6 +554,7 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
         "market_end_ms",
         "prices",
         "futures",
+        "twap_shadow",
     }
     assert payload["prices"]["binance_spot"] == {
         "value": "62067.89",
@@ -479,6 +577,10 @@ def test_build_current_live_payload_returns_only_source_prices_and_freshness():
     assert payload["futures"]["last"]["source_age_ms"] == 173
     assert payload["futures"]["last"]["received_age_ms"] == 33
     assert payload["futures"]["last"]["time_ms"] == 1_783_459_249_950
+    assert payload["twap_shadow"]["predictions"]["h1"]["value"] == (
+        "62066.123456789012345678"
+    )
+    assert payload["twap_shadow"]["generated_age_ms"] == 65
 
 
 def test_build_current_live_payload_serializes_missing_sources_as_nulls():
@@ -511,6 +613,7 @@ def test_build_current_live_payload_serializes_missing_sources_as_nulls():
         "provider_event_ms": None,
     }
     assert payload["futures"]["last"]["value"] is None
+    assert payload["twap_shadow"] is None
 
 
 def test_get_prices_rejects_short_mget_response():

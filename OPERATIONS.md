@@ -36,6 +36,7 @@ curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtd
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
+curl http://127.0.0.1:9000/markets/current/twap-shadow
 curl http://127.0.0.1:9000/markets/current/microstructure/live
 ```
 
@@ -92,6 +93,7 @@ Then, from your local machine:
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/latest"
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/sources"
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/live"
+curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/twap-shadow"
 curl "http://127.0.0.1:${LOCAL_API_PORT}/markets/current/microstructure/live"
 ```
 
@@ -183,7 +185,192 @@ curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
+curl http://127.0.0.1:9000/markets/current/twap-shadow
 curl http://127.0.0.1:9000/markets/current/microstructure/live
+```
+
+### Experimental Chainlink TWAP shadow rollout
+
+The shadow runs inside `price-collector-polymarket-chainlink`; it does not add
+a service or replace the exact TWAP collector. It publishes one experimental
+batch per UTC second for the `+1`, `+3`, `+5`, and `+10` second targets. Redis
+key `btc:live:chainlink_twap_shadow` is attempted before the batch enters the
+independent PostgreSQL persistence queue, so the frontend can see a new batch
+briefly before it appears in history.
+
+Run this rollout only after the change is pushed to GitHub. Apply the schema
+before enabling or restarting the runtime:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u postgres psql -v ON_ERROR_STOP=1 \
+  -d price_collector \
+  -f /opt/price-collector/schema.sql
+```
+
+Review and add these non-secret keys manually in
+`/etc/price-collector/collector.env`. Never replace the production file with
+the repository example:
+
+```text
+TWAP_SHADOW_ENABLED=true
+TWAP_SHADOW_POLL_MS=250
+TWAP_SHADOW_RETENTION_DAYS=30
+TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES=10000
+TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
+```
+
+The feature requires `POLYMARKET_TWAP_ENABLED=true`.
+`TWAP_SHADOW_POLL_MS` must remain exactly `250` for model version 1. Its
+latest-wins Redis reads can collapse multiple Binance or Chainlink updates
+between polls and do not turn this into a tick-level forecast. The runtime emits
+at most one batch per UTC second.
+
+Confirm the effective settings, then restart all Python services. This
+checkpoint changes shared configuration, database, and live-cache modules in
+addition to the owning Chainlink collector:
+
+```bash
+sudo grep -E \
+  '^(POLYMARKET_TWAP_ENABLED|TWAP_SHADOW_ENABLED|TWAP_SHADOW_POLL_MS|TWAP_SHADOW_RETENTION_DAYS|TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES|TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS)=' \
+  /etc/price-collector/collector.env
+
+sudo systemctl restart \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api
+sudo systemctl status \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api \
+  --no-pager
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  -n 150 \
+  --no-pager
+```
+
+Verify the Redis-first live path. `prices.twap` is the authoritative actual;
+`twap_shadow` must remain visually and operationally experimental:
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 -n 0 \
+  GET btc:live:chainlink_twap_shadow
+
+curl -fsS http://127.0.0.1:9000/markets/current/live | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+print(json.dumps({
+    "actual_twap": payload["prices"]["twap"],
+    "twap_shadow": payload["twap_shadow"],
+}, indent=2))
+'
+```
+
+On startup, `twap_shadow` can be `null` until the first batch is published. The
+causal preload runs in small cancellable chunks and then performs a bounded
+source-history catch-up so exact collection remains responsive, but the first
+shadow can take roughly 12 to 15 seconds on the current droplet. A published warming batch has `status="warming_up"` and null prediction
+values; that is not a zero-price forecast. The key is latest-wins and has no
+replay, so use `generated_age_ms`, `status`, and `quality_flags` when assessing
+freshness. A malformed optional shadow cache value is ignored by the live API
+and appears as `twap_shadow: null`; valid authoritative prices still return.
+
+Verify that retained targets begin to appear and that the read-only API joins
+them to actual TWAP seconds. Redis publication can legitimately lead these
+checks by a short interval:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "
+SELECT
+    count(*) AS target_rows,
+    count(h1_price) AS h1_rows,
+    count(h3_price) AS h3_rows,
+    count(h5_price) AS h5_rows,
+    count(h10_price) AS h10_rows,
+    max(target_second_ms) AS latest_target_second_ms
+FROM chainlink_twap_shadow_predictions
+WHERE model_version = 1;
+"
+
+curl -fsS \
+  'http://127.0.0.1:9000/markets/current/twap-shadow?model_version=1' \
+  | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+print(json.dumps({
+    "market_id": payload["market_id"],
+    "model_version": payload["model_version"],
+    "summary": payload["summary"],
+    "sample_count": len(payload["samples"]),
+}, indent=2))
+'
+```
+
+The history response has exactly 300 target seconds when the market window
+exists. Missing predictions or actuals remain `null`. Version 1 learns a causal
+per-source basis from the trailing 30 minutes of already received actual TWAP
+data, but it does not feed forecast misses back into later forecast prices.
+Signed mean error and MAE in the history response are evaluation diagnostics,
+not online correction inputs. `estimated_error_bps` is the same rolling
+ensemble-nowcast p90 for every available horizon, not a horizon-specific
+confidence interval.
+
+Redis publication continues if the bounded PostgreSQL queue is full. The
+affected live batch can therefore be absent from later history, and the
+collector logs `twap_shadow_persistence_queue_saturated` with the origin and
+queue depth. Treat any occurrence as an explicit history gap and investigate
+PostgreSQL latency or availability:
+
+```bash
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  -g 'twap_shadow_persistence_queue_saturated' \
+  -n 100 \
+  --no-pager
+```
+
+Prediction target rows are retained for 30 days by default. Cleanup deletes in
+bounded batches and must not block live Redis publication or exact TWAP
+collection. Check the logical cutoff after the runtime has completed a
+maintenance pass:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -c "
+SELECT
+    count(*) AS total_rows,
+    min(target_second_ms) AS oldest_target_second_ms,
+    max(target_second_ms) AS newest_target_second_ms,
+    count(*) FILTER (
+        WHERE target_second_ms <
+              floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+              - 30 * 86400000::BIGINT
+    ) AS older_than_default_retention
+FROM chainlink_twap_shadow_predictions;
+"
+```
+
+To disable only this experiment, set `TWAP_SHADOW_ENABLED=false`, restart
+`price-collector-polymarket-chainlink`, and remove only its live cache key so a
+stale batch is not mistaken for an active one. Historical rows remain available
+until normal retention removes them:
+
+```bash
+sudoedit /etc/price-collector/collector.env
+sudo systemctl restart price-collector-polymarket-chainlink
+redis-cli -h 127.0.0.1 -p 6379 -n 0 \
+  DEL btc:live:chainlink_twap_shadow
+sudo systemctl status price-collector-polymarket-chainlink --no-pager
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  -n 100 \
+  --no-pager
 ```
 
 ## Destructive TWAP-Only Clean Reset
@@ -293,12 +480,14 @@ redis-cli -h 127.0.0.1 -p 6379 -n 0 MGET \
   btc:live:binance_spot \
   btc:live:chainlink \
   btc:live:chainlink_twap_30s \
-  btc:live:futures
+  btc:live:futures \
+  btc:live:chainlink_twap_shadow
 
 curl -fsS http://127.0.0.1:9000/healthz
 curl -fsS \
   "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
 curl -fsS http://127.0.0.1:9000/markets/current/live
+curl -fsS http://127.0.0.1:9000/markets/current/twap-shadow
 ```
 
 Immediately after restart, a latest-price request can return `404` until the
@@ -3176,7 +3365,8 @@ redis-cli -h 127.0.0.1 MGET \
   btc:live:binance_spot \
   btc:live:chainlink \
   btc:live:chainlink_twap_30s \
-  btc:live:futures
+  btc:live:futures \
+  btc:live:chainlink_twap_shadow
 ```
 
 Each populated key should look like:
@@ -3184,6 +3374,13 @@ Each populated key should look like:
 ```json
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
+
+The first four keys use that source-price shape. The optional shadow key uses a
+structured version-1 batch with `origin_second_ms`, `generated_ms`, status and
+quality fields, causal source-basis diagnostics, and `h1`, `h3`, `h5`, and
+`h10` predictions. It is latest-wins rather than a Redis history. A missing key
+is expected while the experiment is disabled; a warming batch can contain null
+prediction values.
 
 ## Database Spot Checks
 
@@ -3198,6 +3395,30 @@ SELECT
 FROM price_samples;
 "
 ```
+
+Experimental TWAP shadow coverage and its 30-day logical retention:
+
+```bash
+sudo -u postgres psql -d price_collector -c "
+SELECT
+    model_version,
+    count(*) AS target_rows,
+    count(h1_price) AS h1_rows,
+    count(h3_price) AS h3_rows,
+    count(h5_price) AS h5_rows,
+    count(h10_price) AS h10_rows,
+    min(target_second_ms) AS oldest_target_second_ms,
+    max(target_second_ms) AS newest_target_second_ms
+FROM chainlink_twap_shadow_predictions
+GROUP BY model_version
+ORDER BY model_version;
+"
+```
+
+The table preserves the first available forecast for each model, target, and
+horizon. Actual TWAP prices are not copied into it; the API joins the final
+accepted event per source second from `polymarket_twap_events` when serving the
+evaluation routes.
 
 Latest market counts:
 

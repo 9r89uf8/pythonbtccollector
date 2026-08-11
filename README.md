@@ -4,8 +4,8 @@
 Production-oriented BTC market-data collection for a single-user Ubuntu 24.04
 DigitalOcean droplet. The application collects spot, oracle, futures, order-flow,
 top-of-book, and Polymarket probability data into local PostgreSQL. Redis holds
-the latest source prices and latest finalized microstructure second needed by
-the live API responses.
+the latest source prices, the optional experimental Chainlink TWAP shadow batch,
+and the latest finalized microstructure second needed by the live API responses.
 
 The deployment is deliberately private:
 
@@ -75,6 +75,24 @@ columns, and are serialized as strings by the API.
   `crypto_prices` subscription-history dump are received-only startup frames,
   not parse errors. They, control frames, and malformed frames do not reset that
   monotonic deadline.
+
+The same service can run the optional experimental Chainlink TWAP shadow when
+`TWAP_SHADOW_ENABLED=true`. It emits one versioned batch per UTC second with
+predictions for the exact TWAP source seconds at `+1`, `+3`, `+5`, and `+10`
+seconds. Each batch is written to Redis key
+`btc:live:chainlink_twap_shadow` before its available forecasts are queued for
+PostgreSQL. This is a low-latency research nowcast, not a settlement source or a
+replacement for `btc:live:chainlink_twap_30s`.
+
+Redis remains live if the bounded PostgreSQL backlog reaches capacity. In that
+case the new batch is still published for the frontend, the saturation is
+logged, and that particular prediction can be absent from later history.
+
+Version 1 is dynamic only through causal, trailing 30-minute basis estimates
+for Binance futures, Binance Spot, and standard Chainlink spot. It uses only
+TWAP observations already received at forecast time. It does not feed recent
+forecast misses back into later prices; the stored error history is evaluation
+evidence for a separately versioned future model.
 
 ### Binance USD-M Futures
 
@@ -168,6 +186,9 @@ PostgreSQL is the historical source of record. The main tables are:
   one-second Chainlink TWAP materialization
 - `polymarket_twap_sessions`, `polymarket_twap_events`, and
   `polymarket_twap_gaps` for durable exact TWAP evidence and coverage gaps
+- `chainlink_twap_shadow_predictions` for the first retained versioned
+  `+1`/`+3`/`+5`/`+10` forecast for each target second; actual TWAP values remain
+  in the source-of-record tables and are joined at read time
 - `polymarket_btc_5m_markets`, `polymarket_probability_samples`, and
   `polymarket_btc_5m_resolutions` for discovered markets, probability history,
   and official Polymarket resolution metadata
@@ -280,7 +301,7 @@ Automatic future-partition creation, expired-partition removal, the configured
 72-hour retention behavior, and sustained relation-budget enforcement therefore
 remain known production risks and must not be described as validated.
 
-Redis is not a historical store. The four source-price keys are:
+Redis is not a historical store. The four authoritative source-price keys are:
 
 - `btc:live:binance_spot`
 - `btc:live:chainlink`
@@ -292,6 +313,17 @@ Each value has this shape:
 ```json
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
+
+When enabled, the experimental shadow uses a separate latest-wins key:
+
+- `btc:live:chainlink_twap_shadow`
+
+That value is one structured prediction batch rather than a source-price
+object. It contains model and origin identity, generation time, causal
+30-minute per-source basis state, health flags, and the four fixed horizons.
+Prices, basis values, fractions, spreads, and error estimates are decimal
+strings or `null`. Redis retains only the newest batch; PostgreSQL keeps the
+target-second forecasts for later comparison with the actual TWAP.
 
 The optional microstructure collector also writes
 `btc:live:microstructure`. That key contains the latest finalized flat
@@ -326,6 +358,8 @@ Current routes:
 - `GET /markets/current/download`
 - `GET /markets/{market_id}/download`
 - `GET /markets/current/live`
+- `GET /markets/current/twap-shadow?model_version=1`
+- `GET /markets/{market_id}/twap-shadow?model_version=1`
 - `GET /markets/current/microstructure/live`
 
 The data and download responses use schema version `4` and always include
@@ -366,8 +400,20 @@ leave missing values null, and never carry data forward for display.
 `GET /markets/current/microstructure/live` reads the four source-price keys and
 the latest finalized microstructure key with one Redis `MGET`. It returns simple
 string-or-`null` prices and the nested microstructure groups without querying
-PostgreSQL. `GET /markets/current/live` uses the same four-price one-`MGET`
-path and returns standard Chainlink context separately from `twap`.
+PostgreSQL. `GET /markets/current/live` reads the same four prices plus the
+optional shadow key with one Redis `MGET`; it returns standard Chainlink context
+separately from the authoritative `twap` and exposes the experimental batch as
+top-level `twap_shadow`. A missing key produces `twap_shadow: null`; a warming
+batch remains present but has null prediction values. Neither case changes the
+actual price fields. A malformed optional shadow value is also isolated as
+`twap_shadow: null`; it does not suppress otherwise valid authoritative prices.
+
+The two `/twap-shadow` history routes read PostgreSQL and return a 300-target
+UTC-second grid for model version 1, joining every retained horizon with the
+final accepted exact TWAP event for that source second. They include paired count, signed mean error,
+and mean absolute error in basis points for each horizon. The current alias is
+historical state for the active five-minute market; the Redis field on
+`/markets/current/live` is the lowest-latency frontend source.
 
 `GET /markets` is the frontend discovery route. It returns the newest three
 completed markets by default, newest first, with market timestamps and
@@ -476,6 +522,36 @@ POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000
 POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000
 POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
 ```
+
+The experimental shadow defaults off. After applying `schema.sql`, enable it
+manually with these collector settings:
+
+```text
+TWAP_SHADOW_ENABLED=true
+TWAP_SHADOW_POLL_MS=250
+TWAP_SHADOW_RETENTION_DAYS=30
+TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES=10000
+TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
+```
+
+`TWAP_SHADOW_POLL_MS` is fixed at `250` for model version 1. Polling observes
+the latest Redis value for each input source and can collapse multiple source
+updates between polls, but the model still emits at most one batch per UTC
+second. Redis publication precedes the independent bounded PostgreSQL writer,
+so live and historical reads can briefly differ. If that bounded queue is full,
+the live batch still advances but can be missing from PostgreSQL history; the
+collector logs `twap_shadow_persistence_queue_saturated`. The 30-day retention
+applies only to experimental prediction rows and deletes old target seconds in
+bounded batches.
+
+Startup causally preloads the trailing calibration window from PostgreSQL. The
+CPU-heavy replay runs in small cancellable chunks and then performs a bounded
+source-history catch-up, so exact collection stays responsive. On the current
+droplet the first shadow batch can take roughly 12 to 15 seconds to appear; the
+authoritative price keys continue independently. Version 1 exposes the same rolling
+ensemble-nowcast p90 as `estimated_error_bps` for every available horizon. It is
+a shared diagnostic, not a horizon-specific confidence interval. Enabling the
+shadow also requires `POLYMARKET_TWAP_ENABLED=true`.
 
 At minimum, replace the database passwords in:
 
