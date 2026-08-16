@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from decimal import Decimal, getcontext
+from decimal import Decimal, ROUND_HALF_UP, getcontext, localcontext
 
 import pytest
 
@@ -29,9 +29,9 @@ from price_collector.twap_shadow import (
 D = Decimal
 
 
-def test_model_v1_definition_is_pinned() -> None:
-    assert MODEL_VERSION == 1
-    assert WINDOW_MS == 30_000
+def test_model_v2_definition_is_pinned() -> None:
+    assert MODEL_VERSION == 2
+    assert WINDOW_MS == 60_000
     assert BASIS_WINDOW_MS == 1_800_000
     assert HORIZONS_SECONDS == (1, 3, 5, 10)
     assert dict(SOURCE_ENDPOINT_DELAYS_MS) == {
@@ -79,7 +79,7 @@ def _observe_all_sources(
 
 
 def _seed_zero_basis(model: TwapShadowModel, provider_ms: int) -> None:
-    _observe_all_sources(model, "100", provider_ms - 40_000)
+    _observe_all_sources(model, "100", provider_ms - WINDOW_MS - 10_000)
     _observe_all_sources(model, "100", provider_ms, received_ms=provider_ms + 100)
     update = model.observe_actual(
         ActualTwapObservation(
@@ -103,12 +103,13 @@ def test_time_weighted_average_is_exact_and_half_open() -> None:
     origin_ms = 100_000
     target_ms = origin_ms + 1_000
     end_ms = target_ms - SOURCE_ENDPOINT_DELAYS_MS[SOURCE_FUTURES]
-    start_ms = end_ms - 30_000
+    start_ms = end_ms - WINDOW_MS
 
     _observe_source(model, SOURCE_FUTURES, "90", start_ms - 1_000)
     _observe_source(model, SOURCE_FUTURES, "100", start_ms, sequence=1)
-    _observe_source(model, SOURCE_FUTURES, "108", start_ms + 15_000, sequence=1)
-    _observe_source(model, SOURCE_FUTURES, "110", start_ms + 15_000, sequence=2)
+    midpoint_ms = start_ms + WINDOW_MS // 2
+    _observe_source(model, SOURCE_FUTURES, "108", midpoint_ms, sequence=1)
+    _observe_source(model, SOURCE_FUTURES, "110", midpoint_ms, sequence=2)
     # The half-open interval excludes this price entirely.
     _observe_source(model, SOURCE_FUTURES, "999", end_ms)
 
@@ -128,10 +129,15 @@ def test_irregular_step_durations_are_weighted_in_milliseconds() -> None:
     origin_ms = 200_000
     target_ms = origin_ms + 1_000
     end_ms = target_ms - SOURCE_ENDPOINT_DELAYS_MS[SOURCE_CHAINLINK_SPOT]
-    start_ms = end_ms - 30_000
+    start_ms = end_ms - WINDOW_MS
 
     _observe_source(model, SOURCE_CHAINLINK_SPOT, "100", start_ms)
-    _observe_source(model, SOURCE_CHAINLINK_SPOT, "130", start_ms + 10_000)
+    _observe_source(
+        model,
+        SOURCE_CHAINLINK_SPOT,
+        "130",
+        start_ms + WINDOW_MS // 3,
+    )
     _observe_source(model, SOURCE_CHAINLINK_SPOT, "130", origin_ms)
 
     batch = model.forecast(origin_ms=origin_ms, issued_ms=origin_ms + 50)
@@ -142,7 +148,7 @@ def test_irregular_step_durations_are_weighted_in_milliseconds() -> None:
 def test_basis_sign_same_second_replacement_and_exact_eviction() -> None:
     model = TwapShadowModel()
     provider_ms = 1_000_000
-    _observe_all_sources(model, "100", provider_ms - 40_000)
+    _observe_all_sources(model, "100", provider_ms - WINDOW_MS - 10_000)
     _observe_all_sources(model, "100", provider_ms, received_ms=provider_ms + 100)
 
     first = model.observe_actual(
@@ -161,7 +167,7 @@ def test_basis_sign_same_second_replacement_and_exact_eviction() -> None:
     assert batch.source_bias_bps[SOURCE_FUTURES] == D("200.00000000")
 
     later_ms = provider_ms + BASIS_WINDOW_MS
-    _observe_all_sources(model, "100", later_ms - 40_000)
+    _observe_all_sources(model, "100", later_ms - WINDOW_MS - 10_000)
     _observe_all_sources(model, "100", later_ms, received_ms=later_ms + 10)
     model.observe_actual(
         ActualTwapObservation(D("100"), later_ms, later_ms + 500)
@@ -188,9 +194,9 @@ def test_all_horizons_use_source_delays_and_flat_hold_known_fraction() -> None:
 
     expected_known = {
         1: D("1.00000000"),
-        3: D("0.95666667"),
-        5: D("0.89000000"),
-        10: D("0.72333333"),
+        3: D("0.97833333"),
+        5: D("0.94500000"),
+        10: D("0.86166667"),
     }
     for forecast in batch.forecasts:
         assert forecast.target_second_ms == origin_ms + forecast.horizon_seconds * 1_000
@@ -201,7 +207,7 @@ def test_all_horizons_use_source_delays_and_flat_hold_known_fraction() -> None:
                 - SOURCE_ENDPOINT_DELAYS_MS[source.source]
             )
             assert source.window_end_ms == expected_end
-            assert source.window_start_ms == expected_end - 30_000
+            assert source.window_start_ms == expected_end - WINDOW_MS
 
 
 def test_cutoffs_exclude_late_receive_and_post_origin_source_events() -> None:
@@ -282,14 +288,16 @@ def test_two_source_consensus_uses_median_and_reports_spread() -> None:
     contributors = [
         item.adjusted_twap for item in horizon.sources if item.adjusted_twap is not None
     ]
-    expected_value = ((contributors[0] + contributors[1]) / D(2)).quantize(
-        PRICE_QUANTUM
-    )
-    expected_spread = (
-        (max(contributors) - min(contributors))
-        / expected_value
-        * D("10000")
-    ).quantize(BPS_QUANTUM)
+    with localcontext() as context:
+        context.prec = 80
+        expected_value = (
+            (contributors[0] + contributors[1]) / D(2)
+        ).quantize(PRICE_QUANTUM, rounding=ROUND_HALF_UP)
+        expected_spread = (
+            (max(contributors) - min(contributors))
+            / expected_value
+            * D("10000")
+        ).quantize(BPS_QUANTUM, rounding=ROUND_HALF_UP)
 
     assert horizon.source_count == 2
     assert horizon.status == "degraded"
@@ -301,7 +309,7 @@ def test_two_source_consensus_uses_median_and_reports_spread() -> None:
 def test_recent_ensemble_nowcast_error_uses_nearest_rank_p90() -> None:
     model = TwapShadowModel()
     provider_ms = 6_000_000
-    _observe_all_sources(model, "100", provider_ms - 40_000)
+    _observe_all_sources(model, "100", provider_ms - WINDOW_MS - 10_000)
 
     actual_prices = ("100", "110", "100", "125")
     updates = []

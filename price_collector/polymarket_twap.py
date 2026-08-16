@@ -21,10 +21,12 @@ from price_collector.raw_capture import (
 
 LOGGER = logging.getLogger("price_collector.polymarket_twap")
 TWAP_PROVIDER_CODE = "polymarket_chainlink_twap_rtds"
-TWAP_INSTRUMENT_SYMBOL = "BTCUSD_TWAP_30S"
-TWAP_TOPIC = "crypto_prices_twap_thirty"
+TWAP_INSTRUMENT_SYMBOL = "BTCUSD_TWAP_60S"
+TWAP_TOPIC = "crypto_prices_twap_sixty"
 TWAP_SYMBOL = "btc/usd"
-TWAP_WINDOW_SECONDS = 30
+TWAP_WINDOW_SECONDS = 60
+LEGACY_TWAP_TOPIC = "crypto_prices_twap_thirty"
+LEGACY_TWAP_WINDOW_SECONDS = 30
 TWAP_E18_DECIMAL_PLACES = 18
 TWAP_PING_SECONDS = 5.0
 TWAP_MAX_SOURCE_AGE_MS = 10_000
@@ -792,12 +794,25 @@ async def recover_orphaned_polymarket_twap_sessions(pool: Any) -> int:
                 ORDER BY event.receive_sequence DESC
                 LIMIT 1
             ) latest_event ON TRUE
-            WHERE session.topic = 'crypto_prices_twap_thirty'
-              AND session.symbol = 'btc/usd'
-              AND session.window_s = 30
+            WHERE session.symbol = $1::TEXT
+              AND (
+                    (
+                        session.topic = $2::TEXT
+                        AND session.window_s = $3::SMALLINT
+                    )
+                    OR (
+                        session.topic = $4::TEXT
+                        AND session.window_s = $5::SMALLINT
+                    )
+              )
               AND session.disconnected_wall_ns IS NULL
             ORDER BY session.connected_wall_ns ASC, session.connection_id ASC
-            """
+            """,
+            TWAP_SYMBOL,
+            LEGACY_TWAP_TOPIC,
+            LEGACY_TWAP_WINDOW_SECONDS,
+            TWAP_TOPIC,
+            TWAP_WINDOW_SECONDS,
         )
 
     recovered = 0

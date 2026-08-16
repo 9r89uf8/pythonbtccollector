@@ -71,10 +71,10 @@ def test_collector_env_example_contains_writer_credentials_only():
         "POLYMARKET_TWAP_PROVIDER_CODE=polymarket_chainlink_twap_rtds"
         in lines
     )
-    assert "POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_30S" in lines
+    assert "POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_60S" in lines
     assert "POLYMARKET_TWAP_RTD_SYMBOL=btc/usd" in lines
-    assert "POLYMARKET_TWAP_TOPIC=crypto_prices_twap_thirty" in lines
-    assert "POLYMARKET_TWAP_WINDOW_SECONDS=30" in lines
+    assert "POLYMARKET_TWAP_TOPIC=crypto_prices_twap_sixty" in lines
+    assert "POLYMARKET_TWAP_WINDOW_SECONDS=60" in lines
     assert "POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000" in lines
     assert "POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000" in lines
     assert "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5" in lines
@@ -174,7 +174,7 @@ def test_redis_server_is_documented_as_loopback_only():
     assert "0.0.0.0:6379" in readme
     assert "btc:live:binance_spot" in operations
     assert "btc:live:chainlink" in operations
-    assert "btc:live:chainlink_twap_30s" in operations
+    assert "btc:live:chainlink_twap_60s" in operations
     assert "btc:live:futures" in operations
 
 

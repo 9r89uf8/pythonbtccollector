@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS polymarket_btc_5m_resolutions (
     resolved_at_ms BIGINT,
     resolution_source TEXT,
     raw_resolution JSONB,
+    reconciled_settlement_rule_version TEXT,
 
     first_checked_ms BIGINT NOT NULL,
     last_checked_ms BIGINT NOT NULL,
@@ -240,6 +241,57 @@ CREATE TABLE IF NOT EXISTS polymarket_btc_5m_resolutions (
         )
     )
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = 'polymarket_btc_5m_resolutions'::regclass
+          AND attname = 'reconciled_settlement_rule_version'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE polymarket_btc_5m_resolutions
+            ADD COLUMN IF NOT EXISTS reconciled_settlement_rule_version TEXT;
+
+        -- Stamp pre-migration complete rows only when their stored market
+        -- metadata is an exact rule/time match.  This is deliberately inside
+        -- the one-time column migration: reapplying schema.sql must never
+        -- bless a stale resolution after market metadata has been repaired.
+        UPDATE polymarket_btc_5m_resolutions AS resolution
+        SET reconciled_settlement_rule_version = market.settlement_rule_version
+        FROM polymarket_btc_5m_markets AS market
+        JOIN market_windows AS mw ON mw.market_id = market.market_id
+        WHERE resolution.market_id = market.market_id
+          AND resolution.resolution_status = 'resolved'
+          AND resolution.resolution_type IS NOT NULL
+          AND resolution.chainlink_open_price IS NOT NULL
+          AND resolution.chainlink_close_price IS NOT NULL
+          AND (
+                (
+                    market.settlement_reference = 'chainlink_spot'
+                    AND market.settlement_rule_version = 'chainlink-spot-v1'
+                )
+                OR (
+                    mw.market_start_ms < 1786665600000
+                    AND market.settlement_reference = 'chainlink_twap'
+                    AND market.settlement_window_s = 30
+                    AND market.settlement_source_url =
+                        'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                    AND market.settlement_rule_version = 'btc-5m-twap-30'
+                )
+                OR (
+                    mw.market_start_ms >= 1786665600000
+                    AND market.settlement_reference = 'chainlink_twap'
+                    AND market.settlement_window_s = 60
+                    AND market.settlement_source_url =
+                        'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                    AND market.settlement_rule_version = 'btc-5m-twap-60'
+                )
+          );
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS polymarket_btc_5m_resolutions_due_idx
     ON polymarket_btc_5m_resolutions (next_check_ms, market_id)
@@ -1653,9 +1705,10 @@ ON CONFLICT (provider_id, symbol) DO NOTHING;
 INSERT INTO providers (provider_code, display_name)
 VALUES (
     'polymarket_chainlink_twap_rtds',
-    'Polymarket RTDS Chainlink BTC/USD 30-second TWAP'
+    'Polymarket RTDS Chainlink BTC/USD TWAP'
 )
-ON CONFLICT (provider_code) DO NOTHING;
+ON CONFLICT (provider_code)
+DO UPDATE SET display_name = EXCLUDED.display_name;
 
 INSERT INTO instruments (
     provider_id,
@@ -1670,6 +1723,23 @@ SELECT
     'BTC',
     'USD',
     'crypto_prices_twap_thirty:btc/usd'
+FROM providers
+WHERE provider_code = 'polymarket_chainlink_twap_rtds'
+ON CONFLICT (provider_id, symbol) DO NOTHING;
+
+INSERT INTO instruments (
+    provider_id,
+    symbol,
+    base_asset,
+    quote_asset,
+    stream_name
+)
+SELECT
+    provider_id,
+    'BTCUSD_TWAP_60S',
+    'BTC',
+    'USD',
+    'crypto_prices_twap_sixty:btc/usd'
 FROM providers
 WHERE provider_code = 'polymarket_chainlink_twap_rtds'
 ON CONFLICT (provider_id, symbol) DO NOTHING;

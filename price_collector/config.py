@@ -28,10 +28,10 @@ class Settings(BaseSettings):
 
     POLYMARKET_TWAP_ENABLED: bool = True
     POLYMARKET_TWAP_PROVIDER_CODE: str = "polymarket_chainlink_twap_rtds"
-    POLYMARKET_TWAP_SYMBOL: str = "BTCUSD_TWAP_30S"
+    POLYMARKET_TWAP_SYMBOL: str = "BTCUSD_TWAP_60S"
     POLYMARKET_TWAP_RTD_SYMBOL: str = "btc/usd"
-    POLYMARKET_TWAP_TOPIC: str = "crypto_prices_twap_thirty"
-    POLYMARKET_TWAP_WINDOW_SECONDS: int = Field(default=30, ge=30, le=30)
+    POLYMARKET_TWAP_TOPIC: str = "crypto_prices_twap_sixty"
+    POLYMARKET_TWAP_WINDOW_SECONDS: int = Field(default=60, ge=60, le=60)
     POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS: int = Field(
         default=10_000,
         ge=5_000,
@@ -141,10 +141,10 @@ class Settings(BaseSettings):
                 "POLYMARKET_TWAP_PROVIDER_CODE": (
                     "polymarket_chainlink_twap_rtds"
                 ),
-                "POLYMARKET_TWAP_SYMBOL": "BTCUSD_TWAP_30S",
+                "POLYMARKET_TWAP_SYMBOL": "BTCUSD_TWAP_60S",
                 "POLYMARKET_TWAP_RTD_SYMBOL": "btc/usd",
-                "POLYMARKET_TWAP_TOPIC": "crypto_prices_twap_thirty",
-                "POLYMARKET_TWAP_WINDOW_SECONDS": 30,
+                "POLYMARKET_TWAP_TOPIC": "crypto_prices_twap_sixty",
+                "POLYMARKET_TWAP_WINDOW_SECONDS": 60,
             }
             for field_name, canonical_value in canonical_twap_settings.items():
                 if getattr(self, field_name) != canonical_value:
@@ -159,7 +159,7 @@ class Settings(BaseSettings):
             )
         if self.TWAP_SHADOW_POLL_MS != 250:
             raise ValueError(
-                "TWAP_SHADOW_POLL_MS must remain 250 for model version 1"
+                "TWAP_SHADOW_POLL_MS must remain 250 for model version 2"
             )
         if self.RAW_CAPTURE_BATCH_MAX_ROWS > self.RAW_CAPTURE_QUEUE_MAX_EVENTS:
             raise ValueError(

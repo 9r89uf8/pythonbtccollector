@@ -29,6 +29,7 @@ from price_collector.live_cache import (
 from price_collector.twap_shadow import (
     BASIS_WINDOW_MS,
     DEFAULT_STALE_AFTER_MS,
+    PRELOAD_SAFETY_MS,
     SOURCE_BINANCE_SPOT,
     SOURCE_CHAINLINK_SPOT,
     SOURCE_FUTURES,
@@ -41,7 +42,9 @@ from price_collector.twap_shadow import (
 
 LOGGER = logging.getLogger("price_collector.twap_shadow_runtime")
 
-SHADOW_PRELOAD_SAFETY_MS = 45_000
+# Retain the full modeled window plus margin for source endpoint delays before
+# the earliest replayed actual. This moves with the versioned TWAP window.
+SHADOW_PRELOAD_SAFETY_MS = PRELOAD_SAFETY_MS
 SHADOW_PRELOAD_LOOKBACK_MS = BASIS_WINDOW_MS + SHADOW_PRELOAD_SAFETY_MS
 SHADOW_MIN_BASIS_SAMPLES = 60
 SHADOW_RETENTION_CHECK_SECONDS = 60.0

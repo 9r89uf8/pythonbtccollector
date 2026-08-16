@@ -604,21 +604,154 @@ def test_polymarket_resolution_db_helpers_are_retryable_and_non_regressing():
     fetch_source = inspect.getsource(db.fetch_due_polymarket_resolutions)
     upsert_source = inspect.getsource(db.upsert_polymarket_btc_5m_resolution)
     retry_source = inspect.getsource(db.schedule_polymarket_resolution_retry)
+    normalized_fetch = " ".join(fetch_source.split())
+    normalized_upsert = " ".join(upsert_source.split())
+    normalized_retry = " ".join(retry_source.split())
 
     assert "mw.market_end_ms <= $1" in fetch_source
     assert "resolution.next_check_ms <= $1" in fetch_source
     assert "resolution.resolution_status = 'pending'" in fetch_source
     assert "resolution.chainlink_open_price IS NULL" in fetch_source
     assert "resolution.chainlink_close_price IS NULL" in fetch_source
+    assert "resolution.reconciled_settlement_rule_version" in fetch_source
+    assert (
+        "resolution.reconciled_settlement_rule_version IS DISTINCT FROM "
+        "pm.settlement_rule_version"
+    ) in normalized_fetch
+    assert "AS settlement_identity_refresh_required" in normalized_fetch
     assert "ON CONFLICT (market_id)" in upsert_source
     assert "= 'resolved'" in upsert_source
     assert "EXCLUDED.resolution_status = 'resolved'" in upsert_source
     assert "EXCLUDED.last_checked_ms" in upsert_source
     assert "< polymarket_btc_5m_resolutions.last_checked_ms" in upsert_source
     assert "raw_resolution" in upsert_source
+    assert "expected_settlement_rule_version: Optional[str]" in upsert_source
+    assert "settlement_identity_validated: bool" in upsert_source
+    assert (
+        "CASE WHEN $19::BOOLEAN THEN $18::TEXT ELSE NULL END"
+        in normalized_upsert
+    )
+    for field in (
+        "resolution_status",
+        "resolution_type",
+        "chainlink_open_price",
+        "chainlink_close_price",
+        "chainlink_source",
+        "winner",
+        "winning_token_id",
+        "up_payout",
+        "down_payout",
+        "resolved_at_ms",
+        "resolution_source",
+        "raw_resolution",
+    ):
+        assert f"WHEN $19::BOOLEAN THEN EXCLUDED.{field}" in normalized_upsert
+    assert (
+        "reconciled_settlement_rule_version = CASE WHEN $19::BOOLEAN "
+        "AND $18::TEXT IS NOT NULL THEN $18::TEXT ELSE"
+    ) in normalized_upsert
     assert "ON CONFLICT (market_id)" in retry_source
     assert "GREATEST(" in retry_source
     assert "< polymarket_btc_5m_resolutions.last_checked_ms" in retry_source
+    assert (
+        "reconciled_settlement_rule_version IS DISTINCT FROM "
+        "market.settlement_rule_version"
+    ) in normalized_retry
+    assert "reconciled_settlement_rule_version =" not in normalized_retry
+
+
+def test_missing_market_scan_is_cursor_bounded_and_selects_noncanonical_rows():
+    cutover_ms = 1_786_665_600_000
+    rows = [
+        {
+            "market_id": cutover_ms // 300_000 + 1,
+            "market_start_ms": cutover_ms + 300_000,
+            "market_end_ms": cutover_ms + 600_000,
+        },
+        {
+            "market_id": cutover_ms // 300_000 + 2,
+            "market_start_ms": cutover_ms + 600_000,
+            "market_end_ms": cutover_ms + 900_000,
+        },
+    ]
+
+    class Connection:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch(self, query, *args):
+            self.calls.append((" ".join(query.split()), args))
+            return rows
+
+    class Pool:
+        def __init__(self):
+            self.connection = Connection()
+
+        def acquire(self):
+            return _FakeAsyncContext(self.connection)
+
+    pool = Pool()
+    windows = asyncio.run(
+        db.fetch_missing_polymarket_market_windows(
+            pool,
+            first_market_start_ms=cutover_ms,
+            now_ms=cutover_ms + 900_123,
+            after_market_start_ms=cutover_ms,
+            limit=2,
+        )
+    )
+
+    assert windows == [
+        MarketWindow(
+            market_id=cutover_ms // 300_000 + 1,
+            market_start_ms=cutover_ms + 300_000,
+            market_end_ms=cutover_ms + 600_000,
+        ),
+        MarketWindow(
+            market_id=cutover_ms // 300_000 + 2,
+            market_start_ms=cutover_ms + 600_000,
+            market_end_ms=cutover_ms + 900_000,
+        ),
+    ]
+    query, args = pool.connection.calls[0]
+    assert "FROM generate_series(" in query
+    assert "300000::BIGINT" in query
+    assert "LEFT JOIN polymarket_btc_5m_markets market" in query
+    assert "market.market_id IS NULL" in query
+    assert (
+        "market.settlement_reference IS DISTINCT FROM 'chainlink_twap'"
+        in query
+    )
+    assert "market.settlement_window_s IS DISTINCT FROM 60" in query
+    assert "btc-usd-twap-60s-streams" in query
+    assert "market.settlement_rule_version IS DISTINCT FROM" in query
+    assert "'btc-5m-twap-60'" in query
+    assert "$3::BIGINT IS NULL" in query
+    assert "series.market_start_ms > $3::BIGINT" in query
+    assert "ORDER BY series.market_start_ms ASC" in query
+    assert "LIMIT $4::INTEGER" in query
+    assert args == (
+        cutover_ms,
+        cutover_ms + 600_000,
+        cutover_ms,
+        2,
+    )
+
+
+def test_missing_market_window_scan_skips_when_no_cutover_market_is_complete():
+    class UnexpectedPool:
+        def acquire(self):
+            raise AssertionError("empty completed range must not query PostgreSQL")
+
+    assert asyncio.run(
+        db.fetch_missing_polymarket_market_windows(
+            UnexpectedPool(),
+            first_market_start_ms=1_786_665_600_000,
+            now_ms=1_786_665_899_999,
+            after_market_start_ms=None,
+            limit=20,
+        )
+    ) == []
 
 
 def test_fetch_recent_market_windows_uses_time_cursor_and_real_observations():
@@ -686,8 +819,31 @@ def test_fetch_recent_market_windows_uses_time_cursor_and_real_observations():
     assert "ORDER BY mw.market_id DESC LIMIT $4::INTEGER" in normalized_query
     assert normalized_query.count("OR EXISTS") == 4
     assert "FROM price_samples" in normalized_query
-    assert "AS twap_id" in normalized_query
+    assert "AS twap_30_id" in normalized_query
+    assert "AS twap_60_id" in normalized_query
     assert "AS twap_sample_count" in normalized_query
+    assert "'BTCUSD_TWAP_30S'" in normalized_query
+    assert "'BTCUSD_TWAP_60S'" in normalized_query
+    assert "ids.twap_30_id" in normalized_query
+    assert "ids.twap_60_id" in normalized_query
+    assert "END AS settlement_twap_id" in normalized_query
+    assert (
+        "WHERE ps.instrument_id = candidates.settlement_twap_id"
+        in normalized_query
+    )
+    compact_query = normalized_query.replace(" ", "")
+    assert (
+        "ps.instrument_idIN(ids.twap_30_id,ids.twap_60_id)"
+        not in compact_query
+    )
+    assert "mw.market_start_ms < 1786665600000" in normalized_query
+    assert "mw.market_start_ms >= 1786665600000" in normalized_query
+    assert "pm.settlement_window_s = 30" in normalized_query
+    assert "pm.settlement_window_s = 60" in normalized_query
+    assert "btc-usd-twap-30s-streams" in normalized_query
+    assert "btc-usd-twap-60s-streams" in normalized_query
+    assert "pm.settlement_rule_version = 'btc-5m-twap-30'" in normalized_query
+    assert "pm.settlement_rule_version = 'btc-5m-twap-60'" in normalized_query
     assert "FROM binance_futures_snapshots" in normalized_query
     assert "FROM binance_flow_1s" in normalized_query
     assert "FROM binance_book_1s" in normalized_query
@@ -768,6 +924,8 @@ def test_schema_persists_exact_twap_events_sessions_gaps_and_distinct_seed():
     assert "'polymarket_chainlink_twap_rtds'" in schema
     assert "'BTCUSD_TWAP_30S'" in schema
     assert "'crypto_prices_twap_thirty:btc/usd'" in schema
+    assert "'BTCUSD_TWAP_60S'" in schema
+    assert "'crypto_prices_twap_sixty:btc/usd'" in schema
 
 
 def test_twap_shadow_schema_is_decimal_target_keyed_and_role_separated():
@@ -816,9 +974,9 @@ def test_persist_twap_shadow_batch_is_decimal_and_first_forecast_wins():
         def acquire(self):
             return _FakeAsyncContext(self.connection)
 
-    target_ms = 1_783_459_251_000
+    target_ms = 1_786_665_651_000
     batch = SimpleNamespace(
-        model_version=1,
+        model_version=2,
         generated_ms=target_ms - 950,
         forecasts=(
             SimpleNamespace(
@@ -843,7 +1001,7 @@ def test_persist_twap_shadow_batch_is_decimal_and_first_forecast_wins():
     assert "h1_price = EXCLUDED.h1_price" in query
     assert "WHERE chainlink_twap_shadow_predictions.h1_price IS NULL" in query
     assert args[0] == target_ms
-    assert args[1] == 1
+    assert args[1] == 2
     assert args[3] == Decimal("62066.123456789012345678")
     assert args[5] == Decimal("1")
     assert args[7] == Decimal("0.75")
@@ -861,11 +1019,29 @@ def test_twap_shadow_preload_and_history_use_causal_exact_twap_seconds():
     assert "event.sample_second_ms AS provider_event_ms" in preload_source
     assert "event.received_wall_ns <= $2::BIGINT * 1000000" in preload_source
     assert "event.received_wall_ns ASC" in preload_source
+    assert "event.topic = 'crypto_prices_twap_sixty'" in preload_source
+    assert "event.window_s = 60" in preload_source
     assert "generate_series" in history_source
     assert "FROM polymarket_twap_events event" in history_source
     assert "event.topic = 'crypto_prices_twap_thirty'" in history_source
+    assert "event.window_s = 30" in history_source
+    assert "event.topic = 'crypto_prices_twap_sixty'" in history_source
+    assert "event.window_s = 60" in history_source
+    assert "$3::SMALLINT = 1" in history_source
+    assert "$3::SMALLINT >= 2" in history_source
     assert "DISTINCT ON (event.sample_second_ms)" in history_source
     assert "actual.sample_second_ms = target.target_second_ms" in history_source
+
+
+def test_twap_shadow_preload_rejects_lookback_shorter_than_v2_safety_window():
+    with pytest.raises(ValueError, match="lookback_ms must be at least 75000"):
+        asyncio.run(
+            db.fetch_twap_shadow_preload(
+                object(),
+                cutoff_received_ms=1_000_000,
+                lookback_ms=db.PRELOAD_SAFETY_MS - 1,
+            )
+        )
 
 
 def test_twap_shadow_retention_is_bounded_and_target_time_ordered():
@@ -928,8 +1104,8 @@ def test_record_twap_event_is_atomic_append_plus_latest_second_materialization()
             return _FakeAsyncContext(self.connection)
 
     connection_id = UUID("12345678-1234-5678-1234-567812345678")
-    event_ms = 1_783_459_200_987
-    sample_second_ms = 1_783_459_200_000
+    event_ms = 1_786_665_600_987
+    sample_second_ms = 1_786_665_600_000
     price_e18 = 63_337_115_841_440_165_000_000
     asyncio.run(
         db.record_polymarket_twap_event(
@@ -937,9 +1113,9 @@ def test_record_twap_event_is_atomic_append_plus_latest_second_materialization()
             instrument_id=7,
             connection_id=connection_id,
             receive_sequence=9,
-            topic="crypto_prices_twap_thirty",
+            topic="crypto_prices_twap_sixty",
             symbol="btc/usd",
-            window_s=30,
+            window_s=60,
             provider_event_ms=event_ms,
             provider_message_ms=event_ms + 10,
             received_wall_ns=(event_ms + 20) * 1_000_000 + 123,
@@ -959,7 +1135,10 @@ def test_record_twap_event_is_atomic_append_plus_latest_second_materialization()
     assert "INSERT INTO market_windows" in calls[0][0]
     assert "INSERT INTO polymarket_twap_events" in calls[1][0]
     assert "ON CONFLICT (connection_id, receive_sequence) DO NOTHING" in calls[1][0]
+    assert calls[1][1][3] == "crypto_prices_twap_sixty"
+    assert calls[1][1][5] == 60
     assert calls[1][1][12] == Decimal(price_e18)
+    assert calls[1][1][13] == Decimal("63337.115841440165")
     assert "INSERT INTO price_samples" in calls[2][0]
     assert "'payload.full_accuracy_value'" in calls[2][0]
     assert "EXCLUDED.provider_event_ms" in calls[2][0]
@@ -974,6 +1153,12 @@ def test_schema_includes_polymarket_probability_tables():
     assert "CREATE TABLE IF NOT EXISTS polymarket_probability_samples" in schema
     assert "chainlink_open_price NUMERIC(38, 18)" in schema
     assert "chainlink_close_price NUMERIC(38, 18)" in schema
+    assert "reconciled_settlement_rule_version TEXT" in schema
+    assert (
+        "ADD COLUMN IF NOT EXISTS reconciled_settlement_rule_version TEXT"
+        in schema
+    )
+    assert "SET reconciled_settlement_rule_version =" in schema
     assert "resolution_status IN ('pending', 'resolved')" in schema
     assert "resolution_type IS NULL OR resolution_type IN ('winner', 'split')" in schema
     assert "AND resolution_type IS NOT NULL" in schema
@@ -1099,7 +1284,7 @@ def test_schema_isolates_partitioned_raw_capture_tables_from_api_reader():
     assert "DEFAULT PARTITION" not in schema
 
 
-def test_build_market_sources_summary_returns_both_btc_sources():
+def test_build_market_sources_summary_returns_all_market_price_sources():
     market_start_at = datetime(2026, 7, 7, 21, 0, 0, tzinfo=timezone.utc)
     market_end_at = datetime(2026, 7, 7, 21, 5, 0, tzinfo=timezone.utc)
     rows = [
@@ -1159,6 +1344,20 @@ def test_build_market_sources_summary_returns_both_btc_sources():
             "provider_event_ms": 1_783_459_202_999,
             "received_ms": 1_783_459_203_020,
         },
+        {
+            "provider": "polymarket_chainlink_twap_rtds",
+            "symbol": "BTCUSD_TWAP_30S",
+            "quote_asset": "USD",
+            "market_id": 5_944_864,
+            "market_start_ms": 1_783_459_200_000,
+            "market_end_ms": 1_783_459_500_000,
+            "market_start_at": market_start_at,
+            "market_end_at": market_end_at,
+            "sample_second_ms": 1_783_459_202_000,
+            "price": Decimal("123440.123456789012345678"),
+            "provider_event_ms": 1_783_459_202_123,
+            "received_ms": 1_783_459_204_020,
+        },
     ]
 
     summary = db.build_market_sources_summary(rows)
@@ -1168,6 +1367,7 @@ def test_build_market_sources_summary_returns_both_btc_sources():
     assert [source["provider"] for source in summary["sources"]] == [
         "binance_spot",
         "polymarket_chainlink_rtds",
+        "polymarket_chainlink_twap_rtds",
     ]
     assert summary["sources"][0]["symbol"] == "BTCUSDT"
     assert summary["sources"][0]["sample_count"] == 2
@@ -1177,6 +1377,27 @@ def test_build_market_sources_summary_returns_both_btc_sources():
     assert summary["sources"][1]["sample_count"] == 2
     assert summary["sources"][1]["latest_sample_second_ms"] == 1_783_459_202_000
     assert summary["sources"][1]["latest_provider_event_ms"] == 1_783_459_202_999
+    assert summary["sources"][2]["symbol"] == "BTCUSD_TWAP_30S"
+    assert summary["sources"][2]["sample_count"] == 1
+
+
+def test_market_sources_query_selects_twap_instrument_from_settlement_identity():
+    source = inspect.getsource(db.fetch_market_summaries_for_btc_sources)
+
+    for expected in (
+        "BTCUSD_TWAP_30S",
+        "BTCUSD_TWAP_60S",
+        "btc-usd-twap-30s-streams",
+        "btc-usd-twap-60s-streams",
+        "btc-5m-twap-30",
+        "btc-5m-twap-60",
+        "market.settlement_window_s = 30",
+        "market.settlement_window_s = 60",
+        "market.market_id * 300000 < 1786665600000",
+        "market.market_id * 300000 >= 1786665600000",
+    ):
+        assert expected in source
+    assert "i.symbol = CASE" in source
 
 
 def market_download_rows():
@@ -1767,6 +1988,17 @@ def test_fetch_market_download_payload_query_includes_optional_futures_joins():
     assert "book.spread_bps AS book_spread_bps" in source
     assert "LEFT JOIN flow ON flow.sample_second_ms = s.sample_second_ms" in source
     assert "LEFT JOIN book ON book.sample_second_ms = s.sample_second_ms" in source
+    assert "i.symbol = CASE" in source
+    assert "THEN 'BTCUSD_TWAP_30S'" in source
+    assert "THEN 'BTCUSD_TWAP_60S'" in source
+    assert "market.settlement_window_s = 30" in source
+    assert "market.settlement_window_s = 60" in source
+    assert "btc-usd-twap-30s-streams" in source
+    assert "btc-usd-twap-60s-streams" in source
+    assert "btc-5m-twap-30" in source
+    assert "btc-5m-twap-60" in source
+    assert "market.market_id * 300000 < 1786665600000" in source
+    assert "market.market_id * 300000 >= 1786665600000" in source
     assert "f.sample_second_ms - 30000" in source
     assert "f.sample_second_ms - 60000" in source
     assert "f.sample_second_ms - 300000" in source

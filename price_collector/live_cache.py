@@ -14,6 +14,7 @@ from price_collector.binance_microstructure import (
     SCHEMA_VERSION as MICROSTRUCTURE_SCHEMA_VERSION,
 )
 from price_collector.market import MarketWindow
+from price_collector.twap_shadow import MODEL_VERSION as TWAP_SHADOW_MODEL_VERSION
 
 
 LOGGER = logging.getLogger("price_collector.live_cache")
@@ -23,7 +24,7 @@ _last_shadow_decode_warning_ns: Optional[int] = None
 
 BINANCE_SPOT_LIVE_KEY = "btc:live:binance_spot"
 CHAINLINK_LIVE_KEY = "btc:live:chainlink"
-TWAP_LIVE_KEY = "btc:live:chainlink_twap_30s"
+TWAP_LIVE_KEY = "btc:live:chainlink_twap_60s"
 TWAP_SHADOW_LIVE_KEY = "btc:live:chainlink_twap_shadow"
 FUTURES_LIVE_KEY = "btc:live:futures"
 MICROSTRUCTURE_LIVE_KEY = "btc:live:microstructure"
@@ -940,7 +941,10 @@ async def build_current_live_payload(
     )
 
     serialized_shadow = None
-    if shadow is not None:
+    if (
+        shadow is not None
+        and int(shadow["model_version"]) == TWAP_SHADOW_MODEL_VERSION
+    ):
         serialized_shadow = dict(shadow)
         serialized_shadow["generated_age_ms"] = age_ms(
             server_time_ms,

@@ -22,12 +22,16 @@ from price_collector.config import Settings
 from price_collector.db import (
     create_pool,
     fetch_due_polymarket_resolutions,
+    fetch_missing_polymarket_market_windows,
     schedule_polymarket_resolution_retry,
     upsert_polymarket_btc_5m_market,
     upsert_polymarket_btc_5m_resolution,
     upsert_polymarket_probability_sample,
 )
-from price_collector.flip_research import flip_evaluator_loop
+from price_collector.flip_research import (
+    TWAP_60S_CUTOVER_MS,
+    flip_evaluator_loop,
+)
 from price_collector.market import MarketWindow, market_for_sample_second
 
 
@@ -37,10 +41,36 @@ SETTLEMENT_REFERENCE_CHAINLINK_TWAP = "chainlink_twap"
 SETTLEMENT_REFERENCE_CHAINLINK_SPOT = "chainlink_spot"
 SETTLEMENT_REFERENCE_UNKNOWN = "unknown"
 LEGACY_SPOT_RULE_VERSION = "chainlink-spot-v1"
-SUPPORTED_TWAP_WINDOW_SECONDS = 30
-SUPPORTED_TWAP_RULE_VERSION = "btc-5m-twap-30"
-SUPPORTED_TWAP_SOURCE_URL = (
+LEGACY_TWAP_WINDOW_SECONDS = 30
+LEGACY_TWAP_RULE_VERSION = "btc-5m-twap-30"
+LEGACY_TWAP_SOURCE_URL = (
     "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+)
+CURRENT_TWAP_WINDOW_SECONDS = 60
+CURRENT_TWAP_RULE_VERSION = "btc-5m-twap-60"
+CURRENT_TWAP_SOURCE_URL = (
+    "https://data.chain.link/streams/btc-usd-twap-60s-streams"
+)
+
+# These aliases remain the single current rule used by discovery and storage.
+SUPPORTED_TWAP_WINDOW_SECONDS = CURRENT_TWAP_WINDOW_SECONDS
+SUPPORTED_TWAP_RULE_VERSION = CURRENT_TWAP_RULE_VERSION
+SUPPORTED_TWAP_SOURCE_URL = CURRENT_TWAP_SOURCE_URL
+
+LEGACY_TWAP_SETTLEMENT_RULE = (
+    SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+    LEGACY_TWAP_WINDOW_SECONDS,
+    LEGACY_TWAP_SOURCE_URL,
+    LEGACY_TWAP_RULE_VERSION,
+)
+CURRENT_TWAP_SETTLEMENT_RULE = (
+    SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+    CURRENT_TWAP_WINDOW_SECONDS,
+    CURRENT_TWAP_SOURCE_URL,
+    CURRENT_TWAP_RULE_VERSION,
+)
+RECOGNIZED_TWAP_SETTLEMENT_RULES = frozenset(
+    (LEGACY_TWAP_SETTLEMENT_RULE, CURRENT_TWAP_SETTLEMENT_RULE)
 )
 
 
@@ -502,12 +532,16 @@ def parse_market_settlement_rule(
     )
 
     normalized_source = source_url.lower() if source_url is not None else None
+    twap_rule = (
+        SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
+        window_s,
+        normalized_source,
+        rule_version,
+    )
     if (
         len(source_values) == 1
         and len(config_id_values) == 1
-        and normalized_source == SUPPORTED_TWAP_SOURCE_URL
-        and rule_version == SUPPORTED_TWAP_RULE_VERSION
-        and window_s == SUPPORTED_TWAP_WINDOW_SECONDS
+        and twap_rule in RECOGNIZED_TWAP_SETTLEMENT_RULES
         and asset is not None
         and asset.strip().lower() == "btc"
         and duration is not None
@@ -540,6 +574,31 @@ def parse_market_settlement_rule(
     else:
         reference = SETTLEMENT_REFERENCE_UNKNOWN
     return reference, window_s, source_url, rule_version
+
+
+def expected_twap_settlement_rule(
+    market_start_ms: int,
+) -> tuple[str, int, str, str]:
+    """Return the exact settlement identity in force at a market boundary."""
+
+    if not isinstance(market_start_ms, int) or isinstance(market_start_ms, bool):
+        raise TypeError("market_start_ms must be an integer")
+    if market_start_ms < 0:
+        raise ValueError("market_start_ms must be non-negative")
+    if market_start_ms < TWAP_60S_CUTOVER_MS:
+        return LEGACY_TWAP_SETTLEMENT_RULE
+    return CURRENT_TWAP_SETTLEMENT_RULE
+
+
+def _uses_expected_twap_settlement_rule(
+    market: CurrentPolymarketMarket,
+) -> bool:
+    return (
+        market.settlement_reference,
+        market.settlement_window_s,
+        market.settlement_source_url,
+        market.settlement_rule_version,
+    ) == expected_twap_settlement_rule(market.window.market_start_ms)
 
 
 def extract_up_down_tokens(
@@ -708,23 +767,23 @@ async def discover_current_polymarket_market(
         except GammaDiscoveryError:
             current_market = None
         else:
-            if (
-                current_market.settlement_reference
-                != SETTLEMENT_REFERENCE_CHAINLINK_TWAP
-                or current_market.settlement_window_s
-                != SUPPORTED_TWAP_WINDOW_SECONDS
-                or current_market.settlement_rule_version
-                != SUPPORTED_TWAP_RULE_VERSION
-            ):
+            if not _uses_expected_twap_settlement_rule(current_market):
+                expected_rule = expected_twap_settlement_rule(
+                    current_market.window.market_start_ms
+                )
                 raise GammaDiscoveryError(
-                    "market does not use the supported BTC 5m 30-second TWAP rule"
+                    "market does not use the expected BTC 5m "
+                    f"{expected_rule[1]}-second TWAP rule"
                 )
             await store_current_market(pool, current_market, seen_ms=seen_ms)
             return current_market
 
+    fallback_params = {"slug": slug}
+    if window.market_end_ms > seen_ms:
+        fallback_params.update({"active": "true", "closed": "false"})
     response = await client.get(
         f"{base_url}/markets",
-        params={"slug": slug, "active": "true", "closed": "false"},
+        params=fallback_params,
     )
     response.raise_for_status()
     current_market = parse_current_market_from_gamma(
@@ -732,14 +791,13 @@ async def discover_current_polymarket_market(
         window=window,
         slug=slug,
     )
-    if (
-        current_market.settlement_reference
-        != SETTLEMENT_REFERENCE_CHAINLINK_TWAP
-        or current_market.settlement_window_s != SUPPORTED_TWAP_WINDOW_SECONDS
-        or current_market.settlement_rule_version != SUPPORTED_TWAP_RULE_VERSION
-    ):
+    if not _uses_expected_twap_settlement_rule(current_market):
+        expected_rule = expected_twap_settlement_rule(
+            current_market.window.market_start_ms
+        )
         raise GammaDiscoveryError(
-            "market does not use the supported BTC 5m 30-second TWAP rule"
+            "market does not use the expected BTC 5m "
+            f"{expected_rule[1]}-second TWAP rule"
         )
     await store_current_market(pool, current_market, seen_ms=seen_ms)
     return current_market
@@ -751,14 +809,13 @@ async def store_current_market(
     *,
     seen_ms: int,
 ) -> None:
-    if (
-        current_market.settlement_reference
-        != SETTLEMENT_REFERENCE_CHAINLINK_TWAP
-        or current_market.settlement_window_s != SUPPORTED_TWAP_WINDOW_SECONDS
-        or current_market.settlement_rule_version != SUPPORTED_TWAP_RULE_VERSION
-    ):
+    if not _uses_expected_twap_settlement_rule(current_market):
+        expected_rule = expected_twap_settlement_rule(
+            current_market.window.market_start_ms
+        )
         raise GammaDiscoveryError(
-            "refusing to store a market without the supported 30-second TWAP rule"
+            "refusing to store a market without the expected "
+            f"{expected_rule[1]}-second TWAP rule"
         )
     await upsert_polymarket_btc_5m_market(
         pool,
@@ -916,6 +973,7 @@ def parse_polymarket_resolution(
     expected_settlement_window_s: Optional[int] = None,
     expected_settlement_source_url: Optional[str] = None,
     expected_settlement_rule_version: Optional[str] = None,
+    expected_market_start_ms: Optional[int] = None,
 ) -> PolymarketResolution:
     event, market = _find_gamma_resolution_market(
         gamma_data,
@@ -925,16 +983,19 @@ def parse_polymarket_resolution(
     )
 
     canonical_rule = parse_market_settlement_rule(event, market)
-    supported_rule = (
-        SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
-        SUPPORTED_TWAP_WINDOW_SECONDS,
-        SUPPORTED_TWAP_SOURCE_URL,
-        SUPPORTED_TWAP_RULE_VERSION,
-    )
-    if canonical_rule != supported_rule:
+    if canonical_rule not in RECOGNIZED_TWAP_SETTLEMENT_RULES:
         raise ResolutionParseError(
-            "canonical Gamma market no longer has the supported BTC 5m "
-            "30-second TWAP settlement rule"
+            "canonical Gamma market no longer has a recognized BTC 5m "
+            "TWAP settlement rule"
+        )
+    if (
+        expected_market_start_ms is not None
+        and canonical_rule
+        != expected_twap_settlement_rule(expected_market_start_ms)
+    ):
+        raise ResolutionParseError(
+            "canonical Gamma settlement rule contradicts the rule in force "
+            "at the market boundary"
         )
     expected_rule = (
         expected_settlement_reference,
@@ -942,7 +1003,10 @@ def parse_polymarket_resolution(
         expected_settlement_source_url,
         expected_settlement_rule_version,
     )
-    if any(value is not None for value in expected_rule) and expected_rule != canonical_rule:
+    if (
+        any(value is not None for value in expected_rule)
+        and expected_rule != canonical_rule
+    ):
         raise ResolutionParseError(
             "canonical Gamma settlement rule contradicts the discovered rule"
         )
@@ -1112,6 +1176,11 @@ async def fetch_polymarket_resolution(
         expected_settlement_window_s=market.get("settlement_window_s"),
         expected_settlement_source_url=market.get("settlement_source_url"),
         expected_settlement_rule_version=market.get("settlement_rule_version"),
+        expected_market_start_ms=int(
+            market.get("market_start_ms")
+            if market.get("market_start_ms") is not None
+            else int(market["market_id"]) * 300_000
+        ),
     )
 
 
@@ -1173,6 +1242,8 @@ async def persist_websocket_resolution(
         resolved_at_ms=state.resolution_event_ms,
         resolution_source="polymarket_clob_ws",
         raw_resolution={"websocket": state.raw_resolution_event},
+        expected_settlement_rule_version=current_market.settlement_rule_version,
+        settlement_identity_validated=False,
         checked_ms=checked_ms,
         next_check_ms=(
             checked_ms
@@ -1240,6 +1311,8 @@ async def reconcile_polymarket_resolution_once(
         resolved_at_ms=resolution.resolved_at_ms,
         resolution_source=resolution.resolution_source,
         raw_resolution=resolution.raw_resolution,
+        expected_settlement_rule_version=market.get("settlement_rule_version"),
+        settlement_identity_validated=resolution.is_complete,
         checked_ms=checked_ms,
         next_check_ms=next_check_ms,
         resolution_attempts=attempt,
@@ -1258,13 +1331,106 @@ async def reconcile_polymarket_resolution_once(
     return resolution.is_complete
 
 
+async def backfill_missing_polymarket_markets_once(
+    *,
+    settings: Settings,
+    pool: Any,
+    client: httpx.AsyncClient,
+    now_ms: int,
+    after_market_start_ms: Optional[int],
+    limit: int,
+) -> tuple[int, int, Optional[int]]:
+    """Backfill canonical metadata only; never invent historical samples."""
+
+    windows = await fetch_missing_polymarket_market_windows(
+        pool,
+        first_market_start_ms=TWAP_60S_CUTOVER_MS,
+        now_ms=now_ms,
+        after_market_start_ms=after_market_start_ms,
+        limit=limit,
+    )
+    stored = 0
+    for window in windows:
+        try:
+            market = await discover_current_polymarket_market(
+                settings,
+                pool,
+                client,
+                window,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.warning(
+                "polymarket_market_metadata_backfill_failed",
+                extra={
+                    "event": "polymarket_market_metadata_backfill_failed",
+                    "market_id": window.market_id,
+                    "error": repr(exc),
+                },
+            )
+            continue
+        stored += 1
+        LOGGER.info(
+            "polymarket_market_metadata_backfilled",
+            extra={
+                "event": "polymarket_market_metadata_backfilled",
+                "market_id": window.market_id,
+                "slug": market.slug,
+            },
+        )
+    last_scanned_ms = windows[-1].market_start_ms if windows else None
+    return len(windows), stored, last_scanned_ms
+
+
 async def _resolution_reconciler_session(settings: Settings, pool: Any) -> None:
     poll_seconds = max(1, int(settings.POLYMARKET_RESOLUTION_POLL_SECONDS))
     batch_size = max(1, int(settings.POLYMARKET_RESOLUTION_BATCH_SIZE))
 
+    next_backfill_scan_ms = 0
+    backfill_cursor_ms: Optional[int] = None
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             now_ms = current_utc_epoch_ms()
+            if now_ms >= next_backfill_scan_ms:
+                try:
+                    attempted, stored, last_scanned_ms = (
+                        await backfill_missing_polymarket_markets_once(
+                            settings=settings,
+                            pool=pool,
+                            client=client,
+                            now_ms=now_ms,
+                            after_market_start_ms=backfill_cursor_ms,
+                            limit=batch_size,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    attempted = 0
+                    stored = 0
+                    last_scanned_ms = None
+                    LOGGER.warning(
+                        "polymarket_market_metadata_backfill_scan_failed",
+                        extra={
+                            "event": (
+                                "polymarket_market_metadata_backfill_scan_failed"
+                            ),
+                            "error": repr(exc),
+                        },
+                    )
+                if attempted > 0:
+                    backfill_cursor_ms = last_scanned_ms
+                else:
+                    # Wrap after reaching the end so failed or contradictory
+                    # windows are retried without starving later windows.
+                    backfill_cursor_ms = None
+                quick_retry = attempted > 0
+                next_backfill_scan_ms = now_ms + (
+                    poll_seconds * 1_000
+                    if quick_retry
+                    else max(60, poll_seconds) * 1_000
+                )
             try:
                 markets = await fetch_due_polymarket_resolutions(
                     pool,

@@ -62,7 +62,7 @@ def microstructure_cache_row(**updates):
 
 
 def twap_shadow_snapshot(**updates):
-    origin_second_ms = 1_783_459_250_000
+    origin_second_ms = 1_786_665_650_000
     predictions = {}
     for horizon in (1, 3, 5, 10):
         target_second_ms = origin_second_ms + horizon * 1_000
@@ -79,7 +79,7 @@ def twap_shadow_snapshot(**updates):
         }
     snapshot = {
         "schema_version": 1,
-        "model_version": 1,
+        "model_version": 2,
         "origin_second_ms": origin_second_ms,
         "generated_ms": origin_second_ms + 58,
         "basis_window_seconds": 1_800,
@@ -111,6 +111,16 @@ def test_twap_shadow_snapshot_round_trips_exact_decimal_strings():
     assert json.loads(encoded)["predictions"]["h1"]["value"] == (
         "62066.123456789012345678"
     )
+
+    legacy = twap_shadow_snapshot(model_version=1)
+    assert decode_twap_shadow_snapshot(
+        encode_twap_shadow_snapshot(legacy)
+    ) == legacy
+
+
+def test_current_twap_live_key_names_the_sixty_second_feed():
+    assert TWAP_LIVE_KEY == "btc:live:chainlink_twap_60s"
+    assert TWAP_LIVE_KEY != "btc:live:chainlink_twap_30s"
 
 
 def test_twap_shadow_snapshot_rejects_binary_float_financial_values():
@@ -496,35 +506,35 @@ def test_build_current_live_payload_returns_sources_and_shadow_in_one_read():
     redis = FakeRedis()
     cache = LiveCache(redis_client=redis)
     window = MarketWindow(
-        market_id=5_944_864,
-        market_start_ms=1_783_459_200_000,
-        market_end_ms=1_783_459_500_000,
+        market_id=5_955_552,
+        market_start_ms=1_786_665_600_000,
+        market_end_ms=1_786_665_900_000,
     )
 
     async def run():
         await cache.set_price(
             BINANCE_SPOT_LIVE_KEY,
             value=Decimal("62067.89"),
-            source_timestamp_ms=1_783_459_250_000,
-            received_ms=1_783_459_250_050,
+            source_timestamp_ms=1_786_665_650_000,
+            received_ms=1_786_665_650_050,
         )
         await cache.set_price(
             CHAINLINK_LIVE_KEY,
             value=Decimal("62066.12"),
-            source_timestamp_ms=1_783_459_249_900,
-            received_ms=1_783_459_250_075,
+            source_timestamp_ms=1_786_665_649_900,
+            received_ms=1_786_665_650_075,
         )
         await cache.set_price(
             TWAP_LIVE_KEY,
             value=Decimal("62065.987654321098765432"),
-            source_timestamp_ms=1_783_459_249_910,
-            received_ms=1_783_459_250_080,
+            source_timestamp_ms=1_786_665_649_910,
+            received_ms=1_786_665_650_080,
         )
         await cache.set_price(
             FUTURES_LIVE_KEY,
             value=Decimal("62070.11"),
-            source_timestamp_ms=1_783_459_249_950,
-            received_ms=1_783_459_250_090,
+            source_timestamp_ms=1_786_665_649_950,
+            received_ms=1_786_665_650_090,
         )
         await cache.set_twap_shadow_snapshot(
             TWAP_SHADOW_LIVE_KEY,
@@ -533,7 +543,7 @@ def test_build_current_live_payload_returns_sources_and_shadow_in_one_read():
         return await build_current_live_payload(
             cache,
             window=window,
-            server_time_ms=1_783_459_250_123,
+            server_time_ms=1_786_665_650_123,
         )
 
     payload = asyncio.run(run())
@@ -558,25 +568,26 @@ def test_build_current_live_payload_returns_sources_and_shadow_in_one_read():
     }
     assert payload["prices"]["binance_spot"] == {
         "value": "62067.89",
-        "source_timestamp_ms": 1_783_459_250_000,
-        "received_ms": 1_783_459_250_050,
+        "source_timestamp_ms": 1_786_665_650_000,
+        "received_ms": 1_786_665_650_050,
         "source_age_ms": 123,
         "received_age_ms": 73,
-        "provider_event_ms": 1_783_459_250_000,
+        "provider_event_ms": 1_786_665_650_000,
     }
     assert payload["prices"]["chainlink"]["source_age_ms"] == 223
     assert payload["prices"]["chainlink"]["received_age_ms"] == 48
     assert payload["prices"]["twap"] == {
         "value": "62065.987654321098765432",
-        "source_timestamp_ms": 1_783_459_249_910,
-        "received_ms": 1_783_459_250_080,
+        "source_timestamp_ms": 1_786_665_649_910,
+        "received_ms": 1_786_665_650_080,
         "source_age_ms": 213,
         "received_age_ms": 43,
-        "provider_event_ms": 1_783_459_249_910,
+        "provider_event_ms": 1_786_665_649_910,
     }
     assert payload["futures"]["last"]["source_age_ms"] == 173
     assert payload["futures"]["last"]["received_age_ms"] == 33
-    assert payload["futures"]["last"]["time_ms"] == 1_783_459_249_950
+    assert payload["futures"]["last"]["time_ms"] == 1_786_665_649_950
+    assert payload["twap_shadow"]["model_version"] == 2
     assert payload["twap_shadow"]["predictions"]["h1"]["value"] == (
         "62066.123456789012345678"
     )
@@ -588,11 +599,11 @@ def test_build_current_live_payload_serializes_missing_sources_as_nulls():
         build_current_live_payload(
             LiveCache(redis_client=FakeRedis()),
             window=MarketWindow(
-                market_id=5_944_864,
-                market_start_ms=1_783_459_200_000,
-                market_end_ms=1_783_459_500_000,
+                market_id=5_955_552,
+                market_start_ms=1_786_665_600_000,
+                market_end_ms=1_786_665_900_000,
             ),
-            server_time_ms=1_783_459_250_123,
+            server_time_ms=1_786_665_650_123,
         )
     )
 
@@ -613,6 +624,27 @@ def test_build_current_live_payload_serializes_missing_sources_as_nulls():
         "provider_event_ms": None,
     }
     assert payload["futures"]["last"]["value"] is None
+    assert payload["twap_shadow"] is None
+
+
+def test_build_current_live_payload_hides_legacy_model_v1_shadow():
+    redis = FakeRedis()
+    redis.data[TWAP_SHADOW_LIVE_KEY] = encode_twap_shadow_snapshot(
+        twap_shadow_snapshot(model_version=1)
+    )
+
+    payload = asyncio.run(
+        build_current_live_payload(
+            LiveCache(redis_client=redis),
+            window=MarketWindow(
+                market_id=5_955_552,
+                market_start_ms=1_786_665_600_000,
+                market_end_ms=1_786_665_900_000,
+            ),
+            server_time_ms=1_786_665_650_123,
+        )
+    )
+
     assert payload["twap_shadow"] is None
 
 
