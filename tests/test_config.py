@@ -3,6 +3,7 @@ import pytest
 from pydantic import ValidationError
 
 from price_collector.config import Settings
+from price_collector.flip_research import TWAP_60S_CUTOVER_MS
 
 
 def test_settings_allows_api_reader_url_without_writer_url(monkeypatch):
@@ -74,6 +75,74 @@ def test_settings_include_polymarket_twap_defaults(monkeypatch):
     assert settings.POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS == 10_000
     assert settings.POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS == 10_000
     assert settings.POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS == 5
+
+
+def test_settings_default_market_backfill_start_is_immutable_twap_cutover(
+    monkeypatch,
+):
+    monkeypatch.delenv("POLYMARKET_MARKET_BACKFILL_START_MS", raising=False)
+
+    settings = Settings()
+
+    assert TWAP_60S_CUTOVER_MS == 1_786_665_600_000
+    assert (
+        settings.POLYMARKET_MARKET_BACKFILL_START_MS
+        == TWAP_60S_CUTOVER_MS
+    )
+
+
+@pytest.mark.parametrize(
+    "start_ms",
+    (-300_000, -1, 0, TWAP_60S_CUTOVER_MS - 300_000),
+)
+def test_settings_reject_market_backfill_start_before_rule_cutover(
+    monkeypatch,
+    start_ms,
+):
+    monkeypatch.setenv("POLYMARKET_MARKET_BACKFILL_START_MS", str(start_ms))
+
+    with pytest.raises(
+        ValidationError,
+        match="POLYMARKET_MARKET_BACKFILL_START_MS",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "start_ms",
+    (
+        TWAP_60S_CUTOVER_MS + 1,
+        TWAP_60S_CUTOVER_MS + 299_999,
+        TWAP_60S_CUTOVER_MS + 300_001,
+    ),
+)
+def test_settings_reject_unaligned_market_backfill_start(
+    monkeypatch,
+    start_ms,
+):
+    monkeypatch.setenv("POLYMARKET_MARKET_BACKFILL_START_MS", str(start_ms))
+
+    with pytest.raises(
+        ValidationError,
+        match="POLYMARKET_MARKET_BACKFILL_START_MS",
+    ):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "start_ms",
+    (
+        TWAP_60S_CUTOVER_MS,
+        TWAP_60S_CUTOVER_MS + 300_000,
+    ),
+)
+def test_settings_accept_five_minute_aligned_market_backfill_start(
+    monkeypatch,
+    start_ms,
+):
+    monkeypatch.setenv("POLYMARKET_MARKET_BACKFILL_START_MS", str(start_ms))
+
+    assert Settings().POLYMARKET_MARKET_BACKFILL_START_MS == start_ms
 
 
 def test_settings_include_twap_shadow_defaults(monkeypatch):

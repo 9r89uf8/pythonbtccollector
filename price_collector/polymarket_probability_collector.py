@@ -1344,7 +1344,7 @@ async def backfill_missing_polymarket_markets_once(
 
     windows = await fetch_missing_polymarket_market_windows(
         pool,
-        first_market_start_ms=TWAP_60S_CUTOVER_MS,
+        first_market_start_ms=settings.POLYMARKET_MARKET_BACKFILL_START_MS,
         now_ms=now_ms,
         after_market_start_ms=after_market_start_ms,
         limit=limit,
@@ -2268,6 +2268,7 @@ async def run_collector(settings: Settings) -> None:
             "resolution_ws_grace_seconds": (
                 settings.POLYMARKET_RESOLUTION_WS_GRACE_SECONDS
             ),
+            "market_backfill_start_ms": settings.POLYMARKET_MARKET_BACKFILL_START_MS,
         },
     )
 

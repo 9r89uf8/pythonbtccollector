@@ -165,10 +165,12 @@ evidence for a separately versioned future model.
   resolution. A missing or stale marker keeps that market in reconciliation and
   blocks flip evaluation until the official result has been revalidated against
   the market's exact settlement identity.
-- In bounded pages, scans completed windows from the 60-second cutover through
-  the last completed market, advancing oldest to newest. It repairs missing or
-  noncanonical Gamma metadata to the exact 60-second settlement identity, then
-  wraps to retry failures so one bad window cannot starve later windows.
+- In bounded pages, scans completed windows from
+  `POLYMARKET_MARKET_BACKFILL_START_MS` through the last completed market,
+  advancing oldest to newest. The floor defaults to the 60-second cutover. It
+  cannot precede that cutover and repairs missing or noncanonical Gamma
+  metadata to the exact 60-second settlement identity, then wraps to retry
+  failures so one bad window cannot starve later windows.
   Ordinary resolution reconciliation and flip evaluation then process those
   recovered markets.
 - The deployment-gap backfill is metadata-only. It never fabricates historical
@@ -595,6 +597,12 @@ READ_DATABASE_URL=postgresql://price_reader:REPLACE_ME@127.0.0.1:5432/price_coll
 The probability collector's resolution reconciler uses these settings from
 `collector.env`:
 
+- `POLYMARKET_MARKET_BACKFILL_START_MS=1786665600000` is the inclusive lower
+  bound for metadata-only completed-market backfill. It must be a UTC
+  five-minute boundary (`value % 300000 == 0`) at or after the
+  `2026-08-14T00:00:00Z` cutover. Moving this operational floor forward after
+  an intentional clean reset does not move or redefine that immutable rule
+  cutover.
 - `POLYMARKET_RESOLUTION_POLL_SECONDS=5` sets the scan interval and initial
   retry delay.
 - `POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS=300` caps exponential retry

@@ -3,6 +3,8 @@ from typing import Optional
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from price_collector.market import MARKET_MS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=True)
@@ -71,6 +73,13 @@ class Settings(BaseSettings):
     POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS: int = 300
     POLYMARKET_RESOLUTION_BATCH_SIZE: int = 20
     POLYMARKET_RESOLUTION_WS_GRACE_SECONDS: int = 30
+    # This recovery floor defaults to the immutable 60-second settlement-rule
+    # cutover.  It may be advanced after an explicitly destructive clean reset,
+    # but it must not replace the rule cutover used to interpret market history.
+    POLYMARKET_MARKET_BACKFILL_START_MS: int = Field(
+        default=1_786_665_600_000,
+        ge=1_786_665_600_000,
+    )
 
     BINANCE_FUTURES_BASE_URL: str = "https://fapi.binance.com"
     BINANCE_FUTURES_SYMBOL: str = "BTCUSDT"
@@ -160,6 +169,11 @@ class Settings(BaseSettings):
         if self.TWAP_SHADOW_POLL_MS != 250:
             raise ValueError(
                 "TWAP_SHADOW_POLL_MS must remain 250 for model version 2"
+            )
+        if self.POLYMARKET_MARKET_BACKFILL_START_MS % MARKET_MS != 0:
+            raise ValueError(
+                "POLYMARKET_MARKET_BACKFILL_START_MS must be aligned to a "
+                "UTC five-minute market boundary"
             )
         if self.RAW_CAPTURE_BATCH_MAX_ROWS > self.RAW_CAPTURE_QUEUE_MAX_EVENTS:
             raise ValueError(
