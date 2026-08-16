@@ -331,12 +331,35 @@ def test_retention_delete_is_indexed_and_fails_closed_without_safe_evaluation():
     assert "sample_second_ms < $2" in query
     assert "USING polymarket_btc_5m_flip_evaluations AS evaluation" in query
     assert "evaluation.market_id = binance_microstructure_1s.market_id" in query
-    assert "evaluation.definition_version = $3" in query
-    assert "$3::SMALLINT = $4::SMALLINT" in query
-    assert "$3::SMALLINT = $5::SMALLINT" in query
+    assert (
+        f"evaluation.definition_version = "
+        f"{runtime.TWAP_60S_FLIP_DEFINITION_VERSION}"
+    ) in normalized_query
+    assert (
+        f"evaluation.definition_version = "
+        f"{runtime.TWAP_30S_FLIP_DEFINITION_VERSION}"
+    ) in normalized_query
+    assert (
+        f"market.market_id * 300000 >= {runtime.TWAP_60S_CUTOVER_MS}"
+        in normalized_query
+    )
+    assert (
+        f"market.market_id * 300000 < {runtime.TWAP_60S_CUTOVER_MS}"
+        in normalized_query
+    )
     assert "market.settlement_reference = 'chainlink_twap'" in query
-    assert "market.settlement_window_s = 30" in query
-    assert "market.settlement_rule_version = 'btc-5m-twap-30'" in query
+    assert "market.settlement_window_s = 60" in normalized_query
+    assert "market.settlement_window_s = 30" in normalized_query
+    assert (
+        "market.settlement_rule_version = 'btc-5m-twap-60'"
+        in normalized_query
+    )
+    assert (
+        "market.settlement_rule_version = 'btc-5m-twap-30'"
+        in normalized_query
+    )
+    assert "btc-usd-twap-60s-streams" in query
+    assert "btc-usd-twap-30s-streams" in query
     assert "market.settlement_reference = 'chainlink_spot'" in query
     assert "market.settlement_rule_version =" in query
     assert "'chainlink-spot-v1'" in query
@@ -359,13 +382,7 @@ def test_retention_delete_is_indexed_and_fails_closed_without_safe_evaluation():
         "archive.received_ms >= binance_microstructure_1s.received_ms"
         in normalized_query
     )
-    assert args == (
-        "BTCUSDT",
-        7 * runtime.MILLISECONDS_PER_DAY,
-        runtime.FLIP_DEFINITION_VERSION,
-        runtime.TWAP_FLIP_DEFINITION_VERSION,
-        runtime.SPOT_FLIP_DEFINITION_VERSION,
-    )
+    assert args == ("BTCUSDT", 7 * runtime.MILLISECONDS_PER_DAY)
 
 
 def test_microstructure_live_cache_write_is_decimal_safe_and_nonfatal(caplog):

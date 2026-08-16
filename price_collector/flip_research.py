@@ -21,8 +21,23 @@ from price_collector.binance_microstructure import MICROSTRUCTURE_VALUE_COLUMNS
 LOGGER = logging.getLogger("price_collector.flip_research")
 
 SPOT_FLIP_DEFINITION_VERSION = 1
-TWAP_FLIP_DEFINITION_VERSION = 2
+TWAP_30S_FLIP_DEFINITION_VERSION = 2
+TWAP_60S_FLIP_DEFINITION_VERSION = 3
+TWAP_FLIP_DEFINITION_VERSION = TWAP_60S_FLIP_DEFINITION_VERSION
 FLIP_DEFINITION_VERSION = TWAP_FLIP_DEFINITION_VERSION
+TWAP_30S_TOPIC = "crypto_prices_twap_thirty"
+TWAP_30S_WINDOW_SECONDS = 30
+TWAP_30S_SOURCE_URL = (
+    "https://data.chain.link/streams/btc-usd-twap-30s-streams"
+)
+TWAP_30S_RULE_VERSION = "btc-5m-twap-30"
+TWAP_60S_TOPIC = "crypto_prices_twap_sixty"
+TWAP_60S_WINDOW_SECONDS = 60
+TWAP_60S_SOURCE_URL = (
+    "https://data.chain.link/streams/btc-usd-twap-60s-streams"
+)
+TWAP_60S_RULE_VERSION = "btc-5m-twap-60"
+TWAP_60S_CUTOVER_MS = 1_786_665_600_000
 FLIP_WINDOW_SECONDS = 20
 CHAINLINK_CUTOFF_FRESH_MS = 10_000
 MAX_CONFIRMED_CROSSING_GAP_MS = CHAINLINK_CUTOFF_FRESH_MS
@@ -55,6 +70,79 @@ ARCHIVE_NOT_REQUIRED = "not_required"
 ARCHIVE_PENDING = "pending"
 ARCHIVE_COMPLETE = "complete"
 ARCHIVE_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class TwapFlipIdentity:
+    topic: str
+    window_seconds: int
+    source_url: str
+    rule_version: str
+
+    @property
+    def source_reference(self) -> str:
+        return f"chainlink_twap_{self.window_seconds}s"
+
+
+_TWAP_IDENTITIES = {
+    TWAP_30S_FLIP_DEFINITION_VERSION: TwapFlipIdentity(
+        topic=TWAP_30S_TOPIC,
+        window_seconds=TWAP_30S_WINDOW_SECONDS,
+        source_url=TWAP_30S_SOURCE_URL,
+        rule_version=TWAP_30S_RULE_VERSION,
+    ),
+    TWAP_60S_FLIP_DEFINITION_VERSION: TwapFlipIdentity(
+        topic=TWAP_60S_TOPIC,
+        window_seconds=TWAP_60S_WINDOW_SECONDS,
+        source_url=TWAP_60S_SOURCE_URL,
+        rule_version=TWAP_60S_RULE_VERSION,
+    ),
+}
+
+
+def _market_rule_sql(
+    definition_expression: str,
+    *,
+    market_alias: str,
+    window_alias: str,
+) -> str:
+    """Build the exact immutable definition-to-market identity predicate."""
+
+    return f"""
+        (
+            (
+                {definition_expression} = {TWAP_30S_FLIP_DEFINITION_VERSION}
+                AND {window_alias}.market_start_ms < {TWAP_60S_CUTOVER_MS}
+                AND {market_alias}.settlement_reference = 'chainlink_twap'
+                AND {market_alias}.settlement_window_s = {TWAP_30S_WINDOW_SECONDS}
+                AND {market_alias}.settlement_source_url = '{TWAP_30S_SOURCE_URL}'
+                AND {market_alias}.settlement_rule_version = '{TWAP_30S_RULE_VERSION}'
+            )
+            OR (
+                {definition_expression} = {TWAP_60S_FLIP_DEFINITION_VERSION}
+                AND {window_alias}.market_start_ms >= {TWAP_60S_CUTOVER_MS}
+                AND {market_alias}.settlement_reference = 'chainlink_twap'
+                AND {market_alias}.settlement_window_s = {TWAP_60S_WINDOW_SECONDS}
+                AND {market_alias}.settlement_source_url = '{TWAP_60S_SOURCE_URL}'
+                AND {market_alias}.settlement_rule_version = '{TWAP_60S_RULE_VERSION}'
+            )
+            OR (
+                {definition_expression} = {SPOT_FLIP_DEFINITION_VERSION}
+                AND {market_alias}.settlement_reference = 'chainlink_spot'
+                AND {market_alias}.settlement_rule_version = 'chainlink-spot-v1'
+            )
+        )
+    """
+
+
+def _twap_identity_for_definition(
+    definition_version: int,
+) -> Optional[TwapFlipIdentity]:
+    return _TWAP_IDENTITIES.get(definition_version)
+
+
+def _is_twap_definition(definition_version: int) -> bool:
+    return _twap_identity_for_definition(definition_version) is not None
 
 
 @dataclass(frozen=True)
@@ -435,7 +523,7 @@ def _build_cutoffs(
             if chainlink_observation is not None
             else None
         )
-        if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+        if _is_twap_definition(definition_version):
             chainlink_fresh = (
                 source_age_ms is not None
                 and 0 <= source_age_ms < TWAP_CUTOFF_FRESH_MS
@@ -705,6 +793,7 @@ def analyze_market(
 
     if market_end_ms != market_start_ms + 300_000:
         raise ValueError("market must be a 300-second half-open window")
+    twap_identity = _twap_identity_for_definition(definition_version)
     threshold = _require_decimal_or_none(threshold, "threshold")
     official_close = _require_decimal_or_none(official_close, "official_close")
 
@@ -721,7 +810,7 @@ def analyze_market(
             observations=chainlink,
             observation_precision=(
                 "exact_twap_event"
-                if definition_version == TWAP_FLIP_DEFINITION_VERSION
+                if _is_twap_definition(definition_version)
                 else "one_second_summary"
             ),
         )
@@ -747,7 +836,7 @@ def analyze_market(
     all_cutoffs_fresh = all(cutoff.chainlink_fresh for cutoff in cutoffs)
     maximum_crossing_gap_ms = (
         TWAP_MAX_OBSERVATION_GAP_MS
-        if definition_version == TWAP_FLIP_DEFINITION_VERSION
+        if _is_twap_definition(definition_version)
         else MAX_CONFIRMED_CROSSING_GAP_MS
     )
     crossing_coverage_gaps = [
@@ -834,7 +923,7 @@ def analyze_market(
         )
     )
     known_source_gap = (
-        definition_version == TWAP_FLIP_DEFINITION_VERSION
+        _is_twap_definition(definition_version)
         and bool(source_gap_rows)
     )
     if not official_complete or known_source_gap:
@@ -845,7 +934,7 @@ def analyze_market(
         evaluation_status = EVALUATION_AMBIGUOUS
     elif (
         twap_cutoffs_dense
-        if definition_version == TWAP_FLIP_DEFINITION_VERSION
+        if _is_twap_definition(definition_version)
         else all_cutoffs_fresh
     ):
         evaluation_status = EVALUATION_NON_FLIP
@@ -940,8 +1029,8 @@ def analyze_market(
         data_quality={
             "official_complete": official_complete,
             "source_reference": (
-                "chainlink_twap_30s"
-                if definition_version == TWAP_FLIP_DEFINITION_VERSION
+                twap_identity.source_reference
+                if twap_identity is not None
                 else "chainlink_spot"
             ),
             "known_source_gap_count": len(source_gap_rows),
@@ -1173,13 +1262,26 @@ def market_rule_supports_flip_definition(
     market: Mapping[str, Any],
     definition_version: int,
 ) -> bool:
-    if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+    twap_identity = _twap_identity_for_definition(definition_version)
+    if twap_identity is not None:
+        market_start_ms = market.get("market_start_ms")
+        if market_start_ms is not None:
+            starts_after_cutover = int(market_start_ms) >= TWAP_60S_CUTOVER_MS
+            if (
+                definition_version == TWAP_30S_FLIP_DEFINITION_VERSION
+                and starts_after_cutover
+            ) or (
+                definition_version == TWAP_60S_FLIP_DEFINITION_VERSION
+                and not starts_after_cutover
+            ):
+                return False
         return (
             market.get("settlement_reference") == "chainlink_twap"
-            and market.get("settlement_window_s") == 30
-            and market.get("settlement_source_url")
-            == "https://data.chain.link/streams/btc-usd-twap-30s-streams"
-            and market.get("settlement_rule_version") == "btc-5m-twap-30"
+            and market.get("settlement_window_s")
+            == twap_identity.window_seconds
+            and market.get("settlement_source_url") == twap_identity.source_url
+            and market.get("settlement_rule_version")
+            == twap_identity.rule_version
         )
     if definition_version == SPOT_FLIP_DEFINITION_VERSION:
         return (
@@ -1193,7 +1295,7 @@ def _quality_flags(analysis: FlipAnalysis) -> list[str]:
     flags: list[str] = []
     observation_name = (
         "twap"
-        if analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+        if _is_twap_definition(analysis.definition_version)
         else "chainlink"
     )
     if analysis.resolution_type != "winner":
@@ -1207,7 +1309,7 @@ def _quality_flags(analysis: FlipAnalysis) -> list[str]:
     if analysis.fresh_cutoff_count < FLIP_WINDOW_SECONDS:
         flags.append(f"incomplete_fresh_{observation_name}_cutoffs")
     if (
-        analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+        _is_twap_definition(analysis.definition_version)
         and not analysis.data_quality.get("twap_cutoffs_dense")
     ):
         flags.append("incomplete_dense_twap_cutoffs")
@@ -1224,7 +1326,7 @@ def _quality_flags(analysis: FlipAnalysis) -> list[str]:
     if analysis.data_quality.get("known_source_gap_count"):
         flags.append("twap_stream_gap")
     if (
-        analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+        _is_twap_definition(analysis.definition_version)
         and analysis.chainlink_observation_count == 0
     ):
         flags.append("missing_twap")
@@ -1238,7 +1340,7 @@ def _cutoff_quality_flags(
     flags: list[str] = []
     observation_name = (
         "twap"
-        if definition_version == TWAP_FLIP_DEFINITION_VERSION
+        if _is_twap_definition(definition_version)
         else "chainlink"
     )
     if cutoff.chainlink is None:
@@ -1275,7 +1377,7 @@ def _evaluation_arguments(
         analysis.evaluation_status,
         (
             "exact_twap_event"
-            if analysis.definition_version == TWAP_FLIP_DEFINITION_VERSION
+            if _is_twap_definition(analysis.definition_version)
             else "one_second_summary"
         ),
         analysis.threshold,
@@ -1425,6 +1527,16 @@ async def fetch_due_flip_markets(
 ) -> list[dict[str, Any]]:
     """Return complete official resolutions needing evaluation or archival."""
 
+    twap_identity = _twap_identity_for_definition(definition_version)
+    if twap_identity is None:
+        if definition_version != SPOT_FLIP_DEFINITION_VERSION:
+            raise ValueError(
+                f"unsupported flip definition version: {definition_version}"
+            )
+        # The lateral TWAP watermark is irrelevant to the spot definition but
+        # remains type-stable in the shared query.
+        twap_identity = _TWAP_IDENTITIES[TWAP_FLIP_DEFINITION_VERSION]
+
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             f"""
@@ -1459,9 +1571,9 @@ async def fetch_due_flip_markets(
             LEFT JOIN LATERAL (
                 SELECT event.provider_event_ms
                 FROM polymarket_twap_events event
-                WHERE event.topic = 'crypto_prices_twap_thirty'
+                WHERE event.topic = $5::TEXT
                   AND event.symbol = 'btc/usd'
-                  AND event.window_s = 30
+                  AND event.window_s = $6::SMALLINT
                   AND event.provider_event_ms > mw.market_end_ms
                 ORDER BY
                     event.provider_event_ms ASC,
@@ -1474,13 +1586,40 @@ async def fetch_due_flip_markets(
               AND r.chainlink_close_price IS NOT NULL
               AND (
                     (
-                        $2::SMALLINT = {TWAP_FLIP_DEFINITION_VERSION}
+                        $2::SMALLINT IN (
+                            {TWAP_30S_FLIP_DEFINITION_VERSION},
+                            {TWAP_60S_FLIP_DEFINITION_VERSION}
+                        )
                         AND pm.settlement_reference = 'chainlink_twap'
-                        AND pm.settlement_window_s = 30
-                        AND pm.settlement_source_url =
-                            'https://data.chain.link/streams/btc-usd-twap-30s-streams'
-                        AND pm.settlement_rule_version = 'btc-5m-twap-30'
-                        AND twap_watermark.provider_event_ms > mw.market_end_ms
+                        AND pm.settlement_window_s = $6::SMALLINT
+                        AND pm.settlement_source_url = $7::TEXT
+                        AND pm.settlement_rule_version = $8::TEXT
+                        AND r.reconciled_settlement_rule_version =
+                            pm.settlement_rule_version
+                        AND (
+                            (
+                                $2::SMALLINT =
+                                    {TWAP_30S_FLIP_DEFINITION_VERSION}
+                                AND mw.market_start_ms <
+                                    {TWAP_60S_CUTOVER_MS}
+                            )
+                            OR (
+                                $2::SMALLINT =
+                                    {TWAP_60S_FLIP_DEFINITION_VERSION}
+                                AND mw.market_start_ms >=
+                                    {TWAP_60S_CUTOVER_MS}
+                            )
+                        )
+                        AND (
+                            twap_watermark.provider_event_ms > mw.market_end_ms
+                            OR (
+                                $2::SMALLINT =
+                                    {TWAP_30S_FLIP_DEFINITION_VERSION}
+                                AND $1::BIGINT >= {TWAP_60S_CUTOVER_MS}
+                                AND mw.market_end_ms =
+                                    {TWAP_60S_CUTOVER_MS}
+                            )
+                        )
                     )
                     OR (
                         $2::SMALLINT = {SPOT_FLIP_DEFINITION_VERSION}
@@ -1524,6 +1663,10 @@ async def fetch_due_flip_markets(
             definition_version,
             max(0, int(finalization_grace_ms)),
             max(1, int(limit)),
+            twap_identity.topic,
+            twap_identity.window_seconds,
+            twap_identity.source_url,
+            twap_identity.rule_version,
         )
     return [dict(row) for row in rows]
 
@@ -1539,7 +1682,8 @@ async def _load_market_inputs(
     list[dict[str, Any]],
     list[dict[str, Any]],
 ]:
-    if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+    twap_identity = _twap_identity_for_definition(definition_version)
+    if twap_identity is not None:
         # Deliberately source-time global: an event at the exact ending
         # boundary is keyed to the following market in its materialized row,
         # but still brackets this market's close and must remain queryable.
@@ -1554,18 +1698,17 @@ async def _load_market_inputs(
                 (event.received_wall_ns / 1000000)::BIGINT AS received_ms
             FROM polymarket_twap_events event
             JOIN market_windows target ON target.market_id = $1
-            WHERE event.topic = 'crypto_prices_twap_thirty'
+            WHERE event.topic = $2::TEXT
               AND event.symbol = 'btc/usd'
-              AND event.window_s = 30
+              AND event.window_s = $3::SMALLINT
               AND event.provider_event_ms >= target.market_start_ms
               AND event.provider_event_ms <= COALESCE(
                     (
                         SELECT MIN(watermark.provider_event_ms)
                         FROM polymarket_twap_events watermark
-                        WHERE watermark.topic =
-                                'crypto_prices_twap_thirty'
+                        WHERE watermark.topic = $2::TEXT
                           AND watermark.symbol = 'btc/usd'
-                          AND watermark.window_s = 30
+                          AND watermark.window_s = $3::SMALLINT
                           AND watermark.provider_event_ms >
                                 target.market_end_ms
                     ),
@@ -1578,6 +1721,8 @@ async def _load_market_inputs(
                 event.receive_sequence ASC
             """,
             market_id,
+            twap_identity.topic,
+            twap_identity.window_seconds,
         )
         source_gap_rows = await connection.fetch(
             """
@@ -1596,9 +1741,9 @@ async def _load_market_inputs(
                             session.connection_id ASC
                     ) AS session_order
                 FROM polymarket_twap_sessions session
-                WHERE session.topic = 'crypto_prices_twap_thirty'
+                WHERE session.topic = $2::TEXT
                   AND session.symbol = 'btc/usd'
-                  AND session.window_s = 30
+                  AND session.window_s = $3::SMALLINT
             ),
             session_event_bounds AS (
                 SELECT
@@ -1614,9 +1759,9 @@ async def _load_market_inputs(
                         event.received_wall_ns
                     FROM polymarket_twap_events event
                     WHERE event.connection_id = session.connection_id
-                      AND event.topic = 'crypto_prices_twap_thirty'
+                      AND event.topic = $2::TEXT
                       AND event.symbol = 'btc/usd'
-                      AND event.window_s = 30
+                      AND event.window_s = $3::SMALLINT
                     ORDER BY event.receive_sequence DESC
                     LIMIT 1
                 ) last_event ON TRUE
@@ -1646,9 +1791,9 @@ async def _load_market_inputs(
                     FROM feed_sessions future
                     JOIN polymarket_twap_events event
                       ON event.connection_id = future.connection_id
-                     AND event.topic = 'crypto_prices_twap_thirty'
+                     AND event.topic = $2::TEXT
                      AND event.symbol = 'btc/usd'
-                     AND event.window_s = 30
+                     AND event.window_s = $3::SMALLINT
                     WHERE future.session_order > current.session_order
                     ORDER BY
                         future.session_order ASC,
@@ -1803,6 +1948,8 @@ async def _load_market_inputs(
                 interval.connection_id ASC
             """,
             market_id,
+            twap_identity.topic,
+            twap_identity.window_seconds,
         )
     elif definition_version == SPOT_FLIP_DEFINITION_VERSION:
         chainlink_rows = await connection.fetch(
@@ -1867,7 +2014,7 @@ async def _load_market_inputs(
         market_id,
     )
     source_gaps = [dict(row) for row in source_gap_rows]
-    if definition_version == TWAP_FLIP_DEFINITION_VERSION:
+    if twap_identity is not None:
         normalized_source_gaps: list[dict[str, Any]] = []
         for row in source_gaps:
             gap_start_ms, gap_end_ms, time_basis = normalize_gap_interval_ms(
@@ -1898,6 +2045,26 @@ async def _load_market_inputs(
             ):
                 normalized_source_gaps.append(row)
         source_gaps = normalized_source_gaps
+        market_end_ms = (market_id + 1) * 300_000
+        if (
+            definition_version == TWAP_30S_FLIP_DEFINITION_VERSION
+            and market_end_ms == TWAP_60S_CUTOVER_MS
+            and not any(
+                int(row["provider_event_ms"]) > market_end_ms
+                for row in chainlink_rows
+            )
+        ):
+            # The legacy settlement rule ended at the cutover. Without a
+            # persisted post-boundary legacy frame, evaluate and archive the
+            # affected market conservatively instead of leaving it pending
+            # forever or treating incomplete terminal evidence as a non-flip.
+            source_gaps.append(
+                {
+                    "gap_start_ms": market_end_ms,
+                    "gap_end_ms": None,
+                    "time_basis": "settlement_rule_cutover",
+                }
+            )
     return (
         [dict(row) for row in chainlink_rows],
         [dict(row) for row in probability_rows],
@@ -2367,10 +2534,11 @@ async def evaluate_flip_market(
     return True
 
 
-async def evaluate_due_flip_markets_once(
+async def _evaluate_due_flip_definition_once(
     settings: Any,
     pool: Any,
     *,
+    definition_version: int,
     now_ms: Optional[int] = None,
 ) -> int:
     current_ms = _now_ms() if now_ms is None else now_ms
@@ -2391,7 +2559,7 @@ async def evaluate_due_flip_markets_once(
     markets = await fetch_due_flip_markets(
         pool,
         now_ms=current_ms,
-        definition_version=FLIP_DEFINITION_VERSION,
+        definition_version=definition_version,
         finalization_grace_ms=FLIP_FINALIZATION_GRACE_MS,
         limit=batch_size,
     )
@@ -2401,7 +2569,7 @@ async def evaluate_due_flip_markets_once(
             succeeded = await evaluate_flip_market(
                 pool,
                 market,
-                definition_version=FLIP_DEFINITION_VERSION,
+                definition_version=definition_version,
                 now_ms=current_ms,
                 base_retry_seconds=max(
                     1,
@@ -2431,7 +2599,7 @@ async def evaluate_due_flip_markets_once(
                 await _mark_evaluation_failed(
                     pool,
                     market,
-                    definition_version=FLIP_DEFINITION_VERSION,
+                    definition_version=definition_version,
                     failed_ms=current_ms,
                     error=exc,
                     base_retry_seconds=max(
@@ -2465,7 +2633,7 @@ async def evaluate_due_flip_markets_once(
                             "polymarket_flip_evaluation_failure_state_failed"
                         ),
                         "market_id": market.get("market_id"),
-                        "definition_version": FLIP_DEFINITION_VERSION,
+                        "definition_version": definition_version,
                     },
                 )
             LOGGER.exception(
@@ -2473,12 +2641,35 @@ async def evaluate_due_flip_markets_once(
                 extra={
                     "event": "polymarket_flip_evaluation_failed",
                     "market_id": market.get("market_id"),
-                    "definition_version": FLIP_DEFINITION_VERSION,
+                    "definition_version": definition_version,
                     "error": repr(exc),
                 },
             )
             continue
         completed += bool(succeeded)
+    return completed
+
+
+async def evaluate_due_flip_markets_once(
+    settings: Any,
+    pool: Any,
+    *,
+    now_ms: Optional[int] = None,
+) -> int:
+    """Evaluate current 60-second markets and unfinished legacy 30-second work."""
+
+    current_ms = _now_ms() if now_ms is None else now_ms
+    completed = 0
+    for definition_version in (
+        TWAP_60S_FLIP_DEFINITION_VERSION,
+        TWAP_30S_FLIP_DEFINITION_VERSION,
+    ):
+        completed += await _evaluate_due_flip_definition_once(
+            settings,
+            pool,
+            definition_version=definition_version,
+            now_ms=current_ms,
+        )
     return completed
 
 
@@ -2627,6 +2818,11 @@ async def fetch_flip_markets(
                 ) AS matches
             ) matching_cutoff ON TRUE
             WHERE evaluation.definition_version = $1
+              AND {_market_rule_sql(
+                    "$1::SMALLINT",
+                    market_alias="pm",
+                    window_alias="mw",
+                  )}
               AND evaluation.observation_precision <> 'evaluation_failed'
               AND ($5::TEXT IS NULL OR evaluation.official_winner = $5)
               AND ($6::BIGINT IS NULL OR mw.market_start_ms >= $6)
@@ -2720,6 +2916,11 @@ async def fetch_market_flip_analysis(
               ON pm.market_id = evaluation.market_id
             WHERE evaluation.market_id = $1
               AND evaluation.definition_version = $2
+              AND {_market_rule_sql(
+                    "$2::SMALLINT",
+                    market_alias="pm",
+                    window_alias="mw",
+                  )}
               AND evaluation.observation_precision <> 'evaluation_failed'
             """,
             market_id,
@@ -2818,7 +3019,14 @@ async def fetch_flip_distribution(
             FROM {EVALUATION_TABLE} evaluation
             JOIN market_windows mw
               ON mw.market_id = evaluation.market_id
+            JOIN polymarket_btc_5m_markets pm
+              ON pm.market_id = evaluation.market_id
             WHERE evaluation.definition_version = $1
+              AND {_market_rule_sql(
+                    "$1::SMALLINT",
+                    market_alias="pm",
+                    window_alias="mw",
+                  )}
               AND evaluation.observation_precision <> 'evaluation_failed'
               AND ($4::BIGINT IS NULL OR mw.market_start_ms >= $4)
               AND ($5::BIGINT IS NULL OR mw.market_start_ms < $5)
@@ -2841,7 +3049,14 @@ async def fetch_flip_distribution(
                 FROM {EVALUATION_TABLE} evaluation
                 JOIN market_windows mw
                   ON mw.market_id = evaluation.market_id
+                JOIN polymarket_btc_5m_markets pm
+                  ON pm.market_id = evaluation.market_id
                 WHERE evaluation.definition_version = $1
+                  AND {_market_rule_sql(
+                        "$1::SMALLINT",
+                        market_alias="pm",
+                        window_alias="mw",
+                      )}
                   AND evaluation.observation_precision <>
                         'evaluation_failed'
                   AND evaluation.evaluation_status <> 'ambiguous'
@@ -2935,7 +3150,14 @@ async def fetch_flip_distribution(
                 FROM {CUTOFF_TABLE} cutoff
                 JOIN market_windows mw
                   ON mw.market_id = cutoff.market_id
+                JOIN polymarket_btc_5m_markets pm
+                  ON pm.market_id = cutoff.market_id
                 WHERE cutoff.definition_version = $1
+                  AND {_market_rule_sql(
+                        "$1::SMALLINT",
+                        market_alias="pm",
+                        window_alias="mw",
+                      )}
                   AND cutoff.seconds_before_end <= $2
                   AND ($4::BIGINT IS NULL OR mw.market_start_ms >= $4)
                   AND ($5::BIGINT IS NULL OR mw.market_start_ms < $5)

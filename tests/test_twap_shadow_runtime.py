@@ -27,12 +27,13 @@ from price_collector.twap_shadow import (
 D = Decimal
 
 
-def test_runtime_model_v1_definition_is_pinned() -> None:
+def test_runtime_model_v2_definition_is_pinned() -> None:
     assert DEFAULT_STALE_AFTER_MS == 10_000
     assert shadow_runtime.SHADOW_MIN_BASIS_SAMPLES == 60
     assert shadow_runtime.SHADOW_PRELOAD_YIELD_EVERY_EVENTS == 16
     assert shadow_runtime.SHADOW_STARTUP_CATCHUP_TARGET_MS == 250
     assert shadow_runtime.SHADOW_STARTUP_CATCHUP_MAX_LAG_MS == 1_000
+    assert shadow_runtime.SHADOW_PRELOAD_SAFETY_MS == 75_000
     assert _loop_settings().TWAP_SHADOW_POLL_MS == 250
 
 
@@ -44,7 +45,7 @@ class StubBatch:
     def __init__(self, origin_second_ms, value=D("64000")):
         self.origin_second_ms = origin_second_ms
         self.generated_ms = origin_second_ms + 100
-        self.model_version = 1
+        self.model_version = 2
         self.forecasts = (
             SimpleNamespace(
                 horizon_seconds=1,
@@ -209,8 +210,14 @@ def test_preload_replay_respects_each_actual_receive_cutoff(monkeypatch):
                 {
                     "source": source,
                     "price": D("100"),
-                    "source_ms": provider_ms - 50_000,
-                    "received_ms": provider_ms - 49_900,
+                    "source_ms": (
+                        provider_ms - shadow_runtime.SHADOW_PRELOAD_SAFETY_MS
+                    ),
+                    "received_ms": (
+                        provider_ms
+                        - shadow_runtime.SHADOW_PRELOAD_SAFETY_MS
+                        + 100
+                    ),
                 },
                 {
                     "source": source,
@@ -385,8 +392,9 @@ def test_startup_catch_up_covers_elapsed_time_plus_late_actual_overlap(
             + second_elapsed_ms,
         ),
     ]
-    # The DB query starts actual replay at cutoff-lookback+45s. These checks
-    # pin the additional 10-second overlap on each elapsed interval.
+    # The DB query removes the versioned preload safety margin before replaying
+    # actuals. These checks pin the additional stale-source overlap on each
+    # elapsed interval.
     assert (
         fetches[0][1]
         - fetches[0][2]
@@ -497,7 +505,7 @@ def test_live_loop_emits_once_per_utc_second_redis_first_and_deduplicates_cached
         shadow_runtime.ShadowPersistenceBatch,
     )
     assert first_persistence_batch == shadow_runtime.ShadowPersistenceBatch(
-        model_version=1,
+        model_version=2,
         origin_second_ms=200_000,
         generated_ms=200_100,
         forecasts=(
@@ -552,8 +560,14 @@ def test_live_loop_observes_cached_sources_before_accumulated_actual_without_lea
             SourceObservation(
                 source=source,
                 price=D("100"),
-                source_ms=provider_ms - 50_000,
-                received_ms=provider_ms - 49_900,
+                source_ms=(
+                    provider_ms - shadow_runtime.SHADOW_PRELOAD_SAFETY_MS
+                ),
+                received_ms=(
+                    provider_ms
+                    - shadow_runtime.SHADOW_PRELOAD_SAFETY_MS
+                    + 100
+                ),
             )
         )
     model.record_runtime_order = True

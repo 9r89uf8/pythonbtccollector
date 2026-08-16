@@ -38,9 +38,16 @@ from price_collector.collector import (
 )
 from price_collector.db import epoch_ms_to_utc_datetime
 from price_collector.flip_research import (
-    FLIP_DEFINITION_VERSION,
     SPOT_FLIP_DEFINITION_VERSION,
-    TWAP_FLIP_DEFINITION_VERSION,
+    TWAP_30S_FLIP_DEFINITION_VERSION,
+    TWAP_30S_RULE_VERSION,
+    TWAP_30S_SOURCE_URL,
+    TWAP_30S_WINDOW_SECONDS,
+    TWAP_60S_FLIP_DEFINITION_VERSION,
+    TWAP_60S_CUTOVER_MS,
+    TWAP_60S_RULE_VERSION,
+    TWAP_60S_SOURCE_URL,
+    TWAP_60S_WINDOW_SECONDS,
 )
 from price_collector.live_cache import MICROSTRUCTURE_LIVE_KEY
 from price_collector.market import MarketWindow, market_for_sample_second
@@ -542,12 +549,11 @@ async def delete_expired_microstructure_rows(
     symbol: str,
     now_ms: int,
     retention_days: int,
-    definition_version: int = FLIP_DEFINITION_VERSION,
 ) -> Any:
     cutoff_ms = now_ms - retention_days * MILLISECONDS_PER_DAY
     async with pool.acquire() as connection:
         return await connection.execute(
-            """
+            f"""
             DELETE FROM binance_microstructure_1s
             USING polymarket_btc_5m_flip_evaluations AS evaluation,
                   polymarket_btc_5m_markets AS market
@@ -556,18 +562,36 @@ async def delete_expired_microstructure_rows(
               AND evaluation.market_id = binance_microstructure_1s.market_id
               AND market.market_id = binance_microstructure_1s.market_id
               AND evaluation.market_id = market.market_id
-              AND evaluation.definition_version = $3
               AND (
                     (
-                        $3::SMALLINT = $4::SMALLINT
+                        evaluation.definition_version =
+                            {TWAP_60S_FLIP_DEFINITION_VERSION}
+                        AND market.market_id * 300000 >=
+                            {TWAP_60S_CUTOVER_MS}
                         AND market.settlement_reference = 'chainlink_twap'
-                        AND market.settlement_window_s = 30
+                        AND market.settlement_window_s =
+                            {TWAP_60S_WINDOW_SECONDS}
                         AND market.settlement_source_url =
-                            'https://data.chain.link/streams/btc-usd-twap-30s-streams'
-                        AND market.settlement_rule_version = 'btc-5m-twap-30'
+                            '{TWAP_60S_SOURCE_URL}'
+                        AND market.settlement_rule_version =
+                            '{TWAP_60S_RULE_VERSION}'
                     )
                     OR (
-                        $3::SMALLINT = $5::SMALLINT
+                        evaluation.definition_version =
+                            {TWAP_30S_FLIP_DEFINITION_VERSION}
+                        AND market.market_id * 300000 <
+                            {TWAP_60S_CUTOVER_MS}
+                        AND market.settlement_reference = 'chainlink_twap'
+                        AND market.settlement_window_s =
+                            {TWAP_30S_WINDOW_SECONDS}
+                        AND market.settlement_source_url =
+                            '{TWAP_30S_SOURCE_URL}'
+                        AND market.settlement_rule_version =
+                            '{TWAP_30S_RULE_VERSION}'
+                    )
+                    OR (
+                        evaluation.definition_version =
+                            {SPOT_FLIP_DEFINITION_VERSION}
                         AND market.settlement_reference = 'chainlink_spot'
                         AND market.settlement_rule_version = 'chainlink-spot-v1'
                     )
@@ -593,9 +617,6 @@ async def delete_expired_microstructure_rows(
             """,
             symbol,
             cutoff_ms,
-            definition_version,
-            TWAP_FLIP_DEFINITION_VERSION,
-            SPOT_FLIP_DEFINITION_VERSION,
         )
 
 

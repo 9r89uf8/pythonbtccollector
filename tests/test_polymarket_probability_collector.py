@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -10,24 +11,37 @@ import price_collector.polymarket_probability_collector as collector
 from price_collector.market import MarketWindow
 
 
-def market_window():
+LEGACY_MARKET_START_MS = 1_783_459_200_000
+CURRENT_MARKET_START_MS = collector.TWAP_60S_CUTOVER_MS
+
+
+def market_window(*, start_ms=LEGACY_MARKET_START_MS):
     return MarketWindow(
-        market_id=5_944_864,
-        market_start_ms=1_783_459_200_000,
-        market_end_ms=1_783_459_500_000,
+        market_id=start_ms // 300_000,
+        market_start_ms=start_ms,
+        market_end_ms=start_ms + 300_000,
     )
 
 
-def current_market():
+def current_market(*, start_ms=LEGACY_MARKET_START_MS, settlement_rule=None):
+    window = market_window(start_ms=start_ms)
+    if settlement_rule is None:
+        settlement_rule = collector.expected_twap_settlement_rule(start_ms)
+    (
+        settlement_reference,
+        settlement_window_s,
+        settlement_source_url,
+        settlement_rule_version,
+    ) = settlement_rule
     return collector.CurrentPolymarketMarket(
-        window=market_window(),
-        slug="btc-updown-5m-1783459200",
+        window=window,
+        slug=f"btc-updown-5m-{start_ms // 1000}",
         gamma_event_id="event-1",
         gamma_market_id="market-1",
         condition_id="condition-1",
         question="BTC Up or Down",
-        start_ms=1_783_459_200_000,
-        end_ms=1_783_459_500_000,
+        start_ms=start_ms,
+        end_ms=start_ms + 300_000,
         up_token_id="up-token",
         down_token_id="down-token",
         up_outcome="Up",
@@ -35,10 +49,10 @@ def current_market():
         active=True,
         closed=False,
         archived=False,
-        settlement_reference=collector.SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
-        settlement_window_s=collector.SUPPORTED_TWAP_WINDOW_SECONDS,
-        settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
-        settlement_rule_version=collector.SUPPORTED_TWAP_RULE_VERSION,
+        settlement_reference=settlement_reference,
+        settlement_window_s=settlement_window_s,
+        settlement_source_url=settlement_source_url,
+        settlement_rule_version=settlement_rule_version,
         raw_gamma={"market": {"id": "market-1"}},
     )
 
@@ -69,14 +83,14 @@ def test_parse_current_market_from_gamma_maps_up_down_tokens_from_json_strings()
                 "startDate": "2026-07-06T21:20:00Z",
                 "eventStartTime": "2026-07-07T21:20:00Z",
                 "endDate": "2026-07-07T21:25:00Z",
-                "resolutionSource": collector.SUPPORTED_TWAP_SOURCE_URL,
-                "cryptoMarketConfigId": "btc-5m-twap-30",
+                "resolutionSource": collector.LEGACY_TWAP_SOURCE_URL,
+                "cryptoMarketConfigId": collector.LEGACY_TWAP_RULE_VERSION,
                 "cryptoMarketConfig": {
-                    "id": "btc-5m-twap-30",
+                    "id": collector.LEGACY_TWAP_RULE_VERSION,
                     "asset": "btc",
                     "duration": "5m",
                     "twapEnabled": True,
-                    "twapLookbackSeconds": 30,
+                    "twapLookbackSeconds": collector.LEGACY_TWAP_WINDOW_SECONDS,
                 },
             }
         ],
@@ -99,11 +113,11 @@ def test_parse_current_market_from_gamma_maps_up_down_tokens_from_json_strings()
     assert market.end_ms == 1_783_459_500_000
     assert market.settlement_reference == "chainlink_twap"
     assert market.settlement_window_s == 30
-    assert market.settlement_source_url == collector.SUPPORTED_TWAP_SOURCE_URL
-    assert market.settlement_rule_version == "btc-5m-twap-30"
+    assert market.settlement_source_url == collector.LEGACY_TWAP_SOURCE_URL
+    assert market.settlement_rule_version == collector.LEGACY_TWAP_RULE_VERSION
 
 
-def test_market_rule_parser_preserves_legacy_and_fails_unknown_twap_closed():
+def test_market_rule_parser_recognizes_legacy_and_fails_mixed_twap_closed():
     assert collector.parse_market_settlement_rule(
         {},
         {
@@ -117,18 +131,33 @@ def test_market_rule_parser_preserves_legacy_and_fails_unknown_twap_closed():
         collector.LEGACY_SPOT_RULE_VERSION,
     )
 
+    assert collector.parse_market_settlement_rule(
+        {},
+        {
+            "resolutionSource": collector.LEGACY_TWAP_SOURCE_URL,
+            "cryptoMarketConfigId": collector.LEGACY_TWAP_RULE_VERSION,
+            "cryptoMarketConfig": {
+                "id": collector.LEGACY_TWAP_RULE_VERSION,
+                "asset": "btc",
+                "duration": "5m",
+                "twapEnabled": True,
+                "twapLookbackSeconds": collector.LEGACY_TWAP_WINDOW_SECONDS,
+            },
+        },
+    ) == collector.LEGACY_TWAP_SETTLEMENT_RULE
+
     reference, window_s, source_url, rule_version = (
         collector.parse_market_settlement_rule(
             {},
             {
                 "resolutionSource": collector.SUPPORTED_TWAP_SOURCE_URL,
-                "cryptoMarketConfigId": "btc-5m-twap-30",
+                "cryptoMarketConfigId": collector.LEGACY_TWAP_RULE_VERSION,
                 "cryptoMarketConfig": {
-                    "id": "btc-5m-twap-30",
+                    "id": collector.LEGACY_TWAP_RULE_VERSION,
                     "asset": "btc",
                     "duration": "5m",
                     "twapEnabled": True,
-                    "twapLookbackSeconds": 60,
+                    "twapLookbackSeconds": collector.SUPPORTED_TWAP_WINDOW_SECONDS,
                 },
             },
         )
@@ -139,7 +168,112 @@ def test_market_rule_parser_preserves_legacy_and_fails_unknown_twap_closed():
     assert rule_version == "btc-5m-twap-30"
 
 
-def test_store_current_market_refuses_unknown_or_legacy_rules_before_database():
+def test_expected_twap_rule_changes_only_at_exact_sixty_second_cutover():
+    assert collector.TWAP_60S_CUTOVER_MS == 1_786_665_600_000
+    assert collector.expected_twap_settlement_rule(
+        collector.TWAP_60S_CUTOVER_MS - 300_000
+    ) == collector.LEGACY_TWAP_SETTLEMENT_RULE
+    assert collector.expected_twap_settlement_rule(
+        collector.TWAP_60S_CUTOVER_MS
+    ) == collector.CURRENT_TWAP_SETTLEMENT_RULE
+    assert collector.expected_twap_settlement_rule(
+        collector.TWAP_60S_CUTOVER_MS + 300_000
+    ) == collector.CURRENT_TWAP_SETTLEMENT_RULE
+
+
+@pytest.mark.parametrize(
+    ("start_ms", "settlement_rule"),
+    (
+        (
+            collector.TWAP_60S_CUTOVER_MS - 300_000,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS + 300_000,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+    ),
+)
+def test_store_current_market_accepts_exact_rule_in_force(
+    monkeypatch,
+    start_ms,
+    settlement_rule,
+):
+    writes = []
+
+    async def fake_upsert(pool, **kwargs):
+        writes.append((pool, kwargs))
+
+    monkeypatch.setattr(
+        collector,
+        "upsert_polymarket_btc_5m_market",
+        fake_upsert,
+    )
+    market = current_market(
+        start_ms=start_ms,
+        settlement_rule=settlement_rule,
+    )
+
+    asyncio.run(
+        collector.store_current_market(
+            "pool",
+            market,
+            seen_ms=start_ms,
+        )
+    )
+
+    assert len(writes) == 1
+    assert writes[0][0] == "pool"
+    assert writes[0][1]["window"] == market.window
+    assert (
+        writes[0][1]["settlement_reference"],
+        writes[0][1]["settlement_window_s"],
+        writes[0][1]["settlement_source_url"],
+        writes[0][1]["settlement_rule_version"],
+    ) == settlement_rule
+
+
+@pytest.mark.parametrize(
+    ("start_ms", "settlement_rule"),
+    (
+        (
+            collector.TWAP_60S_CUTOVER_MS - 300_000,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS + 300_000,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+    ),
+)
+def test_store_current_market_rejects_inverted_cutover_identity_before_database(
+    start_ms,
+    settlement_rule,
+):
+    inverted = current_market(
+        start_ms=start_ms,
+        settlement_rule=settlement_rule,
+    )
+
+    with pytest.raises(collector.GammaDiscoveryError, match="refusing to store"):
+        asyncio.run(
+            collector.store_current_market(
+                object(),
+                inverted,
+                seen_ms=start_ms,
+            )
+        )
+
+
+def test_store_current_market_refuses_unknown_rules_before_database():
     for reference in (
         collector.SETTLEMENT_REFERENCE_UNKNOWN,
         collector.SETTLEMENT_REFERENCE_CHAINLINK_SPOT,
@@ -159,13 +293,286 @@ def test_store_current_market_refuses_unknown_or_legacy_rules_before_database():
                 collector.store_current_market(
                     object(),
                     unsupported,
-                    seen_ms=1_783_459_200_000,
+                    seen_ms=LEGACY_MARKET_START_MS,
                 )
             )
 
 
-def resolved_gamma_event(*, outcome_prices='["0","1"]'):
-    slug = "btc-updown-5m-1783459200"
+@pytest.mark.parametrize(
+    ("start_ms", "settlement_rule"),
+    (
+        (
+            collector.TWAP_60S_CUTOVER_MS - 300_000,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS + 300_000,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+    ),
+)
+def test_discovery_accepts_exact_rule_in_force(
+    monkeypatch,
+    start_ms,
+    settlement_rule,
+):
+    candidate = current_market(
+        start_ms=start_ms,
+        settlement_rule=settlement_rule,
+    )
+    stores = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class Client:
+        async def get(self, url, **kwargs):
+            return Response()
+
+    async def fake_store(pool, market, *, seen_ms):
+        stores.append((pool, market, seen_ms))
+
+    monkeypatch.setattr(
+        collector,
+        "parse_current_market_from_gamma",
+        lambda payload, *, window, slug: candidate,
+    )
+    monkeypatch.setattr(collector, "store_current_market", fake_store)
+    monkeypatch.setattr(collector, "current_utc_epoch_ms", lambda: start_ms)
+
+    discovered = asyncio.run(
+        collector.discover_current_polymarket_market(
+            SimpleNamespace(
+                POLYMARKET_BTC_5M_SLUG_PREFIX="btc-updown-5m",
+                POLYMARKET_GAMMA_BASE_URL="https://gamma.example.test",
+            ),
+            "pool",
+            Client(),
+            candidate.window,
+        )
+    )
+
+    assert discovered == candidate
+    assert stores == [("pool", candidate, start_ms)]
+
+
+@pytest.mark.parametrize(
+    ("start_ms", "settlement_rule"),
+    (
+        (
+            collector.TWAP_60S_CUTOVER_MS - 300_000,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS + 300_000,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+    ),
+)
+def test_discovery_rejects_inverted_cutover_identity(
+    monkeypatch,
+    start_ms,
+    settlement_rule,
+):
+    candidate = current_market(
+        start_ms=start_ms,
+        settlement_rule=settlement_rule,
+    )
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class Client:
+        async def get(self, url, **kwargs):
+            return Response()
+
+    async def unexpected_store(*args, **kwargs):
+        raise AssertionError("inverted discovery must not store the market")
+
+    monkeypatch.setattr(
+        collector,
+        "parse_current_market_from_gamma",
+        lambda payload, *, window, slug: candidate,
+    )
+    monkeypatch.setattr(collector, "store_current_market", unexpected_store)
+
+    with pytest.raises(collector.GammaDiscoveryError, match="expected BTC 5m"):
+        asyncio.run(
+            collector.discover_current_polymarket_market(
+                SimpleNamespace(
+                    POLYMARKET_BTC_5M_SLUG_PREFIX="btc-updown-5m",
+                    POLYMARKET_GAMMA_BASE_URL="https://gamma.example.test",
+                ),
+                "pool",
+                Client(),
+                candidate.window,
+            )
+        )
+
+
+def test_historical_discovery_fallback_does_not_require_active_open_market(
+    monkeypatch,
+):
+    start_ms = collector.TWAP_60S_CUTOVER_MS
+    candidate = current_market(start_ms=start_ms)
+    requests = []
+    stores = []
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class Client:
+        async def get(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response(404 if "/events/slug/" in url else 200)
+
+    async def fake_store(pool, market, *, seen_ms):
+        stores.append((pool, market, seen_ms))
+
+    monkeypatch.setattr(
+        collector,
+        "parse_current_market_from_gamma",
+        lambda payload, *, window, slug: candidate,
+    )
+    monkeypatch.setattr(collector, "store_current_market", fake_store)
+    monkeypatch.setattr(
+        collector,
+        "current_utc_epoch_ms",
+        lambda: candidate.window.market_end_ms + 1,
+    )
+
+    discovered = asyncio.run(
+        collector.discover_current_polymarket_market(
+            SimpleNamespace(
+                POLYMARKET_BTC_5M_SLUG_PREFIX="btc-updown-5m",
+                POLYMARKET_GAMMA_BASE_URL="https://gamma.example.test",
+            ),
+            "pool",
+            Client(),
+            candidate.window,
+        )
+    )
+
+    assert discovered == candidate
+    assert requests == [
+        (
+            f"https://gamma.example.test/events/slug/{candidate.slug}",
+            {},
+        ),
+        (
+            "https://gamma.example.test/markets",
+            {"params": {"slug": candidate.slug}},
+        ),
+    ]
+    assert stores == [
+        ("pool", candidate, candidate.window.market_end_ms + 1)
+    ]
+
+
+def test_backfill_scan_advances_cursor_across_failures_and_stores_metadata_only(
+    monkeypatch,
+):
+    windows = [
+        market_window(start_ms=collector.TWAP_60S_CUTOVER_MS),
+        market_window(start_ms=collector.TWAP_60S_CUTOVER_MS + 300_000),
+    ]
+    scans = []
+    discoveries = []
+
+    async def fake_fetch(pool, **kwargs):
+        scans.append((pool, kwargs))
+        return windows
+
+    async def fake_discover(settings, pool, client, window):
+        discoveries.append((settings, pool, client, window))
+        if window == windows[1]:
+            raise collector.GammaDiscoveryError("missing historical metadata")
+        return current_market(start_ms=window.market_start_ms)
+
+    monkeypatch.setattr(
+        collector,
+        "fetch_missing_polymarket_market_windows",
+        fake_fetch,
+    )
+    monkeypatch.setattr(
+        collector,
+        "discover_current_polymarket_market",
+        fake_discover,
+    )
+
+    attempted, stored, last_scanned_ms = asyncio.run(
+        collector.backfill_missing_polymarket_markets_once(
+            settings="settings",
+            pool="pool",
+            client="client",
+            now_ms=collector.TWAP_60S_CUTOVER_MS + 900_000,
+            after_market_start_ms=collector.TWAP_60S_CUTOVER_MS - 300_000,
+            limit=20,
+        )
+    )
+
+    assert (attempted, stored) == (2, 1)
+    assert last_scanned_ms == windows[-1].market_start_ms
+    assert scans == [
+        (
+            "pool",
+            {
+                "first_market_start_ms": collector.TWAP_60S_CUTOVER_MS,
+                "now_ms": collector.TWAP_60S_CUTOVER_MS + 900_000,
+                "after_market_start_ms": (
+                    collector.TWAP_60S_CUTOVER_MS - 300_000
+                ),
+                "limit": 20,
+            },
+        )
+    ]
+    assert [call[3] for call in discoveries] == windows
+
+
+def resolved_gamma_event(
+    *,
+    outcome_prices='["0","1"]',
+    market_start_ms=LEGACY_MARKET_START_MS,
+    settlement_rule=None,
+):
+    if settlement_rule is None:
+        settlement_rule = collector.expected_twap_settlement_rule(
+            market_start_ms
+        )
+    (
+        _settlement_reference,
+        settlement_window_s,
+        settlement_source_url,
+        settlement_rule_version,
+    ) = settlement_rule
+    slug = f"btc-updown-5m-{market_start_ms // 1000}"
     return {
         "id": "event-1",
         "slug": slug,
@@ -181,17 +588,20 @@ def resolved_gamma_event(*, outcome_prices='["0","1"]'):
                 "outcomes": '["Up","Down"]',
                 "outcomePrices": outcome_prices,
                 "clobTokenIds": '["up-token","down-token"]',
-                "resolutionSource": collector.SUPPORTED_TWAP_SOURCE_URL,
-                "cryptoMarketConfigId": "btc-5m-twap-30",
+                "resolutionSource": settlement_source_url,
+                "cryptoMarketConfigId": settlement_rule_version,
                 "cryptoMarketConfig": {
-                    "id": "btc-5m-twap-30",
+                    "id": settlement_rule_version,
                     "asset": "btc",
                     "duration": "5m",
                     "twapEnabled": True,
-                    "twapLookbackSeconds": 30,
+                    "twapLookbackSeconds": settlement_window_s,
                 },
                 "closed": True,
-                "closedTime": "2026-07-07 21:25:17+00",
+                "closedTime": datetime.fromtimestamp(
+                    (market_start_ms + 317_000) / 1000,
+                    tz=timezone.utc,
+                ).isoformat(),
                 "umaResolutionStatus": "resolved",
             }
         ],
@@ -334,8 +744,14 @@ def test_parse_polymarket_resolution_requires_all_stored_market_ids_to_match():
 
 
 def test_resolution_revalidates_live_gamma_twap_rule_and_rejects_changes():
-    changed = resolved_gamma_event()
-    changed["markets"][0]["cryptoMarketConfig"]["twapLookbackSeconds"] = 60
+    changed = resolved_gamma_event(
+        market_start_ms=CURRENT_MARKET_START_MS,
+        settlement_rule=collector.CURRENT_TWAP_SETTLEMENT_RULE,
+    )
+    changed["markets"][0]["cryptoMarketConfig"][
+        "twapLookbackSeconds"
+    ] = collector.LEGACY_TWAP_WINDOW_SECONDS
+    current = current_market(start_ms=CURRENT_MARKET_START_MS)
 
     with pytest.raises(
         collector.ResolutionParseError,
@@ -343,15 +759,16 @@ def test_resolution_revalidates_live_gamma_twap_rule_and_rejects_changes():
     ):
         collector.parse_polymarket_resolution(
             changed,
-            slug=current_market().slug,
+            slug=current.slug,
             gamma_market_id="market-1",
             condition_id="condition-1",
             up_token_id="up-token",
             down_token_id="down-token",
             expected_settlement_reference="chainlink_twap",
-            expected_settlement_window_s=30,
-            expected_settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
-            expected_settlement_rule_version="btc-5m-twap-30",
+            expected_settlement_window_s=collector.CURRENT_TWAP_WINDOW_SECONDS,
+            expected_settlement_source_url=collector.CURRENT_TWAP_SOURCE_URL,
+            expected_settlement_rule_version=collector.CURRENT_TWAP_RULE_VERSION,
+            expected_market_start_ms=CURRENT_MARKET_START_MS,
         )
 
     with pytest.raises(
@@ -359,16 +776,120 @@ def test_resolution_revalidates_live_gamma_twap_rule_and_rejects_changes():
         match="contradicts the discovered rule",
     ):
         collector.parse_polymarket_resolution(
-            resolved_gamma_event(),
-            slug=current_market().slug,
+            resolved_gamma_event(
+                market_start_ms=CURRENT_MARKET_START_MS,
+                settlement_rule=collector.CURRENT_TWAP_SETTLEMENT_RULE,
+            ),
+            slug=current.slug,
             gamma_market_id="market-1",
             condition_id="condition-1",
             up_token_id="up-token",
             down_token_id="down-token",
             expected_settlement_reference="chainlink_twap",
-            expected_settlement_window_s=60,
-            expected_settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
-            expected_settlement_rule_version="btc-5m-twap-30",
+            expected_settlement_window_s=collector.LEGACY_TWAP_WINDOW_SECONDS,
+            expected_settlement_source_url=collector.LEGACY_TWAP_SOURCE_URL,
+            expected_settlement_rule_version=collector.LEGACY_TWAP_RULE_VERSION,
+            expected_market_start_ms=CURRENT_MARKET_START_MS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("market_start_ms", "settlement_rule"),
+    (
+        (
+            collector.TWAP_60S_CUTOVER_MS - 300_000,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS + 300_000,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+    ),
+)
+def test_resolution_reconciliation_accepts_rule_in_force_at_market_boundary(
+    market_start_ms,
+    settlement_rule,
+):
+    gamma = resolved_gamma_event(
+        market_start_ms=market_start_ms,
+        settlement_rule=settlement_rule,
+    )
+    market = current_market(
+        start_ms=market_start_ms,
+        settlement_rule=settlement_rule,
+    )
+    reference, window_s, source_url, rule_version = settlement_rule
+
+    resolution = collector.parse_polymarket_resolution(
+        gamma,
+        slug=market.slug,
+        gamma_market_id="market-1",
+        condition_id="condition-1",
+        up_token_id="up-token",
+        down_token_id="down-token",
+        expected_settlement_reference=reference,
+        expected_settlement_window_s=window_s,
+        expected_settlement_source_url=source_url,
+        expected_settlement_rule_version=rule_version,
+        expected_market_start_ms=market_start_ms,
+    )
+
+    assert resolution.winner == "Down"
+    assert resolution.chainlink_open_price == Decimal("63337.115841440165")
+    assert resolution.chainlink_close_price == Decimal("63336.71900847139")
+
+
+@pytest.mark.parametrize(
+    ("market_start_ms", "inverted_rule"),
+    (
+        (
+            collector.TWAP_60S_CUTOVER_MS - 300_000,
+            collector.CURRENT_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+        (
+            collector.TWAP_60S_CUTOVER_MS + 300_000,
+            collector.LEGACY_TWAP_SETTLEMENT_RULE,
+        ),
+    ),
+)
+def test_resolution_reconciliation_rejects_inverted_cutover_identity(
+    market_start_ms,
+    inverted_rule,
+):
+    gamma = resolved_gamma_event(
+        market_start_ms=market_start_ms,
+        settlement_rule=inverted_rule,
+    )
+    market = current_market(
+        start_ms=market_start_ms,
+        settlement_rule=inverted_rule,
+    )
+    reference, window_s, source_url, rule_version = inverted_rule
+
+    with pytest.raises(
+        collector.ResolutionParseError,
+        match="rule in force at the market boundary",
+    ):
+        collector.parse_polymarket_resolution(
+            gamma,
+            slug=market.slug,
+            gamma_market_id="market-1",
+            condition_id="condition-1",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            expected_settlement_reference=reference,
+            expected_settlement_window_s=window_s,
+            expected_settlement_source_url=source_url,
+            expected_settlement_rule_version=rule_version,
+            expected_market_start_ms=market_start_ms,
         )
 
 
@@ -544,7 +1065,13 @@ def test_reconcile_polymarket_resolution_persists_complete_official_result(
             ),
             pool="pool",
             client="client",
-            market={"market_id": 5_944_864, "resolution_attempts": 0},
+            market={
+                "market_id": 5_944_864,
+                "resolution_attempts": 0,
+                "settlement_rule_version": collector.LEGACY_TWAP_RULE_VERSION,
+                "reconciled_settlement_rule_version": "stale-rule",
+                "settlement_identity_refresh_required": True,
+            },
             now_ms=1_783_459_520_000,
         )
     )
@@ -555,6 +1082,11 @@ def test_reconcile_polymarket_resolution_persists_complete_official_result(
     assert writes[0]["resolution_type"] == "winner"
     assert writes[0]["winner"] == "Down"
     assert writes[0]["chainlink_open_price"] == Decimal("63337.115841440165")
+    assert (
+        writes[0]["expected_settlement_rule_version"]
+        == collector.LEGACY_TWAP_RULE_VERSION
+    )
+    assert writes[0]["settlement_identity_validated"] is True
     assert writes[0]["next_check_ms"] is None
     assert writes[0]["resolution_attempts"] == 1
 
@@ -585,7 +1117,13 @@ def test_reconcile_polymarket_resolution_schedules_durable_retry_on_failure(
             ),
             pool="pool",
             client="client",
-            market={"market_id": 5_944_864, "resolution_attempts": 2},
+            market={
+                "market_id": 5_944_864,
+                "resolution_attempts": 2,
+                "settlement_rule_version": collector.LEGACY_TWAP_RULE_VERSION,
+                "reconciled_settlement_rule_version": "stale-rule",
+                "settlement_identity_refresh_required": True,
+            },
             now_ms=1_783_459_520_000,
         )
     )
@@ -599,6 +1137,109 @@ def test_reconcile_polymarket_resolution_schedules_durable_retry_on_failure(
             "resolution_attempts": 3,
         }
     ]
+
+
+def test_resolution_reconciler_pages_backfill_before_due_scan_and_wraps_cursor(
+    monkeypatch,
+):
+    cutover_ms = collector.TWAP_60S_CUTOVER_MS
+    clock = {"now_ms": cutover_ms + 900_000}
+    order = []
+    cursors = []
+    sleep_calls = []
+    backfill_results = [
+        (2, 1, cutover_ms + 300_000),
+        (1, 0, cutover_ms + 600_000),
+        (0, 0, None),
+        (0, 0, None),
+    ]
+
+    class StopSession(RuntimeError):
+        pass
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            assert kwargs == {"timeout": 10.0}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def fake_backfill(**kwargs):
+        order.append("backfill")
+        assert kwargs["settings"] is settings
+        assert kwargs["pool"] == "pool"
+        assert isinstance(kwargs["client"], FakeAsyncClient)
+        assert kwargs["now_ms"] == clock["now_ms"]
+        assert kwargs["limit"] == 2
+        cursors.append(kwargs["after_market_start_ms"])
+        return backfill_results[len(cursors) - 1]
+
+    async def fake_fetch_due(pool, **kwargs):
+        order.append("due")
+        assert pool == "pool"
+        assert kwargs == {"now_ms": clock["now_ms"], "limit": 2}
+        return [{"market_id": 5_955_552}]
+
+    async def fake_reconcile(**kwargs):
+        order.append("reconcile")
+        assert kwargs["settings"] is settings
+        assert kwargs["pool"] == "pool"
+        assert isinstance(kwargs["client"], FakeAsyncClient)
+        assert kwargs["market"] == {"market_id": 5_955_552}
+
+    async def fake_sleep(seconds):
+        order.append("sleep")
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 4:
+            raise StopSession
+        clock["now_ms"] += 60_000 if len(sleep_calls) == 3 else 5_000
+
+    settings = SimpleNamespace(
+        POLYMARKET_RESOLUTION_POLL_SECONDS=5,
+        POLYMARKET_RESOLUTION_BATCH_SIZE=2,
+    )
+    monkeypatch.setattr(collector.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        collector,
+        "current_utc_epoch_ms",
+        lambda: clock["now_ms"],
+    )
+    monkeypatch.setattr(
+        collector,
+        "backfill_missing_polymarket_markets_once",
+        fake_backfill,
+    )
+    monkeypatch.setattr(
+        collector,
+        "fetch_due_polymarket_resolutions",
+        fake_fetch_due,
+    )
+    monkeypatch.setattr(
+        collector,
+        "reconcile_polymarket_resolution_once",
+        fake_reconcile,
+    )
+    monkeypatch.setattr(collector.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(StopSession):
+        asyncio.run(collector._resolution_reconciler_session(settings, "pool"))
+
+    assert cursors == [
+        None,
+        cutover_ms + 300_000,
+        cutover_ms + 600_000,
+        None,
+    ]
+    assert order == [
+        "backfill",
+        "due",
+        "reconcile",
+        "sleep",
+    ] * 4
+    assert sleep_calls == [5, 5, 5, 5]
 
 
 def test_build_clob_subscription_uses_only_up_and_down_token_ids():
@@ -719,6 +1360,11 @@ def test_persist_websocket_resolution_writes_official_winner_for_reconciliation(
     assert writes[0]["winner"] == "Down"
     assert writes[0]["winning_token_id"] == "down-token"
     assert writes[0]["chainlink_open_price"] is None
+    assert (
+        writes[0]["expected_settlement_rule_version"]
+        == collector.LEGACY_TWAP_RULE_VERSION
+    )
+    assert writes[0]["settlement_identity_validated"] is False
     assert writes[0]["next_check_ms"] == 1_783_459_522_100
     assert writes[0]["resolution_source"] == "polymarket_clob_ws"
 
@@ -1146,6 +1792,12 @@ def test_run_collector_preloads_and_starts_next_market_before_boundary(monkeypat
 
     async def fake_discover_current_polymarket_market(settings, pool, client, window):
         discover_calls.append((window.market_id, clock["now_ms"], window))
+        (
+            settlement_reference,
+            settlement_window_s,
+            settlement_source_url,
+            settlement_rule_version,
+        ) = collector.expected_twap_settlement_rule(window.market_start_ms)
         return collector.CurrentPolymarketMarket(
             window=window,
             slug=f"btc-updown-5m-{window.market_start_ms // 1000}",
@@ -1162,10 +1814,10 @@ def test_run_collector_preloads_and_starts_next_market_before_boundary(monkeypat
             active=True,
             closed=False,
             archived=False,
-            settlement_reference=collector.SETTLEMENT_REFERENCE_CHAINLINK_TWAP,
-            settlement_window_s=collector.SUPPORTED_TWAP_WINDOW_SECONDS,
-            settlement_source_url=collector.SUPPORTED_TWAP_SOURCE_URL,
-            settlement_rule_version=collector.SUPPORTED_TWAP_RULE_VERSION,
+            settlement_reference=settlement_reference,
+            settlement_window_s=settlement_window_s,
+            settlement_source_url=settlement_source_url,
+            settlement_rule_version=settlement_rule_version,
             raw_gamma={"market": {"id": "market"}},
         )
 

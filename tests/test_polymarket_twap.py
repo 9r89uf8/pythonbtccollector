@@ -13,10 +13,10 @@ def twap_settings(*, idle_timeout_ms=10_000, queue_max_events=100):
     return SimpleNamespace(
         POLYMARKET_RTDS_WS_URL="wss://example.test/rtds",
         POLYMARKET_TWAP_PROVIDER_CODE="polymarket_chainlink_twap_rtds",
-        POLYMARKET_TWAP_SYMBOL="BTCUSD_TWAP_30S",
+        POLYMARKET_TWAP_SYMBOL="BTCUSD_TWAP_60S",
         POLYMARKET_TWAP_RTD_SYMBOL="btc/usd",
-        POLYMARKET_TWAP_TOPIC="crypto_prices_twap_thirty",
-        POLYMARKET_TWAP_WINDOW_SECONDS=30,
+        POLYMARKET_TWAP_TOPIC="crypto_prices_twap_sixty",
+        POLYMARKET_TWAP_WINDOW_SECONDS=60,
         POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=idle_timeout_ms,
         POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=queue_max_events,
         POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=0.1,
@@ -28,14 +28,14 @@ def valid_twap_message(**payload_overrides):
         "symbol": "btc/usd",
         "value": Decimal("1.25"),
         "full_accuracy_value": "64255113422936400000000",
-        "timestamp": 1_786_060_800_123,
-        "window_s": 30,
+        "timestamp": 1_786_665_600_123,
+        "window_s": 60,
     }
     payload.update(payload_overrides)
     return {
-        "topic": "crypto_prices_twap_thirty",
+        "topic": "crypto_prices_twap_sixty",
         "type": "update",
-        "timestamp": 1_786_060_800_456,
+        "timestamp": 1_786_665_600_456,
         "payload": payload,
     }
 
@@ -67,8 +67,8 @@ def twap_event(*, receive_sequence=1):
         instrument_id=77,
         connection_id=UUID("11111111-1111-1111-1111-111111111111"),
         receive_sequence=receive_sequence,
-        topic="crypto_prices_twap_thirty",
-        received_wall_ns=1_786_060_800_500_123_456,
+        topic="crypto_prices_twap_sixty",
+        received_wall_ns=1_786_665_600_500_123_456,
         received_monotonic_ns=9_000_000_000,
     )
 
@@ -80,7 +80,7 @@ def test_twap_subscription_uses_raw_update_topic_and_compact_symbol_filter():
         "action": "subscribe",
         "subscriptions": [
             {
-                "topic": "crypto_prices_twap_thirty",
+                "topic": "crypto_prices_twap_sixty",
                 "type": "update",
                 "filters": '{"symbol":"btc/usd"}',
             }
@@ -92,21 +92,21 @@ def test_twap_parser_uses_exact_e18_instead_of_rounded_display_value():
     tick = twap.parse_polymarket_twap_message(valid_twap_message())
 
     assert tick.symbol == "btc/usd"
-    assert tick.window_s == 30
+    assert tick.window_s == 60
     assert tick.price_e18 == 64_255_113_422_936_400_000_000
     assert tick.price == Decimal("64255.113422936400000000")
-    assert tick.provider_event_ms == 1_786_060_800_123
-    assert tick.provider_message_ms == 1_786_060_800_456
+    assert tick.provider_event_ms == 1_786_665_600_123
+    assert tick.provider_message_ms == 1_786_665_600_456
 
 
 @pytest.mark.parametrize(
     ("field_name", "bad_value"),
     (
         ("POLYMARKET_TWAP_PROVIDER_CODE", "wrong_provider"),
-        ("POLYMARKET_TWAP_SYMBOL", "ETHUSD_TWAP_30S"),
+        ("POLYMARKET_TWAP_SYMBOL", "BTCUSD_TWAP_30S"),
         ("POLYMARKET_TWAP_RTD_SYMBOL", "eth/usd"),
-        ("POLYMARKET_TWAP_TOPIC", "crypto_prices_twap_sixty"),
-        ("POLYMARKET_TWAP_WINDOW_SECONDS", 60),
+        ("POLYMARKET_TWAP_TOPIC", "crypto_prices_twap_thirty"),
+        ("POLYMARKET_TWAP_WINDOW_SECONDS", 30),
     ),
 )
 def test_runtime_rejects_noncanonical_twap_identity(field_name, bad_value):
@@ -139,12 +139,12 @@ def test_twap_timestamp_plausibility_accepts_normal_lag_and_rejects_bad_units():
         )
 
     seconds_unit_tick = twap.parse_polymarket_twap_message(
-        valid_twap_message(timestamp=1_786_060_800)
+        valid_twap_message(timestamp=1_786_665_600)
     )
     with pytest.raises(twap.RtdsTwapParseError, match="is stale"):
         twap.validate_twap_timestamp_plausibility(
             seconds_unit_tick,
-            received_ms=1_786_060_800_500,
+            received_ms=1_786_665_600_500,
             accepted_event_idle_timeout_ms=10_000,
         )
 
@@ -152,7 +152,7 @@ def test_twap_timestamp_plausibility_accepts_normal_lag_and_rejects_bad_units():
 @pytest.mark.parametrize(
     ("payload_overrides", "match"),
     (
-        ({"window_s": 60}, "unexpected TWAP window_s"),
+        ({"window_s": 30}, "unexpected TWAP window_s"),
         ({"window_s": True}, "payload.window_s must be a positive integer"),
         ({"symbol": "eth/usd"}, "unexpected TWAP symbol"),
         (
@@ -179,13 +179,21 @@ def test_twap_parser_rejects_wrong_feed_or_inexact_e18(
         )
 
 
+def test_twap_parser_rejects_legacy_thirty_second_topic():
+    message = valid_twap_message()
+    message["topic"] = "crypto_prices_twap_thirty"
+
+    with pytest.raises(twap.RtdsTwapParseError, match="unexpected TWAP topic"):
+        twap.parse_polymarket_twap_message(message)
+
+
 def test_twap_event_materialization_uses_provider_second_and_half_open_market():
     event = twap_event()
 
-    assert event.sample_second_ms == 1_786_060_800_000
-    assert event.window.market_start_ms == 1_786_060_800_000
-    assert event.window.market_end_ms == 1_786_061_100_000
-    assert event.window.market_id == 1_786_060_800_000 // 300_000
+    assert event.sample_second_ms == 1_786_665_600_000
+    assert event.window.market_start_ms == 1_786_665_600_000
+    assert event.window.market_end_ms == 1_786_665_900_000
+    assert event.window.market_id == 1_786_665_600_000 // 300_000
     assert event.price_e18 == 64_255_113_422_936_400_000_000
     assert isinstance(event.price, Decimal)
 
@@ -302,7 +310,7 @@ def test_reader_attempts_twap_live_cache_before_postgres_queue(monkeypatch):
         class RecordingLiveCache:
             async def set_price(self, key, **fields):
                 order.append("redis")
-                assert key == "btc:live:chainlink_twap_30s"
+                assert key == "btc:live:chainlink_twap_60s"
                 assert fields == {
                     "value": Decimal("64255.113422936400000000"),
                     "source_timestamp_ms": message["payload"]["timestamp"],
@@ -555,6 +563,14 @@ class NonAcceptedFramesWebSocket:
                     "payload": {"symbol": "btc/usd"},
                 }
             ),
+            json.dumps(valid_twap_message(window_s=30), default=str),
+            json.dumps(
+                {
+                    **valid_twap_message(),
+                    "topic": "crypto_prices_twap_thirty",
+                },
+                default=str,
+            ),
         )
         frame = frames[self.index % len(frames)]
         self.index += 1
@@ -767,9 +783,9 @@ def test_queue_saturation_preserves_current_event_and_forces_explicit_gap(caplog
         records.put_nowait(
             twap.PolymarketTwapSessionStart(
                 connection_id=UUID("22222222-2222-2222-2222-222222222222"),
-                topic="crypto_prices_twap_thirty",
+                topic="crypto_prices_twap_sixty",
                 symbol="btc/usd",
-                window_s=30,
+                window_s=60,
                 connected_wall_ns=1,
                 connected_monotonic_ns=1,
                 subscribed_wall_ns=2,
@@ -834,12 +850,14 @@ def test_independent_persistence_worker_retries_exact_event(monkeypatch):
         kwargs = calls[-1][1]
         assert kwargs["connection_id"] == event.connection_id
         assert kwargs["receive_sequence"] == 9
+        assert kwargs["topic"] == "crypto_prices_twap_sixty"
+        assert kwargs["window_s"] == 60
         assert kwargs["price_e18"] == 64_255_113_422_936_400_000_000
         assert kwargs["price"] == Decimal("64255.113422936400000000")
-        assert kwargs["provider_event_ms"] == 1_786_060_800_123
-        assert kwargs["received_wall_ns"] == 1_786_060_800_500_123_456
+        assert kwargs["provider_event_ms"] == 1_786_665_600_123
+        assert kwargs["received_wall_ns"] == 1_786_665_600_500_123_456
         assert kwargs["received_monotonic_ns"] == 9_000_000_000
-        assert kwargs["sample_second_ms"] == 1_786_060_800_000
+        assert kwargs["sample_second_ms"] == 1_786_665_600_000
 
     asyncio.run(scenario())
 
@@ -998,8 +1016,8 @@ def test_final_control_offer_is_nonblocking_when_reserve_is_exhausted(caplog):
             messages_accepted_total=1,
             parse_errors_total=0,
             receive_sequence=1,
-            last_accepted_received_ms=1_786_060_800_500,
-            last_provider_event_ms=1_786_060_800_123,
+            last_accepted_received_ms=1_786_665_600_500,
+            last_provider_event_ms=1_786_665_600_123,
         )
 
         assert offered is False
@@ -1016,8 +1034,8 @@ def test_startup_recovers_open_session_as_gap_before_finish(monkeypatch):
         calls = []
 
         class Connection:
-            async def fetch(self, query):
-                queries.append(" ".join(query.split()))
+            async def fetch(self, query, *args):
+                queries.append((" ".join(query.split()), args))
                 return [
                     {
                         "connection_id": connection_id,
@@ -1026,8 +1044,8 @@ def test_startup_recovers_open_session_as_gap_before_finish(monkeypatch):
                         "messages_accepted_total": 4,
                         "parse_errors_total": 2,
                         "last_receive_sequence": 9,
-                        "last_accepted_received_ms": 1_786_060_800_500,
-                        "last_provider_event_ms": 1_786_060_800_123,
+                        "last_accepted_received_ms": 1_786_665_600_500,
+                        "last_provider_event_ms": 1_786_665_600_123,
                     }
                 ]
 
@@ -1069,10 +1087,20 @@ def test_startup_recovers_open_session_as_gap_before_finish(monkeypatch):
             >= 8_000_000_000_000_000_000
         )
         assert calls[0][1]["messages_accepted_total"] == 4
-        assert "session.disconnected_wall_ns IS NULL" in queries[0]
-        assert "session.topic = 'crypto_prices_twap_thirty'" in queries[0]
-        assert "session.symbol = 'btc/usd'" in queries[0]
-        assert "session.window_s = 30" in queries[0]
+        query, args = queries[0]
+        assert "session.disconnected_wall_ns IS NULL" in query
+        assert "session.symbol = $1::TEXT" in query
+        assert "session.topic = $2::TEXT" in query
+        assert "session.window_s = $3::SMALLINT" in query
+        assert "session.topic = $4::TEXT" in query
+        assert "session.window_s = $5::SMALLINT" in query
+        assert args == (
+            "btc/usd",
+            "crypto_prices_twap_thirty",
+            30,
+            "crypto_prices_twap_sixty",
+            60,
+        )
 
     asyncio.run(scenario())
 

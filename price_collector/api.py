@@ -48,6 +48,7 @@ from price_collector.flip_research import (
     fetch_flip_markets,
     fetch_market_flip_analysis,
 )
+from price_collector.twap_shadow import MODEL_VERSION as TWAP_SHADOW_MODEL_VERSION
 
 
 DEFAULT_PROVIDER = "binance_spot"
@@ -57,6 +58,11 @@ FlipKind = Literal["any_crossing", "decisive_flip", "cutoff_reversal"]
 FlipDirection = Literal["up_to_down", "down_to_up"]
 FlipWinner = Literal["Up", "Down"]
 FlipDataView = Literal["event_window", "full"]
+MIN_FLIP_DEFINITION_VERSION = 1
+FLIP_DEFINITION_VERSION_DESCRIPTION = (
+    "Immutable flip definition version; version 3 is current and versions "
+    "1-2 are retained history"
+)
 DEFAULT_FLIP_EVENT_WINDOW_BEFORE_SECONDS = 30
 MAX_FLIP_EVENT_WINDOW_BEFORE_SECONDS = 120
 DOWNLOAD_FLOW_FIELDS = (
@@ -408,7 +414,11 @@ def _serialize_settlement(
     }
 
 
-def serialize_flip_market_item(row: Mapping[str, Any]) -> dict[str, Any]:
+def serialize_flip_market_item(
+    row: Mapping[str, Any],
+    *,
+    definition_version: int,
+) -> dict[str, Any]:
     market_id = int(row["market_id"])
     price_to_beat = _mapping_value(
         row,
@@ -464,10 +474,19 @@ def serialize_flip_market_item(row: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "decisive_flip": _serialize_decisive_flip(row),
         "archive": _serialize_flip_archive(row),
-        "flip_detail_url": f"/markets/{market_id}/flips",
+        "flip_detail_url": (
+            f"/markets/{market_id}/flips"
+            f"?definition_version={definition_version}"
+        ),
         "data_url": f"/markets/{market_id}/data",
-        "evidence_url": f"/markets/{market_id}/flips/data",
-        "evidence_download_url": f"/markets/{market_id}/flips/download",
+        "evidence_url": (
+            f"/markets/{market_id}/flips/data"
+            f"?definition_version={definition_version}"
+        ),
+        "evidence_download_url": (
+            f"/markets/{market_id}/flips/download"
+            f"?definition_version={definition_version}"
+        ),
     }
 
 
@@ -710,6 +729,7 @@ def serialize_flip_cutoff(
 def serialize_market_flip_analysis(
     analysis: Mapping[str, Any],
     *,
+    definition_version: int,
     now_ms: int,
     microstructure_groups: tuple[str, ...] = MICROSTRUCTURE_GROUPS,
 ) -> dict[str, Any]:
@@ -731,13 +751,7 @@ def serialize_market_flip_analysis(
     )
     return {
         "schema_version": 2,
-        "definition_version": int(
-            _mapping_value(
-                evaluation,
-                "definition_version",
-                default=FLIP_DEFINITION_VERSION,
-            )
-        ),
+        "definition_version": definition_version,
         "server_time_ms": now_ms,
         "market": {
             "market_id": market_id,
@@ -899,8 +913,14 @@ def serialize_market_flip_analysis(
         ],
         "archive": _serialize_flip_archive(evaluation),
         "data_url": f"/markets/{market_id}/data",
-        "evidence_url": f"/markets/{market_id}/flips/data",
-        "evidence_download_url": f"/markets/{market_id}/flips/download",
+        "evidence_url": (
+            f"/markets/{market_id}/flips/data"
+            f"?definition_version={definition_version}"
+        ),
+        "evidence_download_url": (
+            f"/markets/{market_id}/flips/download"
+            f"?definition_version={definition_version}"
+        ),
     }
 
 
@@ -995,11 +1015,13 @@ def build_flip_evidence_bundle(
     view: FlipDataView,
     before_seconds: int,
     requested_event_sequence: Optional[int],
+    definition_version: int,
     now_ms: int,
     microstructure_groups: tuple[str, ...] = MICROSTRUCTURE_GROUPS,
 ) -> dict[str, Any]:
     serialized_flip = serialize_market_flip_analysis(
         analysis,
+        definition_version=definition_version,
         now_ms=now_ms,
         microstructure_groups=microstructure_groups,
     )
@@ -1080,7 +1102,10 @@ def build_flip_evidence_bundle(
     )
     full_availability = summarize_flip_series_availability(full_series)
     market_id = int(market["market_id"])
-    evidence_query_parts = [f"view={view}"]
+    evidence_query_parts = [
+        f"definition_version={definition_version}",
+        f"view={view}",
+    ]
     if view == "event_window":
         evidence_query_parts.append(f"before_seconds={before_seconds}")
     if requested_event_sequence is not None:
@@ -1147,8 +1172,14 @@ def build_flip_evidence_bundle(
             "preserve_list_filters": True,
         },
         "links": {
-            "flip_list": "/markets/flips",
-            "flip_detail": f"/markets/{market_id}/flips",
+            "flip_list": (
+                "/markets/flips"
+                f"?definition_version={definition_version}"
+            ),
+            "flip_detail": (
+                f"/markets/{market_id}/flips"
+                f"?definition_version={definition_version}"
+            ),
             "evidence": (
                 f"/markets/{market_id}/flips/data{evidence_query}"
             ),
@@ -1176,13 +1207,14 @@ def build_flip_evidence_bundle(
 def serialize_flip_distribution(
     distribution: Mapping[str, Any],
     *,
+    definition_version: int,
     max_seconds: int,
     now_ms: int,
 ) -> dict[str, Any]:
     population = distribution.get("population") or {}
     return {
         "schema_version": 2,
-        "definition_version": FLIP_DEFINITION_VERSION,
+        "definition_version": definition_version,
         "server_time_ms": now_ms,
         "max_seconds": max_seconds,
         "population": {
@@ -1462,6 +1494,12 @@ async def markets_index(
 @app.get("/markets/flips")
 async def markets_flips(
     request: Request,
+    definition_version: int = Query(
+        FLIP_DEFINITION_VERSION,
+        ge=MIN_FLIP_DEFINITION_VERSION,
+        le=FLIP_DEFINITION_VERSION,
+        description=FLIP_DEFINITION_VERSION_DESCRIPTION,
+    ),
     within_seconds: int = Query(20, ge=1, le=20),
     kind: FlipKind = Query("any_crossing"),
     direction: Optional[FlipDirection] = Query(None),
@@ -1475,7 +1513,7 @@ async def markets_flips(
     now_ms = current_utc_epoch_ms()
     rows = await fetch_flip_markets(
         get_pool(request),
-        definition_version=FLIP_DEFINITION_VERSION,
+        definition_version=definition_version,
         within_seconds=within_seconds,
         kind=kind,
         direction=direction,
@@ -1502,11 +1540,14 @@ async def markets_flips(
 
     return {
         "schema_version": 2,
-        "definition_version": FLIP_DEFINITION_VERSION,
+        "definition_version": definition_version,
         "server_time_ms": now_ms,
         "filters": filters,
         "markets": [
-            serialize_flip_market_item(row)
+            serialize_flip_market_item(
+                row,
+                definition_version=definition_version,
+            )
             for row in page_rows
         ],
         "next_before_market_id": (
@@ -1520,6 +1561,12 @@ async def markets_flips(
 @app.get("/markets/flips/distribution")
 async def markets_flips_distribution(
     request: Request,
+    definition_version: int = Query(
+        FLIP_DEFINITION_VERSION,
+        ge=MIN_FLIP_DEFINITION_VERSION,
+        le=FLIP_DEFINITION_VERSION,
+        description=FLIP_DEFINITION_VERSION_DESCRIPTION,
+    ),
     max_seconds: int = Query(20, ge=1, le=20),
     direction: Optional[FlipDirection] = Query(None),
     start_ms: Optional[int] = Query(None, ge=0),
@@ -1529,7 +1576,7 @@ async def markets_flips_distribution(
     now_ms = current_utc_epoch_ms()
     distribution = await fetch_flip_distribution(
         get_pool(request),
-        definition_version=FLIP_DEFINITION_VERSION,
+        definition_version=definition_version,
         max_seconds=max_seconds,
         direction=direction,
         start_ms=start_ms,
@@ -1537,6 +1584,7 @@ async def markets_flips_distribution(
     )
     return serialize_flip_distribution(
         distribution,
+        definition_version=definition_version,
         max_seconds=max_seconds,
         now_ms=now_ms,
     )
@@ -1546,11 +1594,17 @@ async def markets_flips_distribution(
 async def markets_flips_by_id(
     request: Request,
     market_id: int,
+    definition_version: int = Query(
+        FLIP_DEFINITION_VERSION,
+        ge=MIN_FLIP_DEFINITION_VERSION,
+        le=FLIP_DEFINITION_VERSION,
+        description=FLIP_DEFINITION_VERSION_DESCRIPTION,
+    ),
 ) -> dict[str, Any]:
     analysis = await fetch_market_flip_analysis(
         get_pool(request),
         market_id=market_id,
-        definition_version=FLIP_DEFINITION_VERSION,
+        definition_version=definition_version,
     )
     if analysis is None:
         raise HTTPException(
@@ -1559,6 +1613,7 @@ async def markets_flips_by_id(
         )
     return serialize_market_flip_analysis(
         analysis,
+        definition_version=definition_version,
         now_ms=current_utc_epoch_ms(),
     )
 
@@ -1567,6 +1622,12 @@ async def markets_flips_by_id(
 async def markets_flip_data_by_id(
     request: Request,
     market_id: int,
+    definition_version: int = Query(
+        FLIP_DEFINITION_VERSION,
+        ge=MIN_FLIP_DEFINITION_VERSION,
+        le=FLIP_DEFINITION_VERSION,
+        description=FLIP_DEFINITION_VERSION_DESCRIPTION,
+    ),
     view: FlipDataView = Query("event_window"),
     before_seconds: int = Query(
         DEFAULT_FLIP_EVENT_WINDOW_BEFORE_SECONDS,
@@ -1600,6 +1661,7 @@ async def markets_flip_data_by_id(
     return await market_flip_evidence_payload(
         request,
         market_id=market_id,
+        definition_version=definition_version,
         view=view,
         before_seconds=before_seconds,
         event_sequence=event_sequence,
@@ -1611,6 +1673,12 @@ async def markets_flip_data_by_id(
 async def markets_flip_download_by_id(
     request: Request,
     market_id: int,
+    definition_version: int = Query(
+        FLIP_DEFINITION_VERSION,
+        ge=MIN_FLIP_DEFINITION_VERSION,
+        le=FLIP_DEFINITION_VERSION,
+        description=FLIP_DEFINITION_VERSION_DESCRIPTION,
+    ),
     view: FlipDataView = Query("event_window"),
     before_seconds: int = Query(
         DEFAULT_FLIP_EVENT_WINDOW_BEFORE_SECONDS,
@@ -1644,6 +1712,7 @@ async def markets_flip_download_by_id(
     payload = await market_flip_evidence_payload(
         request,
         market_id=market_id,
+        definition_version=definition_version,
         view=view,
         before_seconds=before_seconds,
         event_sequence=event_sequence,
@@ -1890,7 +1959,7 @@ async def twap_shadow_market_response(
 @app.get("/markets/current/twap-shadow")
 async def markets_current_twap_shadow(
     request: Request,
-    model_version: int = Query(1, ge=1, le=32_767),
+    model_version: int = Query(TWAP_SHADOW_MODEL_VERSION, ge=1, le=32_767),
 ) -> dict[str, Any]:
     now_ms = current_utc_epoch_ms()
     window = market_for_sample_second((now_ms // 1_000) * 1_000)
@@ -1905,7 +1974,7 @@ async def markets_current_twap_shadow(
 async def markets_twap_shadow(
     request: Request,
     market_id: int,
-    model_version: int = Query(1, ge=1, le=32_767),
+    model_version: int = Query(TWAP_SHADOW_MODEL_VERSION, ge=1, le=32_767),
 ) -> dict[str, Any]:
     return await twap_shadow_market_response(
         request,
@@ -2040,6 +2109,7 @@ async def market_flip_evidence_payload(
     request: Request,
     *,
     market_id: int,
+    definition_version: int,
     view: FlipDataView,
     before_seconds: int,
     event_sequence: Optional[int],
@@ -2049,7 +2119,7 @@ async def market_flip_evidence_payload(
     analysis = await fetch_market_flip_analysis(
         get_pool(request),
         market_id=market_id,
-        definition_version=FLIP_DEFINITION_VERSION,
+        definition_version=definition_version,
     )
     if analysis is None:
         raise HTTPException(
@@ -2104,6 +2174,7 @@ async def market_flip_evidence_payload(
         view=view,
         before_seconds=before_seconds,
         requested_event_sequence=event_sequence,
+        definition_version=definition_version,
         now_ms=now_ms,
         microstructure_groups=microstructure_groups,
     )

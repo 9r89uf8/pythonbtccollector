@@ -67,10 +67,10 @@ def test_settings_include_polymarket_twap_defaults(monkeypatch):
         settings.POLYMARKET_TWAP_PROVIDER_CODE
         == "polymarket_chainlink_twap_rtds"
     )
-    assert settings.POLYMARKET_TWAP_SYMBOL == "BTCUSD_TWAP_30S"
+    assert settings.POLYMARKET_TWAP_SYMBOL == "BTCUSD_TWAP_60S"
     assert settings.POLYMARKET_TWAP_RTD_SYMBOL == "btc/usd"
-    assert settings.POLYMARKET_TWAP_TOPIC == "crypto_prices_twap_thirty"
-    assert settings.POLYMARKET_TWAP_WINDOW_SECONDS == 30
+    assert settings.POLYMARKET_TWAP_TOPIC == "crypto_prices_twap_sixty"
+    assert settings.POLYMARKET_TWAP_WINDOW_SECONDS == 60
     assert settings.POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS == 10_000
     assert settings.POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS == 10_000
     assert settings.POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS == 5
@@ -104,15 +104,15 @@ def test_enabled_twap_shadow_requires_exact_twap_collector(monkeypatch):
 
 
 @pytest.mark.parametrize("poll_ms", (100, 125, 200, 500, 1_000, 101, 300, 750))
-def test_twap_shadow_poll_interval_is_fixed_for_model_v1(monkeypatch, poll_ms):
+def test_twap_shadow_poll_interval_is_fixed_for_model_v2(monkeypatch, poll_ms):
     monkeypatch.setenv("TWAP_SHADOW_POLL_MS", str(poll_ms))
 
     with pytest.raises(ValidationError, match="TWAP_SHADOW_POLL_MS"):
         Settings()
 
 
-@pytest.mark.parametrize("window_s", (29, 31, 60))
-def test_settings_reject_non_30_second_twap_window(monkeypatch, window_s):
+@pytest.mark.parametrize("window_s", (30, 59, 61))
+def test_settings_reject_non_60_second_twap_window(monkeypatch, window_s):
     monkeypatch.setenv("POLYMARKET_TWAP_WINDOW_SECONDS", str(window_s))
 
     with pytest.raises(
@@ -126,9 +126,9 @@ def test_settings_reject_non_30_second_twap_window(monkeypatch, window_s):
     ("field_name", "invalid_value"),
     (
         ("POLYMARKET_TWAP_PROVIDER_CODE", "wrong_provider"),
-        ("POLYMARKET_TWAP_SYMBOL", "ETHUSD_TWAP_30S"),
+        ("POLYMARKET_TWAP_SYMBOL", "BTCUSD_TWAP_30S"),
         ("POLYMARKET_TWAP_RTD_SYMBOL", "eth/usd"),
-        ("POLYMARKET_TWAP_TOPIC", "crypto_prices_twap_sixty"),
+        ("POLYMARKET_TWAP_TOPIC", "crypto_prices_twap_thirty"),
     ),
 )
 def test_enabled_twap_rejects_noncanonical_feed_identity(

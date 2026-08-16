@@ -9,6 +9,7 @@ from uuid import UUID
 import asyncpg
 
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.twap_shadow import PRELOAD_SAFETY_MS
 
 
 LOGGER = logging.getLogger("price_collector.db")
@@ -1104,8 +1105,10 @@ async def fetch_twap_shadow_preload(
 
     if cutoff_received_ms <= 0:
         raise ValueError("cutoff_received_ms must be positive")
-    if lookback_ms < 30_000:
-        raise ValueError("lookback_ms must be at least 30000")
+    if lookback_ms < PRELOAD_SAFETY_MS:
+        raise ValueError(
+            f"lookback_ms must be at least {PRELOAD_SAFETY_MS}"
+        )
     source_start_ms = cutoff_received_ms - lookback_ms
     async with pool.acquire() as connection:
         source_rows = await connection.fetch(
@@ -1185,9 +1188,9 @@ async def fetch_twap_shadow_preload(
                 event.price,
                 event.receive_sequence
             FROM polymarket_twap_events event
-            WHERE event.topic = 'crypto_prices_twap_thirty'
+            WHERE event.topic = 'crypto_prices_twap_sixty'
               AND event.symbol = 'btc/usd'
-              AND event.window_s = 30
+              AND event.window_s = 60
               AND event.provider_event_ms >= $1::BIGINT
               AND event.received_wall_ns <= $2::BIGINT * 1000000
             ORDER BY
@@ -1195,7 +1198,7 @@ async def fetch_twap_shadow_preload(
                 event.connection_id ASC,
                 event.receive_sequence ASC
             """,
-            source_start_ms + 45_000,
+            source_start_ms + PRELOAD_SAFETY_MS,
             cutoff_received_ms,
         )
 
@@ -1332,9 +1335,19 @@ async def fetch_twap_shadow_market_history(
                     event.provider_event_ms,
                     (event.received_wall_ns / 1000000)::BIGINT AS received_ms
                 FROM polymarket_twap_events event
-                WHERE event.topic = 'crypto_prices_twap_thirty'
-                  AND event.symbol = 'btc/usd'
-                  AND event.window_s = 30
+                WHERE event.symbol = 'btc/usd'
+                  AND (
+                        (
+                            $3::SMALLINT = 1
+                            AND event.topic = 'crypto_prices_twap_thirty'
+                            AND event.window_s = 30
+                        )
+                        OR (
+                            $3::SMALLINT >= 2
+                            AND event.topic = 'crypto_prices_twap_sixty'
+                            AND event.window_s = 60
+                        )
+                  )
                   AND event.provider_event_ms >= $1::BIGINT
                   AND event.provider_event_ms < $2::BIGINT
                 ORDER BY
@@ -1532,11 +1545,19 @@ async def fetch_due_polymarket_resolutions(
                 pm.settlement_window_s,
                 pm.settlement_source_url,
                 pm.settlement_rule_version,
+                mw.market_start_ms,
                 mw.market_end_ms,
                 COALESCE(resolution.resolution_status, 'pending')
                     AS resolution_status,
                 COALESCE(resolution.resolution_attempts, 0)
-                    AS resolution_attempts
+                    AS resolution_attempts,
+                resolution.reconciled_settlement_rule_version,
+                (
+                    resolution.market_id IS NOT NULL
+                    AND pm.settlement_reference = 'chainlink_twap'
+                    AND resolution.reconciled_settlement_rule_version
+                        IS DISTINCT FROM pm.settlement_rule_version
+                ) AS settlement_identity_refresh_required
             FROM polymarket_btc_5m_markets pm
             JOIN market_windows mw ON mw.market_id = pm.market_id
             LEFT JOIN polymarket_btc_5m_resolutions resolution
@@ -1547,6 +1568,11 @@ async def fetch_due_polymarket_resolutions(
                 OR resolution.resolution_status = 'pending'
                 OR resolution.chainlink_open_price IS NULL
                 OR resolution.chainlink_close_price IS NULL
+                OR (
+                    pm.settlement_reference = 'chainlink_twap'
+                    AND resolution.reconciled_settlement_rule_version
+                        IS DISTINCT FROM pm.settlement_rule_version
+                )
               )
               AND (
                 resolution.next_check_ms IS NULL
@@ -1562,6 +1588,71 @@ async def fetch_due_polymarket_resolutions(
         )
 
     return [dict(row) for row in rows]
+
+
+async def fetch_missing_polymarket_market_windows(
+    pool: asyncpg.Pool,
+    *,
+    first_market_start_ms: int,
+    now_ms: int,
+    after_market_start_ms: Optional[int],
+    limit: int,
+) -> list[MarketWindow]:
+    """Page through completed windows missing the current canonical identity."""
+
+    if first_market_start_ms < 0 or first_market_start_ms % 300_000 != 0:
+        raise ValueError(
+            "first_market_start_ms must be a non-negative five-minute boundary"
+        )
+    last_complete_start_ms = (now_ms // 300_000) * 300_000 - 300_000
+    if last_complete_start_ms < first_market_start_ms:
+        return []
+
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                series.market_start_ms / 300000 AS market_id,
+                series.market_start_ms,
+                series.market_start_ms + 300000 AS market_end_ms
+            FROM generate_series(
+                $1::BIGINT,
+                $2::BIGINT,
+                300000::BIGINT
+            ) AS series(market_start_ms)
+            LEFT JOIN polymarket_btc_5m_markets market
+              ON market.market_id = series.market_start_ms / 300000
+            WHERE (
+                    market.market_id IS NULL
+                    OR market.settlement_reference IS DISTINCT FROM
+                        'chainlink_twap'
+                    OR market.settlement_window_s IS DISTINCT FROM 60
+                    OR market.settlement_source_url IS DISTINCT FROM
+                        'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                    OR market.settlement_rule_version IS DISTINCT FROM
+                        'btc-5m-twap-60'
+                  )
+              AND (
+                    $3::BIGINT IS NULL
+                    OR series.market_start_ms > $3::BIGINT
+                  )
+            ORDER BY series.market_start_ms ASC
+            LIMIT $4::INTEGER
+            """,
+            first_market_start_ms,
+            last_complete_start_ms,
+            after_market_start_ms,
+            max(1, int(limit)),
+        )
+
+    return [
+        MarketWindow(
+            market_id=int(row["market_id"]),
+            market_start_ms=int(row["market_start_ms"]),
+            market_end_ms=int(row["market_end_ms"]),
+        )
+        for row in rows
+    ]
 
 
 async def upsert_polymarket_btc_5m_resolution(
@@ -1580,10 +1671,23 @@ async def upsert_polymarket_btc_5m_resolution(
     resolved_at_ms: Optional[int],
     resolution_source: Optional[str],
     raw_resolution: Optional[Mapping[str, Any]],
+    expected_settlement_rule_version: Optional[str],
+    settlement_identity_validated: bool,
     checked_ms: int,
     next_check_ms: Optional[int],
     resolution_attempts: int,
 ) -> None:
+    if settlement_identity_validated and (
+        expected_settlement_rule_version is None
+        or resolution_status != "resolved"
+        or resolution_type is None
+        or chainlink_open_price is None
+        or chainlink_close_price is None
+    ):
+        raise ValueError(
+            "a validated settlement identity requires a complete resolution"
+        )
+
     async with pool.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
@@ -1605,84 +1709,196 @@ async def upsert_polymarket_btc_5m_resolution(
                     first_checked_ms,
                     last_checked_ms,
                     next_check_ms,
-                    resolution_attempts
+                    resolution_attempts,
+                    reconciled_settlement_rule_version
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
-                    $11, $12, $13::jsonb, $14, $15, $16, $17
+                    $11, $12, $13::jsonb, $14, $15, $16, $17,
+                    CASE WHEN $19::BOOLEAN THEN $18::TEXT ELSE NULL END
                 )
                 ON CONFLICT (market_id)
                 DO UPDATE SET
                     resolution_status = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.resolution_status
+                            ELSE polymarket_btc_5m_resolutions.resolution_status
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.resolution_status
                         ELSE EXCLUDED.resolution_status
                     END,
                     resolution_type = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.resolution_type
+                            ELSE polymarket_btc_5m_resolutions.resolution_type
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.resolution_type
                         ELSE EXCLUDED.resolution_type
                     END,
-                    chainlink_open_price = COALESCE(
-                        EXCLUDED.chainlink_open_price,
-                        polymarket_btc_5m_resolutions.chainlink_open_price
-                    ),
-                    chainlink_close_price = COALESCE(
-                        EXCLUDED.chainlink_close_price,
-                        polymarket_btc_5m_resolutions.chainlink_close_price
-                    ),
-                    chainlink_source = COALESCE(
-                        EXCLUDED.chainlink_source,
-                        polymarket_btc_5m_resolutions.chainlink_source
-                    ),
+                    chainlink_open_price = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN
+                            THEN EXCLUDED.chainlink_open_price
+                            ELSE polymarket_btc_5m_resolutions
+                                    .chainlink_open_price
+                        END
+                        ELSE COALESCE(
+                            EXCLUDED.chainlink_open_price,
+                            polymarket_btc_5m_resolutions.chainlink_open_price
+                        )
+                    END,
+                    chainlink_close_price = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN
+                            THEN EXCLUDED.chainlink_close_price
+                            ELSE polymarket_btc_5m_resolutions
+                                    .chainlink_close_price
+                        END
+                        ELSE COALESCE(
+                            EXCLUDED.chainlink_close_price,
+                            polymarket_btc_5m_resolutions.chainlink_close_price
+                        )
+                    END,
+                    chainlink_source = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.chainlink_source
+                            ELSE polymarket_btc_5m_resolutions.chainlink_source
+                        END
+                        ELSE COALESCE(
+                            EXCLUDED.chainlink_source,
+                            polymarket_btc_5m_resolutions.chainlink_source
+                        )
+                    END,
                     winner = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.winner
+                            ELSE polymarket_btc_5m_resolutions.winner
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.winner
                         ELSE EXCLUDED.winner
                     END,
                     winning_token_id = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.winning_token_id
+                            ELSE polymarket_btc_5m_resolutions.winning_token_id
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.winning_token_id
                         ELSE EXCLUDED.winning_token_id
                     END,
                     up_payout = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.up_payout
+                            ELSE polymarket_btc_5m_resolutions.up_payout
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.up_payout
                         ELSE EXCLUDED.up_payout
                     END,
                     down_payout = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.down_payout
+                            ELSE polymarket_btc_5m_resolutions.down_payout
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.down_payout
                         ELSE EXCLUDED.down_payout
                     END,
                     resolved_at_ms = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.resolved_at_ms
+                            ELSE polymarket_btc_5m_resolutions.resolved_at_ms
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.resolved_at_ms
                         ELSE EXCLUDED.resolved_at_ms
                     END,
                     resolution_source = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.resolution_source
+                            ELSE polymarket_btc_5m_resolutions.resolution_source
+                        END
                         WHEN polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
                         THEN polymarket_btc_5m_resolutions.resolution_source
                         ELSE EXCLUDED.resolution_source
                     END,
-                    raw_resolution = COALESCE(
-                        polymarket_btc_5m_resolutions.raw_resolution,
-                        '{}'::jsonb
-                    ) || COALESCE(EXCLUDED.raw_resolution, '{}'::jsonb),
+                    raw_resolution = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                        THEN CASE
+                            WHEN $19::BOOLEAN THEN EXCLUDED.raw_resolution
+                            ELSE polymarket_btc_5m_resolutions.raw_resolution
+                        END
+                        ELSE COALESCE(
+                            polymarket_btc_5m_resolutions.raw_resolution,
+                            '{}'::jsonb
+                        ) || COALESCE(EXCLUDED.raw_resolution, '{}'::jsonb)
+                    END,
+                    reconciled_settlement_rule_version = CASE
+                        WHEN $19::BOOLEAN AND $18::TEXT IS NOT NULL
+                        THEN $18::TEXT
+                        ELSE polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                    END,
                     last_checked_ms = GREATEST(
                         polymarket_btc_5m_resolutions.last_checked_ms,
                         EXCLUDED.last_checked_ms
                     ),
                     next_check_ms = CASE
+                        WHEN $18::TEXT IS NOT NULL
+                             AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                    IS DISTINCT FROM $18::TEXT
+                             AND NOT $19::BOOLEAN
+                        THEN GREATEST(
+                            EXCLUDED.next_check_ms,
+                            polymarket_btc_5m_resolutions.last_checked_ms,
+                            EXCLUDED.last_checked_ms
+                        )
                         WHEN (
                             polymarket_btc_5m_resolutions.resolution_status
                                 = 'resolved'
@@ -1735,6 +1951,8 @@ async def upsert_polymarket_btc_5m_resolution(
                 checked_ms,
                 next_check_ms,
                 max(0, int(resolution_attempts)),
+                expected_settlement_rule_version,
+                bool(settlement_identity_validated),
             )
 
             if resolution_status == "resolved":
@@ -1776,6 +1994,20 @@ async def schedule_polymarket_resolution_retry(
                     EXCLUDED.last_checked_ms
                 ),
                 next_check_ms = CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM polymarket_btc_5m_markets market
+                        WHERE market.market_id =
+                                polymarket_btc_5m_resolutions.market_id
+                          AND market.settlement_reference = 'chainlink_twap'
+                          AND polymarket_btc_5m_resolutions.reconciled_settlement_rule_version
+                                IS DISTINCT FROM market.settlement_rule_version
+                    )
+                    THEN GREATEST(
+                        EXCLUDED.next_check_ms,
+                        polymarket_btc_5m_resolutions.last_checked_ms,
+                        EXCLUDED.last_checked_ms
+                    )
                     WHEN polymarket_btc_5m_resolutions.resolution_status
                             = 'resolved'
                          AND polymarket_btc_5m_resolutions.chainlink_open_price
@@ -2357,7 +2589,12 @@ async def fetch_recent_market_windows(
                         WHERE p.provider_code =
                                 'polymarket_chainlink_twap_rtds'
                           AND i.symbol = 'BTCUSD_TWAP_30S'
-                    ) AS twap_id
+                    ) AS twap_30_id,
+                    max(i.instrument_id) FILTER (
+                        WHERE p.provider_code =
+                                'polymarket_chainlink_twap_rtds'
+                          AND i.symbol = 'BTCUSD_TWAP_60S'
+                    ) AS twap_60_id
                 FROM instruments i
                 JOIN providers p ON p.provider_id = i.provider_id
             ),
@@ -2367,9 +2604,27 @@ async def fetch_recent_market_windows(
                     mw.market_start_ms,
                     mw.market_end_ms,
                     mw.market_start_at,
-                    mw.market_end_at
+                    mw.market_end_at,
+                    CASE
+                        WHEN pm.settlement_reference = 'chainlink_twap'
+                          AND mw.market_start_ms < 1786665600000
+                          AND pm.settlement_window_s = 30
+                          AND pm.settlement_source_url =
+                                'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                          AND pm.settlement_rule_version = 'btc-5m-twap-30'
+                            THEN ids.twap_30_id
+                        WHEN pm.settlement_reference = 'chainlink_twap'
+                          AND mw.market_start_ms >= 1786665600000
+                          AND pm.settlement_window_s = 60
+                          AND pm.settlement_source_url =
+                                'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                          AND pm.settlement_rule_version = 'btc-5m-twap-60'
+                            THEN ids.twap_60_id
+                    END AS settlement_twap_id
                 FROM market_windows mw
                 CROSS JOIN instrument_ids ids
+                LEFT JOIN polymarket_btc_5m_markets pm
+                  ON pm.market_id = mw.market_id
                 WHERE mw.market_start_ms <= $1::BIGINT
                   AND ($2::BOOLEAN OR mw.market_end_ms <= $1::BIGINT)
                   AND ($3::BIGINT IS NULL OR mw.market_id < $3::BIGINT)
@@ -2381,7 +2636,26 @@ async def fetch_recent_market_windows(
                           AND ps.instrument_id IN (
                                 ids.binance_id,
                                 ids.chainlink_id,
-                                ids.twap_id
+                                CASE
+                                    WHEN pm.settlement_reference =
+                                            'chainlink_twap'
+                                      AND mw.market_start_ms < 1786665600000
+                                      AND pm.settlement_window_s = 30
+                                      AND pm.settlement_source_url =
+                                            'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                                      AND pm.settlement_rule_version =
+                                            'btc-5m-twap-30'
+                                        THEN ids.twap_30_id
+                                    WHEN pm.settlement_reference =
+                                            'chainlink_twap'
+                                      AND mw.market_start_ms >= 1786665600000
+                                      AND pm.settlement_window_s = 60
+                                      AND pm.settlement_source_url =
+                                            'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                                      AND pm.settlement_rule_version =
+                                            'btc-5m-twap-60'
+                                        THEN ids.twap_60_id
+                                END
                           )
                     )
                     OR EXISTS (
@@ -2454,14 +2728,14 @@ async def fetch_recent_market_windows(
                         WHERE ps.instrument_id = ids.chainlink_id
                     ) AS chainlink_count,
                     count(*) FILTER (
-                        WHERE ps.instrument_id = ids.twap_id
+                        WHERE ps.instrument_id = candidates.settlement_twap_id
                     ) AS twap_count
                 FROM price_samples ps
                 WHERE ps.market_id = candidates.market_id
                   AND ps.instrument_id IN (
                         ids.binance_id,
                         ids.chainlink_id,
-                        ids.twap_id
+                        candidates.settlement_twap_id
                   )
             ) price_counts ON TRUE
             LEFT JOIN LATERAL (
@@ -2649,7 +2923,36 @@ async def fetch_market_summaries_for_btc_sources(
                 OR
                 (
                     p.provider_code = 'polymarket_chainlink_twap_rtds'
-                    AND i.symbol = 'BTCUSD_TWAP_30S'
+                    AND i.symbol = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM polymarket_btc_5m_markets market
+                            WHERE market.market_id = $1
+                              AND market.market_id * 300000 < 1786665600000
+                              AND market.settlement_reference =
+                                    'chainlink_twap'
+                              AND market.settlement_window_s = 30
+                              AND market.settlement_source_url =
+                                    'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                              AND market.settlement_rule_version =
+                                    'btc-5m-twap-30'
+                        )
+                            THEN 'BTCUSD_TWAP_30S'
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM polymarket_btc_5m_markets market
+                            WHERE market.market_id = $1
+                              AND market.market_id * 300000 >= 1786665600000
+                              AND market.settlement_reference =
+                                    'chainlink_twap'
+                              AND market.settlement_window_s = 60
+                              AND market.settlement_source_url =
+                                    'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                              AND market.settlement_rule_version =
+                                    'btc-5m-twap-60'
+                        )
+                            THEN 'BTCUSD_TWAP_60S'
+                    END
                 )
               )
             ORDER BY
@@ -3011,7 +3314,36 @@ async def fetch_market_download_payload(
                 JOIN providers p ON p.provider_id = i.provider_id
                 WHERE ps.market_id = $1
                   AND p.provider_code = 'polymarket_chainlink_twap_rtds'
-                  AND i.symbol = 'BTCUSD_TWAP_30S'
+                  AND i.symbol = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM polymarket_btc_5m_markets market
+                            WHERE market.market_id = $1
+                              AND market.market_id * 300000 < 1786665600000
+                              AND market.settlement_reference =
+                                    'chainlink_twap'
+                              AND market.settlement_window_s = 30
+                              AND market.settlement_source_url =
+                                    'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                              AND market.settlement_rule_version =
+                                    'btc-5m-twap-30'
+                        )
+                            THEN 'BTCUSD_TWAP_30S'
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM polymarket_btc_5m_markets market
+                            WHERE market.market_id = $1
+                              AND market.market_id * 300000 >= 1786665600000
+                              AND market.settlement_reference =
+                                    'chainlink_twap'
+                              AND market.settlement_window_s = 60
+                              AND market.settlement_source_url =
+                                    'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                              AND market.settlement_rule_version =
+                                    'btc-5m-twap-60'
+                        )
+                            THEN 'BTCUSD_TWAP_60S'
+                  END
             ),
             probs AS (
                 SELECT *

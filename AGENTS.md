@@ -12,7 +12,7 @@ The deployed system is:
 - A local PostgreSQL database named `price_collector`, used for historical data
 - A local Redis instance, used only for current live values
 - A Binance Spot collector managed by systemd
-- A Polymarket Chainlink spot and 30-second TWAP RTDS collector managed by systemd
+- A Polymarket Chainlink spot and 60-second TWAP RTDS collector managed by systemd
 - A Binance USD-M futures, flow, and book collector managed by systemd
 - A Polymarket BTC five-minute probability collector managed by systemd
 - A small read-only FastAPI API managed by systemd
@@ -103,19 +103,28 @@ The corresponding Python entry points are:
   value so its receive age exposes the gap; do not fabricate a fallback.
 - Keep the standard `crypto_prices_chainlink` feed and Redis key
   `btc:live:chainlink` as context; it is not the five-minute settlement feed.
-- Independently subscribe to `crypto_prices_twap_thirty` with the same
-  `{"symbol":"btc/usd"}` filter and require `payload.window_s = 30`.
+- Independently subscribe to `crypto_prices_twap_sixty` with the same
+  `{"symbol":"btc/usd"}` filter and require `payload.window_s = 60`.
 - Parse `payload.full_accuracy_value` as an exact E18 integer/`Decimal`. Never
   use `payload.value`, binary floating point, standard Chainlink spot, Binance,
   or a locally computed average as the settlement TWAP.
 - Publish each accepted TWAP tick to Redis key
-  `btc:live:chainlink_twap_30s` before PostgreSQL persistence.
+  `btc:live:chainlink_twap_60s` before PostgreSQL persistence.
 - Persist every accepted TWAP event, connection session, and explicit no-replay
   gap durably. The optional `raw_capture` feature is not the TWAP source of
   record and may not gate this path.
+- Preserve the historical 30-second instrument, events, sessions, and gaps.
+  Markets before `2026-08-14T00:00:00Z` retain the
+  `crypto_prices_twap_thirty` / `payload.window_s = 30` identity; the market
+  starting exactly at that UTC boundary and later markets use the 60-second
+  identity. Never relabel historical 30-second evidence as 60-second evidence.
 - Apply an accepted-event idle deadline independently to the TWAP socket.
   PING/PONG, malformed, wrong-topic, wrong-symbol, and wrong-window frames must
   not reset it. Preserve the last cached value so gaps remain visible by age.
+- When the optional TWAP shadow is enabled, model version 2 targets the current
+  60-second feed. Preserve retained model-version-1 rows as historical
+  30-second forecasts, and do not expose a stale model-version-1 Redis payload
+  through the current live API.
 
 ### Binance Futures, Flow, and Book
 
@@ -191,10 +200,18 @@ The corresponding Python entry points are:
 
 ### Polymarket Probabilities
 
-- Discover BTC five-minute Up/Down markets through Polymarket Gamma and collect
-  only markets whose own metadata matches the supported
-  `chainlink_twap`/30-second/`btc-5m-twap-30` rule. Unknown or contradictory
-  settlement rules fail closed.
+- Discover BTC five-minute Up/Down markets through Polymarket Gamma and select
+  the required settlement identity from the market start. Markets before
+  `2026-08-14T00:00:00Z` must exactly match
+  `chainlink_twap`/30-second/`btc-5m-twap-30` and
+  `https://data.chain.link/streams/btc-usd-twap-30s-streams`; the market
+  starting exactly at that boundary and all later markets must exactly match
+  `chainlink_twap`/60-second/`btc-5m-twap-60` and
+  `https://data.chain.link/streams/btc-usd-twap-60s-streams`. Unknown or
+  contradictory settlement rules fail closed.
+- Preserve both identities. Reconciliation and historical API reads must remain
+  boundary- and rule-aware rather than rewriting 30-second markets as
+  60-second settlements.
 - Subscribe only to the discovered Up and Down token IDs through the CLOB
   WebSocket.
 - Store at most one probability snapshot per UTC second in the active market.
@@ -214,8 +231,10 @@ The corresponding Python entry points are:
   incomplete evidence as a non-flip.
 - Keep flip events immutable within a definition version. A definition change
   creates new versioned rows rather than rewriting prior research labels.
-- Definition version 2 uses exact TWAP events. Standard Chainlink spot remains
-  context only and must never supply v2 crossings or cutoff classifications.
+- Definition version 2 remains the immutable historical 30-second TWAP
+  definition. Definition version 3 uses exact 60-second TWAP events for current
+  markets. Standard Chainlink spot remains context only and must never supply
+  v2 or v3 crossings or cutoff classifications.
 - Before ordinary microstructure retention removes a confirmed-flip or
   ambiguous market, verify that every available five-minute source row was
   copied to `binance_microstructure_1s_flip_archive`. Retention must fail closed
@@ -228,7 +247,7 @@ The corresponding Python entry points are:
 - Use the source-price keys exactly:
   - `btc:live:binance_spot`
   - `btc:live:chainlink`
-  - `btc:live:chainlink_twap_30s`
+  - `btc:live:chainlink_twap_60s`
   - `btc:live:futures`
 - Store each live price as JSON with only `value`, `source_timestamp_ms`, and
   `received_ms`; price values remain decimal strings.
@@ -260,6 +279,8 @@ The corresponding Python entry points are:
     `crypto_prices_chainlink:btc/usd`
   - `polymarket_chainlink_twap_rtds` / `BTCUSD_TWAP_30S` / `BTC` / `USD` /
     `crypto_prices_twap_thirty:btc/usd`
+  - `polymarket_chainlink_twap_rtds` / `BTCUSD_TWAP_60S` / `BTC` / `USD` /
+    `crypto_prices_twap_sixty:btc/usd`
   - `binance_usdm_perp` / `BTCUSDT` / `BTC` / `USDT`
 - Collectors use `DATABASE_URL` with the writer role.
 - The API uses `READ_DATABASE_URL` with the reader role and must not receive the

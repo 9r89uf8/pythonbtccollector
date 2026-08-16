@@ -32,7 +32,7 @@ Check the local API from inside the droplet:
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/prices/latest
 curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
-curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
+curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_60S"
 curl http://127.0.0.1:9000/markets/latest
 curl http://127.0.0.1:9000/markets/current/sources
 curl http://127.0.0.1:9000/markets/current/live
@@ -121,6 +121,339 @@ sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 sudo systemctl restart price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
 ```
 
+### Non-destructive 30-second to 60-second TWAP cutover
+
+Polymarket moved BTC five-minute markets from the 30-second settlement feed to
+the 60-second feed at `2026-08-14T00:00:00Z`. Markets before that UTC boundary
+retain `BTCUSD_TWAP_30S`, `crypto_prices_twap_thirty`, window `30`, source URL
+`https://data.chain.link/streams/btc-usd-twap-30s-streams`, rule version
+`btc-5m-twap-30`, and flip definition version `2`. The market starting exactly
+at the boundary and later markets use `BTCUSD_TWAP_60S`,
+`crypto_prices_twap_sixty`, window `60`, source URL
+`https://data.chain.link/streams/btc-usd-twap-60s-streams`, rule version
+`btc-5m-twap-60`, and flip definition version `3`.
+
+Use this procedure for the production cutover. It preserves the historical
+30-second instrument, samples, exact events, sessions, gaps, markets,
+resolutions, flip records, and shadow model-version-1 rows. Do not drop the
+database or flush Redis. Run it only after the completed change is pushed to
+GitHub:
+
+```bash
+set -euo pipefail
+cd /opt/price-collector
+
+sudo install -d -o postgres -g postgres -m 0750 \
+  /var/lib/price-collector/backups
+sudo -u postgres pg_dump -Fc -d price_collector \
+  -f "/var/lib/price-collector/backups/price_collector_before_twap_60s_$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+
+sudoedit /etc/price-collector/collector.env
+```
+
+In that editor, change only these three non-secret values. Do not replace the
+production environment file with the repository example:
+
+```text
+POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_60S
+POLYMARKET_TWAP_TOPIC=crypto_prices_twap_sixty
+POLYMARKET_TWAP_WINDOW_SECONDS=60
+```
+
+Confirm the saved values, apply the schema, and only then restart the affected
+services. The schema adds the 60-second instrument while preserving the
+historical 30-second instrument:
+
+```bash
+sudo grep -E \
+  '^(POLYMARKET_TWAP_SYMBOL|POLYMARKET_TWAP_TOPIC|POLYMARKET_TWAP_WINDOW_SECONDS)=' \
+  /etc/price-collector/collector.env
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector \
+  -f /opt/price-collector/schema.sql
+
+sudo systemctl stop price-collector-polymarket-chainlink
+redis-cli -h 127.0.0.1 -p 6379 -n 0 DEL \
+  btc:live:chainlink_twap_30s \
+  btc:live:chainlink_twap_shadow
+
+sudo systemctl restart \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api
+```
+
+All five application units restart because the cutover changes shared
+configuration, database, live-cache, flip-research, and API code. No systemd
+unit changed, so do not copy unit files or run `daemon-reload`. Redis does not
+need a restart. The brief Chainlink stop prevents the legacy writer from racing
+the cache cleanup or a newly started model-version-2 runtime from repopulating
+the shared shadow key before it is deleted. Removing the two stale cache values
+prevents an aging 30-second price or model-version-1 shadow payload from
+surviving the cutover. When the experiment is enabled, the Chainlink service
+repopulates the shadow with model version 2. PostgreSQL history is unaffected.
+
+Verify the new runtime and the preserved historical identity:
+
+```bash
+sudo systemctl status \
+  price-collector \
+  price-collector-polymarket-chainlink \
+  price-collector-binance-futures \
+  price-collector-polymarket-probabilities \
+  price-api \
+  redis-server \
+  --no-pager
+
+sudo journalctl \
+  -u price-collector-polymarket-chainlink \
+  -u price-collector-polymarket-probabilities \
+  -u price-collector-binance-futures \
+  -u price-api \
+  -n 200 \
+  --no-pager
+
+sudo journalctl \
+  -u price-collector-polymarket-probabilities \
+  -n 500 \
+  --no-pager \
+  | grep -E 'polymarket_market_metadata_backfilled|polymarket_market_metadata_backfill_failed|polymarket_market_metadata_backfill_scan_failed|polymarket_resolution_checked|polymarket_flip_evaluation_persisted' \
+  || true
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector <<'SQL'
+SELECT p.provider_code, i.symbol, i.stream_name
+FROM instruments AS i
+JOIN providers AS p ON p.provider_id = i.provider_id
+WHERE p.provider_code = 'polymarket_chainlink_twap_rtds'
+ORDER BY i.symbol;
+
+SELECT topic, window_s, count(*) AS event_count,
+       max(provider_event_ms) AS latest_provider_event_ms
+FROM polymarket_twap_events
+WHERE topic IN ('crypto_prices_twap_thirty', 'crypto_prices_twap_sixty')
+GROUP BY topic, window_s
+ORDER BY window_s;
+
+SELECT market.market_id, window.market_start_ms,
+       market.settlement_window_s, market.settlement_source_url,
+       market.settlement_rule_version
+FROM polymarket_btc_5m_markets AS market
+JOIN market_windows AS window USING (market_id)
+WHERE window.market_start_ms >= 1786665600000
+ORDER BY market.market_id DESC
+LIMIT 5;
+
+WITH expected AS (
+    SELECT generated.market_start_ms
+    FROM generate_series(
+        1786665600000::BIGINT,
+        (
+            floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+            / 300000
+        ) * 300000 - 300000,
+        300000::BIGINT
+    ) AS generated(market_start_ms)
+), audited AS (
+    SELECT
+        expected.market_start_ms,
+        market.market_id,
+        market.market_id IS NOT NULL
+        AND (
+            market.settlement_reference IS DISTINCT FROM 'chainlink_twap'
+            OR market.settlement_window_s IS DISTINCT FROM 60
+            OR market.settlement_source_url IS DISTINCT FROM
+                'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+            OR market.settlement_rule_version IS DISTINCT FROM
+                'btc-5m-twap-60'
+        ) AS noncanonical
+    FROM expected
+    LEFT JOIN polymarket_btc_5m_markets AS market
+      ON market.market_id = expected.market_start_ms / 300000
+)
+SELECT
+    count(*) FILTER (
+        WHERE market_id IS NULL
+    ) AS missing_completed_market_metadata,
+    count(*) FILTER (
+        WHERE noncanonical
+    ) AS noncanonical_completed_market_metadata,
+    count(*) FILTER (
+        WHERE market_id IS NULL OR noncanonical
+    ) AS completed_metadata_requiring_backfill
+FROM audited;
+
+WITH canonical_completed AS (
+    SELECT
+        market.market_id,
+        window.market_start_ms,
+        window.market_end_ms,
+        market.settlement_rule_version,
+        resolution.market_id AS resolution_market_id,
+        resolution.resolution_status,
+        resolution.resolution_type,
+        resolution.chainlink_open_price,
+        resolution.chainlink_close_price,
+        resolution.reconciled_settlement_rule_version,
+        resolution.last_checked_ms,
+        resolution.next_check_ms,
+        resolution.resolution_attempts
+    FROM polymarket_btc_5m_markets AS market
+    JOIN market_windows AS window USING (market_id)
+    LEFT JOIN polymarket_btc_5m_resolutions AS resolution USING (market_id)
+    WHERE window.market_end_ms <=
+            floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT - 30000
+      AND market.settlement_reference = 'chainlink_twap'
+      AND (
+            (
+                window.market_start_ms < 1786665600000
+                AND market.settlement_window_s = 30
+                AND market.settlement_source_url =
+                    'https://data.chain.link/streams/btc-usd-twap-30s-streams'
+                AND market.settlement_rule_version = 'btc-5m-twap-30'
+            )
+            OR (
+                window.market_start_ms >= 1786665600000
+                AND market.settlement_window_s = 60
+                AND market.settlement_source_url =
+                    'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+                AND market.settlement_rule_version = 'btc-5m-twap-60'
+            )
+      )
+), resolution_backlog AS (
+    SELECT
+        *,
+        array_remove(ARRAY[
+            CASE WHEN resolution_market_id IS NULL
+                 THEN 'resolution_absent' END,
+            CASE WHEN resolution_status IS DISTINCT FROM 'resolved'
+                 THEN 'status_not_resolved' END,
+            CASE WHEN resolution_type IS NULL
+                 THEN 'resolution_type_missing' END,
+            CASE WHEN chainlink_open_price IS NULL
+                 THEN 'open_price_missing' END,
+            CASE WHEN chainlink_close_price IS NULL
+                 THEN 'close_price_missing' END,
+            CASE WHEN reconciled_settlement_rule_version IS DISTINCT FROM
+                           settlement_rule_version
+                 THEN 'settlement_rule_not_reconciled' END
+        ], NULL) AS reasons
+    FROM canonical_completed
+    WHERE resolution_market_id IS NULL
+       OR resolution_status IS DISTINCT FROM 'resolved'
+       OR resolution_type IS NULL
+       OR chainlink_open_price IS NULL
+       OR chainlink_close_price IS NULL
+       OR reconciled_settlement_rule_version IS DISTINCT FROM
+            settlement_rule_version
+), first_100 AS (
+    SELECT *
+    FROM resolution_backlog
+    ORDER BY market_end_ms, market_id
+    LIMIT 100
+)
+SELECT
+    (SELECT count(*) FROM resolution_backlog)
+        AS unreconciled_canonical_completed_markets,
+    COALESCE(
+        jsonb_agg(to_jsonb(first_100) ORDER BY first_100.market_id)
+            FILTER (WHERE first_100.market_id IS NOT NULL),
+        '[]'::jsonb
+    ) AS first_100_backlog_rows
+FROM first_100;
+
+SELECT definition_version, count(*) AS evaluations
+FROM polymarket_btc_5m_flip_evaluations
+WHERE definition_version IN (2, 3)
+GROUP BY definition_version
+ORDER BY definition_version;
+
+SELECT
+    count(*) AS legacy_frames_at_or_after_cutover,
+    count(*) FILTER (
+        WHERE provider_event_ms > 1786665600000
+    ) AS terminal_post_end_watermarks
+FROM polymarket_twap_events
+WHERE topic = 'crypto_prices_twap_thirty'
+  AND window_s = 30
+  AND provider_event_ms >= 1786665600000;
+
+SELECT market_id, definition_version, evaluation_status,
+       'twap_stream_gap' = ANY(quality_flags) AS has_twap_stream_gap,
+       archive_status, source_microstructure_row_count,
+       archived_microstructure_row_count, retention_safe
+FROM polymarket_btc_5m_flip_evaluations
+WHERE market_id = (1786665600000 / 300000) - 1
+  AND definition_version = 2;
+
+SELECT model_version, count(*) AS shadow_targets
+FROM chainlink_twap_shadow_predictions
+WHERE model_version IN (1, 2)
+GROUP BY model_version
+ORDER BY model_version;
+SQL
+
+redis-cli -h 127.0.0.1 -p 6379 -n 0 MGET \
+  btc:live:binance_spot \
+  btc:live:chainlink \
+  btc:live:chainlink_twap_60s \
+  btc:live:futures \
+  btc:live:chainlink_twap_shadow
+
+curl -fsS http://127.0.0.1:9000/healthz
+curl -fsS \
+  "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_60S"
+curl -fsS http://127.0.0.1:9000/markets/current/live
+curl -fsS \
+  'http://127.0.0.1:9000/markets/flips?definition_version=3&within_seconds=20&kind=any_crossing&limit=3'
+```
+
+The probability service scans only completed windows, from the cutover through
+the last completed five-minute boundary, in pages bounded by
+`POLYMARKET_RESOLUTION_BATCH_SIZE`. Its cursor advances oldest to newest even
+when an individual discovery fails, then wraps after the end to retry failed or
+contradictory windows without starving later ones. Repeat the SQL audit until
+`missing_completed_market_metadata`, `noncanonical_completed_market_metadata`,
+and `completed_metadata_requiring_backfill` all reach zero. Nonzero counts
+immediately after restart are expected when the deployment gap contains missing
+or incorrect rows; they should fall as success logs appear. Successful metadata
+recovery logs `polymarket_market_metadata_backfilled`; individual or scan
+failures log
+`polymarket_market_metadata_backfill_failed` or
+`polymarket_market_metadata_backfill_scan_failed`. The ordinary resolution and
+flip loops then emit `polymarket_resolution_checked` and
+`polymarket_flip_evaluation_persisted` as each recovered market advances.
+
+The resolution-backlog audit is boundary-aware: it checks exact canonical
+30-second markets before the cutover and exact canonical 60-second markets from
+the cutover onward. Its 30,000 ms cutoff excludes only the just-ended market
+while the documented default `POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30` is
+still open; change that literal if production overrides the grace. After that
+bounded grace, absent or incomplete official resolution data and a missing or
+stale `reconciled_settlement_rule_version` remain visible in
+`first_100_backlog_rows`. Repeat verification after ordinary retries and require
+`unreconciled_canonical_completed_markets = 0` (with an empty JSON list) before
+declaring resolution and flip catch-up complete.
+
+This closes only the deployment gap in canonical Gamma market metadata. It does
+not create historical probability snapshots, exact TWAP events, or materialized
+TWAP samples, so missing source evidence must remain missing in APIs and flip
+quality flags.
+
+The terminal legacy market is `5955551`, ending exactly at the cutover. It must
+remain a definition-v2 row. When `terminal_post_end_watermarks` is zero, expect
+that row to be `ambiguous` with `has_twap_stream_gap = true`; after the archive
+worker catches up, require `archive_status = 'complete'`, equal source/archive
+row counts, and `retention_safe = true`. Review every nonzero
+`legacy_frames_at_or_after_cutover` result without relabeling it: a frame exactly
+at the boundary belongs to the first 60-second market and does not suppress the
+terminal synthetic gap. Only a retained 30-second frame strictly after the
+boundary can provide the runtime's terminal post-end watermark.
+
 If the update adds database columns, seed rows, indexes, or new systemd unit files, use this fuller sequence instead. Apply the schema before restarting services so new code does not start before PostgreSQL has the expected tables, columns, and seed data:
 
 ```bash
@@ -153,16 +486,16 @@ POLYMARKET_RESOLUTION_BATCH_SIZE=20
 POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30
 ```
 
-For the TWAP-only rollout, also review and add these non-secret keys manually
+For the current TWAP runtime, also review and add these non-secret keys manually
 to `/etc/price-collector/collector.env`; do not replace that production file:
 
 ```text
 POLYMARKET_TWAP_ENABLED=true
 POLYMARKET_TWAP_PROVIDER_CODE=polymarket_chainlink_twap_rtds
-POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_30S
+POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_60S
 POLYMARKET_TWAP_RTD_SYMBOL=btc/usd
-POLYMARKET_TWAP_TOPIC=crypto_prices_twap_thirty
-POLYMARKET_TWAP_WINDOW_SECONDS=30
+POLYMARKET_TWAP_TOPIC=crypto_prices_twap_sixty
+POLYMARKET_TWAP_WINDOW_SECONDS=60
 POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000
 POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000
 POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
@@ -223,7 +556,7 @@ TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
 ```
 
 The feature requires `POLYMARKET_TWAP_ENABLED=true`.
-`TWAP_SHADOW_POLL_MS` must remain exactly `250` for model version 1. Its
+`TWAP_SHADOW_POLL_MS` must remain exactly `250` for model version 2. Its
 latest-wins Redis reads can collapse multiple Binance or Chainlink updates
 between polls and do not turn this into a tick-level forecast. The runtime emits
 at most one batch per UTC second.
@@ -296,11 +629,11 @@ SELECT
     count(h10_price) AS h10_rows,
     max(target_second_ms) AS latest_target_second_ms
 FROM chainlink_twap_shadow_predictions
-WHERE model_version = 1;
+WHERE model_version = 2;
 "
 
 curl -fsS \
-  'http://127.0.0.1:9000/markets/current/twap-shadow?model_version=1' \
+  'http://127.0.0.1:9000/markets/current/twap-shadow?model_version=2' \
   | python3 -c '
 import json, sys
 payload = json.load(sys.stdin)
@@ -314,13 +647,15 @@ print(json.dumps({
 ```
 
 The history response has exactly 300 target seconds when the market window
-exists. Missing predictions or actuals remain `null`. Version 1 learns a causal
+exists. Missing predictions or actuals remain `null`. Version 2 learns a causal
 per-source basis from the trailing 30 minutes of already received actual TWAP
 data, but it does not feed forecast misses back into later forecast prices.
 Signed mean error and MAE in the history response are evaluation diagnostics,
 not online correction inputs. `estimated_error_bps` is the same rolling
 ensemble-nowcast p90 for every available horizon, not a horizon-specific
-confidence interval.
+confidence interval. Retained 30-second forecasts remain available from the
+historical route with `model_version=1`; never merge their evaluation statistics
+with model-version-2 rows.
 
 Redis publication continues if the bounded PostgreSQL queue is full. The
 affected live batch can therefore be absent from later history, and the
@@ -379,6 +714,8 @@ Use this procedure only when the old market history is intentionally being
 discarded. It irreversibly drops exactly the PostgreSQL database
 `price_collector` and flushes Redis database 0. It does not drop PostgreSQL
 roles, any other database, or change either production environment file.
+Do not use it for the 30-second to 60-second cutover; use the non-destructive
+procedure above for that migration.
 
 Run these commands only after the completed change has been pushed to GitHub:
 
@@ -479,13 +816,13 @@ FROM polymarket_twap_events;
 redis-cli -h 127.0.0.1 -p 6379 -n 0 MGET \
   btc:live:binance_spot \
   btc:live:chainlink \
-  btc:live:chainlink_twap_30s \
+  btc:live:chainlink_twap_60s \
   btc:live:futures \
   btc:live:chainlink_twap_shadow
 
 curl -fsS http://127.0.0.1:9000/healthz
 curl -fsS \
-  "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
+  "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_60S"
 curl -fsS http://127.0.0.1:9000/markets/current/live
 curl -fsS http://127.0.0.1:9000/markets/current/twap-shadow
 ```
@@ -494,7 +831,7 @@ Immediately after restart, a latest-price request can return `404` until the
 first accepted TWAP event is durably written. Retry it after the Chainlink
 collector journal reports an accepted TWAP tick. A collected Polymarket market
 must report `settlement_reference = 'chainlink_twap'`,
-`settlement_window_s = 30`, and rule version `btc-5m-twap-30`; unknown rules
+`settlement_window_s = 60`, and rule version `btc-5m-twap-60`; unknown rules
 must remain absent rather than being classified from standard Chainlink spot.
 
 ### Optional Binance microstructure summary rollout
@@ -639,14 +976,21 @@ resolution with both Chainlink open and close prices, then permanently stores
 the versioned evaluation, every final-20-second crossing, and causal T-20
 through T-1 cutoff records.
 
+Definition version 2 is the immutable historical 30-second evaluation for
+markets before `2026-08-14T00:00:00Z`. Definition version 3 is the current
+60-second evaluation for the market beginning at that boundary and later
+markets. The current backlog and canary commands below intentionally target
+definition version 3 and the 60-second settlement identity; they do not rewrite
+or delete definition-version-2 rows.
+
 Confirmed flips and ambiguous markets also receive a typed copy of every
 available row from their complete five-minute
 `binance_microstructure_1s` window. Ordinary retention fails closed:
-microstructure rows cannot expire until the current definition's evaluation is
-`retention_safe`; an archive-required market becomes safe only after copied
-and source row counts match. Retention also checks each archived key and its
-`received_ms`, so a late or newer live-table write remains protected until the
-evaluator synchronizes that exact row.
+microstructure rows cannot expire until the market's boundary-selected
+definition evaluation is `retention_safe`; an archive-required market becomes
+safe only after copied and source row counts match. Retention also checks each
+archived key and its `received_ms`, so a late or newer live-table write remains
+protected until the evaluator synchronizes that exact row.
 
 Here, permanent means no application TTL and inclusion in verified PostgreSQL
 backups. Continue monitoring disk and backup capacity; the droplet cannot
@@ -710,12 +1054,14 @@ WITH eligible AS (
       AND resolution.chainlink_open_price IS NOT NULL
       AND resolution.chainlink_close_price IS NOT NULL
       AND market.settlement_reference = 'chainlink_twap'
-      AND market.settlement_window_s = 30
-      AND market.settlement_rule_version = 'btc-5m-twap-30'
+      AND market.settlement_window_s = 60
+      AND market.settlement_source_url =
+          'https://data.chain.link/streams/btc-usd-twap-60s-streams'
+      AND market.settlement_rule_version = 'btc-5m-twap-60'
 ), current_evaluations AS (
     SELECT *
     FROM polymarket_btc_5m_flip_evaluations
-    WHERE definition_version = 2
+    WHERE definition_version = 3
       AND observation_precision <> 'evaluation_failed'
 )
 SELECT
@@ -746,7 +1092,7 @@ SELECT
     sum(archived_microstructure_row_count) AS archived_rows,
     bool_and(retention_safe) AS all_retention_safe
 FROM polymarket_btc_5m_flip_evaluations
-WHERE definition_version = 2
+WHERE definition_version = 3
 GROUP BY evaluation_status, archive_status
 ORDER BY evaluation_status, archive_status;
 
@@ -761,7 +1107,7 @@ FROM (
     LEFT JOIN polymarket_btc_5m_flip_cutoffs AS cutoff
       ON cutoff.market_id = evaluation.market_id
      AND cutoff.definition_version = evaluation.definition_version
-    WHERE evaluation.definition_version = 2
+    WHERE evaluation.definition_version = 3
       AND evaluation.observation_precision <> 'evaluation_failed'
     GROUP BY evaluation.market_id
 ) AS coverage;
@@ -774,7 +1120,7 @@ SELECT
 FROM polymarket_btc_5m_flip_evaluations AS evaluation
 LEFT JOIN binance_microstructure_1s_flip_archive AS archive
   ON archive.market_id = evaluation.market_id
-WHERE evaluation.definition_version = 2
+WHERE evaluation.definition_version = 3
   AND evaluation.archive_status = 'complete'
 GROUP BY
     evaluation.market_id,
@@ -792,7 +1138,7 @@ SELECT
 FROM binance_microstructure_1s AS live
 JOIN polymarket_btc_5m_flip_evaluations AS evaluation
   ON evaluation.market_id = live.market_id
- AND evaluation.definition_version = 2
+ AND evaluation.definition_version = 3
 LEFT JOIN binance_microstructure_1s_flip_archive AS archive
   ON archive.symbol = live.symbol
  AND archive.sample_second_ms = live.sample_second_ms
@@ -807,28 +1153,38 @@ SQL
 
 curl -fsS http://127.0.0.1:9000/healthz
 curl -fsS \
-  'http://127.0.0.1:9000/markets/flips?within_seconds=20&kind=any_crossing&limit=3'
+  'http://127.0.0.1:9000/markets/flips?definition_version=3&within_seconds=20&kind=any_crossing&limit=3'
 curl -fsS \
-  'http://127.0.0.1:9000/markets/flips/distribution?max_seconds=20'
+  'http://127.0.0.1:9000/markets/flips/distribution?definition_version=3&max_seconds=20'
 
 FLIP_MARKET_ID="$(
   sudo -u postgres psql -At -d price_collector -c \
-    "SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 2 AND observation_precision <> 'evaluation_failed' AND crossing_count > 0 ORDER BY market_id DESC LIMIT 1"
+    "SELECT evaluation.market_id FROM polymarket_btc_5m_flip_evaluations AS evaluation JOIN market_windows AS window USING (market_id) WHERE evaluation.definition_version = 3 AND window.market_start_ms >= 1786665600000 AND evaluation.observation_precision <> 'evaluation_failed' AND evaluation.crossing_count > 0 ORDER BY evaluation.market_id DESC LIMIT 1"
 )"
 if [ -n "${FLIP_MARKET_ID}" ]; then
-  curl -fsS "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips"
+  curl -fsS \
+    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips?definition_version=3"
   curl -fsS --compressed \
-    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips/data" \
+    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips/data?definition_version=3" \
     | python3 -c 'import json, sys; payload = json.load(sys.stdin); print(json.dumps({"market_id": payload["market"]["market_id"], "selection": payload["selection"], "availability": payload["availability"]}, indent=2))'
   curl -fsS -D - -o /dev/null \
-    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips/download"
+    "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/flips/download?definition_version=3"
   curl -fsS --compressed \
     "http://127.0.0.1:9000/markets/${FLIP_MARKET_ID}/data?include_microstructure=true"
 fi
 
+HISTORICAL_FLIP_MARKET_ID="$(
+  sudo -u postgres psql -At -d price_collector -c \
+    "SELECT evaluation.market_id FROM polymarket_btc_5m_flip_evaluations AS evaluation JOIN market_windows AS window USING (market_id) WHERE evaluation.definition_version = 2 AND window.market_start_ms < 1786665600000 AND evaluation.observation_precision <> 'evaluation_failed' ORDER BY evaluation.market_id DESC LIMIT 1"
+)"
+if [ -n "${HISTORICAL_FLIP_MARKET_ID}" ]; then
+  curl -fsS \
+    "http://127.0.0.1:9000/markets/${HISTORICAL_FLIP_MARKET_ID}/flips?definition_version=2"
+fi
+
 REMAINING="$(
   sudo -u postgres psql -At -d price_collector -c \
-    "WITH eligible AS (SELECT resolution.market_id FROM polymarket_btc_5m_resolutions resolution JOIN polymarket_btc_5m_markets market USING (market_id) WHERE resolution_status = 'resolved' AND resolution_type IS NOT NULL AND chainlink_open_price IS NOT NULL AND chainlink_close_price IS NOT NULL AND market.settlement_reference = 'chainlink_twap' AND market.settlement_window_s = 30 AND market.settlement_rule_version = 'btc-5m-twap-30'), completed AS (SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 2 AND observation_precision <> 'evaluation_failed') SELECT count(*) FROM eligible LEFT JOIN completed USING (market_id) WHERE completed.market_id IS NULL"
+    "WITH eligible AS (SELECT resolution.market_id FROM polymarket_btc_5m_resolutions resolution JOIN polymarket_btc_5m_markets market USING (market_id) WHERE resolution_status = 'resolved' AND resolution_type IS NOT NULL AND chainlink_open_price IS NOT NULL AND chainlink_close_price IS NOT NULL AND market.settlement_reference = 'chainlink_twap' AND market.settlement_window_s = 60 AND market.settlement_source_url = 'https://data.chain.link/streams/btc-usd-twap-60s-streams' AND market.settlement_rule_version = 'btc-5m-twap-60'), completed AS (SELECT market_id FROM polymarket_btc_5m_flip_evaluations WHERE definition_version = 3 AND observation_precision <> 'evaluation_failed') SELECT count(*) FROM eligible LEFT JOIN completed USING (market_id) WHERE completed.market_id IS NULL"
 )"
 if [ "${REMAINING}" != "0" ]; then
   echo "flip backfill still has ${REMAINING} markets; repeat verification before the post-deploy backup" >&2
@@ -933,10 +1289,10 @@ SELECT
     (
         SELECT count(*)
         FROM polymarket_btc_5m_flip_events
-        WHERE definition_version = 2
+        WHERE definition_version = 3
     ) AS crossing_events
 FROM polymarket_btc_5m_flip_evaluations
-WHERE definition_version = 2;
+WHERE definition_version = 3;
 
 SELECT count(*) AS markets_without_20_cutoffs
 FROM (
@@ -945,7 +1301,7 @@ FROM (
     LEFT JOIN polymarket_btc_5m_flip_cutoffs AS cutoff
       ON cutoff.market_id = evaluation.market_id
      AND cutoff.definition_version = evaluation.definition_version
-    WHERE evaluation.definition_version = 2
+    WHERE evaluation.definition_version = 3
       AND evaluation.observation_precision <> 'evaluation_failed'
     GROUP BY evaluation.market_id
 ) AS coverage
@@ -953,7 +1309,7 @@ WHERE cutoff_rows <> 20;
 
 SELECT count(*) AS archive_count_mismatches
 FROM polymarket_btc_5m_flip_evaluations AS evaluation
-WHERE evaluation.definition_version = 2
+WHERE evaluation.definition_version = 3
   AND evaluation.archive_status = 'complete'
   AND (
         evaluation.source_microstructure_row_count
@@ -969,7 +1325,7 @@ SELECT count(*) AS unsynchronized_live_archive_rows
 FROM binance_microstructure_1s AS live
 JOIN polymarket_btc_5m_flip_evaluations AS evaluation
   ON evaluation.market_id = live.market_id
- AND evaluation.definition_version = 2
+ AND evaluation.definition_version = 3
 LEFT JOIN binance_microstructure_1s_flip_archive AS archive
   ON archive.symbol = live.symbol
  AND archive.sample_second_ms = live.sample_second_ms
@@ -3364,7 +3720,7 @@ Redis is the live-card cache only. PostgreSQL remains the historical source.
 redis-cli -h 127.0.0.1 MGET \
   btc:live:binance_spot \
   btc:live:chainlink \
-  btc:live:chainlink_twap_30s \
+  btc:live:chainlink_twap_60s \
   btc:live:futures \
   btc:live:chainlink_twap_shadow
 ```
@@ -3376,11 +3732,13 @@ Each populated key should look like:
 ```
 
 The first four keys use that source-price shape. The optional shadow key uses a
-structured version-1 batch with `origin_second_ms`, `generated_ms`, status and
+structured version-2 batch with `origin_second_ms`, `generated_ms`, status and
 quality fields, causal source-basis diagnostics, and `h1`, `h3`, `h5`, and
 `h10` predictions. It is latest-wins rather than a Redis history. A missing key
 is expected while the experiment is disabled; a warming batch can contain null
-prediction values.
+prediction values. The live API ignores a stale model-version-1 payload;
+retained version-1 history remains queryable only through the PostgreSQL-backed
+shadow route.
 
 ## Database Spot Checks
 

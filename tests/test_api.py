@@ -207,25 +207,25 @@ def test_prices_latest_can_query_polymarket_chainlink_btcusd(client, monkeypatch
 def test_prices_latest_can_query_polymarket_chainlink_twap(client, monkeypatch):
     async def fake_fetch_latest_price(pool, provider_code, symbol):
         assert provider_code == "polymarket_chainlink_twap_rtds"
-        assert symbol == "BTCUSD_TWAP_30S"
+        assert symbol == "BTCUSD_TWAP_60S"
         return {
             "provider": provider_code,
             "symbol": symbol,
             "price": Decimal("123455.987654321098765432"),
-            "sample_second_ms": 1_783_459_200_000,
-            "sample_second_at": utc_dt(2026, 7, 7, 21, 0, 0),
-            "provider_event_ms": 1_783_459_200_123,
-            "received_ms": 1_783_459_200_250,
-            "market_id": 5_944_864,
-            "market_start_ms": 1_783_459_200_000,
-            "market_end_ms": 1_783_459_500_000,
+            "sample_second_ms": 1_786_665_600_000,
+            "sample_second_at": utc_dt(2026, 8, 14, 0, 0, 0),
+            "provider_event_ms": 1_786_665_600_123,
+            "received_ms": 1_786_665_600_250,
+            "market_id": 5_955_552,
+            "market_start_ms": 1_786_665_600_000,
+            "market_end_ms": 1_786_665_900_000,
         }
 
     monkeypatch.setattr(api, "fetch_latest_price", fake_fetch_latest_price)
 
     response = client.get(
         "/prices/latest?provider=polymarket_chainlink_twap_rtds"
-        "&symbol=BTCUSD_TWAP_30S"
+        "&symbol=BTCUSD_TWAP_60S"
     )
 
     assert response.status_code == 200
@@ -523,7 +523,7 @@ def test_markets_by_id_returns_404_when_no_samples_exist(client, monkeypatch):
     assert response.status_code == 404
 
 
-def test_markets_sources_by_id_returns_both_sources(client, monkeypatch):
+def test_markets_sources_by_id_returns_all_market_price_sources(client, monkeypatch):
     async def fake_fetch_market_summaries_for_btc_sources(pool, market_id):
         assert market_id == 5_944_864
         return {
@@ -560,6 +560,19 @@ def test_markets_sources_by_id_returns_both_sources(client, monkeypatch):
                     "latest_provider_event_ms": 1_783_459_499_123,
                     "latest_received_ms": 1_783_459_499_320,
                 },
+                {
+                    "provider": "polymarket_chainlink_twap_rtds",
+                    "symbol": "BTCUSD_TWAP_30S",
+                    "quote_asset": "USD",
+                    "sample_count": 297,
+                    "open": Decimal("122997.987654321098765432"),
+                    "high": Decimal("123500.987654321098765432"),
+                    "low": Decimal("122900.987654321098765432"),
+                    "close": Decimal("123454.987654321098765432"),
+                    "latest_sample_second_ms": 1_783_459_499_000,
+                    "latest_provider_event_ms": 1_783_459_499_111,
+                    "latest_received_ms": 1_783_459_501_320,
+                },
             ],
         }
 
@@ -579,6 +592,7 @@ def test_markets_sources_by_id_returns_both_sources(client, monkeypatch):
     assert [source["provider"] for source in body["sources"]] == [
         "binance_spot",
         "polymarket_chainlink_rtds",
+        "polymarket_chainlink_twap_rtds",
     ]
     assert body["sources"][0]["symbol"] == "BTCUSDT"
     assert body["sources"][0]["quote_asset"] == "USDT"
@@ -587,6 +601,8 @@ def test_markets_sources_by_id_returns_both_sources(client, monkeypatch):
     assert body["sources"][1]["quote_asset"] == "USD"
     assert body["sources"][1]["sample_count"] == 298
     assert body["sources"][1]["close"] == "123455.900000000000000000"
+    assert body["sources"][2]["symbol"] == "BTCUSD_TWAP_30S"
+    assert body["sources"][2]["sample_count"] == 297
 
 
 def test_markets_current_sources_uses_current_five_minute_market(client, monkeypatch):
@@ -830,10 +846,10 @@ def microstructure_row(**updates):
 
 
 def twap_shadow_snapshot():
-    origin_second_ms = 1_783_459_250_000
+    origin_second_ms = 1_786_665_650_000
     return {
         "schema_version": 1,
-        "model_version": 1,
+        "model_version": 2,
         "origin_second_ms": origin_second_ms,
         "generated_ms": origin_second_ms + 58,
         "basis_window_seconds": 1_800,
@@ -971,7 +987,7 @@ def flip_evidence_analysis(*, events=None, cutoffs=None):
     return {
         "evaluation": {
             **flip_market_row(),
-            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "definition_version": 2,
             "crossing_count": len(events),
             "touch_count": 0,
             "observation_precision": "exact_twap_event",
@@ -1037,7 +1053,7 @@ def install_flip_evidence_sources(
         assert pool is client.fake_pool
         assert kwargs == {
             "market_id": 5_944_864,
-            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "definition_version": 2,
         }
         return deepcopy(analysis)
 
@@ -1077,7 +1093,7 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
     async def fake_fetch_flip_markets(pool, **kwargs):
         assert pool is client.fake_pool
         assert kwargs == {
-            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "definition_version": 2,
             "within_seconds": 5,
             "kind": "any_crossing",
             "direction": "up_to_down",
@@ -1107,7 +1123,8 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
 
     response = client.get(
         "/markets/flips"
-        "?within_seconds=5"
+        "?definition_version=2"
+        "&within_seconds=5"
         "&kind=any_crossing"
         "&direction=up_to_down"
         "&winner=Down"
@@ -1120,7 +1137,7 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
     assert response.status_code == 200
     body = response.json()
     assert body["schema_version"] == 2
-    assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
+    assert body["definition_version"] == 2
     assert body["server_time_ms"] == 1_783_460_100_123
     assert body["filters"] == {
         "within_seconds": 5,
@@ -1157,22 +1174,27 @@ def test_markets_flips_serializes_decimals_filters_and_exclusive_cursor(
         "retention_safe": True,
         "archived_at_ms": 1_783_459_560_000,
     }
-    assert market["flip_detail_url"] == "/markets/5944864/flips"
+    assert market["flip_detail_url"] == (
+        "/markets/5944864/flips?definition_version=2"
+    )
     assert market["data_url"] == "/markets/5944864/data"
-    assert market["evidence_url"] == "/markets/5944864/flips/data"
+    assert market["evidence_url"] == (
+        "/markets/5944864/flips/data?definition_version=2"
+    )
     assert (
         market["evidence_download_url"]
-        == "/markets/5944864/flips/download"
+        == "/markets/5944864/flips/download?definition_version=2"
     )
 
 
 def test_markets_flips_returns_empty_list_with_200(client, monkeypatch):
     async def fake_fetch_flip_markets(pool, **kwargs):
         assert kwargs["limit"] == 21
+        assert kwargs["definition_version"] == api.FLIP_DEFINITION_VERSION == 3
         return []
 
     monkeypatch.setattr(api, "fetch_flip_markets", fake_fetch_flip_markets)
-    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_786_665_900_123)
 
     response = client.get("/markets/flips")
 
@@ -1180,7 +1202,7 @@ def test_markets_flips_returns_empty_list_with_200(client, monkeypatch):
     assert response.json() == {
         "schema_version": 2,
         "definition_version": api.FLIP_DEFINITION_VERSION,
-        "server_time_ms": 1_783_460_100_123,
+        "server_time_ms": 1_786_665_900_123,
         "filters": {
             "within_seconds": 20,
             "kind": "any_crossing",
@@ -1190,9 +1212,51 @@ def test_markets_flips_returns_empty_list_with_200(client, monkeypatch):
     }
 
 
+def test_markets_flips_v2_reads_legacy_market_and_versions_all_links(
+    client,
+    monkeypatch,
+):
+    async def fake_fetch_flip_markets(pool, **kwargs):
+        assert pool is client.fake_pool
+        assert kwargs["definition_version"] == 2
+        return [
+            flip_market_row(
+                settlement_window_s=30,
+                settlement_source_url=(
+                    "https://data.chain.link/streams/"
+                    "btc-usd-twap-30s-streams"
+                ),
+                settlement_rule_version="btc-5m-twap-30",
+            )
+        ]
+
+    monkeypatch.setattr(api, "fetch_flip_markets", fake_fetch_flip_markets)
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
+
+    response = client.get("/markets/flips?definition_version=2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["definition_version"] == 2
+    market = body["markets"][0]
+    assert market["settlement"]["window_s"] == 30
+    assert market["settlement"]["rule_version"] == "btc-5m-twap-30"
+    assert market["flip_detail_url"] == (
+        "/markets/5944864/flips?definition_version=2"
+    )
+    assert market["evidence_url"] == (
+        "/markets/5944864/flips/data?definition_version=2"
+    )
+    assert market["evidence_download_url"] == (
+        "/markets/5944864/flips/download?definition_version=2"
+    )
+
+
 @pytest.mark.parametrize(
     "query",
     [
+        "definition_version=0",
+        "definition_version=4",
         "within_seconds=0",
         "within_seconds=21",
         "limit=0",
@@ -1242,7 +1306,7 @@ def test_markets_flips_distribution_serializes_rates_and_keeps_zero_buckets(
     async def fake_fetch_flip_distribution(pool, **kwargs):
         assert pool is client.fake_pool
         assert kwargs == {
-            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "definition_version": 2,
             "max_seconds": 5,
             "direction": "up_to_down",
             "start_ms": 1_783_000_000_000,
@@ -1287,7 +1351,8 @@ def test_markets_flips_distribution_serializes_rates_and_keeps_zero_buckets(
 
     response = client.get(
         "/markets/flips/distribution"
-        "?max_seconds=5"
+        "?definition_version=2"
+        "&max_seconds=5"
         "&direction=up_to_down"
         "&start_ms=1783000000000"
         "&end_ms=1784000000000"
@@ -1295,7 +1360,7 @@ def test_markets_flips_distribution_serializes_rates_and_keeps_zero_buckets(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
+    assert body["definition_version"] == 2
     assert body["max_seconds"] == 5
     assert body["population"]["eligible_markets"] == 2_012
     assert body["crossings_by_time"][0]["crossing_event_count"] == 0
@@ -1311,12 +1376,12 @@ def test_markets_flip_detail_serializes_events_cutoffs_and_microstructure(
         assert pool is client.fake_pool
         assert kwargs == {
             "market_id": 5_944_864,
-            "definition_version": api.FLIP_DEFINITION_VERSION,
+            "definition_version": 2,
         }
         return {
             "evaluation": {
                 **flip_market_row(),
-                "definition_version": api.FLIP_DEFINITION_VERSION,
+                "definition_version": 2,
                 "crossing_count": 3,
                 "touch_count": 1,
                 "observation_precision": "one_second_summary",
@@ -1408,10 +1473,11 @@ def test_markets_flip_detail_serializes_events_cutoffs_and_microstructure(
     )
     monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_460_100_123)
 
-    response = client.get("/markets/5944864/flips")
+    response = client.get("/markets/5944864/flips?definition_version=2")
 
     assert response.status_code == 200
     body = response.json()
+    assert body["definition_version"] == 2
     assert body["market"]["price_to_beat"] == "63337.115841440165000000"
     assert body["evaluation"]["status"] == "confirmed_flip"
     assert body["evaluation"]["crossing_count"] == 3
@@ -1439,10 +1505,12 @@ def test_markets_flip_detail_serializes_events_cutoffs_and_microstructure(
     )
     assert body["archive"]["status"] == "complete"
     assert body["data_url"] == "/markets/5944864/data"
-    assert body["evidence_url"] == "/markets/5944864/flips/data"
+    assert body["evidence_url"] == (
+        "/markets/5944864/flips/data?definition_version=2"
+    )
     assert (
         body["evidence_download_url"]
-        == "/markets/5944864/flips/download"
+        == "/markets/5944864/flips/download?definition_version=2"
     )
 
 
@@ -1488,7 +1556,9 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
         microstructure_rows=microstructure_rows,
     )
 
-    response = client.get("/markets/5944864/flips/data")
+    response = client.get(
+        "/markets/5944864/flips/data?definition_version=2"
+    )
 
     assert response.status_code == 200
     assert calls["market"] == [
@@ -1508,7 +1578,7 @@ def test_markets_flip_data_defaults_to_decisive_window_and_all_evidence(
 
     body = response.json()
     assert body["schema_version"] == 2
-    assert body["definition_version"] == api.FLIP_DEFINITION_VERSION
+    assert body["definition_version"] == 2
     assert body["market_data_schema_version"] == 4
     assert body["data_scope"] == "curated_public_api"
     assert body["server_time_ms"] == 1_783_460_100_123
@@ -1610,7 +1680,9 @@ def test_flip_cutoff_microstructure_stays_inline_when_series_slot_is_null(
 ):
     install_flip_evidence_sources(client, monkeypatch)
 
-    response = client.get("/markets/5944864/flips/data")
+    response = client.get(
+        "/markets/5944864/flips/data?definition_version=2"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1642,7 +1714,8 @@ def test_flip_microstructure_groups_filter_series_cutoff_and_links(
 
     response = client.get(
         "/markets/5944864/flips/data"
-        "?view=event_window"
+        "?definition_version=2"
+        "&view=event_window"
         "&before_seconds=1"
         "&event_sequence=1"
         "&microstructure_groups=books,quality"
@@ -1671,7 +1744,8 @@ def test_flip_microstructure_groups_filter_series_cutoff_and_links(
         "quality",
     }
     expected_query = (
-        "?view=event_window"
+        "?definition_version=2"
+        "&view=event_window"
         "&before_seconds=1"
         "&event_sequence=1"
         "&microstructure_groups=books,quality"
@@ -1710,7 +1784,7 @@ def test_markets_flip_data_event_sequence_overrides_decisive_anchor(
 
     response = client.get(
         "/markets/5944864/flips/data"
-        "?event_sequence=1&before_seconds=3"
+        "?definition_version=2&event_sequence=1&before_seconds=3"
     )
 
     assert response.status_code == 200
@@ -1753,7 +1827,8 @@ def test_markets_flip_data_full_view_returns_all_300_rows(
     install_flip_evidence_sources(client, monkeypatch)
 
     response = client.get(
-        "/markets/5944864/flips/data?view=full&before_seconds=0"
+        "/markets/5944864/flips/data"
+        "?definition_version=2&view=full&before_seconds=0"
     )
 
     assert response.status_code == 200
@@ -1817,7 +1892,9 @@ def test_markets_flip_data_without_events_uses_market_end_fallback(
         analysis=flip_evidence_analysis(events=[], cutoffs=[]),
     )
 
-    response = client.get("/markets/5944864/flips/data")
+    response = client.get(
+        "/markets/5944864/flips/data?definition_version=2"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1909,7 +1986,8 @@ def test_markets_flip_download_matches_json_endpoint_and_sets_filename(
         ],
     )
     query = (
-        "?event_sequence=1"
+        "?definition_version=2"
+        "&event_sequence=1"
         "&before_seconds=5"
         "&microstructure_groups=books,quality"
     )
@@ -2320,6 +2398,12 @@ def test_openapi_lists_data_flags_and_flip_research_routes(client):
             "parameters"
         ]
     }
+    flip_detail_params = {
+        param["name"]
+        for param in schema["paths"]["/markets/{market_id}/flips"]["get"][
+            "parameters"
+        ]
+    }
     evidence_data_params = {
         param["name"]: param
         for param in schema["paths"]["/markets/{market_id}/flips/data"]["get"][
@@ -2342,6 +2426,7 @@ def test_openapi_lists_data_flags_and_flip_research_routes(client):
     assert "include_microstructure" in market_data_params
     assert "microstructure_groups" in market_data_params
     assert flip_list_params == {
+        "definition_version",
         "within_seconds",
         "kind",
         "direction",
@@ -2352,14 +2437,16 @@ def test_openapi_lists_data_flags_and_flip_research_routes(client):
         "end_ms",
     }
     assert flip_distribution_params == {
+        "definition_version",
         "max_seconds",
         "direction",
         "start_ms",
         "end_ms",
     }
-    assert "/markets/{market_id}/flips" in schema["paths"]
+    assert flip_detail_params == {"market_id", "definition_version"}
     expected_evidence_params = {
         "market_id",
+        "definition_version",
         "view",
         "before_seconds",
         "event_sequence",
@@ -2418,27 +2505,27 @@ def test_markets_current_data_passes_display_fill_options(client, monkeypatch):
 
 
 def test_markets_current_live_reads_redis_without_postgres_queries(client, monkeypatch):
-    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_250_123)
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_786_665_650_123)
     client.fake_live_cache.prices = {
         BINANCE_SPOT_LIVE_KEY: LivePrice(
             value="62067.89",
-            source_timestamp_ms=1_783_459_249_900,
-            received_ms=1_783_459_249_950,
+            source_timestamp_ms=1_786_665_649_900,
+            received_ms=1_786_665_649_950,
         ),
         CHAINLINK_LIVE_KEY: LivePrice(
             value="62037.05",
-            source_timestamp_ms=1_783_459_247_000,
-            received_ms=1_783_459_247_100,
+            source_timestamp_ms=1_786_665_647_000,
+            received_ms=1_786_665_647_100,
         ),
         TWAP_LIVE_KEY: LivePrice(
             value="62036.987654321098765432",
-            source_timestamp_ms=1_783_459_247_500,
-            received_ms=1_783_459_247_600,
+            source_timestamp_ms=1_786_665_647_500,
+            received_ms=1_786_665_647_600,
         ),
         FUTURES_LIVE_KEY: LivePrice(
             value="62099.10",
-            source_timestamp_ms=1_783_459_250_000,
-            received_ms=1_783_459_250_050,
+            source_timestamp_ms=1_786_665_650_000,
+            received_ms=1_786_665_650_050,
         ),
     }
     client.fake_live_cache.twap_shadow_snapshot = twap_shadow_snapshot()
@@ -2447,11 +2534,11 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
 
     assert response.status_code == 200
     body = response.json()
-    assert body["server_time_ms"] == 1_783_459_250_123
-    assert body["market_id"] == 5_944_864
+    assert body["server_time_ms"] == 1_786_665_650_123
+    assert body["market_id"] == 5_955_552
     assert body["prices"]["binance_spot"]["value"] == "62067.89"
-    assert body["prices"]["binance_spot"]["source_timestamp_ms"] == 1_783_459_249_900
-    assert body["prices"]["binance_spot"]["provider_event_ms"] == 1_783_459_249_900
+    assert body["prices"]["binance_spot"]["source_timestamp_ms"] == 1_786_665_649_900
+    assert body["prices"]["binance_spot"]["provider_event_ms"] == 1_786_665_649_900
     assert body["prices"]["binance_spot"]["source_age_ms"] == 223
     assert body["prices"]["binance_spot"]["received_age_ms"] == 173
     assert body["prices"]["chainlink"]["source_age_ms"] == 3_123
@@ -2459,7 +2546,7 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
     assert body["prices"]["twap"]["source_age_ms"] == 2_623
     assert body["futures"]["last"]["source_age_ms"] == 123
     assert body["futures"]["last"]["received_age_ms"] == 73
-    assert body["futures"]["last"]["time_ms"] == 1_783_459_250_000
+    assert body["futures"]["last"]["time_ms"] == 1_786_665_650_000
     assert set(body) == {
         "server_time_ms",
         "market_id",
@@ -2469,6 +2556,7 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
         "futures",
         "twap_shadow",
     }
+    assert body["twap_shadow"]["model_version"] == 2
     assert body["twap_shadow"]["generated_age_ms"] == 65
     assert body["twap_shadow"]["predictions"]["h1"]["value"] == (
         "62066.123456789012345678"
@@ -2482,6 +2570,23 @@ def test_markets_current_live_reads_redis_without_postgres_queries(client, monke
             TWAP_SHADOW_LIVE_KEY,
         ]
     ]
+    assert client.fake_pool.acquire_calls == 0
+
+
+def test_markets_current_live_hides_legacy_twap_shadow_model(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_786_665_650_123)
+    client.fake_live_cache.twap_shadow_snapshot = {
+        **twap_shadow_snapshot(),
+        "model_version": 1,
+    }
+
+    response = client.get("/markets/current/live")
+
+    assert response.status_code == 200
+    assert response.json()["twap_shadow"] is None
     assert client.fake_pool.acquire_calls == 0
 
 
@@ -2593,31 +2698,32 @@ def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_ma
     client,
     monkeypatch,
 ):
-    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_783_459_500_123)
+    monkeypatch.setattr(api, "current_utc_epoch_ms", lambda: 1_786_665_900_123)
     client.fake_live_cache.prices = {
         BINANCE_SPOT_LIVE_KEY: LivePrice(
             value="65758.01",
-            source_timestamp_ms=1_783_459_499_900,
-            received_ms=1_783_459_499_950,
+            source_timestamp_ms=1_786_665_899_900,
+            received_ms=1_786_665_899_950,
         ),
         CHAINLINK_LIVE_KEY: LivePrice(
             value="65721.23639093849",
-            source_timestamp_ms=1_783_459_499_000,
-            received_ms=1_783_459_499_100,
+            source_timestamp_ms=1_786_665_899_000,
+            received_ms=1_786_665_899_100,
         ),
         TWAP_LIVE_KEY: LivePrice(
             value="65720.918273645546372819",
-            source_timestamp_ms=1_783_459_499_010,
-            received_ms=1_783_459_499_110,
+            source_timestamp_ms=1_786_665_899_010,
+            received_ms=1_786_665_899_110,
         ),
         FUTURES_LIVE_KEY: LivePrice(
             value="65723.70",
-            source_timestamp_ms=1_783_459_499_800,
-            received_ms=1_783_459_499_850,
+            source_timestamp_ms=1_786_665_899_800,
+            received_ms=1_786_665_899_850,
         ),
     }
     client.fake_live_cache.microstructure_snapshot = microstructure_row(
-        sample_second_ms=1_783_459_499_000,
+        sample_second_ms=1_786_665_899_000,
+        received_ms=1_786_665_899_250,
     )
 
     response = client.get(
@@ -2629,9 +2735,9 @@ def test_markets_current_microstructure_live_uses_one_cache_read_and_snapshot_ma
     assert response.headers["content-encoding"] == "gzip"
     body = response.json()
     assert body["schema_version"] == 2
-    assert body["server_time_ms"] == 1_783_459_500_123
-    assert body["market_id"] == 5_944_864
-    assert body["sample_second_ms"] == 1_783_459_499_000
+    assert body["server_time_ms"] == 1_786_665_900_123
+    assert body["market_id"] == 5_955_552
+    assert body["sample_second_ms"] == 1_786_665_899_000
     assert body["served_from"] == "redis"
     assert body["prices"] == {
         "binance_spot": "65758.01",

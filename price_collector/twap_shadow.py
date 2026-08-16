@@ -1,4 +1,4 @@
-"""Causal, Decimal-only shadow forecasts for the Chainlink 30-second TWAP.
+"""Causal, Decimal-only shadow forecasts for the Chainlink 60-second TWAP.
 
 The model is intentionally independent of databases, Redis, asyncio, and wall
 clock access.  Callers supply both source and local receive timestamps, which
@@ -17,10 +17,10 @@ from price_collector.market import market_for_sample_second
 
 
 SCHEMA_VERSION = 1
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 # These constants, the three-source consensus rule, and the runtime's fixed
-# 250 ms input polling / 60-sample warm-up define model version 1. Changing any
+# 250 ms input polling / 60-sample warm-up define model version 2. Changing any
 # of them requires incrementing MODEL_VERSION so retained forecasts remain
 # comparable.
 
@@ -28,7 +28,8 @@ SOURCE_FUTURES = "futures"
 SOURCE_CHAINLINK_SPOT = "chainlink_spot"
 SOURCE_BINANCE_SPOT = "binance_spot"
 
-WINDOW_MS = 30_000
+WINDOW_MS = 60_000
+PRELOAD_SAFETY_MS = WINDOW_MS + 15_000
 BASIS_WINDOW_MS = 30 * 60 * 1_000
 RECENT_ERROR_WINDOW_MS = BASIS_WINDOW_MS
 EXPECTED_ACTUAL_RECEIVE_DELAY_MS = 1_800
@@ -1014,6 +1015,7 @@ __all__ = [
     "MIN_CONSENSUS_SOURCES",
     "MODEL_VERSION",
     "PRICE_QUANTUM",
+    "PRELOAD_SAFETY_MS",
     "RecentErrorMetadata",
     "SCHEMA_VERSION",
     "SOURCE_BINANCE_SPOT",

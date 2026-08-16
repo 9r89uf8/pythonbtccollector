@@ -176,13 +176,20 @@ Supported stored spot/oracle combinations are:
 | --- | --- | --- |
 | `binance_spot` | `BTCUSDT` | Binance Spot ticker |
 | `polymarket_chainlink_rtds` | `BTCUSD` | Standard Chainlink spot context through Polymarket RTDS |
-| `polymarket_chainlink_twap_rtds` | `BTCUSD_TWAP_30S` | Exact 30-second Chainlink TWAP settlement reference |
+| `polymarket_chainlink_twap_rtds` | `BTCUSD_TWAP_60S` | Current exact 60-second Chainlink TWAP settlement reference |
+| `polymarket_chainlink_twap_rtds` | `BTCUSD_TWAP_30S` | Historical exact 30-second Chainlink TWAP settlement reference |
+
+The historical `BTCUSD_TWAP_30S` / `crypto_prices_twap_thirty` / window-30
+identity is retained for markets before the `2026-08-14T00:00:00Z` cutover. The
+market starting exactly at that UTC boundary and all later markets use
+`BTCUSD_TWAP_60S` / `crypto_prices_twap_sixty` / window 60.
 
 Calls:
 
 ```bash
 curl "${API_BASE_URL}/prices/latest"
 curl "${API_BASE_URL}/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
+curl "${API_BASE_URL}/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_60S"
 curl "${API_BASE_URL}/prices/latest?provider=polymarket_chainlink_twap_rtds&symbol=BTCUSD_TWAP_30S"
 ```
 
@@ -193,13 +200,13 @@ Response:
   "provider": "binance_spot",
   "symbol": "BTCUSDT",
   "price": "123456.780000000000000000",
-  "sample_second_ms": 1783459200000,
-  "sample_second_at": "2026-07-07T21:00:00Z",
-  "provider_event_ms": 1783459199876,
-  "received_ms": 1783459199900,
-  "market_id": 5944864,
-  "market_start_ms": 1783459200000,
-  "market_end_ms": 1783459500000
+  "sample_second_ms": 1786800000000,
+  "sample_second_at": "2026-08-15T13:20:00Z",
+  "provider_event_ms": 1786799999876,
+  "received_ms": 1786799999900,
+  "market_id": 5956000,
+  "market_start_ms": 1786800000000,
+  "market_end_ms": 1786800300000
 }
 ```
 
@@ -319,7 +326,7 @@ that dataset in the market:
 | --- | --- |
 | `binance` | Binance Spot price samples |
 | `chainlink` | Standard Chainlink spot context samples |
-| `twap` | Exact 30-second Chainlink TWAP settlement-reference samples |
+| `twap` | Exact Chainlink TWAP samples matching that market's settlement rule |
 
 | `futures` | Binance USD-M futures snapshots |
 | `open_interest` | Open-interest snapshots |
@@ -366,14 +373,20 @@ available and its response also contains `market.market_id`.
 
 ## Flip Research
 
-For a focused, copy/paste dashboard integration guide for these endpoints, see
-[`FLIP_RESEARCH_API.md`](FLIP_RESEARCH_API.md).
+The flip routes use permanent definition-v3 post-resolution records for current
+60-second markets. They do not infer a result from the final Up/Down quote. The
+threshold is Polymarket's exact published `priceToBeat`; crossings use exact
+60-second TWAP events, and the label is the official market winner. Standard
+Chainlink spot remains context only. Immutable definition-v2 rows retain the
+historical 30-second analysis for pre-cutover markets; they are not rewritten as
+definition v3. Definition v1 remains retained legacy spot analysis.
 
-The flip routes use permanent definition-v2 post-resolution records. They do
-not infer a result from the final Up/Down quote. The threshold is Polymarket's
-exact published `priceToBeat`; crossings use exact 30-second TWAP events, and
-the label is the official market winner. Standard Chainlink spot remains
-context only.
+Every flip read route accepts `definition_version` from `1` through `3` and
+defaults to current definition `3`. Selection is exact: the API never falls
+back to another version. To read a pre-cutover 30-second evaluation, pass
+`definition_version=2` on the list, distribution, detail, evidence, or download
+route. A response's flip links preserve that selected version so following a
+link cannot silently switch the research definition.
 
 The evaluated interval is half-open:
 
@@ -390,13 +403,14 @@ concepts separate:
 - `cutoff_reversal`: the strict side visible at one exact cutoff differs from
   the official winner.
 
-A market can have multiple crossings. A crossing bracket wider than 10 seconds
-is retained as evidence but makes the market `ambiguous`, rather than claiming
-an exact confirmed crossing across a stale gap. Missing or stale TWAP
-threshold evidence makes an otherwise unconfirmed market `ambiguous`; it is
-never silently counted as a non-flip. Missing probability or microstructure
-evidence adds coverage and quality flags but does not by itself change the
-evaluation status.
+A market can have multiple crossings. For exact-TWAP definitions `2` and `3`, a
+crossing bracket wider than 1,500 milliseconds is retained as evidence but makes
+the market `ambiguous`, rather than claiming an exact confirmed crossing across
+a stale gap. Retained legacy spot definition `1` keeps its 10-second limit.
+Missing or stale TWAP threshold evidence makes an otherwise unconfirmed market
+`ambiguous`; it is never silently counted as a non-flip. Missing probability or
+microstructure evidence adds coverage and quality flags but does not by itself
+change the evaluation status.
 
 ### `GET /markets/flips`
 
@@ -404,6 +418,7 @@ Returns each matching market once, newest first.
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `definition_version` | integer `1`-`3` | `3` | Immutable definition to read: `1` legacy spot, `2` historical 30-second TWAP, or `3` current 60-second TWAP |
 | `within_seconds` | integer | `20` | Final-window bound from `1` through `20` |
 | `kind` | enum | `any_crossing` | `any_crossing`, `decisive_flip`, or `cutoff_reversal` |
 | `direction` | enum or omitted | omitted | `up_to_down` or `down_to_up` |
@@ -418,8 +433,8 @@ timestamp is inside the final five seconds. For `cutoff_reversal`, it means the
 exact T-5 cutoff record.
 
 ```bash
-curl "${API_BASE_URL}/markets/flips?within_seconds=5&kind=any_crossing&limit=20"
-curl "${API_BASE_URL}/markets/flips?within_seconds=10&kind=cutoff_reversal&winner=Down"
+curl "${API_BASE_URL}/markets/flips?definition_version=3&within_seconds=5&kind=any_crossing&limit=20"
+curl "${API_BASE_URL}/markets/flips?definition_version=2&within_seconds=10&kind=cutoff_reversal&winner=Down"
 ```
 
 Response:
@@ -427,24 +442,24 @@ Response:
 ```json
 {
   "schema_version": 2,
-  "definition_version": 2,
-  "server_time_ms": 1783459600123,
+  "definition_version": 3,
+  "server_time_ms": 1786800400123,
   "filters": {
     "within_seconds": 5,
     "kind": "any_crossing"
   },
   "markets": [
     {
-      "market_id": 5944864,
-      "market_start_ms": 1783459200000,
-      "market_end_ms": 1783459500000,
+      "market_id": 5956000,
+      "market_start_ms": 1786800000000,
+      "market_end_ms": 1786800300000,
       "price_to_beat": "63337.115841440165000000",
       "official_close": "63336.719008471390000000",
       "settlement": {
         "reference": "chainlink_twap",
-        "window_s": 30,
-        "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
-        "rule_version": "btc-5m-twap-30",
+        "window_s": 60,
+        "source_url": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+        "rule_version": "btc-5m-twap-60",
         "price_to_beat": "63337.115841440165000000",
         "official_final_price": "63336.719008471390000000"
       },
@@ -463,15 +478,15 @@ Response:
         "source_microstructure_rows": 299,
         "archived_microstructure_rows": 299,
         "retention_safe": true,
-        "archived_at_ms": 1783459525000
+        "archived_at_ms": 1786800325000
       },
-      "flip_detail_url": "/markets/5944864/flips",
-      "data_url": "/markets/5944864/data",
-      "evidence_url": "/markets/5944864/flips/data",
-      "evidence_download_url": "/markets/5944864/flips/download"
+      "flip_detail_url": "/markets/5956000/flips?definition_version=3",
+      "data_url": "/markets/5956000/data",
+      "evidence_url": "/markets/5956000/flips/data?definition_version=3",
+      "evidence_download_url": "/markets/5956000/flips/download?definition_version=3"
     }
   ],
-  "next_before_market_id": 5944800
+  "next_before_market_id": 5955936
 }
 ```
 
@@ -483,28 +498,38 @@ non-null cursor back unchanged as `before_market_id`.
 Returns the stored evaluation, every observed crossing, and all twenty cutoff
 records ordered T-20 through T-1.
 
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `definition_version` | integer `1`-`3` | `3` | Exact immutable definition to read |
+
 ```bash
-curl --compressed "${API_BASE_URL}/markets/5944864/flips"
+curl --compressed "${API_BASE_URL}/markets/5956000/flips?definition_version=3"
+curl --compressed "${API_BASE_URL}/markets/5944864/flips?definition_version=2"
 ```
+
+The response below shows the current definition-v3 call. A definition-v2
+response has the same shape but reports `definition_version: 2`, retains the
+market's 30-second settlement window, URL, and rule fields, and returns flip
+links carrying `definition_version=2`.
 
 The response has this top-level shape:
 
 ```json
 {
   "schema_version": 2,
-  "definition_version": 2,
-  "server_time_ms": 1783459600123,
+  "definition_version": 3,
+  "server_time_ms": 1786800400123,
   "market": {
-    "market_id": 5944864,
-    "market_start_ms": 1783459200000,
-    "market_end_ms": 1783459500000,
+    "market_id": 5956000,
+    "market_start_ms": 1786800000000,
+    "market_end_ms": 1786800300000,
     "price_to_beat": "63337.115841440165000000",
     "official_close": "63336.719008471390000000",
     "settlement": {
       "reference": "chainlink_twap",
-      "window_s": 30,
-      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
-      "rule_version": "btc-5m-twap-30",
+      "window_s": 60,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+      "rule_version": "btc-5m-twap-60",
       "price_to_beat": "63337.115841440165000000",
       "official_final_price": "63336.719008471390000000"
     },
@@ -513,8 +538,8 @@ The response has this top-level shape:
   "evaluation": {
     "status": "confirmed_flip",
     "observation_precision": "exact_twap_event",
-    "analysis_start_ms": 1783459480000,
-    "analysis_end_ms": 1783459500000,
+    "analysis_start_ms": 1786800280000,
+    "analysis_end_ms": 1786800300000,
     "crossing_count": 3,
     "touch_count": 0,
     "first_crossing_ms_before_end": 4800,
@@ -526,8 +551,8 @@ The response has this top-level shape:
     "twap": {
       "observation_count": 20,
       "strict_observation_count": 20,
-      "first_provider_event_ms": 1783459480000,
-      "last_provider_event_ms": 1783459498300,
+      "first_provider_event_ms": 1786800280000,
+      "last_provider_event_ms": 1786800298300,
       "max_gap_ms": 1000
     },
     "cutoff_coverage": {
@@ -540,7 +565,7 @@ The response has this top-level shape:
     "quality_flags": [
       "missing_microstructure_cutoffs"
     ],
-    "evaluated_at_ms": 1783459524000
+    "evaluated_at_ms": 1786800324000
   },
   "events": [
     {
@@ -550,12 +575,12 @@ The response has this top-level shape:
       "new_side": "Down",
       "previous_twap_price": "63337.250000000000000000",
       "new_twap_price": "63336.990000000000000000",
-      "previous_sample_second_ms": 1783459497000,
-      "new_sample_second_ms": 1783459498000,
-      "previous_provider_event_ms": 1783459497300,
-      "new_provider_event_ms": 1783459498300,
-      "previous_received_ms": 1783459497420,
-      "new_received_ms": 1783459498420,
+      "previous_sample_second_ms": 1786800297000,
+      "new_sample_second_ms": 1786800298000,
+      "previous_provider_event_ms": 1786800297300,
+      "new_provider_event_ms": 1786800298300,
+      "previous_received_ms": 1786800297420,
+      "new_received_ms": 1786800298420,
       "observation_gap_ms": 1000,
       "observed_ms_before_end": 1700,
       "is_decisive": true,
@@ -565,12 +590,12 @@ The response has this top-level shape:
   "cutoffs": [
     {
       "seconds_before_end": 20,
-      "cutoff_ms": 1783459480000,
+      "cutoff_ms": 1786800280000,
       "twap": {
         "price": "63338.010000000000000000",
-        "sample_second_ms": 1783459479000,
-        "provider_event_ms": 1783459479000,
-        "received_ms": 1783459479100,
+        "sample_second_ms": 1786800279000,
+        "provider_event_ms": 1786800279000,
+        "received_ms": 1786800279100,
         "age_ms": 1000,
         "received_age_ms": 900,
         "fresh": true
@@ -584,8 +609,8 @@ The response has this top-level shape:
           "ask": "0.61000000",
           "mid": "0.60500000",
           "normalized": "0.61000000",
-          "provider_event_ms": 1783459479500,
-          "received_ms": 1783459479600,
+          "provider_event_ms": 1786800279500,
+          "received_ms": 1786800279600,
           "source_age_ms": 500,
           "received_age_ms": 400
         },
@@ -594,21 +619,21 @@ The response has this top-level shape:
           "ask": "0.39000000",
           "mid": "0.38500000",
           "normalized": "0.39000000",
-          "provider_event_ms": 1783459479400,
-          "received_ms": 1783459479550,
+          "provider_event_ms": 1786800279400,
+          "received_ms": 1786800279550,
           "source_age_ms": 600,
           "received_age_ms": 450
         },
-        "sample_second_ms": 1783459479000,
-        "provider_event_ms": 1783459479500,
-        "received_ms": 1783459479600,
+        "sample_second_ms": 1786800279000,
+        "provider_event_ms": 1786800279500,
+        "received_ms": 1786800279600,
         "age_ms": 600,
         "received_age_ms": 450,
         "fresh": true
       },
       "official_winner": "Down",
       "flipped_after_cutoff": true,
-      "microstructure_sample_second_ms": 1783459479000,
+      "microstructure_sample_second_ms": 1786800279000,
       "microstructure_available": true,
       "microstructure": {
         "collector_healthy": true,
@@ -626,11 +651,11 @@ The response has this top-level shape:
     "source_microstructure_rows": 299,
     "archived_microstructure_rows": 299,
     "retention_safe": true,
-    "archived_at_ms": 1783459525000
+    "archived_at_ms": 1786800325000
   },
-  "data_url": "/markets/5944864/data",
-  "evidence_url": "/markets/5944864/flips/data",
-  "evidence_download_url": "/markets/5944864/flips/download"
+  "data_url": "/markets/5956000/data",
+  "evidence_url": "/markets/5956000/flips/data?definition_version=3",
+  "evidence_download_url": "/markets/5956000/flips/download?definition_version=3"
 }
 ```
 
@@ -650,9 +675,12 @@ created before component timestamps were introduced retain their prices but
 report `fresh: false` and the `unknown_probability_component_freshness` quality
 flag.
 
-The route returns HTTP `404` when that market has no evaluation for the current
-definition version. That can be temporary while an ended market still awaits
-complete official resolution data or the evaluator's retry loop.
+The route returns HTTP `404` when that market has no evaluation for the
+requested definition version. That can be temporary while an ended market still
+awaits complete official resolution data or the evaluator's retry loop. It can
+also mean the caller requested definition `3` for a pre-cutover market whose
+retained evaluation is definition `2`; request version `2` explicitly rather
+than treating the versions as interchangeable.
 
 ### `GET /markets/{market_id}/flips/data`
 
@@ -667,6 +695,7 @@ null.
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `definition_version` | integer `1`-`3` | `3` | Exact immutable definition to read |
 | `view` | enum | `event_window` | `event_window` or `full` |
 | `before_seconds` | integer `0`-`120` | `30` | Prior one-second slots included before the anchor; ignored by `view=full` |
 | `event_sequence` | positive integer or omitted | omitted | Anchor a specific stored crossing |
@@ -694,13 +723,16 @@ and all twenty causal cutoff rows remain in `flip`.
 
 ```bash
 curl --compressed \
-  "${API_BASE_URL}/markets/5944864/flips/data"
+  "${API_BASE_URL}/markets/5956000/flips/data?definition_version=3"
 
 curl --compressed \
-  "${API_BASE_URL}/markets/5944864/flips/data?view=full"
+  "${API_BASE_URL}/markets/5956000/flips/data?definition_version=3&view=full"
 
 curl --compressed \
-  "${API_BASE_URL}/markets/5944864/flips/data?event_sequence=2&before_seconds=15&microstructure_groups=books,flow,quality"
+  "${API_BASE_URL}/markets/5956000/flips/data?definition_version=3&event_sequence=2&before_seconds=15&microstructure_groups=books,flow,quality"
+
+curl --compressed \
+  "${API_BASE_URL}/markets/5944864/flips/data?definition_version=2"
 ```
 
 Top-level response shape:
@@ -708,22 +740,22 @@ Top-level response shape:
 ```json
 {
   "schema_version": 2,
-  "definition_version": 2,
+  "definition_version": 3,
   "market_data_schema_version": 4,
   "data_scope": "curated_public_api",
-  "server_time_ms": 1783459600123,
+  "server_time_ms": 1786800400123,
   "market": {
-    "market_id": 5944864,
-    "market_start_ms": 1783459200000,
-    "market_end_ms": 1783459500000,
+    "market_id": 5956000,
+    "market_start_ms": 1786800000000,
+    "market_end_ms": 1786800300000,
     "seconds_expected": 300,
     "price_to_beat": "63337.115841440165000000",
     "official_close": "63336.719008471390000000",
     "settlement": {
       "reference": "chainlink_twap",
-      "window_s": 30,
-      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
-      "rule_version": "btc-5m-twap-30",
+      "window_s": 60,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+      "rule_version": "btc-5m-twap-60",
       "price_to_beat": "63337.115841440165000000",
       "official_final_price": "63336.719008471390000000"
     },
@@ -733,20 +765,20 @@ Top-level response shape:
     "view": "event_window",
     "anchor": {
       "selection_reason": "decisive_event",
-      "sample_second_ms": 1783459498000,
+      "sample_second_ms": 1786800298000,
       "event": {
         "event_sequence": 1,
         "direction": "up_to_down",
-        "new_sample_second_ms": 1783459498000,
-        "new_provider_event_ms": 1783459498300,
+        "new_sample_second_ms": 1786800298000,
+        "new_provider_event_ms": 1786800298300,
         "observed_ms_before_end": 1700,
         "is_decisive": true
       }
     },
     "window": {
       "before_seconds": 30,
-      "start_ms": 1783459468000,
-      "end_ms_exclusive": 1783459500000,
+      "start_ms": 1786800268000,
+      "end_ms_exclusive": 1786800300000,
       "row_count": 32,
       "rows_before_anchor": 30,
       "rows_at_or_after_anchor_second": 2,
@@ -780,11 +812,17 @@ Top-level response shape:
   },
   "series": [],
   "navigation": {
-    "older_page_cursor": 5944864,
+    "older_page_cursor": 5956000,
     "list_parameter": "before_market_id",
     "preserve_list_filters": true
   },
-  "links": {}
+  "links": {
+    "flip_list": "/markets/flips?definition_version=3",
+    "flip_detail": "/markets/5956000/flips?definition_version=3",
+    "evidence": "/markets/5956000/flips/data?definition_version=3&view=event_window&before_seconds=30",
+    "evidence_download": "/markets/5956000/flips/download?definition_version=3&view=event_window&before_seconds=30",
+    "full_market_data": "/markets/5956000/data?include_probabilities=true&include_futures=true&include_oi=true&include_flow=true&include_book=true&include_microstructure=true"
+  }
 }
 ```
 
@@ -803,30 +841,36 @@ not lose evidence.
 
 The response may also include `previous_5m_oi_summary`. Use
 `navigation.older_page_cursor` as the exclusive `before_market_id` value in the
-next `/markets/flips` call while preserving the same list filters. The cursor is
-only a seed; it does not promise that an older match exists. Do not assume
-`market_id - 1` is another matching flip. The returned `links.evidence` and
-`links.evidence_download` preserve the applied view, lookback, event selection,
-and non-default microstructure groups.
+next `/markets/flips` call while preserving the selected `definition_version`
+and all other list filters. The cursor is only a seed; it does not promise that
+an older match exists. Do not assume `market_id - 1` is another matching flip.
+The returned `links.evidence` and `links.evidence_download` preserve the
+definition version, applied view, lookback, event selection, and non-default
+microstructure groups.
 
-The route returns HTTP `404` when the evaluation, explicitly requested
-crossing, or ordinary market data is unavailable. Invalid view, bounds, or
-group selection returns HTTP `422`.
+The route returns HTTP `404` when the requested-version evaluation, explicitly
+requested crossing, or ordinary market data is unavailable. Invalid definition
+version, view, bounds, or group selection returns HTTP `422`.
 
 ### `GET /markets/{market_id}/flips/download`
 
-Accepts the same four query parameters and returns the identical evidence
-bundle with:
+Accepts the same five query parameters, including `definition_version`, and
+returns the identical evidence bundle with:
 
 ```http
 Content-Type: application/json
-Content-Disposition: attachment; filename="btc_5m_flip_5944864_event_window.json"
+Content-Disposition: attachment; filename="btc_5m_flip_5956000_event_window.json"
 ```
 
 This is the route to use for a download button. Unlike the ordinary compact
 `/markets/{market_id}/download`, it preserves source timestamps, freshness,
 flip analysis, and microstructure. The API still does not expose separate raw
 trade/depth capture through either route.
+
+```bash
+curl -OJ \
+  "${API_BASE_URL}/markets/5944864/flips/download?definition_version=2&view=event_window"
+```
 
 With the same-origin proxy used elsewhere in this guide, the button can follow
 the query-preserving link from the loaded bundle:
@@ -846,13 +890,15 @@ requested second.
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `definition_version` | integer `1`-`3` | `3` | Exact immutable definition to aggregate |
 | `max_seconds` | integer | `20` | Produce T-1 through this second, from `1` through `20` |
 | `direction` | enum or omitted | omitted | Restrict crossing counts by direction; cutoff denominators and reversal counts use the matching source side |
 | `start_ms` | integer or omitted | omitted | Inclusive market-start timestamp filter |
 | `end_ms` | integer or omitted | omitted | Exclusive market-start timestamp filter |
 
 ```bash
-curl "${API_BASE_URL}/markets/flips/distribution?max_seconds=20"
+curl "${API_BASE_URL}/markets/flips/distribution?definition_version=3&max_seconds=20"
+curl "${API_BASE_URL}/markets/flips/distribution?definition_version=2&max_seconds=20"
 ```
 
 Response:
@@ -860,8 +906,8 @@ Response:
 ```json
 {
   "schema_version": 2,
-  "definition_version": 2,
-  "server_time_ms": 1783459600123,
+  "definition_version": 3,
+  "server_time_ms": 1786800400123,
   "max_seconds": 20,
   "population": {
     "resolved_markets": 2050,
@@ -909,8 +955,8 @@ strings, not JSON floating-point values.
 
 The list and distribution routes return HTTP `422` for enum/range violations
 or when both date bounds are present and `start_ms >= end_ms`. The detail route
-has no supported query parameters and returns HTTP `404` when the current
-definition has no completed evaluation.
+accepts only `definition_version` and returns HTTP `404` when the requested
+version has no completed evaluation.
 
 ## Single-Source Market Summary
 
@@ -934,7 +980,7 @@ curl "${API_BASE_URL}/markets/latest"
 curl "${API_BASE_URL}/markets/5944864?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
 ```
 
-Response:
+Response to the default `binance_spot` call:
 
 ```json
 {
@@ -977,8 +1023,8 @@ requested market.
 
 ## Multi-Source Market Summary
 
-These routes compare Binance Spot, standard Chainlink context, and exact
-30-second TWAP samples:
+These routes compare Binance Spot, standard Chainlink context, and exact TWAP
+samples for the market's own settlement rule:
 
 - `GET /markets/current/sources`
 - `GET /markets/{market_id}/sources`
@@ -990,7 +1036,8 @@ curl "${API_BASE_URL}/markets/current/sources"
 curl "${API_BASE_URL}/markets/5944864/sources"
 ```
 
-Response:
+The response below is for the explicit pre-cutover market `5944864`, so its
+TWAP source retains the historical 30-second symbol.
 
 ```json
 {
@@ -1101,7 +1148,9 @@ const market = await apiGet("/markets/current/data", {
 
 ### Base response
 
-These fields are always present on a successful response:
+These fields are always present on a successful response. This example is for
+the explicit pre-cutover market `5944864` call above, so its settlement identity
+remains the historical 30-second rule.
 
 ```json
 {
@@ -1241,9 +1290,9 @@ For a completed market they can look like:
     },
     "settlement": {
       "reference": "chainlink_twap",
-      "window_s": 30,
-      "source_url": "https://data.chain.link/streams/btc-usd-twap-30s-streams",
-      "rule_version": "btc-5m-twap-30",
+      "window_s": 60,
+      "source_url": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+      "rule_version": "btc-5m-twap-60",
       "price_to_beat": "63337.115841440165",
       "official_final_price": "63336.71900847139",
       "status": "official",
@@ -1254,7 +1303,7 @@ For a completed market they can look like:
       "resolution_type": "winner",
       "winner": "Down",
       "winning_token_id": "22257037717815677829542896526504988088700721885271716267073503286407544507251",
-      "resolved_at_ms": 1783647917000,
+      "resolved_at_ms": 1786800324000,
       "official_payouts": {
         "up": "0",
         "down": "1"
@@ -1273,11 +1322,14 @@ two-decimal strings. `settlement.status` is:
 - `pending` while either official price is not yet available; or
 - `official` when both official prices are available.
 
-Only markets whose rule identity is `chainlink_twap`, window `30`, and rule
-version `btc-5m-twap-30` are collected after the clean reset. The independently
-captured `series[].prices.twap` is the research evidence for that settlement
-feed. `series[].prices.chainlink` remains standard Chainlink spot context and
-must not be substituted for TWAP.
+Current markets are collected only when their rule identity is
+`chainlink_twap`, window `60`, source URL
+`https://data.chain.link/streams/btc-usd-twap-60s-streams`, and rule version
+`btc-5m-twap-60`. Markets before `2026-08-14T00:00:00Z` retain window `30`, the
+`btc-usd-twap-30s-streams` source URL, and rule version `btc-5m-twap-30` in
+historical responses. The independently captured `series[].prices.twap` is the
+research evidence for that market's settlement feed. `series[].prices.chainlink`
+remains standard Chainlink spot context and must not be substituted for TWAP.
 
 `resolution.status` is `pending` or `resolved`. While pending,
 `resolution_type` is `null`. A normal resolved binary market has
@@ -1729,7 +1781,7 @@ for:
 
 - `btc:live:binance_spot`
 - `btc:live:chainlink`
-- `btc:live:chainlink_twap_30s`
+- `btc:live:chainlink_twap_60s`
 - `btc:live:futures`
 - `btc:live:microstructure`
 
@@ -1747,9 +1799,9 @@ Abbreviated response:
 ```json
 {
   "schema_version": 2,
-  "server_time_ms": 1784774594250,
-  "market_id": 5949248,
-  "sample_second_ms": 1784774593000,
+  "server_time_ms": 1786800194250,
+  "market_id": 5956000,
+  "sample_second_ms": 1786800193000,
   "served_from": "redis",
   "prices": {
     "binance_spot": "65758.01",
@@ -1873,7 +1925,7 @@ responses are not cached in Redis.
 ### `GET /markets/current/live`
 
 Reads `btc:live:binance_spot`, `btc:live:chainlink`,
-`btc:live:chainlink_twap_30s`, `btc:live:futures`, and the optional
+`btc:live:chainlink_twap_60s`, `btc:live:futures`, and the optional
 `btc:live:chainlink_twap_shadow` with one Redis `MGET`. It does not query
 PostgreSQL or return historical samples, probabilities, mark/index prices,
 open interest, flow, or book data. The four price objects remain authoritative
@@ -1891,51 +1943,51 @@ Response:
 
 ```json
 {
-  "server_time_ms": 1783988794075,
-  "market_id": 5946629,
-  "market_start_ms": 1783988700000,
-  "market_end_ms": 1783989000000,
+  "server_time_ms": 1786800094075,
+  "market_id": 5956000,
+  "market_start_ms": 1786800000000,
+  "market_end_ms": 1786800300000,
   "prices": {
     "binance_spot": {
       "value": "62310.12",
-      "source_timestamp_ms": 1783988793900,
-      "received_ms": 1783988793950,
+      "source_timestamp_ms": 1786800093900,
+      "received_ms": 1786800093950,
       "source_age_ms": 175,
       "received_age_ms": 125,
-      "provider_event_ms": 1783988793900
+      "provider_event_ms": 1786800093900
     },
     "chainlink": {
       "value": "62290.21096323273",
-      "source_timestamp_ms": 1783988792000,
-      "received_ms": 1783988793346,
+      "source_timestamp_ms": 1786800092000,
+      "received_ms": 1786800093346,
       "source_age_ms": 2075,
       "received_age_ms": 729,
-      "provider_event_ms": 1783988792000
+      "provider_event_ms": 1786800092000
     },
     "twap": {
       "value": "62289.997412387451928374",
-      "source_timestamp_ms": 1783988792000,
-      "received_ms": 1783988793350,
+      "source_timestamp_ms": 1786800092000,
+      "received_ms": 1786800093350,
       "source_age_ms": 2075,
       "received_age_ms": 725,
-      "provider_event_ms": 1783988792000
+      "provider_event_ms": 1786800092000
     }
   },
   "futures": {
     "last": {
       "value": "62331.80",
-      "source_timestamp_ms": 1783988793451,
-      "received_ms": 1783988793638,
+      "source_timestamp_ms": 1786800093451,
+      "received_ms": 1786800093638,
       "source_age_ms": 624,
       "received_age_ms": 437,
-      "time_ms": 1783988793451
+      "time_ms": 1786800093451
     }
   },
   "twap_shadow": {
     "schema_version": 1,
-    "model_version": 1,
-    "origin_second_ms": 1783988794000,
-    "generated_ms": 1783988794070,
+    "model_version": 2,
+    "origin_second_ms": 1786800094000,
+    "generated_ms": 1786800094070,
     "basis_window_seconds": 1800,
     "status": "ready",
     "quality_flags": [
@@ -1956,9 +2008,9 @@ Response:
     "predictions": {
       "h1": {
         "horizon_seconds": 1,
-        "target_second_ms": 1783988795000,
-        "target_market_id": 5946629,
-        "expected_actual_received_ms": 1783988796800,
+        "target_second_ms": 1786800095000,
+        "target_market_id": 5956000,
+        "expected_actual_received_ms": 1786800096800,
         "value": "62290.241700000000000000",
         "known_fraction": "1.00000000",
         "source_count": 3,
@@ -1967,33 +2019,33 @@ Response:
       },
       "h3": {
         "horizon_seconds": 3,
-        "target_second_ms": 1783988797000,
-        "target_market_id": 5946629,
-        "expected_actual_received_ms": 1783988798800,
+        "target_second_ms": 1786800097000,
+        "target_market_id": 5956000,
+        "expected_actual_received_ms": 1786800098800,
         "value": "62290.454200000000000000",
-        "known_fraction": "0.95666667",
+        "known_fraction": "0.97833333",
         "source_count": 3,
         "source_spread_bps": "0.23000000",
         "estimated_error_bps": "0.74000000"
       },
       "h5": {
         "horizon_seconds": 5,
-        "target_second_ms": 1783988799000,
-        "target_market_id": 5946629,
-        "expected_actual_received_ms": 1783988800800,
+        "target_second_ms": 1786800099000,
+        "target_market_id": 5956000,
+        "expected_actual_received_ms": 1786800100800,
         "value": "62290.801500000000000000",
-        "known_fraction": "0.89000000",
+        "known_fraction": "0.94500000",
         "source_count": 3,
         "source_spread_bps": "0.27000000",
         "estimated_error_bps": "0.74000000"
       },
       "h10": {
         "horizon_seconds": 10,
-        "target_second_ms": 1783988804000,
-        "target_market_id": 5946629,
-        "expected_actual_received_ms": 1783988805800,
+        "target_second_ms": 1786800104000,
+        "target_market_id": 5956000,
+        "expected_actual_received_ms": 1786800105800,
         "value": "62291.320000000000000000",
-        "known_fraction": "0.72333333",
+        "known_fraction": "0.86166667",
         "source_count": 3,
         "source_spread_bps": "0.33000000",
         "estimated_error_bps": "0.74000000"
@@ -2009,8 +2061,12 @@ Response:
 `btcusdt@aggTrade.p`, with `aggTrade.T` as its source timestamp. Standard
 Chainlink context comes from Polymarket RTDS topic `crypto_prices_chainlink`
 filtered to `btc/usd`. `twap` comes from
-`crypto_prices_twap_thirty` with window `30`; it preserves the exact E18
+`crypto_prices_twap_sixty` with window `60`; it preserves the exact E18
 `full_accuracy_value` decimal string.
+
+Historical PostgreSQL responses remain rule-aware across the cutover. The
+current/live route reads only the 60-second Redis key and never presents an old
+30-second cached value as the current settlement feed.
 
 When enabled, the shadow emits at most one batch per UTC second. Each batch
 targets the exact source seconds `+1`, `+3`, `+5`, and `+10` from
@@ -2019,8 +2075,8 @@ more predictions can correctly point into the next five-minute market near a
 boundary. `expected_actual_received_ms` estimates when the corresponding RTDS
 TWAP is likely to become observable; it is not another price timestamp.
 
-The model is a nowcast of the smoothed 30-second feed, not a claim that the BTC
-market itself will move to that value. Version 1 uses only causal information:
+The model is a nowcast of the smoothed 60-second feed, not a claim that the BTC
+market itself will move to that value. Version 2 uses only causal information:
 the latest polled Binance futures, Binance Spot, and standard Chainlink spot
 observations, plus per-source basis estimates learned from actual TWAP values
 that were already received. Those basis estimates use a trailing 1,800-second
@@ -2028,11 +2084,11 @@ window. The inputs are latest-wins Redis observations, so multiple source
 changes between polls can be collapsed. This experimental limitation matters
 most during fast subsecond moves.
 
-Version 1 does not adjust future prices because recent predictions ran high or
+Version 2 does not adjust future prices because recent predictions ran high or
 low. `recent_p90_abs_error_bps` and each `estimated_error_bps` are diagnostics;
 they do not feed a forecast-error correction loop. A future feedback model must
-use a new `model_version` so its results do not rewrite version 1.
-Version 1 copies the same recent ensemble-nowcast p90 into every available
+use a new `model_version` so its results do not rewrite version 2.
+Version 2 copies the same recent ensemble-nowcast p90 into every available
 horizon; it is not yet a horizon-specific forecast-error band.
 
 Shadow field guidance:
@@ -2071,7 +2127,7 @@ must not assume every live batch is eventually present in PostgreSQL.
 For the lowest display latency, poll this endpoint every 250 to 500 ms and
 replace the shadow only when `origin_second_ms` advances. Polling faster does
 not create more than one batch per UTC second. The collector-side
-`TWAP_SHADOW_POLL_MS` is fixed at `250` for model version 1. Always dim or hide
+`TWAP_SHADOW_POLL_MS` is fixed at `250` for model version 2. Always dim or hide
 predictions whose `generated_age_ms` exceeds the dashboard's freshness
 threshold, or whose `status` is not acceptable for that view.
 
@@ -2115,9 +2171,11 @@ Malformed JSON in an authoritative source-price key returns HTTP `503`:
 { "detail": "live cache payload invalid" }
 ```
 
-The shadow key is optional and isolated. If only its JSON or version-1 shape is
-invalid, the endpoint still returns HTTP `200` with all valid authoritative
-prices and `twap_shadow: null`.
+The shadow key is optional and isolated. If only its JSON or version-2 shape is
+invalid, or if a stale cache payload still declares model version 1, the
+endpoint still returns HTTP `200` with all valid authoritative prices and
+`twap_shadow: null`. Model-version-1 history remains available only through the
+PostgreSQL-backed history route.
 
 ## TWAP Shadow History and Evaluation
 
@@ -2135,23 +2193,28 @@ Query parameters:
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `model_version` | integer | `1` | Prediction definition to read, from `1` through `32767` |
+| `model_version` | integer | `2` | Prediction definition to read, from `1` through `32767` |
+
+Version 2 is the current 60-second target model. Pass `model_version=1` when
+reading retained historical forecasts for the former 30-second target; the two
+versions remain separately queryable and are never merged.
 
 Calls:
 
 ```bash
 curl --compressed "${API_BASE_URL}/markets/current/twap-shadow"
-curl --compressed "${API_BASE_URL}/markets/5946629/twap-shadow?model_version=1"
+curl --compressed "${API_BASE_URL}/markets/5956000/twap-shadow?model_version=2"
+curl --compressed "${API_BASE_URL}/markets/5944864/twap-shadow?model_version=1"
 ```
 
 Abbreviated response:
 
 ```json
 {
-  "market_id": 5946629,
-  "market_start_ms": 1783988700000,
-  "market_end_ms": 1783989000000,
-  "model_version": 1,
+  "market_id": 5956000,
+  "market_start_ms": 1786800000000,
+  "market_end_ms": 1786800300000,
+  "model_version": 2,
   "error_definition": "10000 * (prediction - actual) / actual",
   "summary": {
     "h1": {
@@ -2181,17 +2244,17 @@ Abbreviated response:
   },
   "samples": [
     {
-      "target_second_ms": 1783988795000,
+      "target_second_ms": 1786800095000,
       "actual": {
         "value": "62290.310000000000000000",
-        "provider_event_ms": 1783988795987,
-        "received_ms": 1783988797732
+        "provider_event_ms": 1786800095987,
+        "received_ms": 1786800097732
       },
       "predictions": {
         "h1": {
           "horizon_seconds": 1,
           "value": "62290.241700000000000000",
-          "generated_ms": 1783988794070,
+          "generated_ms": 1786800094070,
           "known_fraction": "1.00000000",
           "source_count": 3,
           "estimated_error_bps": "0.74000000",
@@ -2200,8 +2263,8 @@ Abbreviated response:
         "h3": {
           "horizon_seconds": 3,
           "value": "62290.180000000000000000",
-          "generated_ms": 1783988792091,
-          "known_fraction": "0.95666667",
+          "generated_ms": 1786800092091,
+          "known_fraction": "0.97833333",
           "source_count": 3,
           "estimated_error_bps": "0.74000000",
           "realized_error_bps": "-0.02087000"
@@ -2209,8 +2272,8 @@ Abbreviated response:
         "h5": {
           "horizon_seconds": 5,
           "value": "62290.040000000000000000",
-          "generated_ms": 1783988790084,
-          "known_fraction": "0.89000000",
+          "generated_ms": 1786800090084,
+          "known_fraction": "0.94500000",
           "source_count": 3,
           "estimated_error_bps": "0.74000000",
           "realized_error_bps": "-0.04334542"
@@ -2218,8 +2281,8 @@ Abbreviated response:
         "h10": {
           "horizon_seconds": 10,
           "value": "62289.770000000000000000",
-          "generated_ms": 1783988785099,
-          "known_fraction": "0.72333333",
+          "generated_ms": 1786800085099,
+          "known_fraction": "0.86166667",
           "source_count": 3,
           "estimated_error_bps": "0.74000000",
           "realized_error_bps": "-0.08669084"
