@@ -212,6 +212,12 @@ The corresponding Python entry points are:
 - Preserve both identities. Reconciliation and historical API reads must remain
   boundary- and rule-aware rather than rewriting 30-second markets as
   60-second settlements.
+- Use `POLYMARKET_MARKET_BACKFILL_START_MS` only as the inclusive lower bound
+  for metadata-only completed-market backfill. It defaults to the immutable
+  `2026-08-14T00:00:00Z` rule cutover and must be a UTC five-minute-aligned epoch
+  millisecond value at or after that cutover. An intentional clean reset may
+  move this floor forward to its reset/current market boundary; it must never
+  change which rule applies on either side of the cutover.
 - Subscribe only to the discovered Up and Down token IDs through the CLOB
   WebSocket.
 - Store at most one probability snapshot per UTC second in the active market.

@@ -499,6 +499,10 @@ def test_historical_discovery_fallback_does_not_require_active_open_market(
 def test_backfill_scan_advances_cursor_across_failures_and_stores_metadata_only(
     monkeypatch,
 ):
+    backfill_start_ms = collector.TWAP_60S_CUTOVER_MS + 300_000
+    settings = SimpleNamespace(
+        POLYMARKET_MARKET_BACKFILL_START_MS=backfill_start_ms,
+    )
     windows = [
         market_window(start_ms=collector.TWAP_60S_CUTOVER_MS),
         market_window(start_ms=collector.TWAP_60S_CUTOVER_MS + 300_000),
@@ -529,7 +533,7 @@ def test_backfill_scan_advances_cursor_across_failures_and_stores_metadata_only(
 
     attempted, stored, last_scanned_ms = asyncio.run(
         collector.backfill_missing_polymarket_markets_once(
-            settings="settings",
+            settings=settings,
             pool="pool",
             client="client",
             now_ms=collector.TWAP_60S_CUTOVER_MS + 900_000,
@@ -544,7 +548,7 @@ def test_backfill_scan_advances_cursor_across_failures_and_stores_metadata_only(
         (
             "pool",
             {
-                "first_market_start_ms": collector.TWAP_60S_CUTOVER_MS,
+                "first_market_start_ms": backfill_start_ms,
                 "now_ms": collector.TWAP_60S_CUTOVER_MS + 900_000,
                 "after_market_start_ms": (
                     collector.TWAP_60S_CUTOVER_MS - 300_000
@@ -553,6 +557,12 @@ def test_backfill_scan_advances_cursor_across_failures_and_stores_metadata_only(
             },
         )
     ]
+    assert collector.expected_twap_settlement_rule(
+        collector.TWAP_60S_CUTOVER_MS - 300_000
+    ) == collector.LEGACY_TWAP_SETTLEMENT_RULE
+    assert collector.expected_twap_settlement_rule(
+        collector.TWAP_60S_CUTOVER_MS
+    ) == collector.CURRENT_TWAP_SETTLEMENT_RULE
     assert [call[3] for call in discoveries] == windows
 
 
@@ -1849,6 +1859,7 @@ def test_run_collector_preloads_and_starts_next_market_before_boundary(monkeypat
         POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS=300,
         POLYMARKET_RESOLUTION_BATCH_SIZE=20,
         POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30,
+        POLYMARKET_MARKET_BACKFILL_START_MS=collector.TWAP_60S_CUTOVER_MS,
     )
 
     monkeypatch.setattr(collector, "create_pool", fake_create_pool)

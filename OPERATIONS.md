@@ -154,14 +154,21 @@ sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 sudoedit /etc/price-collector/collector.env
 ```
 
-In that editor, change only these three non-secret values. Do not replace the
+In that editor, change only these four non-secret values. Do not replace the
 production environment file with the repository example:
 
 ```text
 POLYMARKET_TWAP_SYMBOL=BTCUSD_TWAP_60S
 POLYMARKET_TWAP_TOPIC=crypto_prices_twap_sixty
 POLYMARKET_TWAP_WINDOW_SECONDS=60
+POLYMARKET_MARKET_BACKFILL_START_MS=1786665600000
 ```
+
+The backfill setting is an inclusive metadata-replay floor, not a settlement
+rule selector. Its default is the immutable 60-second rule cutover and it must
+be a UTC five-minute-aligned epoch millisecond value at or after that cutover.
+Moving it later for a future clean reset does not move the
+`2026-08-14T00:00:00Z` rule boundary.
 
 Confirm the saved values, apply the schema, and only then restart the affected
 services. The schema adds the 60-second instrument while preserving the
@@ -169,7 +176,7 @@ historical 30-second instrument:
 
 ```bash
 sudo grep -E \
-  '^(POLYMARKET_TWAP_SYMBOL|POLYMARKET_TWAP_TOPIC|POLYMARKET_TWAP_WINDOW_SECONDS)=' \
+  '^(POLYMARKET_TWAP_SYMBOL|POLYMARKET_TWAP_TOPIC|POLYMARKET_TWAP_WINDOW_SECONDS|POLYMARKET_MARKET_BACKFILL_START_MS)=' \
   /etc/price-collector/collector.env
 
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector \
@@ -412,9 +419,11 @@ curl -fsS \
   'http://127.0.0.1:9000/markets/flips?definition_version=3&within_seconds=20&kind=any_crossing&limit=3'
 ```
 
-The probability service scans only completed windows, from the cutover through
-the last completed five-minute boundary, in pages bounded by
-`POLYMARKET_RESOLUTION_BATCH_SIZE`. Its cursor advances oldest to newest even
+The probability service scans only completed windows, from the inclusive
+`POLYMARKET_MARKET_BACKFILL_START_MS` floor through the last completed
+five-minute boundary, in pages bounded by `POLYMARKET_RESOLUTION_BATCH_SIZE`.
+For this non-destructive cutover procedure the floor remains the default cutover
+value used by the SQL audit above. Its cursor advances oldest to newest even
 when an individual discovery fails, then wraps after the end to retry failed or
 contradictory windows without starving later ones. Repeat the SQL audit until
 `missing_completed_market_metadata`, `noncanonical_completed_market_metadata`,
@@ -484,7 +493,13 @@ POLYMARKET_RESOLUTION_POLL_SECONDS=5
 POLYMARKET_RESOLUTION_MAX_BACKOFF_SECONDS=300
 POLYMARKET_RESOLUTION_BATCH_SIZE=20
 POLYMARKET_RESOLUTION_WS_GRACE_SECONDS=30
+POLYMARKET_MARKET_BACKFILL_START_MS=1786665600000
 ```
+
+The backfill start is inclusive, must be divisible by `300000`, and cannot
+precede the immutable cutover. Keep the default cutover value during a normal
+non-destructive rollout. It is an operational metadata-replay floor only; it
+cannot redefine the 30-second/60-second settlement-rule boundary.
 
 For the current TWAP runtime, also review and add these non-secret keys manually
 to `/etc/price-collector/collector.env`; do not replace that production file:
@@ -713,7 +728,9 @@ sudo journalctl \
 Use this procedure only when the old market history is intentionally being
 discarded. It irreversibly drops exactly the PostgreSQL database
 `price_collector` and flushes Redis database 0. It does not drop PostgreSQL
-roles, any other database, or change either production environment file.
+roles, any other database, or replace either production environment file. It
+does deliberately change the one non-secret metadata-backfill floor in
+`collector.env` as shown below.
 Do not use it for the 30-second to 60-second cutover; use the non-destructive
 procedure above for that migration.
 
@@ -732,6 +749,25 @@ sudo systemctl stop \
   price-collector-polymarket-chainlink \
   price-collector-binance-futures \
   price-collector
+
+RESET_MARKET_START_MS="$(( ($(date -u +%s) / 300) * 300000 ))"
+printf 'Set this exact line in collector.env before continuing:\n'
+printf 'POLYMARKET_MARKET_BACKFILL_START_MS=%s\n' \
+  "$RESET_MARKET_START_MS"
+sudoedit /etc/price-collector/collector.env
+
+BACKFILL_FLOOR_MS="$(sudo awk -F= '
+  $1 == "POLYMARKET_MARKET_BACKFILL_START_MS" { value = $2 }
+  END { print value }
+' /etc/price-collector/collector.env)"
+case "$BACKFILL_FLOOR_MS" in
+  ''|*[!0-9]*)
+    echo 'POLYMARKET_MARKET_BACKFILL_START_MS must be an integer' >&2
+    exit 1
+    ;;
+esac
+test "$BACKFILL_FLOOR_MS" = "$RESET_MARKET_START_MS"
+test "$(( BACKFILL_FLOOR_MS % 300000 ))" -eq 0
 
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d postgres -c \
   "SELECT datname FROM pg_database WHERE datname = 'price_collector';"
@@ -774,7 +810,10 @@ sudo systemctl start price-api
 The default privileges are installed before `schema.sql` so the schema's
 later table-specific revocations remain effective, including immutable flip
 events and reader exclusion from `raw_capture`. Schema application must finish
-before any service is restarted.
+before any service is restarted. The probability service remains stopped while
+the reset boundary is written and the database is recreated, preventing its
+metadata scanner from repopulating pre-reset windows. The backfill floor is
+independent of the immutable `2026-08-14T00:00:00Z` settlement-rule cutover.
 
 Verify all services, the exact TWAP instrument, durable events, the live cache,
 and the read-only API:
@@ -813,6 +852,14 @@ SELECT count(*) AS twap_events,
 FROM polymarket_twap_events;
 "
 
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector \
+  -v backfill_floor_ms="$BACKFILL_FLOOR_MS" <<'SQL'
+SELECT count(*) AS pre_backfill_floor_market_rows
+FROM polymarket_btc_5m_markets AS market
+JOIN market_windows AS window USING (market_id)
+WHERE window.market_start_ms < :'backfill_floor_ms'::BIGINT;
+SQL
+
 redis-cli -h 127.0.0.1 -p 6379 -n 0 MGET \
   btc:live:binance_spot \
   btc:live:chainlink \
@@ -833,6 +880,9 @@ collector journal reports an accepted TWAP tick. A collected Polymarket market
 must report `settlement_reference = 'chainlink_twap'`,
 `settlement_window_s = 60`, and rule version `btc-5m-twap-60`; unknown rules
 must remain absent rather than being classified from standard Chainlink spot.
+Require `pre_backfill_floor_market_rows = 0`; a nonzero result means the clean
+reset floor was not effective and the probability service must be stopped
+before investigating or repeating the reset.
 
 ### Optional Binance microstructure summary rollout
 
