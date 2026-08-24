@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Mapping, Optional, Union
+from typing import Any, Mapping, Optional, Union
 from uuid import UUID, uuid4
 
 import websockets
@@ -129,9 +129,6 @@ PolymarketTwapPersistenceRecord = Union[
     PolymarketTwapSessionFinish,
     PolymarketTwapGap,
 ]
-PolymarketTwapEventObserver = Callable[[PolymarketTwapEvent], None]
-
-
 def validate_twap_runtime_identity(settings: Any) -> None:
     expected = {
         "POLYMARKET_TWAP_PROVIDER_CODE": TWAP_PROVIDER_CODE,
@@ -883,7 +880,6 @@ async def polymarket_twap_reader_loop(
     instrument_id: int,
     records: "asyncio.Queue[PolymarketTwapPersistenceRecord]",
     live_cache: Any = None,
-    event_observer: Optional[PolymarketTwapEventObserver] = None,
 ) -> None:
     validate_twap_runtime_identity(settings)
     attempt = 0
@@ -1112,28 +1108,6 @@ async def polymarket_twap_reader_loop(
                                 settings.POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS
                             ),
                         )
-                        if event_observer is not None:
-                            try:
-                                result = event_observer(event)
-                                if result is not None:
-                                    raise TypeError(
-                                        "TWAP event observer must be synchronous"
-                                    )
-                            except Exception as exc:
-                                LOGGER.warning(
-                                    "polymarket_twap_event_observer_failed",
-                                    extra={
-                                        "event": (
-                                            "polymarket_twap_event_observer_failed"
-                                        ),
-                                        "connection_id": event.connection_id,
-                                        "receive_sequence": event.receive_sequence,
-                                        "provider_event_ms": (
-                                            event.provider_event_ms
-                                        ),
-                                        "error": repr(exc),
-                                    },
-                                )
                 except asyncio.CancelledError:
                     close_reason = "planned_restart"
                     gap_reason = "planned_restart"
@@ -1249,7 +1223,6 @@ async def run_polymarket_twap_runtime(
     pool: Any,
     *,
     live_cache: Any = None,
-    event_observer: Optional[PolymarketTwapEventObserver] = None,
 ) -> None:
     validate_twap_runtime_identity(settings)
     await recover_orphaned_polymarket_twap_sessions(pool)
@@ -1265,15 +1238,13 @@ async def run_polymarket_twap_runtime(
     writer = asyncio.create_task(
         polymarket_twap_persistence_worker(pool=pool, records=records)
     )
-    reader_kwargs = {
-        "instrument_id": instrument_id,
-        "records": records,
-        "live_cache": live_cache,
-    }
-    if event_observer is not None:
-        reader_kwargs["event_observer"] = event_observer
     reader = asyncio.create_task(
-        polymarket_twap_reader_loop(settings, **reader_kwargs)
+        polymarket_twap_reader_loop(
+            settings,
+            instrument_id=instrument_id,
+            records=records,
+            live_cache=live_cache,
+        )
     )
     try:
         done, _pending = await asyncio.wait(
@@ -1345,17 +1316,17 @@ async def run_polymarket_twap_noncritical(
     pool: Any,
     *,
     live_cache: Any = None,
-    event_observer: Optional[PolymarketTwapEventObserver] = None,
 ) -> None:
     """Keep TWAP failures from stopping the standard Chainlink collector."""
 
     attempt = 0
     while True:
         try:
-            runtime_kwargs = {"live_cache": live_cache}
-            if event_observer is not None:
-                runtime_kwargs["event_observer"] = event_observer
-            await run_polymarket_twap_runtime(settings, pool, **runtime_kwargs)
+            await run_polymarket_twap_runtime(
+                settings,
+                pool,
+                live_cache=live_cache,
+            )
             raise RuntimeError("Polymarket TWAP runtime stopped unexpectedly")
         except asyncio.CancelledError:
             raise

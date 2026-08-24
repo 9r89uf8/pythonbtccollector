@@ -37,18 +37,6 @@ from price_collector.collector import (
     reconnect_delay_seconds,
 )
 from price_collector.db import epoch_ms_to_utc_datetime
-from price_collector.flip_research import (
-    SPOT_FLIP_DEFINITION_VERSION,
-    TWAP_30S_FLIP_DEFINITION_VERSION,
-    TWAP_30S_RULE_VERSION,
-    TWAP_30S_SOURCE_URL,
-    TWAP_30S_WINDOW_SECONDS,
-    TWAP_60S_FLIP_DEFINITION_VERSION,
-    TWAP_60S_CUTOVER_MS,
-    TWAP_60S_RULE_VERSION,
-    TWAP_60S_SOURCE_URL,
-    TWAP_60S_WINDOW_SECONDS,
-)
 from price_collector.live_cache import MICROSTRUCTURE_LIVE_KEY
 from price_collector.market import MarketWindow, market_for_sample_second
 
@@ -553,67 +541,10 @@ async def delete_expired_microstructure_rows(
     cutoff_ms = now_ms - retention_days * MILLISECONDS_PER_DAY
     async with pool.acquire() as connection:
         return await connection.execute(
-            f"""
+            """
             DELETE FROM binance_microstructure_1s
-            USING polymarket_btc_5m_flip_evaluations AS evaluation,
-                  polymarket_btc_5m_markets AS market
             WHERE symbol = $1
               AND sample_second_ms < $2
-              AND evaluation.market_id = binance_microstructure_1s.market_id
-              AND market.market_id = binance_microstructure_1s.market_id
-              AND evaluation.market_id = market.market_id
-              AND (
-                    (
-                        evaluation.definition_version =
-                            {TWAP_60S_FLIP_DEFINITION_VERSION}
-                        AND market.market_id * 300000 >=
-                            {TWAP_60S_CUTOVER_MS}
-                        AND market.settlement_reference = 'chainlink_twap'
-                        AND market.settlement_window_s =
-                            {TWAP_60S_WINDOW_SECONDS}
-                        AND market.settlement_source_url =
-                            '{TWAP_60S_SOURCE_URL}'
-                        AND market.settlement_rule_version =
-                            '{TWAP_60S_RULE_VERSION}'
-                    )
-                    OR (
-                        evaluation.definition_version =
-                            {TWAP_30S_FLIP_DEFINITION_VERSION}
-                        AND market.market_id * 300000 <
-                            {TWAP_60S_CUTOVER_MS}
-                        AND market.settlement_reference = 'chainlink_twap'
-                        AND market.settlement_window_s =
-                            {TWAP_30S_WINDOW_SECONDS}
-                        AND market.settlement_source_url =
-                            '{TWAP_30S_SOURCE_URL}'
-                        AND market.settlement_rule_version =
-                            '{TWAP_30S_RULE_VERSION}'
-                    )
-                    OR (
-                        evaluation.definition_version =
-                            {SPOT_FLIP_DEFINITION_VERSION}
-                        AND market.settlement_reference = 'chainlink_spot'
-                        AND market.settlement_rule_version = 'chainlink-spot-v1'
-                    )
-              )
-              AND evaluation.retention_safe = TRUE
-              AND (
-                    evaluation.archive_status = 'not_required'
-                    OR (
-                        evaluation.archive_status = 'complete'
-                        AND EXISTS (
-                            SELECT 1
-                            FROM binance_microstructure_1s_flip_archive
-                                AS archive
-                            WHERE archive.symbol
-                                = binance_microstructure_1s.symbol
-                              AND archive.sample_second_ms
-                                = binance_microstructure_1s.sample_second_ms
-                              AND archive.received_ms
-                                >= binance_microstructure_1s.received_ms
-                        )
-                    )
-              )
             """,
             symbol,
             cutoff_ms,

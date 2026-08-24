@@ -2,8 +2,7 @@
 import pytest
 from pydantic import ValidationError
 
-from price_collector.config import Settings
-from price_collector.flip_research import TWAP_60S_CUTOVER_MS
+from price_collector.config import Settings, TWAP_60S_CUTOVER_MS
 
 
 def test_settings_allows_api_reader_url_without_writer_url(monkeypatch):
@@ -143,41 +142,6 @@ def test_settings_accept_five_minute_aligned_market_backfill_start(
     monkeypatch.setenv("POLYMARKET_MARKET_BACKFILL_START_MS", str(start_ms))
 
     assert Settings().POLYMARKET_MARKET_BACKFILL_START_MS == start_ms
-
-
-def test_settings_include_twap_shadow_defaults(monkeypatch):
-    for key in (
-        "TWAP_SHADOW_ENABLED",
-        "TWAP_SHADOW_POLL_MS",
-        "TWAP_SHADOW_RETENTION_DAYS",
-        "TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES",
-        "TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-    settings = Settings()
-
-    assert settings.TWAP_SHADOW_ENABLED is False
-    assert settings.TWAP_SHADOW_POLL_MS == 250
-    assert settings.TWAP_SHADOW_RETENTION_DAYS == 30
-    assert settings.TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES == 10_000
-    assert settings.TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS == 5
-
-
-def test_enabled_twap_shadow_requires_exact_twap_collector(monkeypatch):
-    monkeypatch.setenv("POLYMARKET_TWAP_ENABLED", "false")
-    monkeypatch.setenv("TWAP_SHADOW_ENABLED", "true")
-
-    with pytest.raises(ValidationError, match="POLYMARKET_TWAP_ENABLED"):
-        Settings()
-
-
-@pytest.mark.parametrize("poll_ms", (100, 125, 200, 500, 1_000, 101, 300, 750))
-def test_twap_shadow_poll_interval_is_fixed_for_model_v2(monkeypatch, poll_ms):
-    monkeypatch.setenv("TWAP_SHADOW_POLL_MS", str(poll_ms))
-
-    with pytest.raises(ValidationError, match="TWAP_SHADOW_POLL_MS"):
-        Settings()
 
 
 @pytest.mark.parametrize("window_s", (30, 59, 61))

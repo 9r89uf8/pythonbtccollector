@@ -472,12 +472,8 @@ An active market is incomplete by definition, so missing seconds are normal
 until the market ends.
 
 An existing older market that predates microstructure collection still returns
-HTTP `200`. A non-flip market whose evaluated rows have passed the configured
-retention window can also have no remaining microstructure. Confirmed-flip and
-ambiguous markets are copied to the permanent flip archive before ordinary
-retention is allowed to remove their live-table rows. Historical reads prefer
-the live table for each second and then fall back to that archive, without
-changing the response shape.
+HTTP `200`. A market whose rows have passed the configured retention window can
+also have no remaining microstructure.
 
 When neither source has collected evidence, availability is:
 
@@ -645,13 +641,9 @@ PostgreSQL remains the source of record.
   five-minute market; there is no pagination.
 - Ordinary live-table microstructure history is subject to
   `BINANCE_MICROSTRUCTURE_RETENTION_DAYS`, which defaults to 30 days.
-  Confirmed-flip and ambiguous markets can instead be served from the permanent
-  flip archive, which has no application TTL.
 - The ordinary `/markets/current/download` and
   `/markets/{market_id}/download` routes do not include microstructure and do
-  not accept `include_microstructure` or `microstructure_groups`. The separate
-  `/markets/{market_id}/flips/download` evidence attachment does include
-  archive-aware microstructure and accepts `microstructure_groups`.
+  not accept `include_microstructure` or `microstructure_groups`.
 - The live endpoint does not support group filtering.
 - Live microstructure is finalized once per second; Redis reduces API latency
   but does not make the underlying observations subsecond.

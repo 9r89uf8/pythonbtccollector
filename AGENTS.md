@@ -121,10 +121,6 @@ The corresponding Python entry points are:
 - Apply an accepted-event idle deadline independently to the TWAP socket.
   PING/PONG, malformed, wrong-topic, wrong-symbol, and wrong-window frames must
   not reset it. Preserve the last cached value so gaps remain visible by age.
-- When the optional TWAP shadow is enabled, model version 2 targets the current
-  60-second feed. Preserve retained model-version-1 rows as historical
-  30-second forecasts, and do not expose a stale model-version-1 Redis payload
-  through the current live API.
 
 ### Binance Futures, Flow, and Book
 
@@ -230,21 +226,6 @@ The corresponding Python entry points are:
   data and persist the exact Price to Beat, official final price, settlement
   rule identity, and outcome.
 - Never infer an official winner from the final Up/Down probability quote.
-- After official open, close, and resolution data are complete, evaluate the
-  versioned final-20-second flip definition in the independent retrying loop.
-  Preserve every strict-side crossing, all causal T-20 through T-1 cutoff
-  examples, and explicit missing/stale/tie quality instead of classifying
-  incomplete evidence as a non-flip.
-- Keep flip events immutable within a definition version. A definition change
-  creates new versioned rows rather than rewriting prior research labels.
-- Definition version 2 remains the immutable historical 30-second TWAP
-  definition. Definition version 3 uses exact 60-second TWAP events for current
-  markets. Standard Chainlink spot remains context only and must never supply
-  v2 or v3 crossings or cutoff classifications.
-- Before ordinary microstructure retention removes a confirmed-flip or
-  ambiguous market, verify that every available five-minute source row was
-  copied to `binance_microstructure_1s_flip_archive`. Retention must fail closed
-  while evaluation or archival is incomplete.
 
 ## Live Cache Rules
 
@@ -420,12 +401,6 @@ python -m pytest
 
 - Keep `README.md` aligned with the current architecture, settings, service
   names, and API routes.
-- Keep `FRONTEND_API.md` synchronized with `price_collector/api.py`. In the same
-  checkpoint as any FastAPI endpoint addition, change, rename, or removal,
-  update its frontend-facing method and path, request parameters, example call,
-  response fields and shape, and relevant error responses.
-- Keep `OPERATIONS.md` aligned with deploy, restart, verification, and recovery
-  commands.
 - When adding a collector or service, update the README, operations guide,
   environment examples, service map in this file, and deployment tests in the
   same checkpoint.

@@ -4,8 +4,8 @@
 Production-oriented BTC market-data collection for a single-user Ubuntu 24.04
 DigitalOcean droplet. The application collects spot, oracle, futures, order-flow,
 top-of-book, and Polymarket probability data into local PostgreSQL. Redis holds
-the latest source prices, the optional experimental Chainlink TWAP shadow batch,
-and the latest finalized microstructure second needed by the live API responses.
+the latest source prices and the latest finalized microstructure second needed
+by the live API responses.
 
 The deployment is deliberately private:
 
@@ -86,25 +86,6 @@ versions and source URLs likewise remain `btc-5m-twap-30` /
 `btc-usd-twap-60s-streams` from the cutover onward. Historical rows are not
 renamed or recomputed.
 
-The same service can run the optional experimental Chainlink TWAP shadow when
-`TWAP_SHADOW_ENABLED=true`. It emits one versioned batch per UTC second with
-predictions for the exact TWAP source seconds at `+1`, `+3`, `+5`, and `+10`
-seconds. Each batch is written to Redis key
-`btc:live:chainlink_twap_shadow` before its available forecasts are queued for
-PostgreSQL. This is a low-latency research nowcast, not a settlement source or a
-replacement for `btc:live:chainlink_twap_60s`.
-
-Redis remains live if the bounded PostgreSQL backlog reaches capacity. In that
-case the new batch is still published for the frontend, the saturation is
-logged, and that particular prediction can be absent from later history.
-
-Version 2 targets the 60-second feed and is dynamic only through causal,
-trailing 30-minute basis estimates for Binance futures, Binance Spot, and
-standard Chainlink spot. It uses only
-TWAP observations already received at forecast time. It does not feed recent
-forecast misses back into later prices; the stored error history is evaluation
-evidence for a separately versioned future model.
-
 ### Binance USD-M Futures
 
 `python -m price_collector.binance_futures_collector`
@@ -162,17 +143,16 @@ evidence for a separately versioned future model.
 - Reconciles ended markets against Polymarket Gamma and CLOB REST data, with
   durable retries for resolutions that are not official yet.
 - Stores `reconciled_settlement_rule_version` with each complete, rule-validated
-  resolution. A missing or stale marker keeps that market in reconciliation and
-  blocks flip evaluation until the official result has been revalidated against
-  the market's exact settlement identity.
+  resolution. A missing or stale marker keeps that market in reconciliation
+  until the official result has been revalidated against the market's exact
+  settlement identity.
 - In bounded pages, scans completed windows from
   `POLYMARKET_MARKET_BACKFILL_START_MS` through the last completed market,
   advancing oldest to newest. The floor defaults to the 60-second cutover. It
   cannot precede that cutover and repairs missing or noncanonical Gamma
   metadata to the exact 60-second settlement identity, then wraps to retry
   failures so one bad window cannot starve later windows.
-  Ordinary resolution reconciliation and flip evaluation then process those
-  recovered markets.
+  Ordinary resolution reconciliation then processes those recovered markets.
 - The deployment-gap backfill is metadata-only. It never fabricates historical
   probability snapshots, TWAP events, or TWAP samples; missing observations
   remain explicitly missing.
@@ -183,13 +163,8 @@ evidence for a separately versioned future model.
 - Stores Polymarket's exact published Price to Beat and official final price,
   rule identity, winner or split result, official payouts, winning token ID,
   and resolution timestamp. Probability quotes never infer the winner.
-- Runs an independent idempotent post-resolution evaluator for the final
-  20 seconds, preserving all strict threshold crossings and causal T-20 through
-  T-1 cutoff records for both positive and negative examples.
 - Tracks Up and Down probability component timestamps independently so a fresh
   update on one token cannot make a stale opposite-side quote appear fresh.
-- Archives every available microstructure second for confirmed-flip and
-  ambiguous markets before normal microstructure retention may remove it.
 
 ## Five-Minute Market Windows
 
@@ -213,24 +188,15 @@ PostgreSQL is the historical source of record. The main tables are:
   one-second Chainlink TWAP materialization
 - `polymarket_twap_sessions`, `polymarket_twap_events`, and
   `polymarket_twap_gaps` for durable exact TWAP evidence and coverage gaps
-- `chainlink_twap_shadow_predictions` for the first retained versioned
-  `+1`/`+3`/`+5`/`+10` forecast for each target second; actual TWAP values remain
-  in the source-of-record tables and are joined at read time
 - `polymarket_btc_5m_markets`, `polymarket_probability_samples`, and
   `polymarket_btc_5m_resolutions` for discovered markets, probability history,
   and official Polymarket resolution metadata
-- `polymarket_btc_5m_flip_evaluations`,
-  `polymarket_btc_5m_flip_events`, and
-  `polymarket_btc_5m_flip_cutoffs` for versioned permanent classifications,
-  observed threshold crossings, and causal T-20 through T-1 research records
 - `binance_futures_snapshots`
 - `binance_futures_oi_5m_summaries`
 - `binance_flow_1s`
 - `binance_book_1s`
 - `binance_microstructure_1s` for the optional receipt-time-aligned research
   summary
-- `binance_microstructure_1s_flip_archive` for permanent copies of every
-  available second from confirmed-flip and ambiguous markets
 
 Prices in `price_samples` use `NUMERIC(38,18)`. Its primary key is
 `(instrument_id, sample_second_ms)`, and a duplicate sample for the same
@@ -341,17 +307,6 @@ Each value has this shape:
 {"value":"62067.89","source_timestamp_ms":123,"received_ms":456}
 ```
 
-When enabled, the experimental shadow uses a separate latest-wins key:
-
-- `btc:live:chainlink_twap_shadow`
-
-That value is one structured prediction batch rather than a source-price
-object. It contains model and origin identity, generation time, causal
-30-minute per-source basis state, health flags, and the four fixed horizons.
-Prices, basis values, fractions, spreads, and error estimates are decimal
-strings or `null`. Redis retains only the newest batch; PostgreSQL keeps the
-target-second forecasts for later comparison with the actual TWAP.
-
 The optional microstructure collector also writes
 `btc:live:microstructure`. That key contains the latest finalized flat
 one-second microstructure row as compact JSON. Decimal values are JSON strings;
@@ -371,11 +326,6 @@ Current routes:
 - `GET /healthz`
 - `GET /prices/latest?provider=...&symbol=...`
 - `GET /markets?limit=3&include_current=false&before_market_id=...`
-- `GET /markets/flips?definition_version=3&within_seconds=20&kind=any_crossing`
-- `GET /markets/flips/distribution?definition_version=3&max_seconds=20`
-- `GET /markets/{market_id}/flips?definition_version=3`
-- `GET /markets/{market_id}/flips/data?definition_version=3&view=event_window`
-- `GET /markets/{market_id}/flips/download?definition_version=3&view=event_window`
 - `GET /markets/latest?provider=...&symbol=...`
 - `GET /markets/{market_id}?provider=...&symbol=...`
 - `GET /markets/current/sources`
@@ -385,8 +335,6 @@ Current routes:
 - `GET /markets/current/download`
 - `GET /markets/{market_id}/download`
 - `GET /markets/current/live`
-- `GET /markets/current/twap-shadow?model_version=2`
-- `GET /markets/{market_id}/twap-shadow?model_version=2`
 - `GET /markets/current/microstructure/live`
 
 The data and download responses use schema version `4` and always include
@@ -405,54 +353,18 @@ microstructure availability counts without changing schema version `4`.
 `books,flow,cross_market,liquidations,quality`; all five are returned by default.
 Missing seconds remain `null`, and older markets without microstructure still
 return normally. These larger JSON responses support gzip compression.
-For a market whose ordinary microstructure rows have expired, the same route
-fills each second from `binance_microstructure_1s_flip_archive` when a permanent
-copy exists. A current-table row wins over an archived copy for the same
-second.
-
 The ordinary current/by-ID downloads remain schema version `4` and do not
 include microstructure. They omit the market start/end millisecond fields and
 per-row `timestamp_ms`, retain the equivalent UTC `*_at` strings, and format
 official benchmark/final values to two decimal places. The data routes
 retain their full timing and precision fields.
 
-The two flip-evidence routes combine the versioned evaluation, every crossing,
-all T-20 through T-1 causal cutoffs, and every current curated market-data layer
-in one response. Definition version 2 remains the immutable historical
-30-second evaluation; definition version 3 is the current 60-second evaluation.
-All five flip read routes accept `definition_version` from `1` through `3` and
-default to `3`. Pass `definition_version=2` to query a retained pre-cutover
-30-second evaluation; version `1` is the retained legacy spot definition. Links
-returned by flip list, detail, evidence, and download responses preserve the
-selected definition version. For example, use
-`GET /markets/{market_id}/flips?definition_version=2` for an immutable
-definition-v2 historical record.
-Their default `event_window` view returns thirty one-second
-slots before the decisive crossing through the market's half-open end; `full`
-returns the 300-slot grid. The `/flips/download` response is identical but has
-an attachment filename. Both use the permanent microstructure archive fallback,
-leave missing values null, and never carry data forward for display.
-
 `GET /markets/current/microstructure/live` reads the four source-price keys and
 the latest finalized microstructure key with one Redis `MGET`. It returns simple
 string-or-`null` prices and the nested microstructure groups without querying
-PostgreSQL. `GET /markets/current/live` reads the same four prices plus the
-optional shadow key with one Redis `MGET`; it returns standard Chainlink context
-separately from the authoritative `twap` and exposes the experimental batch as
-top-level `twap_shadow`. A missing key produces `twap_shadow: null`; a warming
-batch remains present but has null prediction values. Neither case changes the
-actual price fields. A malformed optional shadow value or stale model-version-1
-cache payload is also isolated as `twap_shadow: null`; it does not suppress
-otherwise valid authoritative prices.
-
-The two `/twap-shadow` history routes read PostgreSQL and return a 300-target
-UTC-second grid for current model version 2, joining every retained horizon with
-the final accepted exact TWAP event for that source second. Retained historical
-model-version-1 rows remain queryable by passing `model_version=1`. The routes
-include paired count, signed mean error,
-and mean absolute error in basis points for each horizon. The current alias is
-historical state for the active five-minute market; the Redis field on
-`/markets/current/live` is the lowest-latency frontend source.
+PostgreSQL. `GET /markets/current/live` reads the same four prices with one
+Redis `MGET` and returns standard Chainlink context separately from the
+authoritative `twap`.
 
 `GET /markets` is the frontend discovery route. It returns the newest three
 completed markets by default, newest first, with market timestamps and
@@ -462,13 +374,7 @@ exclusive `before_market_id` cursor for older pages. Future and observation-empt
 windows are not returned. The frontend should select a returned `market_id` and
 then request `/markets/{market_id}/data` with the desired optional datasets.
 
-See [`MICROSTRUCTURE_API.md`](MICROSTRUCTURE_API.md) for a focused guide to the
-live and historical microstructure additions, including copy/paste calls,
-response examples, field semantics, and the recommended dashboard update flow.
-The **Flip Research** section of [`FRONTEND_API.md`](FRONTEND_API.md) covers
-flip search, detail, distributions, version-preserving pagination, evidence
-downloads, and the compact list/evidence/cursor loop for programmatic research
-agents. The rest of that file is the complete frontend API reference.
+
 
 ## Repository Layout
 
@@ -557,36 +463,6 @@ POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000
 POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
 ```
 
-The experimental shadow defaults off. After applying `schema.sql`, enable it
-manually with these collector settings:
-
-```text
-TWAP_SHADOW_ENABLED=true
-TWAP_SHADOW_POLL_MS=250
-TWAP_SHADOW_RETENTION_DAYS=30
-TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES=10000
-TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5
-```
-
-`TWAP_SHADOW_POLL_MS` is fixed at `250` for model version 2. Polling observes
-the latest Redis value for each input source and can collapse multiple source
-updates between polls, but the model still emits at most one batch per UTC
-second. Redis publication precedes the independent bounded PostgreSQL writer,
-so live and historical reads can briefly differ. If that bounded queue is full,
-the live batch still advances but can be missing from PostgreSQL history; the
-collector logs `twap_shadow_persistence_queue_saturated`. The 30-day retention
-applies only to experimental prediction rows and deletes old target seconds in
-bounded batches.
-
-Startup causally preloads the trailing calibration window from PostgreSQL. The
-CPU-heavy replay runs in small cancellable chunks and then performs a bounded
-source-history catch-up, so exact collection stays responsive. On the current
-droplet the first shadow batch can take roughly 12 to 15 seconds to appear; the
-authoritative price keys continue independently. Version 2 exposes the same rolling
-ensemble-nowcast p90 as `estimated_error_bps` for every available horizon. It is
-a shared diagnostic, not a horizon-specific confidence interval. Enabling the
-shadow also requires `POLYMARKET_TWAP_ENABLED=true`.
-
 At minimum, replace the database passwords in:
 
 ```text
@@ -650,14 +526,9 @@ BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
 It defaults off so applying a schema/code update does not silently begin a new
 high-rate dataset. Enable it only after applying `schema.sql` and adding the
 single production override manually. Once per UTC day, the collector considers
-rows older than the configured retention, but deletes them only when the
-applicable TWAP flip evaluation is `retention_safe`: definition version 2 for
-historical 30-second markets or definition version 3 for current 60-second
-markets. Archive-required rows also
-need an archive row for the exact symbol/second whose `received_ms` is at least
-as new as the live row. Missing, failed, or stale archival therefore fails
-closed. The collector checks the table plus indexes once
-per minute, warns at the lower relation threshold, and pauses only new
+and deletes rows older than the configured retention. The collector checks the
+table plus indexes once per minute, warns at the lower relation threshold, and
+pauses only new
 microstructure writes at the upper threshold; the critical futures live,
 snapshot, flow, and book paths continue. The size gate is hysteretic: after it
 pauses, writes resume only when a later `pg_total_relation_size` measurement is
@@ -672,9 +543,7 @@ estimate. Measure real PostgreSQL growth before raising it.
 For the Phase 2 accelerated three-hour production canary, manually set only
 `RAW_FUTURES_TRACE_ENABLED=true`, keep
 `RAW_CHAINLINK_EVENTS_ENABLED=false`, and keep
-`BINANCE_FUTURES_STREAMS_ENABLED=true`. Do not commit that production override
-to the example file. Follow the full accelerated acceptance and rollback
-procedure in [`OPERATIONS.md`](OPERATIONS.md). Passing the three-hour gate
+`BINANCE_FUTURES_STREAMS_ENABLED=true`. Passing the three-hour gate
 permits Phase 3, but leave futures capture running and continue observing the
 same health indicators until it reaches at least 24 uninterrupted hours.
 
@@ -957,9 +826,6 @@ sudo cp /opt/price-collector/deployment/CHANGED.service /etc/systemd/system/CHAN
 sudo systemctl daemon-reload
 ```
 
-Always verify the affected services and local API afterward. See
-[`OPERATIONS.md`](OPERATIONS.md) for copy/paste update sequences, logs, database
-checks, Redis checks, and service verification.
 
 ## Maintenance
 

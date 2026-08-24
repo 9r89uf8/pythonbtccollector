@@ -1890,7 +1890,6 @@ def test_run_collector_preloads_and_starts_next_market_before_boundary(monkeypat
     assert collect_calls[1][0] == next_window.market_id
     assert collect_calls[1][1] < next_window.market_start_ms
     assert "resolution_reconciler_loop" in created_task_names
-    assert "flip_evaluator_loop" in created_task_names
 
 
 def test_clob_ping_loop_sends_text_ping_every_configured_interval(monkeypatch):

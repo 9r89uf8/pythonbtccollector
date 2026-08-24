@@ -18,7 +18,7 @@ from price_collector.collector import (
     seconds_until_next_utc_second,
     setup_logging,
 )
-from price_collector.config import Settings
+from price_collector.config import Settings, TWAP_60S_CUTOVER_MS
 from price_collector.db import (
     create_pool,
     fetch_due_polymarket_resolutions,
@@ -27,10 +27,6 @@ from price_collector.db import (
     upsert_polymarket_btc_5m_market,
     upsert_polymarket_btc_5m_resolution,
     upsert_polymarket_probability_sample,
-)
-from price_collector.flip_research import (
-    TWAP_60S_CUTOVER_MS,
-    flip_evaluator_loop,
 )
 from price_collector.market import MarketWindow, market_for_sample_second
 
@@ -2278,9 +2274,6 @@ async def run_collector(settings: Settings) -> None:
     resolution_task: Optional[asyncio.Task] = asyncio.create_task(
         resolution_reconciler_loop(settings, pool)
     )
-    flip_task: Optional[asyncio.Task] = asyncio.create_task(
-        flip_evaluator_loop(settings, pool)
-    )
     try:
         attempt = 0
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -2406,8 +2399,6 @@ async def run_collector(settings: Settings) -> None:
                         window=current_window,
                     )
     finally:
-        if flip_task is not None:
-            await cancel_and_drain_task(flip_task)
         if resolution_task is not None:
             await cancel_and_drain_task(resolution_task)
         if current_task is not None:

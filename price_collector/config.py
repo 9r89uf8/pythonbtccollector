@@ -6,6 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from price_collector.market import MARKET_MS
 
 
+TWAP_60S_CUTOVER_MS = 1_786_665_600_000
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=True)
 
@@ -44,16 +47,6 @@ class Settings(BaseSettings):
         gt=0,
     )
     POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS: float = Field(
-        default=5.0,
-        gt=0,
-        le=10.0,
-    )
-
-    TWAP_SHADOW_ENABLED: bool = False
-    TWAP_SHADOW_POLL_MS: int = Field(default=250, ge=100, le=1_000)
-    TWAP_SHADOW_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
-    TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES: int = Field(default=10_000, gt=0)
-    TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS: float = Field(
         default=5.0,
         gt=0,
         le=10.0,
@@ -161,15 +154,6 @@ class Settings(BaseSettings):
                         f"{field_name} must be {canonical_value!r} when "
                         "POLYMARKET_TWAP_ENABLED=true"
                     )
-        if self.TWAP_SHADOW_ENABLED and not self.POLYMARKET_TWAP_ENABLED:
-            raise ValueError(
-                "POLYMARKET_TWAP_ENABLED must be true when "
-                "TWAP_SHADOW_ENABLED=true"
-            )
-        if self.TWAP_SHADOW_POLL_MS != 250:
-            raise ValueError(
-                "TWAP_SHADOW_POLL_MS must remain 250 for model version 2"
-            )
         if self.POLYMARKET_MARKET_BACKFILL_START_MS % MARKET_MS != 0:
             raise ValueError(
                 "POLYMARKET_MARKET_BACKFILL_START_MS must be aligned to a "

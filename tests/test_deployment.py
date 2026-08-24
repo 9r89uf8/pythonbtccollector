@@ -78,11 +78,6 @@ def test_collector_env_example_contains_writer_credentials_only():
     assert "POLYMARKET_TWAP_ACCEPTED_EVENT_IDLE_TIMEOUT_MS=10000" in lines
     assert "POLYMARKET_TWAP_PERSIST_QUEUE_MAX_EVENTS=10000" in lines
     assert "POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5" in lines
-    assert "TWAP_SHADOW_ENABLED=false" in lines
-    assert "TWAP_SHADOW_POLL_MS=250" in lines
-    assert "TWAP_SHADOW_RETENTION_DAYS=30" in lines
-    assert "TWAP_SHADOW_PERSIST_QUEUE_MAX_BATCHES=10000" in lines
-    assert "TWAP_SHADOW_PERSIST_SHUTDOWN_TIMEOUT_SECONDS=5" in lines
     assert "RAW_FUTURES_BUCKET_MS=100" in lines
     assert "RAW_CAPTURE_QUEUE_MAX_EVENTS=5000" in lines
     assert "RAW_CAPTURE_BATCH_MAX_ROWS=500" in lines
@@ -166,43 +161,15 @@ def test_collector_services_depend_on_local_redis_service():
 
 def test_redis_server_is_documented_as_loopback_only():
     readme = (ROOT / "README.md").read_text()
-    operations = (ROOT / "OPERATIONS.md").read_text()
 
     assert "redis-server" in readme
     assert "bind 127.0.0.1" in readme
     assert "127.0.0.1:6379" in readme
     assert "0.0.0.0:6379" in readme
-    assert "btc:live:binance_spot" in operations
-    assert "btc:live:chainlink" in operations
-    assert "btc:live:chainlink_twap_60s" in operations
-    assert "btc:live:futures" in operations
-
-
-def test_twap_only_clean_reset_is_narrow_and_self_contained():
-    operations = (ROOT / "OPERATIONS.md").read_text()
-    reset_section = operations.split(
-        "## Destructive TWAP-Only Clean Reset",
-        maxsplit=1,
-    )[1].split("\n## ", maxsplit=1)[0]
-
-    for unit in (
-        "price-collector",
-        "price-collector-polymarket-chainlink",
-        "price-collector-binance-futures",
-        "price-collector-polymarket-probabilities",
-        "price-api",
-    ):
-        assert unit in reset_section
-    assert "set -euo pipefail" in reset_section
-    assert "dropdb --force price_collector" in reset_section
-    assert "createdb price_collector" in reset_section
-    assert "psql --single-transaction" in reset_section
-    assert "-f /opt/price-collector/schema.sql" in reset_section
-    assert (
-        "redis-cli -h 127.0.0.1 -p 6379 -n 0 FLUSHDB"
-        in reset_section
-    )
-    assert "polymarket_twap_events" in reset_section
+    assert "btc:live:binance_spot" in readme
+    assert "btc:live:chainlink" in readme
+    assert "btc:live:chainlink_twap_60s" in readme
+    assert "btc:live:futures" in readme
 
 
 def test_no_runtime_code_uses_direct_chainlink_websocket():
