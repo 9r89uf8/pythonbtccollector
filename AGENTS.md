@@ -33,10 +33,20 @@ Production paths and identities:
 
 - Work in reviewable checkpoints. Do not implement the entire system in one
   session unless the user explicitly asks.
-- Keep the project Python-only and use the package layout under
-  `price_collector/`.
-- Use `Decimal` for prices and financial calculations. Never convert prices to
-  `float`.
+- Keep the project Python-only. Keep production/runtime code under
+  `price_collector/`; research-only Python may live under `research/`. A
+  production Git clone may contain those files, but production services must
+  never import or execute them, research
+  dependencies must never be installed into the production virtual
+  environment, and `research/lockflip` must not be added to a service
+  `PYTHONPATH`.
+- Use `Decimal` for prices and financial calculations. Never convert raw
+  prices, dollar values, or intermediate financial arithmetic to `float`.
+  Research-only model fitting may convert finalized dimensionless model
+  features to an explicitly named floating type at a tested, documented
+  boundary. Figure rendering may likewise use isolated floating display copies
+  of finalized values; those copies must never feed calculations, models, or
+  persisted truth. Persisted and tabulated financial values remain `Decimal`.
 - Use UTC epoch milliseconds for sampling, source timestamps, and market
   windows.
 - Keep Binance stream symbols lowercase inside stream names, such as

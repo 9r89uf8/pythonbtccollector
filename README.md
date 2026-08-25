@@ -383,11 +383,15 @@ price_collector/       Source collectors, shared storage helpers, and API
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
-OPERATIONS.md          Update, verification, logs, tunnel, and spot-check commands
+OPERATIONS.md          Required operations runbook (currently missing; restore separately)
 MICROSTRUCTURE_API.md  Focused live/history microstructure API usage guide
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 requirements.txt       Python runtime and test dependencies
 ```
+
+`OPERATIONS.md` is currently absent. Restore and review it in a separate
+repository checkpoint before any production canary or runtime-change handoff
+that depends on its procedures; the research plan does not reconstruct it.
 
 ## Local Development
 
