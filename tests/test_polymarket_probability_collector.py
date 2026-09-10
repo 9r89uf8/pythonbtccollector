@@ -328,6 +328,7 @@ def test_discovery_accepts_exact_rule_in_force(
 
     class Response:
         status_code = 200
+        text = "{}"
 
         def raise_for_status(self):
             return None
@@ -395,6 +396,7 @@ def test_discovery_rejects_inverted_cutover_identity(
 
     class Response:
         status_code = 200
+        text = "{}"
 
         def raise_for_status(self):
             return None
@@ -439,6 +441,8 @@ def test_historical_discovery_fallback_does_not_require_active_open_market(
     stores = []
 
     class Response:
+        text = "{}"
+
         def __init__(self, status_code):
             self.status_code = status_code
 

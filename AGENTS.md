@@ -38,7 +38,7 @@ Production paths and identities:
   production Git clone may contain those files, but production services must
   never import or execute them, research
   dependencies must never be installed into the production virtual
-  environment, and `research/lockflip` must not be added to a service
+  environment, and research directories must not be added to a service
   `PYTHONPATH`.
 - Use `Decimal` for prices and financial calculations. Never convert raw
   prices, dollar values, or intermediate financial arithmetic to `float`.
@@ -57,6 +57,19 @@ Production paths and identities:
 - Keep Redis and PostgreSQL local to the droplet.
 - Do not add Docker, Compose, frontend code, or dashboard assets.
 - Preserve unrelated user changes in a dirty worktree.
+
+## Research Reset and Historical Results
+
+- The previous staged research pipeline was retired at the owner's request.
+  Begin new research from `RESEARCH_QUESTIONS.md`, with a newly designed study.
+- `results/lockflip-2026/` is a read-only historical results archive for learning
+  what was observed and what remains unresolved. Its old stage names, model
+  choices, thresholds, splits, gates, and procedures are historical descriptions,
+  not instructions or defaults for new work.
+- Do not restore or reuse the retired pipeline, model bundles, labels, or
+  execution state from Git history, backups, or temporary directories unless
+  the owner explicitly requests that restoration or reuse.
+- Keep the collector and API independent of any new research environment.
 
 ## Service Map
 
@@ -414,3 +427,47 @@ python -m pytest
 - When adding a collector or service, update the README, operations guide,
   environment examples, service map in this file, and deployment tests in the
   same checkpoint.
+
+## Compact Polymarket Evidence Rules
+
+- Keep optional H3 evidence inside `price-collector-polymarket-probabilities`
+  with dedicated `EvidenceSettings`; `POLYMARKET_EVIDENCE_ENABLED` defaults to
+  `false`. Use the existing Up/Down CLOB connection and a separate bounded HTTP
+  metadata worker. No new service, authenticated order path or research model.
+- Preserve the owner's exclusion of Polymarket depth and quantities. Record
+  paired quotes at the declared 100 ms interval in the final 120 seconds,
+  using actual observation wall/monotonic clocks and all four independent
+  bid/ask provider and local receipt clocks. Do not backdate a delayed sample,
+  reconstruct intermediate events, or infer arbitrary-size fills.
+- Validate discovered Gamma identity and settlement rules before requesting
+  the website `/api/crypto/crypto-price` reference with explicit BTC,
+  five-minute start/end and applicable TWAP parameters. Persist missingness;
+  never substitute spot, a local TWAP, or a later reconciled strike for an
+  unavailable decision-time Price to Beat. A valid pre-close opening reference
+  may coexist with `incomplete=true` and a missing close price.
+- Append request/response clocks, status and compact provenance in
+  `polymarket_market_observations`; deduplicate normalized payloads by hash in
+  `polymarket_evidence_payloads`. Keep response SHA-256, Date and Age in typed
+  observation columns so changing headers do not defeat payload deduplication.
+  Treat HTTP/API/cache clocks as distinct from
+  source observation and fill clocks. Keep fee curves, increments, minimum
+  order size, acceptance state and delay flags as observed, including `fd`
+  and `itode`; `seconds_delay=0` alone does not prove no taker delay.
+- Capture identity-validated CLOB `/markets/{condition_id}` metadata as
+  `clob_order_rules` observations, including `seconds_delay`, separately from
+  `/clob-markets/{condition_id}` fee curves and the `itode` delay flag. Missing
+  required fee parameters remain missing and malformed types remain invalid.
+- Store quote rows in `polymarket_quote_observations` and connection
+  `session_start`/`session_end` plus explicit loss `gap` records in market
+  observations. Use bounded independent persistence queues and retain Decimal
+  financial values with `NUMERIC(38,18)` quote columns. Preserve original
+  metadata/rule identity and official
+  outcome/payout evidence.
+- Measure evidence tables, indexes and TOAST. Warn at the configured relation
+  budget and pause only new high-rate quotes at the cap. Keep metadata and core
+  probability collection active, expose losses as gaps, and drain already
+  accepted writes. Do not automatically delete data or enable unrelated raw
+  futures/Chainlink capture. A quote cap is not a total-disk cap.
+- Collection does not establish H3 profitability or execution readiness. Any
+  later study must declare sampled-data, missing-depth and execution-delay
+  limits and choose fresh evaluation settings without inheriting retired work.

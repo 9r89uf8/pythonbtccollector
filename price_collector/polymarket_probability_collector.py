@@ -2,6 +2,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import signal
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -29,6 +31,11 @@ from price_collector.db import (
     upsert_polymarket_probability_sample,
 )
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.polymarket_evidence import (
+    CollectionEvidenceRuntime,
+    EvidenceSettings,
+    exact_response_json,
+)
 
 
 LOGGER = logging.getLogger("price_collector.polymarket_probability_collector")
@@ -284,17 +291,10 @@ class ProbabilityState:
         self.latest_event_type = event_type
 
     def raw_snapshot(self) -> dict[str, Any]:
+        # Prices/token identity already have typed storage. Preserve the four
+        # component clocks without repeating the whole quote in JSON on every row.
         return {
             "event_type": self.latest_event_type,
-            "resolved": self.resolved,
-            "winning_outcome": self.winning_outcome,
-            "winning_asset_id": self.winning_asset_id,
-            "up_token_id": self.up_token_id,
-            "down_token_id": self.down_token_id,
-            "up_bid": self.up_bid,
-            "up_ask": self.up_ask,
-            "down_bid": self.down_bid,
-            "down_ask": self.down_ask,
             "up_bid_provider_event_ms": self.up_bid_provider_event_ms,
             "up_bid_received_ms": self.up_bid_received_ms,
             "up_ask_provider_event_ms": self.up_ask_provider_event_ms,
@@ -752,11 +752,12 @@ async def discover_current_polymarket_market(
     seen_ms = current_utc_epoch_ms()
 
     response = await client.get(f"{base_url}/events/slug/{slug}")
+    seen_ms = current_utc_epoch_ms()
     if response.status_code != 404:
         response.raise_for_status()
         try:
             current_market = parse_current_market_from_gamma(
-                response.json(),
+                exact_response_json(response),
                 window=window,
                 slug=slug,
             )
@@ -781,9 +782,10 @@ async def discover_current_polymarket_market(
         f"{base_url}/markets",
         params=fallback_params,
     )
+    seen_ms = current_utc_epoch_ms()
     response.raise_for_status()
     current_market = parse_current_market_from_gamma(
-        response.json(),
+        exact_response_json(response),
         window=window,
         slug=slug,
     )
@@ -1988,11 +1990,15 @@ async def collect_current_market(
     pool: Any,
     client: httpx.AsyncClient,
     current_market: CurrentPolymarketMarket,
+    evidence: Optional[CollectionEvidenceRuntime] = None,
 ) -> None:
     state = ProbabilityState(
         up_token_id=current_market.up_token_id,
         down_token_id=current_market.down_token_id,
     )
+    if evidence is not None:
+        # Market polling belongs to the shared runtime and survives socket reconnects.
+        evidence.register_market(current_market)
 
     LOGGER.info(
         "polymarket_clob_connecting",
@@ -2008,7 +2014,21 @@ async def collect_current_market(
         ping_interval=None,
         close_timeout=10,
     ) as websocket:
+        connected_wall_ns = time.time_ns()
+        connected_monotonic_ns = time.monotonic_ns()
         await websocket.send(json.dumps(build_clob_subscription(current_market)))
+        subscribed_wall_ns = time.time_ns()
+        subscribed_monotonic_ns = time.monotonic_ns()
+        capture = None
+        if evidence is not None:
+            capture = evidence.start_session(
+                current_market, state,
+                connected_wall_ns=connected_wall_ns,
+                connected_monotonic_ns=connected_monotonic_ns,
+                subscribed_wall_ns=subscribed_wall_ns,
+                subscribed_monotonic_ns=subscribed_monotonic_ns,
+            )
+        close_reason = "market_end"
         LOGGER.info(
             "polymarket_clob_subscribed",
             extra={
@@ -2071,8 +2091,10 @@ async def collect_current_market(
                 except asyncio.TimeoutError:
                     continue
                 except asyncio.CancelledError:
+                    close_reason = "cancelled"
                     raise
                 except Exception as exc:
+                    close_reason = "connection_error"
                     if (
                         current_utc_epoch_ms()
                         < current_market.window.market_end_ms
@@ -2088,10 +2110,17 @@ async def collect_current_market(
                     )
                     return
 
-                received_ms = current_utc_epoch_ms()
+                # Record arrival immediately after recv, before JSON parsing or SQL.
+                received_wall_ns = time.time_ns()
+                received_monotonic_ns = time.monotonic_ns()
+                received_ms = received_wall_ns // 1_000_000
+                if capture is not None:
+                    capture.frame_received()
                 try:
                     messages = parse_clob_messages(raw_message)
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    if capture is not None:
+                        capture.parse_error(received_wall_ns, received_monotonic_ns, exc)
                     LOGGER.warning(
                         "polymarket_clob_message_skipped",
                         extra={
@@ -2103,8 +2132,17 @@ async def collect_current_market(
 
                 for message in messages:
                     try:
-                        apply_clob_message(state, message, received_ms=received_ms)
+                        accepted = apply_clob_message(state, message, received_ms=received_ms)
+                        if capture is not None:
+                            if accepted:
+                                capture.accepted(received_wall_ns, received_monotonic_ns)
+                            capture.tick_size_change(
+                                message, received_wall_ns, received_monotonic_ns,
+                                _message_timestamp_ms(message),
+                            )
                     except ClobMessageParseError as exc:
+                        if capture is not None:
+                            capture.parse_error(received_wall_ns, received_monotonic_ns, exc)
                         LOGGER.warning(
                             "polymarket_clob_message_skipped",
                             extra={
@@ -2115,6 +2153,7 @@ async def collect_current_market(
                         continue
 
                     if state.resolved:
+                        close_reason = "resolved"
                         try:
                             await persist_websocket_resolution(
                                 settings=settings,
@@ -2135,16 +2174,23 @@ async def collect_current_market(
                                 },
                             )
                         return
+        except asyncio.CancelledError:
+            close_reason = "cancelled"
+            raise
+        except Exception:
+            close_reason = "collector_error"
+            raise
         finally:
             ping_task.cancel()
             sampler_task.cancel()
             rest_prime_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await ping_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await sampler_task
-            with contextlib.suppress(asyncio.CancelledError):
-                await rest_prime_task
+            try:
+                # A failed sampler must not skip closing the evidence session or
+                # leave its independent sampler observing a disconnected state.
+                await asyncio.gather(ping_task, sampler_task, rest_prime_task, return_exceptions=True)
+            finally:
+                if capture is not None:
+                    await capture.close(close_reason)
 
 
 async def sleep_until_ms(target_ms: int) -> None:
@@ -2220,6 +2266,7 @@ async def start_market_collection(
     pool: Any,
     client: httpx.AsyncClient,
     window: MarketWindow,
+    evidence: Optional[CollectionEvidenceRuntime] = None,
 ) -> tuple[CurrentPolymarketMarket, Any]:
     current_market = await discover_current_polymarket_market(
         settings,
@@ -2243,6 +2290,7 @@ async def start_market_collection(
             pool=pool,
             client=client,
             current_market=current_market,
+            **({"evidence": evidence} if evidence is not None else {}),
         )
     )
     return current_market, task
@@ -2269,12 +2317,20 @@ async def run_collector(settings: Settings) -> None:
     )
 
     pool = await create_pool(require_collector_database_url(settings))
+    evidence: Optional[CollectionEvidenceRuntime] = None
     current_task: Optional[asyncio.Task] = None
     next_task: Optional[asyncio.Task] = None
     resolution_task: Optional[asyncio.Task] = asyncio.create_task(
         resolution_reconciler_loop(settings, pool)
     )
     try:
+        evidence_settings = EvidenceSettings()
+        if evidence_settings.POLYMARKET_EVIDENCE_ENABLED:
+            evidence = CollectionEvidenceRuntime(
+                pool=pool, settings=evidence_settings, collector_settings=settings,
+                parse_market=parse_current_market_from_gamma,
+            )
+            await evidence.start()
         attempt = 0
         async with httpx.AsyncClient(timeout=10.0) as client:
             while current_task is None:
@@ -2286,6 +2342,7 @@ async def run_collector(settings: Settings) -> None:
                         pool=pool,
                         client=client,
                         window=current_window,
+                        **({"evidence": evidence} if evidence is not None else {}),
                     )
                     attempt = 0
                 except asyncio.CancelledError:
@@ -2337,6 +2394,7 @@ async def run_collector(settings: Settings) -> None:
                             pool=pool,
                             client=client,
                             current_market=next_market,
+                            **({"evidence": evidence} if evidence is not None else {}),
                         )
                     )
 
@@ -2397,6 +2455,7 @@ async def run_collector(settings: Settings) -> None:
                         pool=pool,
                         client=client,
                         window=current_window,
+                        **({"evidence": evidence} if evidence is not None else {}),
                     )
     finally:
         if resolution_task is not None:
@@ -2405,12 +2464,43 @@ async def run_collector(settings: Settings) -> None:
             await cancel_and_drain_task(current_task)
         if next_task is not None:
             await cancel_and_drain_task(next_task)
+        if evidence is not None:
+            await evidence.close()
         await pool.close()
 
 
+async def run_with_signals(settings: Settings) -> None:
+    """Let systemd SIGTERM drain evidence queues and close socket sessions."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(run_collector(settings))
+    stopped = False
+    registered = []
+
+    def request_stop() -> None:
+        nonlocal stopped
+        if not stopped:
+            stopped = True
+            task.cancel()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, request_stop)
+            registered.append(signum)
+        except (NotImplementedError, RuntimeError):
+            # Windows local tests have no Unix signal handlers.
+            pass
+    try:
+        await task
+    except asyncio.CancelledError:
+        if not stopped:
+            raise
+    finally:
+        for signum in registered:
+            loop.remove_signal_handler(signum)
+
+
 def main() -> None:
-    settings = Settings()
-    asyncio.run(run_collector(settings))
+    asyncio.run(run_with_signals(Settings()))
 
 
 if __name__ == "__main__":

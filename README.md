@@ -279,13 +279,11 @@ TWAP is enabled. With both raw flags `false`, neither legacy raw-capture path cr
 raw queue, raw writer/maintenance task, raw feed-session record, or dedicated
 raw database connection. The futures reader still records its connection and
 pre-parse receive stamp because those are now part of the public last-price
-path. A phase's deployed code is only its code checkpoint. The corresponding
-explicitly accelerated three-hour production canary and all acceptance checks
-in `OPERATIONS.md` must pass before that phase is operationally complete. This
-short gate provides less confidence about slow leaks, reconnects, daily traffic
-variation, and sustained storage growth than a 24-hour canary. After advancing,
-leave capture enabled and continue background observation toward 24
-uninterrupted hours; a later failure still requires the documented rollback.
+path. A phase's deployed code is only its code checkpoint. The historical
+accelerated three-hour canaries provide limited evidence about slow leaks,
+reconnects, daily traffic variation, and sustained storage growth. Current
+deployment and storage checks are in [OPERATIONS.md](OPERATIONS.md); they do
+not reconstruct those older canary procedures or establish their completion.
 
 Phase 4's deliberate partition-boundary and retention validation has been
 explicitly deferred while work proceeds to Phase 5. It is not proven by either
@@ -383,15 +381,14 @@ price_collector/       Source collectors, shared storage helpers, and API
 deployment/            systemd units and environment-file examples
 tests/                 Unit and deployment-safety tests
 schema.sql             PostgreSQL tables, indexes, constraints, and seed rows
-OPERATIONS.md          Required operations runbook (currently missing; restore separately)
+OPERATIONS.md          Current production update and evidence-verification runbook
 MICROSTRUCTURE_API.md  Focused live/history microstructure API usage guide
 FRONTEND_API.md        Frontend-facing FastAPI endpoint and response reference
 requirements.txt       Python runtime and test dependencies
 ```
 
-`OPERATIONS.md` is currently absent. Restore and review it in a separate
-repository checkpoint before any production canary or runtime-change handoff
-that depends on its procedures; the research plan does not reconstruct it.
+Use [OPERATIONS.md](OPERATIONS.md) for current production updates, evidence
+verification, storage measurement, and disabling optional evidence capture.
 
 ## Local Development
 
@@ -842,3 +839,63 @@ sudo systemctl daemon-reload
 - No automatic pruning is included for the long-term historical tables. The
   raw-capture partition-maintenance task runs only in a collector whose capture
   flag is enabled.
+
+## Compact Polymarket evidence for H3
+
+The existing `price-collector-polymarket-probabilities` service can collect
+prospective decision-time evidence with `POLYMARKET_EVIDENCE_ENABLED=true`.
+It defaults to `false`; review the settings in
+`deployment/collector.env.example` and apply the schema before enabling it as
+described in [OPERATIONS.md](OPERATIONS.md). `EvidenceSettings` belongs to this
+optional path rather than the shared collector configuration. It adds no
+service, research model, order submission, authenticated trading connection,
+or public API endpoint.
+
+A separate HTTP worker observes four kinds of metadata: the official website's
+`/api/crypto/crypto-price` opening reference, Gamma market/rule metadata,
+CLOB `/clob-markets/{condition_id}` fee curves and taker-delay flags, and
+CLOB `/markets/{condition_id}` order rules including the separate
+`seconds_delay` setting. These are recorded as `price_to_beat`, `gamma_market`,
+`clob_market` and `clob_order_rules` observations respectively.
+Requests use the discovered market identity; BTC five-minute TWAP requests
+explicitly select `twapEnabled=true` and the applicable TWAP window. Live Gamma
+metadata can omit Price to Beat, so a later reconciled strike is not treated as
+something known before an earlier decision. HTTP request and response clocks,
+status, provenance and missing values are preserved. Response SHA-256, HTTP
+Date and Age are observation columns rather than duplicated payload fields.
+API/cache timestamps do
+not establish the Chainlink observation time or order-to-fill latency.
+
+The existing CLOB state also produces one paired Up/Down quote observation
+every 100 ms during the final 120 seconds. Each row records its actual wall and
+monotonic observation clocks and separate provider/receipt clocks for all four
+bid/ask components. These are sampled observations, not reconstructed ticks:
+intermediate price changes and quote lifetimes cannot be recovered. Neither
+Polymarket depth nor quantities are stored. Consequently, these observations
+cannot establish fills for a chosen order size or complete H3's execution test.
+
+`polymarket_market_observations` appends metadata observations and
+`session_start`, `session_end` and `gap` records. It links normalized payloads
+stored once by hash in `polymarket_evidence_payloads`.
+`polymarket_quote_observations` holds the compact typed quote rows. Quote prices
+remain exact `Decimal`/PostgreSQL `NUMERIC(38,18)`; saved JSON prices are
+decimal strings. Bounded queues and batched database writes keep this path
+independent of the core probability stream. Pending queues live in memory;
+an interrupted session exposes possible data loss and cannot replay unwritten
+observations.
+
+The size guard measures these relations including indexes and TOAST. Its
+default warning/cap settings are 4096/6144 MiB. Reaching the cap pauses new
+quote capture, records gaps, and leaves metadata and core collection running;
+already accepted writes can still drain. It is not a hard disk limit and does
+not automatically delete evidence. Measure actual growth with the operations
+queries before choosing a retention policy. Do not enable unrelated
+`RAW_FUTURES_TRACE_ENABLED` or `RAW_CHAINLINK_EVENTS_ENABLED` flags for this path.
+
+Store CLOB `fd` fee-curve parameters and `itode` independently of legacy base
+fees and `seconds_delay`. The [CLOB market-info documentation](https://docs.polymarket.com/api-reference/markets/get-clob-market-info)
+describes a 250 ms taker delay when `itode=true`; an observed
+`seconds_delay=0` does not negate that flag. The [market-details documentation](https://docs.polymarket.com/market-data/market-details)
+defines current fee schedules and minimum size/tick constraints. Their
+timestamped observations describe the available configuration, not realized
+fills or a frozen fee schedule for future markets.

@@ -541,6 +541,131 @@ CREATE INDEX IF NOT EXISTS polymarket_probability_samples_market_idx
 CREATE INDEX IF NOT EXISTS polymarket_probability_samples_latest_idx
     ON polymarket_probability_samples (sample_second_ms DESC);
 
+-- Compact prospective study evidence. These relations have no automatic
+-- retention/deletion policy and are independent of optional raw_capture.
+CREATE TABLE IF NOT EXISTS polymarket_evidence_payloads (
+    payload_hash TEXT PRIMARY KEY,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
+    CHECK (jsonb_typeof(payload) = 'object')
+);
+
+CREATE TABLE IF NOT EXISTS polymarket_market_observations (
+    record_id UUID PRIMARY KEY,
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    kind TEXT NOT NULL,
+    received_wall_ns BIGINT NOT NULL,
+    received_monotonic_ns BIGINT NOT NULL,
+    requested_wall_ns BIGINT,
+    requested_monotonic_ns BIGINT,
+    http_status SMALLINT,
+    status TEXT NOT NULL,
+    connection_id UUID,
+    provider_event_ms BIGINT,
+    response_sha256 TEXT,
+    response_date TEXT,
+    response_age_seconds BIGINT,
+    payload_hash TEXT NOT NULL REFERENCES polymarket_evidence_payloads(payload_hash),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (market_id >= 0),
+    CHECK (kind IN (
+        'price_to_beat', 'gamma_market', 'clob_market', 'clob_order_rules', 'tick_size',
+        'session_start', 'session_end', 'gap'
+    )),
+    CHECK (status IN ('ok', 'missing', 'invalid', 'http_error', 'transport_error')),
+    CHECK (received_wall_ns > 0),
+    CHECK (received_monotonic_ns > 0),
+    CHECK ((requested_wall_ns IS NULL) = (requested_monotonic_ns IS NULL)),
+    CHECK (requested_wall_ns IS NULL OR requested_wall_ns > 0),
+    CHECK (requested_monotonic_ns IS NULL OR (
+        requested_monotonic_ns > 0 AND requested_monotonic_ns <= received_monotonic_ns
+    )),
+    CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
+    CHECK (provider_event_ms IS NULL OR provider_event_ms >= 0),
+    CHECK (response_sha256 IS NULL OR response_sha256 ~ '^[0-9a-f]{64}$'),
+    CHECK (response_age_seconds IS NULL OR response_age_seconds >= 0),
+    CHECK (kind NOT IN ('session_start', 'session_end') OR connection_id IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_market_observations_market_time_idx
+    ON polymarket_market_observations (market_id, received_wall_ns);
+
+CREATE INDEX IF NOT EXISTS polymarket_market_observations_connection_idx
+    ON polymarket_market_observations (connection_id, received_wall_ns)
+    WHERE connection_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS polymarket_market_observations_session_kind_idx
+    ON polymarket_market_observations (connection_id, kind)
+    WHERE kind IN ('session_start', 'session_end');
+
+-- These are sampled states at their actual observation clocks, not raw quote
+-- events or scheduled/backdated boundaries. Receipt/component clocks may be
+-- older or absent. A missing initial state remains an explicit nullable row.
+-- There is deliberately no quote/session FK: the independent metadata writer
+-- must not serialize the quote writer behind a slow metadata insert.
+CREATE TABLE IF NOT EXISTS polymarket_quote_observations (
+    connection_id UUID NOT NULL,
+    market_id BIGINT NOT NULL REFERENCES market_windows(market_id),
+    observed_wall_ns BIGINT NOT NULL,
+    observed_monotonic_ns BIGINT NOT NULL,
+    receive_sequence BIGINT NOT NULL,
+    received_wall_ns BIGINT,
+    received_monotonic_ns BIGINT,
+    up_bid NUMERIC(38, 18),
+    up_ask NUMERIC(38, 18),
+    down_bid NUMERIC(38, 18),
+    down_ask NUMERIC(38, 18),
+    up_bid_provider_event_ms BIGINT,
+    up_ask_provider_event_ms BIGINT,
+    down_bid_provider_event_ms BIGINT,
+    down_ask_provider_event_ms BIGINT,
+    up_bid_received_ms BIGINT,
+    up_ask_received_ms BIGINT,
+    down_bid_received_ms BIGINT,
+    down_ask_received_ms BIGINT,
+    event_type TEXT,
+    resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (connection_id, observed_wall_ns),
+    CHECK (market_id >= 0),
+    CHECK (observed_wall_ns > 0),
+    CHECK (observed_monotonic_ns > 0),
+    CHECK (receive_sequence >= 0),
+    CHECK ((received_wall_ns IS NULL) = (received_monotonic_ns IS NULL)),
+    CHECK (received_wall_ns IS NULL OR received_wall_ns > 0),
+    CHECK (received_monotonic_ns IS NULL OR (
+        received_monotonic_ns > 0 AND received_monotonic_ns <= observed_monotonic_ns
+    )),
+    CHECK (up_bid IS NULL OR up_bid BETWEEN 0 AND 1),
+    CHECK (up_ask IS NULL OR up_ask BETWEEN 0 AND 1),
+    CHECK (down_bid IS NULL OR down_bid BETWEEN 0 AND 1),
+    CHECK (down_ask IS NULL OR down_ask BETWEEN 0 AND 1),
+    CHECK (up_bid_provider_event_ms IS NULL OR up_bid_provider_event_ms >= 0),
+    CHECK (up_ask_provider_event_ms IS NULL OR up_ask_provider_event_ms >= 0),
+    CHECK (down_bid_provider_event_ms IS NULL OR down_bid_provider_event_ms >= 0),
+    CHECK (down_ask_provider_event_ms IS NULL OR down_ask_provider_event_ms >= 0),
+    CHECK (up_bid_received_ms IS NULL OR up_bid_received_ms >= 0),
+    CHECK (up_ask_received_ms IS NULL OR up_ask_received_ms >= 0),
+    CHECK (down_bid_received_ms IS NULL OR down_bid_received_ms >= 0),
+    CHECK (down_ask_received_ms IS NULL OR down_ask_received_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS polymarket_quote_observations_market_time_idx
+    ON polymarket_quote_observations (market_id, observed_wall_ns);
+
+REVOKE ALL ON polymarket_evidence_payloads FROM PUBLIC;
+GRANT SELECT, INSERT ON polymarket_evidence_payloads TO price_writer;
+GRANT SELECT ON polymarket_evidence_payloads TO price_reader;
+
+REVOKE ALL ON polymarket_market_observations FROM PUBLIC;
+GRANT SELECT, INSERT ON polymarket_market_observations TO price_writer;
+GRANT SELECT ON polymarket_market_observations TO price_reader;
+
+REVOKE ALL ON polymarket_quote_observations FROM PUBLIC;
+GRANT SELECT, INSERT ON polymarket_quote_observations TO price_writer;
+GRANT SELECT ON polymarket_quote_observations TO price_reader;
+
 CREATE TABLE IF NOT EXISTS binance_futures_snapshots (
     symbol TEXT NOT NULL,
 
@@ -1172,6 +1297,12 @@ REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, price_reader;
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON ALL TABLES IN SCHEMA public TO price_writer;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO price_reader;
+
+-- Override the broad legacy writer grant for immutable prospective evidence.
+-- Keep this after that grant so rerunning schema.sql preserves append-only use.
+REVOKE UPDATE, DELETE ON polymarket_evidence_payloads FROM price_writer;
+REVOKE UPDATE, DELETE ON polymarket_market_observations FROM price_writer;
+REVOKE UPDATE, DELETE ON polymarket_quote_observations FROM price_writer;
 
 
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, price_reader;
