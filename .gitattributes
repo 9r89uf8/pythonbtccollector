@@ -232,3 +232,33 @@
 /tests/test_leader_risk_quote_extract.py -text
 /tests/test_leader_risk_quote_return_audit.py -text
 /tests/test_leader_risk_tabulate.py -text
+
+# Checkpoint B byte-hashed implementation and evidence.
+/.gitattributes -text
+/AGENTS.md -text
+/GHOST_TWAP_CHECKPOINT_B.md -text
+/OPERATIONS.md -text
+/README.md -text
+/deployment/collector.env.example -text
+/droplet.env.example -text
+/price_collector/ghost_twap_admin.py -text
+/price_collector/ghost_twap_runtime.py -text
+/price_collector/ghost_twap_spool.py -text
+/price_collector/ghost_twap_store.py -text
+/price_collector/polymarket_chainlink_collector.py -text
+/price_collector/polymarket_twap.py -text
+/research/spot_twap_response/checkpoint_b_validation.py -text
+/results/spot_twap_response/2026-09-13-checkpoint-b/local_tests.txt -text
+/results/spot_twap_response/2026-09-13-checkpoint-b/postgresql_validation.json -text
+/results/spot_twap_response/2026-09-13-checkpoint-b/validation.json -text
+/schema.sql -text
+/tests/test_evidence_deployment.py -text
+/tests/test_ghost_twap_admin.py -text
+/tests/test_ghost_twap_collector_integration.py -text
+/tests/test_ghost_twap_deployment.py -text
+/tests/test_ghost_twap_runtime_faults.py -text
+/tests/test_ghost_twap_runtime_postgres.py -text
+/tests/test_ghost_twap_spool.py -text
+/tests/test_ghost_twap_store.py -text
+/tests/test_ghost_twap_store_postgres.py -text
+/results/spot_twap_response/2026-09-13-checkpoint-b/source_line_endings.json -text

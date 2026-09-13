@@ -54,6 +54,14 @@ class RtdsTwapRemoteClose(ConnectionError):
     pass
 
 
+def _offer_ghost_gap(ghost_runtime: Any, reason: str) -> None:
+    if ghost_runtime is not None:
+        try:
+            ghost_runtime.offer_gap("twap", reason)
+        except Exception:
+            LOGGER.exception("ghost_optional_gap_offer_failed")
+
+
 @dataclass(frozen=True)
 class PolymarketTwapTick:
     symbol: str
@@ -880,6 +888,7 @@ async def polymarket_twap_reader_loop(
     instrument_id: int,
     records: "asyncio.Queue[PolymarketTwapPersistenceRecord]",
     live_cache: Any = None,
+    ghost_runtime: Any = None,
 ) -> None:
     validate_twap_runtime_identity(settings)
     attempt = 0
@@ -1095,6 +1104,21 @@ async def polymarket_twap_reader_loop(
                             received_wall_ns=received_wall_ns,
                             received_monotonic_ns=received_monotonic_ns,
                         )
+                        # The synchronous shared offer preserves original
+                        # receipt ordering before the first Redis/storage await.
+                        if ghost_runtime is not None:
+                            try:
+                                ghost_runtime.offer_price(
+                                    feed="twap", value=event.price,
+                                    source_ms=event.provider_event_ms,
+                                    received_wall_ns=event.received_wall_ns,
+                                    received_mono_ns=event.received_monotonic_ns,
+                                    event_id=f"{event.connection_id}:{event.receive_sequence}",
+                                    window_s=event.window_s,
+                                )
+                            except Exception:
+                                _offer_ghost_gap(ghost_runtime, "collector_offer_failed")
+                                LOGGER.exception("ghost_optional_price_offer_failed")
                         # The live attempt deliberately precedes PostgreSQL
                         # queue visibility. The handoff preserves this event
                         # even when a planned restart cancels the reader while
@@ -1129,6 +1153,7 @@ async def polymarket_twap_reader_loop(
                         )
                     raise
                 finally:
+                    _offer_ghost_gap(ghost_runtime, "connection_end")
                     ping_task.cancel()
                     await asyncio.gather(ping_task, return_exceptions=True)
         except asyncio.CancelledError:
@@ -1223,6 +1248,7 @@ async def run_polymarket_twap_runtime(
     pool: Any,
     *,
     live_cache: Any = None,
+    ghost_runtime: Any = None,
 ) -> None:
     validate_twap_runtime_identity(settings)
     await recover_orphaned_polymarket_twap_sessions(pool)
@@ -1244,6 +1270,7 @@ async def run_polymarket_twap_runtime(
             instrument_id=instrument_id,
             records=records,
             live_cache=live_cache,
+            **({} if ghost_runtime is None else {"ghost_runtime": ghost_runtime}),
         )
     )
     try:
@@ -1316,6 +1343,7 @@ async def run_polymarket_twap_noncritical(
     pool: Any,
     *,
     live_cache: Any = None,
+    ghost_runtime: Any = None,
 ) -> None:
     """Keep TWAP failures from stopping the standard Chainlink collector."""
 
@@ -1326,6 +1354,7 @@ async def run_polymarket_twap_noncritical(
                 settings,
                 pool,
                 live_cache=live_cache,
+                **({} if ghost_runtime is None else {"ghost_runtime": ghost_runtime}),
             )
             raise RuntimeError("Polymarket TWAP runtime stopped unexpectedly")
         except asyncio.CancelledError:

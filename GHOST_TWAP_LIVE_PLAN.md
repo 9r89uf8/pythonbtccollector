@@ -1,6 +1,6 @@
 # Live ghost TWAP — implementation plan
 
-**Status: Checkpoint A implemented locally, 2026-09-13.** The pure engine is default-off and unconnected to services; its exact recorded replay passes. B and C remain planned. No collector integration, configuration, schema or deployment change was made. [Checkpoint A contract and validation](GHOST_TWAP_CHECKPOINT_A.md).
+**Status: A accepted and installed; B implemented and validated for review.** B adds the default-off optional worker, audit schema and export/expiry tools. Its prospective canary has not started; C remains planned. [A contract](GHOST_TWAP_CHECKPOINT_A.md), [B implementation and validation](GHOST_TWAP_CHECKPOINT_B.md).
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
 
@@ -90,6 +90,24 @@ Sixty prices alone reproduce an average but cannot establish receipt-time eligib
 
 Audit writes are asynchronous and bounded. Reserve capacity for a complete audit row for **every published decision**, including pending result updates. Do not sample detail at one row/second while publishing more often. Record missing decisions/status intervals explicitly; on audit pressure, suspend new publishable decisions and let cached forecasts expire while core feeds continue.
 
+B implements that reservation with at most 512 active decisions and a 128 KiB
+serialized-record bound, reserving 64 KiB within each admitted row for later
+publication/results metadata. A fsynced atomic disk outbox precedes Redis;
+PostgreSQL does not gate publication. The outbox is at most 64 MiB plus one
+atomic-write temporary record and campaign metadata. Recovery selects the newest
+consistent disk/database version and never republishes old forecasts. Publication
+attempt or acknowledgement lost in a crash remains uncertain even though its
+prices and inputs are reproducible. Pending PostgreSQL persistence is an explicit
+audit state; a durable complete outbox is not missing audit evidence.
+
+The initial B ceiling is 10 decision admissions per second during bursts, with
+immediate admission when idle. Constituent offers remain separate and bounded at
+2,048 entries; only decision/publication refreshes coalesce. These are conservative
+canary limits, not measured throughput or latency guarantees. Exact initial row
+count plus all subsequent decision admissions bounds rows without scanning a
+growing audit table every second. Relation size, filesystem reserve and reading
+freshness are checked independently.
+
 The limits above define the first canary, not an approved continuous-production retention policy. Measure representative inserts, all six result updates, indexes, TOAST, dead tuples and maintenance overhead before enabling it. The 1.5 GiB stop threshold leaves 0.5 GiB for bounded in-flight writes/updates within the 2 GiB budget; verify that margin and freeze queue/batch/record limits first. A sampled size check alone cannot guarantee zero overshoot. An early cap stop is an incomplete canary, not a successful 72-hour run; do not silently raise caps or reduce evidence.
 
 Export the entire canary's frozen inputs/results and hashes to the owner's computer, verify the export, then expire eligible whole rows in bounded maintenance batches. Expiry must atomically match the currently stored result/status version to its verified export; any later status or conflict update invalidates export eligibility until re-exported. The 96-hour age leaves the earliest rows one day of review/export grace after a full 72-hour run. If export fails, retain the bounded evidence and keep ghost production paused. Keep only bounded reports/aggregates outside the production database afterward. No in-place slot stripping or indefinite per-decision summary tier in v1. Expiry, restart, disk-pressure and space-reuse behavior must be tested before enablement; deleting rows does not itself return their allocated storage to the filesystem. [Capacity evidence and retention rationale](research/spot_twap_response/storage_review/README.md).
@@ -136,6 +154,10 @@ Compare with the research replay only where inputs and policies coincide; explic
 
 [Verified study results](SPOT_TWAP_RESPONSE_STUDY.md) justify this canary, not a prospective accuracy guarantee. The [causal-opening settlement replay](research/spot_twap_response/receipt_clock_pilot/README.md) is already complete: T−30 had 36 projection errors versus 125 TWAP errors among 1,925 markets. It is not an outstanding prerequisite.
 
-A is now implemented and locally validated. An isolated SSE prototype against fixtures can be developed under the frozen contract, but enabling it remains C and follows B's canary review. Choosing retention numbers alone does not establish measured capacity or maintenance safety. Prospective validation and deployment checks remain unfinished.
+A is accepted and B's implementation is available for review. Its tests and
+bounded PostgreSQL probes establish implementation behavior, not completion of
+the prospective canary. Enabling SSE remains C and follows B's canary review.
+Choosing retention numbers alone does not establish full-capacity or sustained
+maintenance safety. Prospective validation and production rollout remain unfinished.
 
 Keep production code under `price_collector/`, with no research imports or retired-pipeline reuse. Each implemented checkpoint gets focused tests and relevant documentation; run the full suite when practical. B/C runtime/schema/API changes require the repository's normal droplet handoff and schema-before-restart ordering. A's standalone module is not imported by running services and needs no service restart.

@@ -46,7 +46,8 @@ def test_evidence_settings_stay_out_of_reader_and_local_tunnel_environments():
 def test_evidence_rollout_applies_schema_before_probability_restart():
     operations = (ROOT / "OPERATIONS.md").read_text()
     blocks = re.findall(r"```bash\n(.*?)\n```", operations, flags=re.DOTALL)
-    rollout = next(block for block in blocks if "git pull --ff-only" in block)
+    rollout = next(block for block in blocks if "git pull --ff-only" in block
+                   and "sudo systemctl restart price-collector-polymarket-probabilities" in block)
     ordered = [
         "cd /opt/price-collector",
         "sudo -u pricecollector git pull --ff-only",

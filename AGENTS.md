@@ -145,6 +145,29 @@ The corresponding Python entry points are:
   PING/PONG, malformed, wrong-topic, wrong-symbol, and wrong-window frames must
   not reset it. Preserve the last cached value so gaps remain visible by age.
 
+### Optional Ghost TWAP
+
+- Keep the ghost worker inside `price-collector-polymarket-chainlink`, default
+  off through dedicated `GhostSettings`. Require canonical spot and 60-second
+  TWAP identities. Offer accepted events synchronously before yielding after
+  their original receipt clocks; never coalesce constituent events silently.
+- Keep the official TWAP and source Redis keys untouched. The ghost uses its
+  own bounded workers, Redis key/channel and database pool. No research imports,
+  extra feed connection, live database input polling, or API calculation.
+- Persist complete frozen evidence in the bounded fsynced outbox before Redis
+  publication. Keep first target matches immutable and distinguish successful
+  acknowledgement, uncertain publication, late results and conflicting reports.
+- Preserve the fixed 72-hour canary deadline and persisted stop latch across
+  restarts. Keep 1.5 GiB relation stop/2 GiB budget, 600,000 rows, 10 GiB free-space
+  reserve, bounded records and fresh guard readings. A cap stop is incomplete
+  validation. Never reset the canary clock or raise limits automatically.
+- Expire only terminal rows aged at least 96 hours whose current version and
+  hashes match an externally verified export. Later updates invalidate export
+  eligibility. No automatic unverified deletion or indefinite summary tier.
+- Keep A's any-interior-carry quality rule in this B version; pending and future
+  slots remain assumptions. B exposes no ghost API routes; those belong to C
+  after prospective review. See `GHOST_TWAP_CHECKPOINT_B.md` and `OPERATIONS.md`.
+
 ### Binance Futures, Flow, and Book
 
 - Require `BINANCE_FUTURES_STREAMS_ENABLED=true`; the collector cannot provide

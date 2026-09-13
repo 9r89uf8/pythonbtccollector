@@ -1,0 +1,261 @@
+{
+  "result": {
+    "database": "ghost_checkpoint_b_validation_a8562c0fa73c",
+    "temporary_directory": "/tmp/ghost-checkpoint-b-validation-a8562c0fa73c",
+    "tests_returncode": 0,
+    "storage_report": {
+      "sample_rows": 128,
+      "slots_per_row": 89,
+      "committed_result_revisions_per_row": 6,
+      "max_frozen_json_bytes": 30829,
+      "max_complete_json_bytes": 32955,
+      "baseline": {
+        "relation_bytes": 49152,
+        "row_count": 0,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_insert": {
+        "relation_bytes": 1122304,
+        "row_count": 128,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_six_updates": {
+        "relation_bytes": 1433600,
+        "row_count": 128,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_delete": {
+        "relation_bytes": 1458176,
+        "row_count": 0,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_vacuum": {
+        "relation_bytes": 188416,
+        "row_count": 0,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "export_bytes": 4710538,
+      "export_sha256": "049da21dd4813017218d23e8fe267d26cd5bc3960d3f6c9489295c2d9978b3a0",
+      "expired_rows": 128,
+      "limitation": "Bounded synthetic engine-shaped sample; not full-canary retention/cap validation."
+    },
+    "runtime_storage_report": {
+      "sample_rows": 64,
+      "horizons_per_row": 6,
+      "slots_per_row": 89,
+      "actual_runtime_frozen_metadata": true,
+      "actual_live_payload_in_state": true,
+      "actual_fsynced_spool": true,
+      "simulated_receipt_clocks": true,
+      "fake_redis": true,
+      "publication_attempts": 64,
+      "acknowledged": 63,
+      "uncertain": 1,
+      "matched_targets": 384,
+      "max_frozen_json_bytes": 31632,
+      "max_state_json_bytes": 8480,
+      "max_complete_json_bytes": 39911,
+      "max_serialized_outbox_bytes": 44899,
+      "max_durable_intent_bytes": 42061,
+      "max_live_payload_bytes": 4270,
+      "baseline": {
+        "relation_bytes": 49152,
+        "row_count": 0,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_publications": {
+        "relation_bytes": 1515520,
+        "row_count": 64,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_all_targets": {
+        "relation_bytes": 1794048,
+        "row_count": 64,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_terminal": {
+        "relation_bytes": 1974272,
+        "row_count": 64,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_delete": {
+        "relation_bytes": 1990656,
+        "row_count": 0,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "after_vacuum": {
+        "relation_bytes": 180224,
+        "row_count": 0,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      },
+      "export_bytes": 2867760,
+      "export_sha256": "81e3aa5b81d05c103df211310622243f2d622daf120c7f8bc4d5481035ce579a",
+      "expired_rows": 64,
+      "limitation": "64 synthetic two-per-second runtime decisions; not live Redis latency, full-cap load or 72h canary evidence."
+    }
+  },
+  "commands": [
+    {
+      "command": [
+        "sudo",
+        "-u",
+        "postgres",
+        "psql",
+        "-At",
+        "-d",
+        "postgres",
+        "-c",
+        "SELECT count(*) FROM pg_database WHERE datname='ghost_checkpoint_b_validation_a8562c0fa73c'"
+      ],
+      "returncode": 0,
+      "stdout": "0\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "sudo",
+        "-u",
+        "postgres",
+        "createdb",
+        "ghost_checkpoint_b_validation_a8562c0fa73c"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "sudo",
+        "-u",
+        "postgres",
+        "env",
+        "GHOST_TEST_POSTGRES_DSN=postgresql:///ghost_checkpoint_b_validation_a8562c0fa73c?host=/var/run/postgresql",
+        "GHOST_TEST_STORAGE_REPORT=/tmp/ghost-checkpoint-b-validation-a8562c0fa73c/storage-report.json",
+        "GHOST_TEST_RUNTIME_STORAGE_REPORT=/tmp/ghost-checkpoint-b-validation-a8562c0fa73c/runtime-storage-report.json",
+        "/opt/price-collector/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "-s",
+        "-p",
+        "no:cacheprovider",
+        "tests/test_ghost_twap.py",
+        "tests/test_ghost_twap_admin.py",
+        "tests/test_ghost_twap_collector_integration.py",
+        "tests/test_ghost_twap_deployment.py",
+        "tests/test_ghost_twap_edges.py",
+        "tests/test_ghost_twap_pending.py",
+        "tests/test_ghost_twap_replay.py",
+        "tests/test_ghost_twap_runtime_faults.py",
+        "tests/test_ghost_twap_runtime_postgres.py",
+        "tests/test_ghost_twap_spool.py",
+        "tests/test_ghost_twap_store.py",
+        "tests/test_ghost_twap_store_postgres.py"
+      ],
+      "returncode": 0,
+      "stdout": ".............................................................{\"accepted_event_idle_timeout_ms\": 10000, \"app_env\": \"test\", \"at\": \"2026-09-13T22:47:31.236440Z\", \"event\": \"polymarket_chainlink_collector_starting\", \"level\": \"INFO\", \"logger\": \"price_collector.polymarket_chainlink_collector\", \"message\": \"polymarket_chainlink_collector_starting\", \"provider_code\": \"polymarket_chainlink_rtds\", \"raw_chainlink_events_enabled\": false, \"rtd_symbol\": \"btc/usd\", \"symbol\": \"BTCUSD\", \"topic\": \"crypto_prices_chainlink\", \"twap_enabled\": false, \"twap_topic\": null}\n.................................................{\"at\": \"2026-09-13T22:47:37.233635Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"receipt_order_fault\", \"run_id\": \"c414c41a80c2464086f90d96a2917caf\"}\n.{\"at\": \"2026-09-13T22:47:37.242965Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"receipt_order_fault\", \"run_id\": \"b987023b7e6b48a2aaff44887fcce9e2\"}\n..............{\"at\": \"2026-09-13T22:47:37.392737Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"stale_guard\", \"run_id\": \"3995e37237ca424b9ed73d148af29c1c\"}\n......{\"at\": \"2026-09-13T22:47:37.457796Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"receipt_order_fault\", \"run_id\": \"67d18af36a6e4f5fb0927b459475f667\"}\n.{\"at\": \"2026-09-13T22:47:37.474362Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_persistence_failure\", \"run_id\": \"375170fa775a47899c01e88119acf0e9\"}\n.......{\"at\": \"2026-09-13T22:47:37.582895Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"late_target_queue_full\", \"run_id\": \"a84f9759220d4683b9b368efda75d261\"}\n.{\"at\": \"2026-09-13T22:47:37.590701Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"record_size_cap\", \"run_id\": \"581b3691140742d392d1b4a484d38d5e\"}\n.{\"at\": \"2026-09-13T22:47:37.592452Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"stale_guard\", \"run_id\": \"623da365c080419c99d25159ed0309d1\"}\n.{\"at\": \"2026-09-13T22:47:37.594747Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_row_cap\", \"run_id\": \"e03065f81f5544d49cdc5ce680dfe9c1\"}\n.{\"at\": \"2026-09-13T22:47:37.597203Z\", \"bytes\": 1610612736, \"level\": \"WARNING\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_audit_relation_warning\"}\n{\"at\": \"2026-09-13T22:47:37.597335Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_size_cap\", \"run_id\": \"146321fa03bb4e07928001ebccf114cb\"}\n.{\"at\": \"2026-09-13T22:47:37.599451Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"database_disk_reserve\", \"run_id\": \"a1c425879d66426d8880900dd160a246\"}\n.{\"at\": \"2026-09-13T22:47:37.601424Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"guard_unavailable\", \"run_id\": \"ce0ddb064c5f4df8bc980d71025804bb\"}\n{\"at\": \"2026-09-13T22:47:37.601518Z\", \"exception\": \"Traceback (most recent call last):\\n  File \\\"/tmp/ghost-checkpoint-b-validation-a8562c0fa73c/price_collector/ghost_twap_runtime.py\\\", line 346, in refresh_guard\\n    measurement = await asyncio.wait_for(self.store.measure(), timeout=2)\\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/usr/lib/python3.12/asyncio/tasks.py\\\", line 520, in wait_for\\n    return await fut\\n           ^^^^^^^^^\\n  File \\\"/tmp/ghost-checkpoint-b-validation-a8562c0fa73c/tests/test_ghost_twap_runtime_faults.py\\\", line 89, in measure\\n    raise self.failure\\nRuntimeError: database guard unavailable\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_guard_failed\"}\n...{\"at\": \"2026-09-13T22:47:37.608162Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_size_cap\", \"run_id\": \"e5bee3994ef04785acd6a5da76ceda8b\"}\n.{\"at\": \"2026-09-13T22:47:37.610830Z\", \"canary_end_ms\": 1800259200000, \"level\": \"INFO\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_runtime_started\", \"run_id\": \"8183d78dbcf240e88af6250b97e33f9b\", \"stop_reason\": null}\n{\"at\": \"2026-09-13T22:47:37.610951Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_size_cap\", \"run_id\": \"8183d78dbcf240e88af6250b97e33f9b\"}\n{\"at\": \"2026-09-13T22:47:37.611992Z\", \"canary_end_ms\": 1800259200000, \"level\": \"INFO\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_runtime_started\", \"run_id\": \"2420c6f7671a4e539ddc28865c4e14ab\", \"stop_reason\": \"audit_size_cap\"}\n.{\"at\": \"2026-09-13T22:47:37.621510Z\", \"canary_end_ms\": 1800259200000, \"level\": \"INFO\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_runtime_started\", \"run_id\": \"74cb91f39a17415fabf8317a35bf9fbd\", \"stop_reason\": null}\n....{\"at\": \"2026-09-13T22:47:37.669962Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"record_size_cap\", \"run_id\": \"96d7df96515247bbae0cb21e10d0b016\"}\n..{\"at\": \"2026-09-13T22:47:37.708958Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_row_reserve\", \"run_id\": \"4648065f1c134fbc8b48864dd1a7b5fb\"}\n.{\"at\": \"2026-09-13T22:47:37.717351Z\", \"level\": \"ERROR\", \"logger\": \"price_collector.ghost_twap_runtime\", \"message\": \"ghost_decisions_stopped\", \"reason\": \"audit_persistence_failure\", \"run_id\": \"32a064cef8bc4c98a8f6b7662bb82987\"}\n....{\"acknowledged\": 63, \"actual_fsynced_spool\": true, \"actual_live_payload_in_state\": true, \"actual_runtime_frozen_metadata\": true, \"after_all_targets\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1794048, \"row_count\": 64, \"tablespaces\": [\"pg_default\"]}, \"after_delete\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1990656, \"row_count\": 0, \"tablespaces\": [\"pg_default\"]}, \"after_publications\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1515520, \"row_count\": 64, \"tablespaces\": [\"pg_default\"]}, \"after_terminal\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1974272, \"row_count\": 64, \"tablespaces\": [\"pg_default\"]}, \"after_vacuum\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 180224, \"row_count\": 0, \"tablespaces\": [\"pg_default\"]}, \"baseline\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 49152, \"row_count\": 0, \"tablespaces\": [\"pg_default\"]}, \"expired_rows\": 64, \"export_bytes\": 2867760, \"export_sha256\": \"81e3aa5b81d05c103df211310622243f2d622daf120c7f8bc4d5481035ce579a\", \"fake_redis\": true, \"horizons_per_row\": 6, \"limitation\": \"64 synthetic two-per-second runtime decisions; not live Redis latency, full-cap load or 72h canary evidence.\", \"matched_targets\": 384, \"max_complete_json_bytes\": 39911, \"max_durable_intent_bytes\": 42061, \"max_frozen_json_bytes\": 31632, \"max_live_payload_bytes\": 4270, \"max_serialized_outbox_bytes\": 44899, \"max_state_json_bytes\": 8480, \"publication_attempts\": 64, \"sample_rows\": 64, \"simulated_receipt_clocks\": true, \"slots_per_row\": 89, \"uncertain\": 1}\n..............................................{\"after_delete\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1458176, \"row_count\": 0, \"tablespaces\": [\"pg_default\"]}, \"after_insert\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1122304, \"row_count\": 128, \"tablespaces\": [\"pg_default\"]}, \"after_six_updates\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 1433600, \"row_count\": 128, \"tablespaces\": [\"pg_default\"]}, \"after_vacuum\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 188416, \"row_count\": 0, \"tablespaces\": [\"pg_default\"]}, \"baseline\": {\"db_data_directory\": \"/var/lib/postgresql/16/main\", \"relation_bytes\": 49152, \"row_count\": 0, \"tablespaces\": [\"pg_default\"]}, \"committed_result_revisions_per_row\": 6, \"expired_rows\": 128, \"export_bytes\": 4710538, \"export_sha256\": \"049da21dd4813017218d23e8fe267d26cd5bc3960d3f6c9489295c2d9978b3a0\", \"limitation\": \"Bounded synthetic engine-shaped sample; not full-canary retention/cap validation.\", \"max_complete_json_bytes\": 32955, \"max_frozen_json_bytes\": 30829, \"sample_rows\": 128, \"slots_per_row\": 89}\n.\n208 passed in 29.68s\n",
+      "stderr": "usage: ghost-admin expire [-h]\n                          [--limit {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100}]\nghost-admin expire: error: argument --limit: invalid choice: 0 (choose from 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100)\nusage: ghost-admin expire [-h]\n                          [--limit {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100}]\nghost-admin expire: error: argument --limit: invalid choice: 101 (choose from 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100)\nusage: ghost-admin download [-h] --ssh SSH --output OUTPUT\n                            [--timeout-seconds TIMEOUT_SECONDS]\nghost-admin download: error: argument --timeout-seconds: timeout must be between 1 and 86400 seconds\nusage: ghost-admin download [-h] --ssh SSH --output OUTPUT\n                            [--timeout-seconds TIMEOUT_SECONDS]\nghost-admin download: error: argument --timeout-seconds: timeout must be between 1 and 86400 seconds\nusage: ghost-admin download [-h] --ssh SSH --output OUTPUT\n                            [--timeout-seconds TIMEOUT_SECONDS]\nghost-admin download: error: argument --timeout-seconds: timeout must be an integer number of seconds\n"
+    },
+    {
+      "command": [
+        "sudo",
+        "-u",
+        "postgres",
+        "dropdb",
+        "ghost_checkpoint_b_validation_a8562c0fa73c"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "ssh_returncode": 0,
+  "ssh_stderr": "",
+  "uploaded_sha256": {
+    "OPERATIONS.md": "85d52fa23bdb1c67877d82425d519056ae88c2fd55d4798f214d5ea0ff121701",
+    "deployment/api.env.example": "bb07254ca768b0c33040bf2bab607882217912246f55dec29a71f24a8ee2b9fa",
+    "deployment/collector.env.example": "b462dd6c660a418fe1bdd03cd72144d0d67fc372319702a3a9c3bd3e0e095316",
+    "droplet.env.example": "f821fecc26e39238b40db101ae02aba265e5eea399a158f66d9330388bf9af69",
+    "price_collector/__init__.py": "d15fb66f1bda9c50013d0db73d01597de937ddc6286ad1e7e4438a6c1aa54967",
+    "price_collector/api.py": "c8b7e8d14e3884fbaf8d3c46568e9ea0298256cd4c5f77801edc80572f0aac7f",
+    "price_collector/binance_futures_collector.py": "ca65c3fc8ad116fc037ec8644b8ce5fdb922122e35dc73954774116bfea212f0",
+    "price_collector/binance_futures_streams.py": "d9e6f814ee6bc6b61423eb2993e015949e500778a60f8af5bc8bc0518cc4ab47",
+    "price_collector/binance_microstructure.py": "680151da821505e166ab1dcbffa0f6af4c62e8fa1b59cba44efff22530a2e6cd",
+    "price_collector/binance_microstructure_collector.py": "c317742993ae8a9dd1ce8c6ad24bce4cdc2a8c172bb26cfd0cfd889d6b3e002f",
+    "price_collector/collector.py": "4b0c27d892dc0dd34dfc6c14cff1c0ebbe6ef5a5f1c6797b7df64a8ac064dec2",
+    "price_collector/config.py": "b6b9033146a4754fc44ecd42c8a7a90918fb317c4bc0c0d0bf8d2695ce14abfb",
+    "price_collector/db.py": "f27ad4c23562022456825313d01887640683eef6b74430fc611b784963e37bcf",
+    "price_collector/ghost_twap.py": "56c04cd04d549006f0f73d05070ef1f0c20d85eb1b88ccdecf903b920eafbf0c",
+    "price_collector/ghost_twap_admin.py": "7afbbaa6dce56633b2979559592f0e452abe41db478f4eadcc8f6c00c2a50460",
+    "price_collector/ghost_twap_runtime.py": "3940d3fdd5830d52eaee17edf1baf985a44044fe5cf0940df163501cb204242a",
+    "price_collector/ghost_twap_spool.py": "a1888f4890a2f3413048316091ad93cd4d5126b67f7487b9b259d46b91997c8d",
+    "price_collector/ghost_twap_store.py": "082efd613297cbc1aa43806bb09dc47f8fbc4bc4d161422ee7d8e4f729252d15",
+    "price_collector/live_cache.py": "305c3cdbc9fa6711163796795eb48e85fe9dfabbd03339f11e43fa08edcd3c10",
+    "price_collector/market.py": "b27f30d09fba03f008cc0013a5bc9769fc70011dea4174fbbd6bec225c152440",
+    "price_collector/microstructure_api.py": "9faffc181f3e0f5d6bb94538f6200fc412e73fb7bb37716e99d824b0b39bbaec",
+    "price_collector/polymarket_chainlink_collector.py": "7c378c76ddad854aa8cd6f70884f31177db371e100b1332468843cb924a42fa3",
+    "price_collector/polymarket_evidence.py": "0367349bfe462df6cd09ce080b0f2ae5fd9a41d26f4c9d19b4d4ee107d090bc4",
+    "price_collector/polymarket_evidence_store.py": "3072901bd11fb46f240f2608072b2e515769ed133dca82b355585a839fa008c8",
+    "price_collector/polymarket_probability_collector.py": "5435946f358596bbedae106e307866d0be00be8e2c7e6fc68212990333218a14",
+    "price_collector/polymarket_twap.py": "80d141845ca0fc3b9e9d2b9dad80e003e25c4131e0b2cf6f6165311a687de7e1",
+    "price_collector/raw_capture.py": "e140951986ac61bf8ceb256390d3dafa8f968e73ae2be58cf81bf38bb50b50f4",
+    "schema.sql": "75e7149464f4c69b9702e342922365141484e0ee72b567ddffd0192c6cbe75f4",
+    "tests/fixtures/ghost_twap/README.md": "6c933ebd0f7065436a1224aa6275988d8dc3849650acaf4b97a4f7e6037d7cb7",
+    "tests/fixtures/ghost_twap/manifest.json": "b1bab833229f3bb4505f8d8faa29a47c9a615c85333c03f50eea64c6235a426c",
+    "tests/fixtures/ghost_twap/pending_v2/README.md": "bcc88ab921d3d26bb7212f71822c59e388541a503f118d8b0d8536da6e2084e8",
+    "tests/fixtures/ghost_twap/pending_v2/manifest.json": "81a18e476fdedbb1678934d10ea39d32e34da5b3a6580631e9cdb95c27c1e599",
+    "tests/fixtures/ghost_twap/pending_v2/recorded_hour_decisions.csv.gz": "62642b8a450e4fe578597931975cf188d83c5e9041a0863481f520c99e138f4e",
+    "tests/fixtures/ghost_twap/pending_v2/recorded_hour_events.csv.gz": "26b54a5b91efd163f2cecc02fb529c0e1a563da1227b2c4f0e0f00fbcf226c2f",
+    "tests/fixtures/ghost_twap/pending_v2/recorded_hour_expected.csv.gz": "345ff83a5e77e0d1f0695a88f4896e284adc277bc7864e2e47f53bcfc96f828d",
+    "tests/fixtures/ghost_twap/recorded_hour_decisions.csv.gz": "62642b8a450e4fe578597931975cf188d83c5e9041a0863481f520c99e138f4e",
+    "tests/fixtures/ghost_twap/recorded_hour_events.csv.gz": "26b54a5b91efd163f2cecc02fb529c0e1a563da1227b2c4f0e0f00fbcf226c2f",
+    "tests/fixtures/ghost_twap/recorded_hour_expected.csv.gz": "fa0829a9295a21a224554930061d289096718350c9b2070326ac658773b103ba",
+    "tests/test_ghost_twap.py": "1ecf1748a8f0046e10dc805cc502f579396d2595a69e3b55374a3035dab299e2",
+    "tests/test_ghost_twap_admin.py": "07c5720929b596df365802f1b302825d4ed862694c7a4c3539d1191d1a76e494",
+    "tests/test_ghost_twap_collector_integration.py": "63bb2036cdd5624ebdf811a8e92577f86bdd1a69e74eb34907c6ee15fea245d7",
+    "tests/test_ghost_twap_deployment.py": "41aa4582e9860d92838d6006faefc9eff7f80f6eb85e5bb87266d7e631545a2a",
+    "tests/test_ghost_twap_edges.py": "19949b1822c7414ff36f5e08fb559324be35986d26675079008b35124798e39b",
+    "tests/test_ghost_twap_pending.py": "1ea4dc5740194d23ff9f2e847a770580ca1667dbcb9a85cc24d38fe4ee3eb7bf",
+    "tests/test_ghost_twap_replay.py": "140249eba3b502d6ad82469088fcb098e84f9ce25fe60786962ac65dbc96634b",
+    "tests/test_ghost_twap_runtime_faults.py": "bb7f2fdbec9d33a777e3a34ddab8d77dc276ebca0d1f6e6c32322398e23142b0",
+    "tests/test_ghost_twap_runtime_postgres.py": "7ca0781a913cfc6aa693ceb9df9ed4462f78ad88e49bec90c42a2b75d19f0653",
+    "tests/test_ghost_twap_spool.py": "831a4dbea067205769f60f217e2fc9e4449a67942a28c26739400aa6106cb59d",
+    "tests/test_ghost_twap_store.py": "b6473a798b46af4c0bdd81e6cb1373a554ef28607d5531199fddb63f8f1f186e",
+    "tests/test_ghost_twap_store_postgres.py": "19b51161045fbd77675a7109510704548e1d92e25c61cf12a61420685f83e9fd",
+    "tests/test_polymarket_chainlink_collector.py": "95132793439ddbb63a3d7f7a42e025f1276b9967a8b97d50e7eeb49392891729",
+    "tests/test_polymarket_twap.py": "4db6c06d6ee9e58cb55408a4a69c87e584c5168620eef6905b8cfbaee70952c5"
+  }
+}

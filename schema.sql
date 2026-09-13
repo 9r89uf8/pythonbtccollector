@@ -1,4 +1,117 @@
 
+-- Optional ghost forecasts: one complete immutable decision, versioned outcomes.
+-- JSON is exact text (Decimal prices are strings); hashes cover the exported bytes.
+CREATE TABLE IF NOT EXISTS ghost_twap_audit (
+    run_id TEXT COLLATE "C" NOT NULL CHECK (length(run_id) BETWEEN 1 AND 128),
+    decision_id TEXT COLLATE "C" NOT NULL CHECK (length(decision_id) BETWEEN 1 AND 128),
+    decision_wall_ns BIGINT NOT NULL CHECK (decision_wall_ns >= 0),
+    created_ms BIGINT NOT NULL CHECK (created_ms >= 0),
+    frozen_json TEXT NOT NULL CHECK (jsonb_typeof(frozen_json::jsonb) = 'object'),
+    frozen_sha256 TEXT NOT NULL CHECK (frozen_sha256 ~ '^[0-9a-f]{64}$'),
+    target_source_timestamps_ms BIGINT[] NOT NULL DEFAULT '{}'
+        CHECK (cardinality(target_source_timestamps_ms) <= 6),
+    state_json TEXT NOT NULL CHECK (jsonb_typeof(state_json::jsonb) = 'object'),
+    state_sha256 TEXT NOT NULL CHECK (state_sha256 ~ '^[0-9a-f]{64}$'),
+    version BIGINT NOT NULL CHECK (version >= 0),
+    terminal BOOLEAN NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    verified_export_sha256 TEXT,
+    verified_external_location TEXT,
+    verified_version BIGINT,
+    verified_frozen_sha256 TEXT,
+    verified_state_sha256 TEXT,
+    verified_at TIMESTAMPTZ,
+    PRIMARY KEY (run_id, decision_id),
+    CHECK (octet_length(frozen_json) + octet_length(state_json) <= 131072),
+    CHECK (
+        (verified_export_sha256 IS NULL AND verified_external_location IS NULL
+         AND verified_version IS NULL AND verified_frozen_sha256 IS NULL
+         AND verified_state_sha256 IS NULL AND verified_at IS NULL)
+        OR
+        (terminal AND verified_export_sha256 IS NOT NULL
+         AND verified_export_sha256 ~ '^[0-9a-f]{64}$'
+         AND verified_external_location IS NOT NULL
+         AND length(verified_external_location) BETWEEN 1 AND 2048
+         AND verified_version IS NOT NULL AND verified_version = version
+         AND verified_frozen_sha256 IS NOT NULL AND verified_frozen_sha256 = frozen_sha256
+         AND verified_state_sha256 IS NOT NULL AND verified_state_sha256 = state_sha256
+         AND verified_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_incomplete_idx
+    ON ghost_twap_audit (run_id, decision_id) WHERE NOT terminal;
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_expiry_idx
+    ON ghost_twap_audit (created_ms, run_id, decision_id)
+    WHERE terminal AND verified_version IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_targets_idx
+    ON ghost_twap_audit USING GIN (target_source_timestamps_ms) WHERE terminal;
+
+CREATE OR REPLACE FUNCTION ghost_twap_audit_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+DECLARE
+    target_key TEXT;
+    old_target JSONB;
+    new_target JSONB;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF NOT OLD.terminal OR OLD.verified_version IS NULL
+           OR OLD.verified_version <> OLD.version
+           OR OLD.verified_frozen_sha256 IS DISTINCT FROM OLD.frozen_sha256
+           OR OLD.verified_state_sha256 IS DISTINCT FROM OLD.state_sha256
+           OR OLD.created_ms > (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 345600000
+        THEN
+            RAISE EXCEPTION 'ghost audit deletion requires age96h and current verified external export';
+        END IF;
+        RETURN OLD;
+    END IF;
+    NEW.frozen_sha256 := encode(sha256(convert_to(NEW.frozen_json, 'UTF8')), 'hex');
+    NEW.state_sha256 := encode(sha256(convert_to(NEW.state_json, 'UTF8')), 'hex');
+    IF TG_OP = 'INSERT' THEN
+        RETURN NEW;
+    END IF;
+    IF ROW(NEW.run_id, NEW.decision_id, NEW.decision_wall_ns, NEW.created_ms,
+           NEW.frozen_json, NEW.target_source_timestamps_ms)
+       IS DISTINCT FROM
+       ROW(OLD.run_id, OLD.decision_id, OLD.decision_wall_ns, OLD.created_ms,
+           OLD.frozen_json, OLD.target_source_timestamps_ms) THEN
+        RAISE EXCEPTION 'ghost decision inputs are immutable';
+    END IF;
+    IF NEW.version < OLD.version OR (OLD.terminal AND NOT NEW.terminal) THEN
+        RAISE EXCEPTION 'ghost audit state cannot regress';
+    END IF;
+    IF NEW.version = OLD.version AND
+       ROW(NEW.state_json, NEW.terminal) IS DISTINCT FROM ROW(OLD.state_json, OLD.terminal) THEN
+        RAISE EXCEPTION 'ghost audit state mutation requires a new version';
+    END IF;
+    FOR target_key, old_target IN
+        SELECT key, value FROM jsonb_each(COALESCE(OLD.state_json::jsonb -> 'targets', '{}'::jsonb))
+    LOOP
+        IF old_target -> 'first_event' IS NOT NULL AND old_target -> 'first_event' <> 'null'::jsonb THEN
+            new_target := NEW.state_json::jsonb -> 'targets' -> target_key;
+            IF new_target -> 'first_event' IS DISTINCT FROM old_target -> 'first_event'
+               OR new_target -> 'status' IS DISTINCT FROM old_target -> 'status' THEN
+                RAISE EXCEPTION 'ghost first target match/status is immutable';
+            END IF;
+        END IF;
+    END LOOP;
+    IF NEW.version > OLD.version THEN
+        NEW.updated_at := clock_timestamp();
+        NEW.verified_export_sha256 := NULL;
+        NEW.verified_external_location := NULL;
+        NEW.verified_version := NULL;
+        NEW.verified_frozen_sha256 := NULL;
+        NEW.verified_state_sha256 := NULL;
+        NEW.verified_at := NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS ghost_twap_audit_guard_trigger ON ghost_twap_audit;
+CREATE TRIGGER ghost_twap_audit_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON ghost_twap_audit
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_audit_guard();
+
 CREATE TABLE IF NOT EXISTS providers (
     provider_id SMALLSERIAL PRIMARY KEY,
     provider_code TEXT NOT NULL UNIQUE,

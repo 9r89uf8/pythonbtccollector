@@ -29,6 +29,104 @@ Review receive ages as well as service status. An active socket or process
 does not establish fresh accepted events. Ports 9000, 5432 and 6379 must not
 listen on public interfaces. Current/live API checks must remain read-only.
 
+## Ghost TWAP checkpoint B
+
+The optional worker stays inside `price-collector-polymarket-chainlink`. B has
+no ghost HTTP/SSE routes. Its Redis key/channel are separate from official
+prices. Read the [checkpoint report](GHOST_TWAP_CHECKPOINT_B.md) before a canary;
+the fixed limits permit an early stop and do not guarantee 72-hour coverage.
+
+After the reviewed B change is pushed to GitHub, install the schema **before**
+restarting the Chainlink service. Keep ghost disabled during this installation:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+sudoedit /etc/price-collector/collector.env
+sudo systemctl restart price-collector-polymarket-chainlink
+sudo systemctl status price-collector-polymarket-chainlink --no-pager
+sudo journalctl -u price-collector-polymarket-chainlink -n 100 --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/markets/current/live
+```
+
+Review these keys manually in `collector.env`; preserve every other setting and
+credential. Do not put them in the API environment or the local tunnel file.
+
+| Key | Installation value |
+|---|---|
+| `GHOST_TWAP_ENABLED` | `false` |
+| `GHOST_TWAP_CANARY_START_MS` | `0` |
+| `GHOST_TWAP_STATE_DIRECTORY` | `/var/lib/price-collector/ghost-twap` |
+| `GHOST_TWAP_DATABASE_FILESYSTEM_PATH` | `/var/lib/postgresql` |
+
+Before an enabled run, verify default tablespace placement and that the configured
+filesystem path shares the database's device. Confirm the writer can inspect
+that filesystem and write its state directory. Review the measured storage
+probe and remaining disk; preserve the 1.5 GiB stop, 2 GiB budget and 10 GiB
+reserve. Exact initial row count plus subsequent admissions bounds 600,000 rows.
+The 512-record outbox and 128 KiB record limit reserve bounded growth; they do not
+establish sustained production CPU, latency or storage behavior.
+
+For an accepted canary, set the enabled flag and an explicit current UTC epoch
+millisecond start once. Keep that start through every restart. The worker stops
+new decisions at start plus 72 hours or an earlier guard. Its `campaign.json`
+persists stop state; do not delete it or advance the start to bypass a stop.
+Its advisory filesystem lock prevents a second worker sharing that outbox.
+Changing the outbox directory requires a separately reviewed new run, not a
+way around existing limits. Redis/API/PostgreSQL bindings remain loopback only.
+
+Check the isolated audit state and bounded logs with:
+
+```bash
+cd /opt/price-collector
+sudo -u postgres .venv/bin/python -m price_collector.ghost_twap_admin status
+redis-cli -h 127.0.0.1 -p 6379 GET btc:live:ghost_chainlink_twap_60s
+sudo journalctl -u price-collector-polymarket-chainlink --since '10 minutes ago' -n 100 --no-pager
+df -h /var/lib/postgresql /var/lib/price-collector
+```
+
+A Redis value expiring is expected when inputs stop, guards stop admissions or
+publication fails. An acknowledged write earns confirmed lead only if its
+monotonic acknowledgement precedes the target's first receipt. Conflicted or
+causally invalid targets are excluded. An attempt without acknowledged ordering
+is uncertain, not a successful early forecast. A target at or after the 120-second
+matching deadline is late. Frozen forecasts, first matches and terminal missing
+statuses are never replaced by a more favorable later result.
+
+At the end, disable the ghost flag and restart only the Chainlink service to
+reconcile pending audit records. Review shutdown/outbox errors and ensure
+`incomplete_count=0` before exporting. Stop admissions before a final export.
+Run this on the **owner's computer** from its B checkout and development Python:
+
+```powershell
+python -m price_collector.ghost_twap_admin download --ssh root@152.42.247.86 --output ghost-canary.jsonl
+```
+
+The SSH export streams only audit records. The local command verifies every row
+and the whole file before acknowledging unchanged hashes/versions to PostgreSQL.
+It will not overwrite a file, and interrupted downloads remain `.part` files.
+The adjacent manifest records exact bytes/row count. Retain both outside the
+droplet. A changed result makes its acknowledgement ineligible; re-export those
+current results before expiry. A local droplet copy alone is not external proof.
+
+After verified export and at least 96 hours of row age, explicit maintenance can
+delete at most 100 eligible rows per command:
+
+```bash
+cd /opt/price-collector
+sudo -u postgres .venv/bin/python -m price_collector.ghost_twap_admin expire --limit 100
+```
+
+Each deletion rechecks terminal state, age and current export hashes under row
+locks. No daemon automatically deletes audit evidence, and no compact summary
+tier accumulates indefinitely. Ordinary deletion may leave allocated space;
+measure relation/filesystem usage and arrange bounded vacuum maintenance rather
+than assume the bytes returned to the filesystem. Keep the full export and
+bounded findings after removing eligible database rows.
+
 ## Deploy compact Polymarket evidence
 
 Run these commands **after the change is pushed to GitHub**. This checkpoint

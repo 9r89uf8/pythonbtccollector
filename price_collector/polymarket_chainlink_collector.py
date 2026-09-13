@@ -18,6 +18,7 @@ from price_collector.collector import (
     setup_logging,
 )
 from price_collector.config import Settings
+from price_collector.ghost_twap_runtime import GhostSettings, start_ghost_runtime
 from price_collector.db import (
     create_pool,
     create_raw_capture_backend,
@@ -53,6 +54,7 @@ CHAINLINK_DELIVERY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS = 12.0
 CHAINLINK_CANCEL_CONFIRM_TIMEOUT_SECONDS = 0.1
 CHAINLINK_DELIVERY_DROP_WARNING_INTERVAL_NS = 60_000_000_000
+GHOST_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 CHAINLINK_MAX_PROVIDER_EVENT_MS = (
     ((POSTGRES_BIGINT_MAX - 300_000) // 300_000) * 300_000
     + 299_999
@@ -65,6 +67,84 @@ class RtdsParseError(ValueError):
 
 class RtdsAcceptedEventIdleTimeout(TimeoutError):
     pass
+
+
+class _OptionalGhostSink:
+    """Nonblocking shared admission point; optional startup never holds a feed."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.runtime: Any = None
+        self.closed = False
+        self.failed = False
+        self.start_task = asyncio.create_task(self._start(settings))
+
+    async def _start(self, settings: Settings) -> None:
+        try:
+            runtime = await start_ghost_runtime(settings)
+            if self.closed and runtime is not None:
+                await asyncio.wait_for(runtime.close(), GHOST_SHUTDOWN_TIMEOUT_SECONDS)
+            else:
+                self.runtime = runtime
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.failed = True
+            LOGGER.exception("ghost_optional_start_failed")
+
+    def _offer(self, method: str, *args: Any, **kwargs: Any) -> None:
+        if self.runtime is None or self.closed or self.failed:
+            return
+        try:
+            getattr(self.runtime, method)(*args, **kwargs)
+        except Exception:
+            # A failed offer is a loss of causal coverage, not permission to
+            # continue publishing from the old state. Stop this optional sink.
+            self.failed = True
+            for feed in ("spot", "twap"):
+                try:
+                    self.runtime.offer_gap(feed, "collector_offer_failed")
+                except Exception:
+                    pass
+            LOGGER.exception("ghost_optional_offer_failed")
+
+    def offer_price(self, *args: Any, **kwargs: Any) -> None:
+        self._offer("offer_price", *args, **kwargs)
+
+    def offer_gap(self, feed: str, reason: str) -> None:
+        self._offer("offer_gap", feed, reason)
+
+    async def close(self) -> None:
+        self.closed = True
+        await _cancel_and_wait(self.start_task, timeout_seconds=1.0)
+        runtime, self.runtime = self.runtime, None
+        if runtime is None:
+            return
+        task = asyncio.create_task(runtime.close())
+        done, _pending = await asyncio.wait({task}, timeout=GHOST_SHUTDOWN_TIMEOUT_SECONDS)
+        if not done:
+            await _cancel_and_wait(task, timeout_seconds=CHAINLINK_CANCEL_CONFIRM_TIMEOUT_SECONDS)
+            LOGGER.error("ghost_optional_shutdown_incomplete")
+            return
+        results = await asyncio.gather(task, return_exceptions=True)
+        if isinstance(results[0], BaseException):
+            LOGGER.error("ghost_optional_shutdown_failed", extra={"error": repr(results[0])})
+
+
+def _create_optional_ghost_sink(settings: Settings) -> Optional[_OptionalGhostSink]:
+    try:
+        if GhostSettings().enabled:
+            return _OptionalGhostSink(settings)
+    except Exception:
+        LOGGER.exception("ghost_optional_settings_failed")
+    return None
+
+
+def _offer_ghost_gap(ghost_runtime: Any, feed: str, reason: str) -> None:
+    if ghost_runtime is not None:
+        try:
+            ghost_runtime.offer_gap(feed, reason)
+        except Exception:
+            LOGGER.exception("ghost_optional_gap_offer_failed")
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1103,7 @@ async def polymarket_chainlink_reader_loop(
     delivery_state: ChainlinkDeliveryState,
     *,
     raw_capture: Any = None,
+    ghost_runtime: Any = None,
 ) -> None:
     attempt = 0
     connection_sequence = 0
@@ -1262,6 +1343,12 @@ async def polymarket_chainlink_reader_loop(
                             ) from exc
 
                         received_wall_ns = time.time_ns()
+                        ghost_monotonic_ns: Optional[int] = None
+                        if ghost_runtime is not None:
+                            try:
+                                ghost_monotonic_ns = time.monotonic_ns()
+                            except Exception:
+                                _offer_ghost_gap(ghost_runtime, "spot", "receipt_clock_failed")
                         last_frame_monotonic = loop.time()
                         last_frame_received_ms = (
                             received_wall_ns // 1_000_000
@@ -1270,7 +1357,10 @@ async def polymarket_chainlink_reader_loop(
                         stamp: Optional[ReceiveStamp] = None
                         if connection_id is not None:
                             try:
-                                received_monotonic_ns = time.monotonic_ns()
+                                received_monotonic_ns = (
+                                    ghost_monotonic_ns if ghost_monotonic_ns is not None
+                                    else time.monotonic_ns()
+                                )
                                 if capture_session is not None:
                                     try:
                                         stamp = (
@@ -1403,6 +1493,25 @@ async def polymarket_chainlink_reader_loop(
                         )
                         item = delivery_state.update_latest(sample)
                         delivery_state.offer_history(item)
+                        # No await is permitted between the original receipt
+                        # stamps, accepted parse and this shared ordered offer.
+                        if ghost_runtime is not None and ghost_monotonic_ns is not None:
+                            if (settings.POLYMARKET_CHAINLINK_TOPIC == "crypto_prices_chainlink"
+                                    and settings.POLYMARKET_CHAINLINK_RTD_SYMBOL == "btc/usd"
+                                    and tick.symbol == "BTCUSD"):
+                                try:
+                                    ghost_runtime.offer_price(
+                                        feed="spot", value=tick.price,
+                                        source_ms=tick.provider_event_ms,
+                                        received_wall_ns=received_wall_ns,
+                                        received_mono_ns=ghost_monotonic_ns,
+                                        event_id=f"chainlink:{item.sequence}",
+                                    )
+                                except Exception:
+                                    _offer_ghost_gap(ghost_runtime, "spot", "collector_offer_failed")
+                                    LOGGER.exception("ghost_optional_price_offer_failed")
+                            else:
+                                _offer_ghost_gap(ghost_runtime, "spot", "unsupported_identity")
                         connection_messages_accepted_total += 1
                         last_accepted_monotonic = loop.time()
                         last_accepted_received_ms = sample.received_ms
@@ -1422,6 +1531,7 @@ async def polymarket_chainlink_reader_loop(
                                 delivery_state=delivery_state,
                             )
                 finally:
+                    _offer_ghost_gap(ghost_runtime, "spot", "connection_end")
                     ping_task.cancel()
                     ping_result = (
                         await asyncio.gather(
@@ -1582,6 +1692,7 @@ async def run_collector(settings: Settings) -> None:
     pool = await create_pool(database_url)
     live_cache = None
     raw_capture = None
+    ghost_runtime = None
     delivery_state = ChainlinkDeliveryState()
     reader_task: Optional["asyncio.Task[Any]"] = None
     live_task: Optional["asyncio.Task[Any]"] = None
@@ -1627,6 +1738,8 @@ async def run_collector(settings: Settings) -> None:
                 live_cache=live_cache,
             )
         )
+        ghost_runtime = _create_optional_ghost_sink(settings)
+        ghost_kwargs = {} if ghost_runtime is None else {"ghost_runtime": ghost_runtime}
         history_task = asyncio.create_task(
             chainlink_history_worker(
                 delivery_state=delivery_state,
@@ -1640,6 +1753,7 @@ async def run_collector(settings: Settings) -> None:
                 settings,
                 delivery_state,
                 raw_capture=raw_capture,
+                **ghost_kwargs,
             )
         )
         if getattr(settings, "POLYMARKET_TWAP_ENABLED", False):
@@ -1648,6 +1762,7 @@ async def run_collector(settings: Settings) -> None:
                     settings,
                     pool,
                     live_cache=live_cache,
+                    **ghost_kwargs,
                 )
             )
         if raw_capture is not None:
@@ -1748,6 +1863,11 @@ async def run_collector(settings: Settings) -> None:
                     task.add_done_callback(_consume_detached_task_result)
 
         await _cancel_and_wait(telemetry_task)
+        if ghost_runtime is not None:
+            try:
+                await ghost_runtime.close()
+            except Exception:
+                LOGGER.exception("ghost_optional_close_failed")
         try:
             if raw_capture is not None:
                 await raw_capture.close()

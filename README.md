@@ -900,16 +900,35 @@ defines current fee schedules and minimum size/tick constraints. Their
 timestamped observations describe the available configuration, not realized
 fills or a frozen fee schedule for future markets.
 
-## Ghost TWAP calculation — Checkpoint A
+## Ghost TWAP — optional worker
 
 `price_collector/ghost_twap.py` provides an optional pure Decimal engine for
 1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
-through `GhostPolicy`, has no I/O, and is not imported by the collectors or API.
-No live ghost route or collector environment flag is installed in this checkpoint.
+through `GhostPolicy` and has no I/O. Checkpoint B adds an optional worker inside
+the Chainlink collector; `GHOST_TWAP_ENABLED=false` keeps that integration inactive.
 The exact recorded-hour replay covers 21,600 horizon calculations; it does not
 measure prospective publication or frontend latency. Payload contract 2 separates
 pending recent inputs from interior carried slots, with all forecast prices and
 availability unchanged. Pending and future inputs remain explicit assumptions.
 See the
 [Checkpoint A contract and tests](GHOST_TWAP_CHECKPOINT_A.md) and
-[remaining live implementation plan](GHOST_TWAP_LIVE_PLAN.md).
+[live implementation plan](GHOST_TWAP_LIVE_PLAN.md).
+
+The B worker uses accepted canonical inputs, an independent Redis connection,
+a bounded fsynced disk outbox, and one PostgreSQL `ghost_twap_audit` table.
+It publishes only `btc:live:ghost_chainlink_twap_60s` and its dedicated update
+channel. The existing source keys and official TWAP remain unchanged. Full
+frozen slot evidence precedes any possible publication; results and publication
+acknowledgements are audited separately. Restart reconciles unfinished audit
+records and warms from new live inputs.
+
+The first canary requires an explicit fixed start time and stops new decisions
+after at most 72 hours, at 1.5 GiB of audit relations, at 600,000 decisions, on
+audit failure, or below 10 GiB free database-filesystem space. It can finish early
+without completing validation. Verified external export is required before
+96-hour whole-row expiry. See the [B report](GHOST_TWAP_CHECKPOINT_B.md) and
+[operating procedure](OPERATIONS.md#ghost-twap-checkpoint-b).
+
+No ghost API routes or frontend are added in B. Snapshot GET and SSE remain C,
+after prospective canary review. Ghost values are forecasts, not official
+settlement prices or demonstrated trading signals.

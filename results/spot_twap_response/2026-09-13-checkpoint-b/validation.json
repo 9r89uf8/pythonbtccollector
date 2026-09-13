@@ -1,0 +1,64 @@
+{
+  "status": "passed",
+  "checkpoint": "B implementation; prospective canary not started",
+  "validated_utc": "2026-09-13T22:49:31.034324+00:00",
+  "base_commit": "b62285a040aff4787414327d42c75cb651058099",
+  "local_tests": {
+    "passed": 1084,
+    "skipped": 5,
+    "elapsed_seconds": "15.18",
+    "command": [
+      "C:\\Users\\alexa\\PycharmProjects\\polycollector\\.venv\\Scripts\\python.exe",
+      "-m",
+      "pytest",
+      "-q"
+    ],
+    "python": "Python 3.9.5"
+  },
+  "production_python_tests": {
+    "passed": 208,
+    "elapsed_seconds": "29.68",
+    "environment": "Python 3.12, disposable PostgreSQL database, controlled Redis/clocks"
+  },
+  "postgres_database_removed": true,
+  "production_deployed": false,
+  "canary_started": false,
+  "limitations": [
+    "Bounded synthetic storage probes, not a full-capacity canary.",
+    "No measured live publication or browser delivery latency.",
+    "Database filesystem placement and sustained storage margin must be accepted before enablement."
+  ],
+  "source_sha256": {
+    ".gitattributes": "5c205a16d7b578173a4afc7b7b3a7c14e47f38de612df8dc6d573cdb29a7c4a1",
+    "AGENTS.md": "7fbb9def49fcac3856811ec15a8079108b5126c22825644747f762ec181d0848",
+    "GHOST_TWAP_CHECKPOINT_B.md": "a8becc59de74e6212e3d5f3803e2baefacd1d2b852cdb702c0a2f7a1091edd42",
+    "GHOST_TWAP_LIVE_PLAN.md": "c5fa59d120c7d57d283372586806e7db362212469c81e790dce8ab72999f4096",
+    "OPERATIONS.md": "d95d3337dab8db14e16d92a1af295293714d503096a76ba6ade587cd486b7148",
+    "README.md": "e9ac712322757f736a1a6c679c07444365212f80c08221cfadfa332df1e5a4fd",
+    "deployment/collector.env.example": "58a3ad752aa19bc674f8e595971a030abcbf0c602103aef99790dfc2155fafc1",
+    "droplet.env.example": "f6a78379bc3998cf73fe55d63b2d718bbdf0c36a4b03c0808b4d0b2532a60653",
+    "price_collector/ghost_twap.py": "56c04cd04d549006f0f73d05070ef1f0c20d85eb1b88ccdecf903b920eafbf0c",
+    "price_collector/ghost_twap_admin.py": "7afbbaa6dce56633b2979559592f0e452abe41db478f4eadcc8f6c00c2a50460",
+    "price_collector/ghost_twap_runtime.py": "3940d3fdd5830d52eaee17edf1baf985a44044fe5cf0940df163501cb204242a",
+    "price_collector/ghost_twap_spool.py": "a1888f4890a2f3413048316091ad93cd4d5126b67f7487b9b259d46b91997c8d",
+    "price_collector/ghost_twap_store.py": "082efd613297cbc1aa43806bb09dc47f8fbc4bc4d161422ee7d8e4f729252d15",
+    "price_collector/polymarket_chainlink_collector.py": "db58354bf8926aa5d976dd559eae62650dcf2886ab4db8705c3dbba2a85de2e1",
+    "price_collector/polymarket_twap.py": "282edb06e9c021df34134e205f236dc590ad07f73765487865b1a640811adeca",
+    "research/spot_twap_response/checkpoint_b_validation.py": "b56031bd146cd20e15cd5b97fbd9b005ae77f473e8fd48a49d0b96325c9d9664",
+    "schema.sql": "fa6770e4f992ce9eb41056b31578496af824116aeffca3004fbabc5da6a0b1d1",
+    "tests/test_evidence_deployment.py": "86ac07d66600dd5e6b13cbbe20747eb1ddc704e3a343cb366ead680652e67c38",
+    "tests/test_ghost_twap_admin.py": "07c5720929b596df365802f1b302825d4ed862694c7a4c3539d1191d1a76e494",
+    "tests/test_ghost_twap_collector_integration.py": "63bb2036cdd5624ebdf811a8e92577f86bdd1a69e74eb34907c6ee15fea245d7",
+    "tests/test_ghost_twap_deployment.py": "41aa4582e9860d92838d6006faefc9eff7f80f6eb85e5bb87266d7e631545a2a",
+    "tests/test_ghost_twap_runtime_faults.py": "ecd8b36a59510ef24e639a96a86c34a2f2fd2fc29b2f5a689fec790e76b71571",
+    "tests/test_ghost_twap_runtime_postgres.py": "7ca0781a913cfc6aa693ceb9df9ed4462f78ad88e49bec90c42a2b75d19f0653",
+    "tests/test_ghost_twap_spool.py": "831a4dbea067205769f60f217e2fc9e4449a67942a28c26739400aa6106cb59d",
+    "tests/test_ghost_twap_store.py": "b6473a798b46af4c0bdd81e6cb1373a554ef28607d5531199fddb63f8f1f186e",
+    "tests/test_ghost_twap_store_postgres.py": "19b51161045fbd77675a7109510704548e1d92e25c61cf12a61420685f83e9fd"
+  },
+  "artifact_sha256": {
+    "local_tests.txt": "962622f44bcd763ecb894e694e047096c844c551208e26c531b4d08494b6ede1",
+    "postgresql_validation.json": "4645ede39480c627565069a365317942cfc1b1e17102628d62830d1f31c22c62",
+    "source_line_endings.json": "867396f5806d3607dc60021b679fa916bfe36c4f585a8bfcbd0839911a490e4e"
+  }
+}
