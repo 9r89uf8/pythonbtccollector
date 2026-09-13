@@ -1,0 +1,19 @@
+{
+  "status": "passed",
+  "events": 7505,
+  "decisions": 3600,
+  "expected_rows": 21600,
+  "checks": [
+    "all recorded hashes",
+    "row counts and one-second decision domain",
+    "sixty-slot conservation",
+    "current receipt cutoffs",
+    "blank unavailable prices and E18 text",
+    "signed ETA arithmetic",
+    "independent permanent-step prices and future counts under low ambient precision",
+    "inclusive ten-second carry boundary",
+    "future latest spot blocks fallback"
+  ],
+  "generator_sha256": "4c33afc0eb997976d606629cb4cd1b3805b835b62727c87bd40256404a3ea6b8",
+  "fixture_manifest_sha256": "b1bab833229f3bb4505f8d8faa29a47c9a615c85333c03f50eea64c6235a426c"
+}

@@ -1,0 +1,15 @@
+{
+  "start_utc": "2026-09-11T00:00:00Z",
+  "end_utc_exclusive": "2026-09-12T00:00:00Z",
+  "spot_margin_before_ms": 63000,
+  "spot_margin_after_ms": 4000,
+  "ssh_started_at_utc": "2026-09-13T13:55:13.132574+00:00",
+  "ssh_finished_at_utc": "2026-09-13T13:55:27.908674+00:00",
+  "psql_exit_code": 0,
+  "read_only": true,
+  "isolation": "repeatable read",
+  "statement_timeout": "20s",
+  "sql_sha256": "1108af8e2128a3793fcaa02edf55a33dfe79bfacb37150ed1e7684ec744d7ad5",
+  "sources_sha256": "729c46d042d8eb9178cb901c67b60f14abceb053187e6c57ee5542a40df9b98f",
+  "sources_bytes": 14921242
+}

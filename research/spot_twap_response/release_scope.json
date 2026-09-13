@@ -1,0 +1,1241 @@
+{
+  "status": "read-only scope recommendation; not a staged or committed manifest",
+  "release_base": "ace8d19",
+  "bundle_allowlist_source": "results/spot_twap_response/2026-09-13-independent-review/bundle_manifest.json",
+  "mandatory_release_edits": {
+    "README.md": "Only Ghost TWAP Checkpoint A section based on release README; preserve other release content.",
+    ".gitattributes": "Create exact-byte -text rules for hashed A/evidence paths on release base, which has no attributes file; do not copy the stale-workspace reset version."
+  },
+  "new_file_count": 232,
+  "new_file_bytes": 5603435,
+  "new_files_exact": [
+    {
+      "path": "GHOST_TWAP_CHECKPOINT_A.md",
+      "bytes": 9728
+    },
+    {
+      "path": "GHOST_TWAP_LIVE_PLAN.md",
+      "bytes": 22611
+    },
+    {
+      "path": "H3_DATA_READINESS_2026-09-10.md",
+      "bytes": 17046
+    },
+    {
+      "path": "H3_TWAP_LEADER_RISK_FINAL_REPORT.md",
+      "bytes": 57310
+    },
+    {
+      "path": "H3_TWAP_LEADER_RISK_STUDY.md",
+      "bytes": 7063
+    },
+    {
+      "path": "H3_TWAP_LEADER_RISK_VALIDATION.md",
+      "bytes": 3205
+    },
+    {
+      "path": "RESEARCH_QUESTIONS.md",
+      "bytes": 3737
+    },
+    {
+      "path": "SPOT_TWAP_RESPONSE_STUDY.md",
+      "bytes": 83391
+    },
+    {
+      "path": "price_collector/ghost_twap.py",
+      "bytes": 18978
+    },
+    {
+      "path": "research/leader_risk/README.md",
+      "bytes": 14306
+    },
+    {
+      "path": "research/leader_risk/extract.sql",
+      "bytes": 8962
+    },
+    {
+      "path": "research/leader_risk/extract_quotes.sql",
+      "bytes": 4025
+    },
+    {
+      "path": "research/leader_risk/market_prices.py",
+      "bytes": 24917
+    },
+    {
+      "path": "research/leader_risk/quote_return_audit.py",
+      "bytes": 16855
+    },
+    {
+      "path": "research/leader_risk/tabulate.py",
+      "bytes": 27365
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/README.md",
+      "bytes": 8898
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/benchmark_remote.py",
+      "bytes": 4923
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/manifest.json",
+      "bytes": 580
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/result.json",
+      "bytes": 13625
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/reuse_review_benchmark.py",
+      "bytes": 11093
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/reuse_review_manifest.json",
+      "bytes": 447
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/reuse_review_result.json",
+      "bytes": 17914
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/reuse_review_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/run_benchmark.py",
+      "bytes": 2165
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/tunnel_benchmark.py",
+      "bytes": 8503
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/tunnel_manifest.json",
+      "bytes": 424
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/tunnel_result.json",
+      "bytes": 4624
+    },
+    {
+      "path": "research/spot_twap_response/api_latency_review/tunnel_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/README.md",
+      "bytes": 3805
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/clock_profile.csv",
+      "bytes": 685
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/manifest.json",
+      "bytes": 3061
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/pairing.csv",
+      "bytes": 117
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/query.sql",
+      "bytes": 4058
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/run_review.py",
+      "bytes": 5444
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/binance_delay_review/stdout.txt",
+      "bytes": 901
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/local_day_README.md",
+      "bytes": 4408
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/local_day_check.py",
+      "bytes": 15653
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/local_day_manifest.json",
+      "bytes": 7425
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/local_day_summary.csv",
+      "bytes": 2052
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/manifest.json",
+      "bytes": 2208
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/query.sql",
+      "bytes": 4411
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/results.csv",
+      "bytes": 485
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/run_review.py",
+      "bytes": 8089
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/section13_original.sql",
+      "bytes": 2929
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/stdout.txt",
+      "bytes": 825
+    },
+    {
+      "path": "research/spot_twap_response/carry_forward_review/supplied_output.txt",
+      "bytes": 765
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/checkpoint_a_validation_v1.json",
+      "bytes": 2342
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/ghost_twap_v1.py.txt",
+      "bytes": 18559
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_README.md",
+      "bytes": 3980
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_manifest.json",
+      "bytes": 3671
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_run.py",
+      "bytes": 5762
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_stdout.txt",
+      "bytes": 880
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/README.md",
+      "bytes": 3279
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/build_fixture.py",
+      "bytes": 16431
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/build_fixture_pending.py",
+      "bytes": 22242
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/pending_review.json",
+      "bytes": 4108
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/third_implementation_check.py",
+      "bytes": 8808
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/validation.json",
+      "bytes": 698
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_validation.json",
+      "bytes": 5795
+    },
+    {
+      "path": "research/spot_twap_response/companion_tests/test_leader_risk_companion.py",
+      "bytes": 12575
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/README.md",
+      "bytes": 4861
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/attempt1_manifest.json",
+      "bytes": 3035
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/attempt1_query.sql",
+      "bytes": 4243
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/attempt1_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/attempt1_stdout.txt",
+      "bytes": 1388
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/run_review.py",
+      "bytes": 6691
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/section18_original.sql",
+      "bytes": 2652
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/summary.csv",
+      "bytes": 361
+    },
+    {
+      "path": "research/spot_twap_response/ghost_pilot_review/supplied_output.txt",
+      "bytes": 482
+    },
+    {
+      "path": "research/spot_twap_response/leader_risk_companion.py",
+      "bytes": 15254
+    },
+    {
+      "path": "research/spot_twap_response/package_review.py",
+      "bytes": 3184
+    },
+    {
+      "path": "research/spot_twap_response/part4_method_review.md",
+      "bytes": 5069
+    },
+    {
+      "path": "research/spot_twap_response/pilot.sql",
+      "bytes": 10466
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part2.sql",
+      "bytes": 6030
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part3.sql",
+      "bytes": 3978
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part3b.sql",
+      "bytes": 3778
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part4.sql",
+      "bytes": 6379
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part5.sql",
+      "bytes": 3729
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part6.sql",
+      "bytes": 4973
+    },
+    {
+      "path": "research/spot_twap_response/pilot_part6b.sql",
+      "bytes": 3293
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/README.md",
+      "bytes": 5301
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/calculate.py",
+      "bytes": 11676
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/crosscheck.sql",
+      "bytes": 3971
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/crosscheck.stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/crosscheck.stdout.jsonl",
+      "bytes": 1976
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/crosscheck_execution.json",
+      "bytes": 405
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/extract_sources.sql",
+      "bytes": 1579
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/extract_sources.stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/extraction.json",
+      "bytes": 600
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/inventory.sql",
+      "bytes": 1769
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/inventory.stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/inventory.stdout.jsonl",
+      "bytes": 3012
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/manifest.json",
+      "bytes": 12180
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/profile.sql",
+      "bytes": 2743
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/profile.stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/profile.stdout.jsonl",
+      "bytes": 681
+    },
+    {
+      "path": "research/spot_twap_response/pilot_review/shift_summary.csv",
+      "bytes": 4770
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/manifest.json",
+      "bytes": 1729
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/query.sql",
+      "bytes": 6376
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/results.csv",
+      "bytes": 2284
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/run_review.py",
+      "bytes": 4770
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/run_review_part2.py",
+      "bytes": 6969
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_manifest.json",
+      "bytes": 2089
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_original.sql",
+      "bytes": 2862
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_query.sql",
+      "bytes": 3960
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_results.csv",
+      "bytes": 458
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_stdout.txt",
+      "bytes": 932
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section10_supplied_output.txt",
+      "bytes": 888
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/section7_original.sql",
+      "bytes": 2093
+    },
+    {
+      "path": "research/spot_twap_response/projection_pilot_review/stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_design_review.md",
+      "bytes": 7353
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/README.md",
+      "bytes": 6896
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit.sql",
+      "bytes": 3730
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit_manifest.json",
+      "bytes": 1867
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit_output.csv",
+      "bytes": 568
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit_run.py",
+      "bytes": 3823
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/early_t30.json",
+      "bytes": 1831
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/early_t30_diagnostics.json",
+      "bytes": 586
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/extract.sql",
+      "bytes": 5147
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/extraction.json",
+      "bytes": 1130
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/guard.sql",
+      "bytes": 2896
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/leader_risk_companion/README.md",
+      "bytes": 1292
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/leader_risk_companion/coverage.csv",
+      "bytes": 3418
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/leader_risk_companion/grids.csv",
+      "bytes": 34257
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/leader_risk_companion/manifest.json",
+      "bytes": 15788
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/pilot.py",
+      "bytes": 18890
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/psql.stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/results/coverage_quality.json",
+      "bytes": 2109
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/results/daily_summary.csv",
+      "bytes": 24585
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/results/independent_validation.json",
+      "bytes": 714
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/results/manifest.json",
+      "bytes": 13622
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/results/summary.csv",
+      "bytes": 4100
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/run_export.py",
+      "bytes": 7005
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/test_pilot.py",
+      "bytes": 17110
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/README.md",
+      "bytes": 6646
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/attempt1_manifest.json",
+      "bytes": 1701
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/attempt1_query.sql",
+      "bytes": 4018
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/attempt1_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/attempt1_stdout.txt",
+      "bytes": 693
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/audit.sql",
+      "bytes": 3819
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/audit_manifest.json",
+      "bytes": 3502
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/audit_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/boundary_side_summary.json",
+      "bytes": 1099
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/run_audit.py",
+      "bytes": 5899
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/run_original.py",
+      "bytes": 4564
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/section19_original.sql",
+      "bytes": 3650
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/summarize_boundary_sides.py",
+      "bytes": 2283
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/summary.csv",
+      "bytes": 543
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/supplied_output.txt",
+      "bytes": 659
+    },
+    {
+      "path": "research/spot_twap_response/short_horizon_review/check.py",
+      "bytes": 6778
+    },
+    {
+      "path": "research/spot_twap_response/short_horizon_review/summary.json",
+      "bytes": 52234
+    },
+    {
+      "path": "research/spot_twap_response/storage_review/README.md",
+      "bytes": 4011
+    },
+    {
+      "path": "research/spot_twap_response/storage_review/capacity.json",
+      "bytes": 348
+    },
+    {
+      "path": "research/spot_twap_response/storage_review/check_capacity.py",
+      "bytes": 2576
+    },
+    {
+      "path": "research/spot_twap_response/storage_review/manifest.json",
+      "bytes": 469
+    },
+    {
+      "path": "research/spot_twap_response/storage_review/stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/README.md",
+      "bytes": 4892
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/manifest.json",
+      "bytes": 14675
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/negative_pairs.csv",
+      "bytes": 3776
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/negative_pairs.sql",
+      "bytes": 1862
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/query.sql",
+      "bytes": 5334
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/run_review.py",
+      "bytes": 4572
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/section14_original.sql",
+      "bytes": 990
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/stdout.jsonl",
+      "bytes": 10681
+    },
+    {
+      "path": "research/spot_twap_response/visibility_delay_review/supplied_section14.txt",
+      "bytes": 304
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/comparison_cells.csv",
+      "bytes": 51825
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/comparison_totals.csv",
+      "bytes": 3501
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/coverage.csv",
+      "bytes": 474
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/daily_cells.csv",
+      "bytes": 603913
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/daily_totals.csv",
+      "bytes": 48437
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/direction_cells.csv",
+      "bytes": 54649
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/direction_totals.csv",
+      "bytes": 3516
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/exclusions.csv",
+      "bytes": 381
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/grids.csv",
+      "bytes": 27860
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/manifest.json",
+      "bytes": 4074
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/outcome_accounting.csv",
+      "bytes": 2405
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/report.md",
+      "bytes": 12152
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/verification.json",
+      "bytes": 1015
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-post-update-check/manifest.json",
+      "bytes": 962
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-post-update-check/verification.json",
+      "bytes": 3262
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/coverage.csv",
+      "bytes": 5347
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/manifest.json",
+      "bytes": 3372
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/market_price_cells.csv",
+      "bytes": 67443
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/price_bands.csv",
+      "bytes": 112453
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/report.md",
+      "bytes": 19924
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/cell_bands.csv",
+      "bytes": 177439
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/checkpoint_bands.csv",
+      "bytes": 15804
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/checkpoint_totals.csv",
+      "bytes": 3503
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/coverage.csv",
+      "bytes": 7857
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/final_report_manifest.json",
+      "bytes": 3188
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/manifest.json",
+      "bytes": 4653
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/reasons.csv",
+      "bytes": 38250
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/screens.csv",
+      "bytes": 281
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/statuses.csv",
+      "bytes": 4252
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/verification.json",
+      "bytes": 786
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-independent-review/bundle_manifest.json",
+      "bytes": 38075
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-independent-review/verification_artifacts.zip",
+      "bytes": 1568331
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/NOTES.md",
+      "bytes": 7495
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_output.txt",
+      "bytes": 3475
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part2_output.txt",
+      "bytes": 2931
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part3_output.txt",
+      "bytes": 700
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part3b_output.txt",
+      "bytes": 765
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part4_output.txt",
+      "bytes": 1457
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part5_output.txt",
+      "bytes": 482
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part6_output.txt",
+      "bytes": 659
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-pilot/pilot_part6b_output.txt",
+      "bytes": 427
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/README.md",
+      "bytes": 5655
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/manifest.json",
+      "bytes": 4278
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/pending_v2/README.md",
+      "bytes": 3019
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/pending_v2/manifest.json",
+      "bytes": 8226
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/pending_v2/recorded_hour_decisions.csv.gz",
+      "bytes": 27258
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/pending_v2/recorded_hour_events.csv.gz",
+      "bytes": 290048
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/pending_v2/recorded_hour_expected.csv.gz",
+      "bytes": 429279
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/recorded_hour_decisions.csv.gz",
+      "bytes": 27258
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/recorded_hour_events.csv.gz",
+      "bytes": 290048
+    },
+    {
+      "path": "tests/fixtures/ghost_twap/recorded_hour_expected.csv.gz",
+      "bytes": 426159
+    },
+    {
+      "path": "tests/test_ghost_twap.py",
+      "bytes": 6221
+    },
+    {
+      "path": "tests/test_ghost_twap_edges.py",
+      "bytes": 15201
+    },
+    {
+      "path": "tests/test_ghost_twap_pending.py",
+      "bytes": 8160
+    },
+    {
+      "path": "tests/test_ghost_twap_replay.py",
+      "bytes": 4058
+    },
+    {
+      "path": "tests/test_h3_leader_risk_extract_guard.py",
+      "bytes": 6882
+    },
+    {
+      "path": "tests/test_leader_risk_market_prices.py",
+      "bytes": 21154
+    },
+    {
+      "path": "tests/test_leader_risk_quote_extract.py",
+      "bytes": 6828
+    },
+    {
+      "path": "tests/test_leader_risk_quote_return_audit.py",
+      "bytes": 16904
+    },
+    {
+      "path": "tests/test_leader_risk_tabulate.py",
+      "bytes": 22664
+    }
+  ],
+  "bundle_allowlist_already_tracked_do_not_overwrite": [
+    "price_collector/__init__.py",
+    "price_collector/market.py"
+  ],
+  "additive_link_dependencies": [
+    {
+      "path": "H3_DATA_READINESS_2026-09-10.md",
+      "bytes": 17046
+    },
+    {
+      "path": "H3_TWAP_LEADER_RISK_STUDY.md",
+      "bytes": 7063
+    },
+    {
+      "path": "H3_TWAP_LEADER_RISK_VALIDATION.md",
+      "bytes": 3205
+    },
+    {
+      "path": "research/leader_risk/README.md",
+      "bytes": 14306
+    },
+    {
+      "path": "research/leader_risk/extract.sql",
+      "bytes": 8962
+    },
+    {
+      "path": "research/leader_risk/quote_return_audit.py",
+      "bytes": 16855
+    },
+    {
+      "path": "research/leader_risk/tabulate.py",
+      "bytes": 27365
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_README.md",
+      "bytes": 3980
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_manifest.json",
+      "bytes": 3671
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_replay/third_implementation_check.py",
+      "bytes": 8808
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/comparison_cells.csv",
+      "bytes": 51825
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/comparison_totals.csv",
+      "bytes": 3501
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/coverage.csv",
+      "bytes": 474
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/daily_cells.csv",
+      "bytes": 603913
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/daily_totals.csv",
+      "bytes": 48437
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/direction_cells.csv",
+      "bytes": 54649
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/direction_totals.csv",
+      "bytes": 3516
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/exclusions.csv",
+      "bytes": 381
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/grids.csv",
+      "bytes": 27860
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/manifest.json",
+      "bytes": 4074
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/outcome_accounting.csv",
+      "bytes": 2405
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/report.md",
+      "bytes": 12152
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-full-history/verification.json",
+      "bytes": 1015
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-post-update-check/manifest.json",
+      "bytes": 962
+    },
+    {
+      "path": "results/leader_risk/2026-09-12-post-update-check/verification.json",
+      "bytes": 3262
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/coverage.csv",
+      "bytes": 5347
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/manifest.json",
+      "bytes": 3372
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/market_price_cells.csv",
+      "bytes": 67443
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/price_bands.csv",
+      "bytes": 112453
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-market-prices/report.md",
+      "bytes": 19924
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/cell_bands.csv",
+      "bytes": 177439
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/checkpoint_bands.csv",
+      "bytes": 15804
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/checkpoint_totals.csv",
+      "bytes": 3503
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/coverage.csv",
+      "bytes": 7857
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/final_report_manifest.json",
+      "bytes": 3188
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/manifest.json",
+      "bytes": 4653
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/reasons.csv",
+      "bytes": 38250
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/screens.csv",
+      "bytes": 281
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/statuses.csv",
+      "bytes": 4252
+    },
+    {
+      "path": "results/leader_risk/2026-09-13-return-audit/verification.json",
+      "bytes": 786
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-independent-review/bundle_manifest.json",
+      "bytes": 38075
+    },
+    {
+      "path": "results/spot_twap_response/2026-09-13-independent-review/verification_artifacts.zip",
+      "bytes": 1568331
+    }
+  ],
+  "third_review_additions": [
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_README.md",
+      "bytes": 3980
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_manifest.json",
+      "bytes": 3671
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_run.py",
+      "bytes": 5762
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_stderr.txt",
+      "bytes": 0
+    },
+    {
+      "path": "research/spot_twap_response/checkpoint_a_pending_review/third_review_stdout.txt",
+      "bytes": 880
+    }
+  ],
+  "helper_import_or_reproduction_additions": [
+    {
+      "path": "research/leader_risk/extract_quotes.sql",
+      "bytes": 4025
+    },
+    {
+      "path": "research/leader_risk/market_prices.py",
+      "bytes": 24917
+    }
+  ],
+  "focused_h3_test_additions": [
+    {
+      "path": "tests/test_h3_leader_risk_extract_guard.py",
+      "bytes": 6882
+    },
+    {
+      "path": "tests/test_leader_risk_market_prices.py",
+      "bytes": 21154
+    },
+    {
+      "path": "tests/test_leader_risk_quote_extract.py",
+      "bytes": 6828
+    },
+    {
+      "path": "tests/test_leader_risk_quote_return_audit.py",
+      "bytes": 16904
+    },
+    {
+      "path": "tests/test_leader_risk_tabulate.py",
+      "bytes": 22664
+    }
+  ],
+  "large_source_exports_required_for_A_tests": [],
+  "intentionally_local_exports": [
+    {
+      "path": "research/spot_twap_response/pilot_review/sources.csv",
+      "bytes": 14921242,
+      "reason": "raw export or large artifact; retain locally"
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/leader_risk_companion/features.csv",
+      "bytes": 17956815,
+      "reason": "raw export or large artifact; retain locally"
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/observations.csv",
+      "bytes": 5007748,
+      "reason": "raw export or large artifact; retain locally"
+    },
+    {
+      "path": "research/spot_twap_response/receipt_clock_pilot/results/rows.csv",
+      "bytes": 11881947,
+      "reason": "raw export or large artifact; retain locally"
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/anchor_targets.csv",
+      "bytes": 11924325,
+      "reason": "raw export or large artifact; retain locally"
+    },
+    {
+      "path": "research/spot_twap_response/receipt_ghost_review/audit_stdout.txt",
+      "bytes": 11924376,
+      "reason": "raw export or large artifact; retain locally"
+    }
+  ],
+  "raw_markdown_links_to_replace_with_omission_manifest_explanation": [
+    "research/spot_twap_response/pilot_review/sources.csv",
+    "research/spot_twap_response/receipt_clock_pilot/leader_risk_companion/features.csv",
+    "research/spot_twap_response/receipt_clock_pilot/results/rows.csv",
+    "research/spot_twap_response/receipt_ghost_review/anchor_targets.csv"
+  ],
+  "currently_missing_links": [],
+  "operational_address_files": [
+    "H3_DATA_READINESS_2026-09-10.md",
+    "research/leader_risk/README.md",
+    "research/spot_twap_response/api_latency_review/manifest.json",
+    "research/spot_twap_response/api_latency_review/reuse_review_benchmark.py",
+    "research/spot_twap_response/api_latency_review/run_benchmark.py",
+    "research/spot_twap_response/api_latency_review/tunnel_benchmark.py",
+    "research/spot_twap_response/api_latency_review/tunnel_result.json",
+    "research/spot_twap_response/binance_delay_review/run_review.py",
+    "research/spot_twap_response/carry_forward_review/manifest.json",
+    "research/spot_twap_response/carry_forward_review/run_review.py",
+    "research/spot_twap_response/ghost_pilot_review/run_review.py",
+    "research/spot_twap_response/projection_pilot_review/manifest.json",
+    "research/spot_twap_response/projection_pilot_review/run_review.py",
+    "research/spot_twap_response/projection_pilot_review/run_review_part2.py",
+    "research/spot_twap_response/projection_pilot_review/section10_manifest.json",
+    "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit_manifest.json",
+    "research/spot_twap_response/receipt_clock_pilot/closing_boundary_audit_run.py",
+    "research/spot_twap_response/receipt_clock_pilot/run_export.py",
+    "research/spot_twap_response/receipt_ghost_review/run_audit.py",
+    "research/spot_twap_response/receipt_ghost_review/run_original.py",
+    "research/spot_twap_response/storage_review/check_capacity.py",
+    "research/spot_twap_response/visibility_delay_review/run_review.py"
+  ],
+  "publication_notes": [
+    "Operational addresses are not credentials, but these original files include the droplet address. Decide inclusion explicitly; any sanitized publication copy needs new hashes without replacing original evidence.",
+    "Compressed A fixtures are sufficient for the replay tests; rebuilding the original fixture still requires the intentionally local source export.",
+    "Keep H3_TWAP_LEADER_RISK_FINAL_REPORT.md byte-identical; its small linked H3 artifacts are included.",
+    "Do not copy stale workspace AGENTS.md, schema.sql, runtime collectors, environment examples, OPERATIONS.md or unrelated reset/probability changes over release base.",
+    "Regenerate the evidence bundle and its manifest only after publication-link changes are final.",
+    "Run tests in the actual clean release tree; dirty-workspace suite counts are not automatically the release suite count."
+  ]
+}

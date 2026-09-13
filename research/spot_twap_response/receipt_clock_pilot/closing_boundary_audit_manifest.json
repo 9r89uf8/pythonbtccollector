@@ -1,0 +1,40 @@
+{
+  "status": "accepted",
+  "purpose": "Grading-only check of scheduled close C=E against official final price; no input selection or future-window fitting",
+  "cohort_start_ms": 1788220800000,
+  "cohort_end_ms_exclusive": 1788825600000,
+  "host": "152.42.247.86",
+  "database": "price_collector",
+  "started_utc": "2026-09-13T15:12:05.450736+00:00",
+  "elapsed_seconds": 6.532,
+  "ssh_psql_exit_code": 0,
+  "validation_errors": [],
+  "result": {
+    "snapshot_ms": "1789312332180",
+    "transaction_read_only": "on",
+    "transaction_isolation": "repeatable read",
+    "statement_timeout": "20s",
+    "calendar_markets": "2016",
+    "validated_market_rules": "2016",
+    "validated_official_rules": "2016",
+    "official_rule_versions": "btc-5m-twap-60",
+    "official_close_missing": "0",
+    "official_close_invalid": "0",
+    "exact_end_events": "1925",
+    "exact_end_missing_markets": "91",
+    "exact_end_unique_markets": "1925",
+    "exact_end_conflicting_markets": "0",
+    "comparable_markets": "1925",
+    "exact_price_matches": "0",
+    "price_mismatches": "1925",
+    "maximum_absolute_price_error": "0.000000000014051072",
+    "maximum_absolute_error_bps": "0.0000000000017806775095147519"
+  },
+  "artifacts_sha256": {
+    "closing_boundary_audit.sql": "698a904a01002bf725a710941dce23715f09f63d78ebdcbe79c2b67d607ec112",
+    "closing_boundary_audit_run.py": "136d5ea704e5df7ab5f9893b973ecfa93dba0e0bcbd3cfb11e79c86a3c97fc2d",
+    "closing_boundary_audit_output.csv": "3b2e95bf4e2004e6c2de88b82d2eb9bf4cd44ba322629cc432f4cad53d5fa6f2",
+    "closing_boundary_audit_stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "execution_scope": "One fixed-week indexed per-market lateral query, 20-second statement timeout, read-only repeatable-read; run after receipt export completed"
+}

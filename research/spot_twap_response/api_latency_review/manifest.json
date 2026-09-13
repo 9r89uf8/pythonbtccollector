@@ -1,0 +1,15 @@
+{
+  "status": "accepted",
+  "ssh_exit_code": 0,
+  "validation_errors": [],
+  "remote_target": "root@152.42.247.86",
+  "read_only": true,
+  "remote_files_written": false,
+  "database_queries": 0,
+  "files_sha256": {
+    "benchmark_remote.py": "a5ccc31627bff2d18defec5ffe794e4920d35aa584badabec0dcf512942b0206",
+    "run_benchmark.py": "b05e4982a28aca23b07c25548fa7d6d83aeed2444e3654b827d7d23b9cb24842",
+    "result.json": "ef3b477d31ff3c322d249955348da10d016177bf3c4cf3e52b54d8f4602b773b",
+    "stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

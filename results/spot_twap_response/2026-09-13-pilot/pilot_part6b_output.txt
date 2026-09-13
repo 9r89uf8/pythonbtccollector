@@ -1,0 +1,11 @@
+BEGIN
+SET
+=== 20. Receipt-clock ghost side calls split by boundary crossing (week, every 60 s of wall time) ===
+h_s|target_in_new_market|n|side_changes|ghost_shows_new_side|ghost_false_alarms|ghost_side_wrong_total|ghost_err_p50_bps
+5|f|7591|131|121|4|14|0.005
+5|t|1912|1800|1772|37|65|0.005
+10|f|7679|245|225|12|32|0.026
+10|t|1930|1731|1708|99|122|0.031
+30|f|7633|692|497|91|286|0.282
+30|t|1915|1526|1457|243|312|0.341
+COMMIT

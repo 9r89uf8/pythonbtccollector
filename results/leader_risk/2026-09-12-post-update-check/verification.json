@@ -1,0 +1,115 @@
+{
+  "scope": "Post-update extraction verification and preliminary counts; full study report and tabulate.py are not implemented.",
+  "market_count": 801,
+  "row_count": 6408,
+  "resolved_market_count": 800,
+  "missing_opening_event_markets": 27,
+  "missing_opening_event_percent": "3.370786516853932584269662921348314606741573033707865168539325842696629",
+  "eligible_observations": 6135,
+  "either_source_age_exactly_3000_ms": 1208,
+  "either_source_age_exactly_3000_percent": "19.69030154849225753871230643846780766096169519152404237978810105949470",
+  "minimum_cell_n": 2,
+  "maximum_cell_n": 85,
+  "empty_cells": 0,
+  "official_vs_stream_k_eligible_pairs": 6127,
+  "leader_tie_or_bin_changes": 0,
+  "unavailable_reason_counts_overlap": {
+    "invalid_market_rule": 0,
+    "boundary_missing_or_late": 216,
+    "boundary_conflict": 0,
+    "twap_no_recent_receipt": 29,
+    "spot_no_recent_receipt": 27,
+    "twap_bad_source_age": 27,
+    "spot_bad_source_age": 20
+  },
+  "checkpoints": [
+    {
+      "t_sec": 120,
+      "rows": 801,
+      "unavailable": 36,
+      "ties": 0,
+      "n": 765,
+      "resolved": 764,
+      "u": 1,
+      "losses": 167,
+      "losing_rate_percent": "21.85863874345549738219895287958115183246073298429319371727748691099476"
+    },
+    {
+      "t_sec": 90,
+      "rows": 801,
+      "unavailable": 36,
+      "ties": 0,
+      "n": 765,
+      "resolved": 764,
+      "u": 1,
+      "losses": 141,
+      "losing_rate_percent": "18.45549738219895287958115183246073298429319371727748691099476439790576"
+    },
+    {
+      "t_sec": 60,
+      "rows": 801,
+      "unavailable": 34,
+      "ties": 0,
+      "n": 767,
+      "resolved": 766,
+      "u": 1,
+      "losses": 89,
+      "losing_rate_percent": "11.61879895561357702349869451697127937336814621409921671018276762402089"
+    },
+    {
+      "t_sec": 30,
+      "rows": 801,
+      "unavailable": 34,
+      "ties": 0,
+      "n": 767,
+      "resolved": 766,
+      "u": 1,
+      "losses": 45,
+      "losing_rate_percent": "5.874673629242819843342036553524804177545691906005221932114882506527415"
+    },
+    {
+      "t_sec": 15,
+      "rows": 801,
+      "unavailable": 33,
+      "ties": 0,
+      "n": 768,
+      "resolved": 767,
+      "u": 1,
+      "losses": 26,
+      "losing_rate_percent": "3.389830508474576271186440677966101694915254237288135593220338983050847"
+    },
+    {
+      "t_sec": 10,
+      "rows": 801,
+      "unavailable": 30,
+      "ties": 0,
+      "n": 771,
+      "resolved": 770,
+      "u": 1,
+      "losses": 18,
+      "losing_rate_percent": "2.337662337662337662337662337662337662337662337662337662337662337662338"
+    },
+    {
+      "t_sec": 5,
+      "rows": 801,
+      "unavailable": 35,
+      "ties": 0,
+      "n": 766,
+      "resolved": 765,
+      "u": 1,
+      "losses": 11,
+      "losing_rate_percent": "1.437908496732026143790849673202614379084967320261437908496732026143791"
+    },
+    {
+      "t_sec": 3,
+      "rows": 801,
+      "unavailable": 35,
+      "ties": 0,
+      "n": 766,
+      "resolved": 765,
+      "u": 1,
+      "losses": 8,
+      "losing_rate_percent": "1.045751633986928104575163398692810457516339869281045751633986928104575"
+    }
+  ]
+}

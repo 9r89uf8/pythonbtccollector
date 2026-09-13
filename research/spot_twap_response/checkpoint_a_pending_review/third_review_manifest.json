@@ -1,0 +1,104 @@
+{
+  "baseline_rows": 21600,
+  "carry_table": [
+    {
+      "available": 3585,
+      "horizon_s": 1,
+      "maximum_interior_carry_at_most_three_seconds": 3463,
+      "maximum_interior_carry_seconds": {
+        "0": 1322,
+        "1": 2081,
+        "2": 60,
+        "6": 122
+      },
+      "no_interior_carry": 1322
+    },
+    {
+      "available": 3585,
+      "horizon_s": 2,
+      "maximum_interior_carry_at_most_three_seconds": 3465,
+      "maximum_interior_carry_seconds": {
+        "0": 1320,
+        "1": 2085,
+        "2": 60,
+        "6": 120
+      },
+      "no_interior_carry": 1320
+    },
+    {
+      "available": 3585,
+      "horizon_s": 3,
+      "maximum_interior_carry_at_most_three_seconds": 3468,
+      "maximum_interior_carry_seconds": {
+        "0": 1340,
+        "1": 2069,
+        "2": 59,
+        "6": 117
+      },
+      "no_interior_carry": 1340
+    },
+    {
+      "available": 3585,
+      "horizon_s": 5,
+      "maximum_interior_carry_at_most_three_seconds": 3471,
+      "maximum_interior_carry_seconds": {
+        "0": 1383,
+        "1": 2031,
+        "2": 57,
+        "6": 114
+      },
+      "no_interior_carry": 1383
+    },
+    {
+      "available": 3585,
+      "horizon_s": 10,
+      "maximum_interior_carry_at_most_three_seconds": 3483,
+      "maximum_interior_carry_seconds": {
+        "0": 1496,
+        "1": 1935,
+        "2": 52,
+        "6": 102
+      },
+      "no_interior_carry": 1496
+    },
+    {
+      "available": 3585,
+      "horizon_s": 30,
+      "maximum_interior_carry_at_most_three_seconds": 3523,
+      "maximum_interior_carry_seconds": {
+        "0": 2066,
+        "1": 1425,
+        "2": 32,
+        "6": 62
+      },
+      "no_interior_carry": 2066
+    }
+  ],
+  "elapsed_ns": 13817850900,
+  "errors": [],
+  "input_hashes_unchanged_during_run": true,
+  "inputs_sha256": {
+    "price_collector/ghost_twap.py": "56c04cd04d549006f0f73d05070ef1f0c20d85eb1b88ccdecf903b920eafbf0c",
+    "price_collector/market.py": "1b8365801387e5424eda3c2333959e09bc2cc163a10522e1e1d65356f016a29a",
+    "research/spot_twap_response/checkpoint_a_replay/third_implementation_check.py": "b9d99978034e53ea06e8ecca9dc1d0951fb81d25b868861b723ad136572964db",
+    "tests/fixtures/ghost_twap/manifest.json": "b1bab833229f3bb4505f8d8faa29a47c9a615c85333c03f50eea64c6235a426c",
+    "tests/fixtures/ghost_twap/pending_v2/manifest.json": "81a18e476fdedbb1678934d10ea39d32e34da5b3a6580631e9cdb95c27c1e599",
+    "tests/fixtures/ghost_twap/pending_v2/recorded_hour_decisions.csv.gz": "62642b8a450e4fe578597931975cf188d83c5e9041a0863481f520c99e138f4e",
+    "tests/fixtures/ghost_twap/pending_v2/recorded_hour_events.csv.gz": "26b54a5b91efd163f2cecc02fb529c0e1a563da1227b2c4f0e0f00fbcf226c2f",
+    "tests/fixtures/ghost_twap/pending_v2/recorded_hour_expected.csv.gz": "345ff83a5e77e0d1f0695a88f4896e284adc277bc7864e2e47f53bcfc96f828d",
+    "tests/fixtures/ghost_twap/recorded_hour_expected.csv.gz": "fa0829a9295a21a224554930061d289096718350c9b2070326ac658773b103ba"
+  },
+  "outputs_sha256": {
+    "third_review_stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "third_review_stdout.txt": "6ab50b20adcdfd417ce2a220cc213dfe742bba5fc892ba90e31df7cde3fb765a"
+  },
+  "python_executable": "C:\\Python312\\python.exe",
+  "python_version": "3.12.0 (tags/v3.12.0:0fb18b0, Oct  2 2023, 13:03:39) [MSC v.1935 64 bit (AMD64)]",
+  "runner_sha256": "d8c00bbac892fb6c812471297828b50c7f36ac60911d1117aae272e2b9b3f299",
+  "sampled_forecasts": 3090,
+  "script_exit_code": 0,
+  "script_printed_assertions_checked": true,
+  "started_wall_ns": 1789335053128773600,
+  "statement": "Local files only; no remote or database access",
+  "status": "accepted"
+}

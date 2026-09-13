@@ -1,0 +1,4 @@
+h_s,n,ghost_err_p50_bps,ghost_err_p90_bps,ghost_err_p99_bps,persistence_err_p50_bps,persistence_err_p90_bps,assumed_slots_avg,assumed_slots_max,target_arrival_p10_ms,target_arrival_p50_ms,target_arrival_p90_ms,side_changes,ghost_shows_new_side,ghost_false_alarms,ghost_side_wrong_total
+5,9503,0.005,0.060,0.209,0.157,0.572,1.94,9,3752,4614,5108.800000000001,1931,1893,41,79
+10,9609,0.027,0.154,0.410,0.310,1.110,6.94,14,8704.8,9571,10117,1976,1933,111,154
+30,9548,0.292,1.243,2.783,0.879,3.110,26.94,34,28634,29611,30158,2218,1954,334,598

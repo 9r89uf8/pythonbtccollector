@@ -1,0 +1,23 @@
+{
+  "cohort_start_utc": "2026-09-10T02:30:00.000Z",
+  "cohort_end_exclusive_utc": "2026-09-12T21:15:00.000Z",
+  "outcome_cutoff_utc": "2026-09-12T21:24:11.716Z",
+  "outcome_cutoff_ms": "1789248251716",
+  "cohort_floor_ms": "1789007400000",
+  "first_full_market_id": "5963358",
+  "deployment_commit": "ace8d19bef1c72d0141ebf729c3a37b534c90efb",
+  "production_pull_utc": "2026-09-10T02:26:54Z",
+  "probability_service_started_utc": "2026-09-10T02:26:56Z",
+  "sql_path": "research/leader_risk/extract.sql",
+  "sql_sha256": "5f3890eaba6df22058c65a5c2aafcc7b9ea66ee6410c44e0f8e3d07b569690aa",
+  "csv_path": "observations.csv",
+  "csv_sha256": "f106c93e70a82fc7c765a6f369bf6387c4edea5239bf0ea004418f12732a1e70",
+  "native_exit_code": 0,
+  "expected_markets": 801,
+  "actual_markets": 801,
+  "expected_rows": 6408,
+  "actual_rows": 6408,
+  "checkpoint_uniqueness_verified": true,
+  "minimum_decimal_precision": 70,
+  "statement_timeout": "60s"
+}

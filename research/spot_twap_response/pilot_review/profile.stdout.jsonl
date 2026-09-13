@@ -1,0 +1,3 @@
+{"raw_chainlink_received_day_count" : 0, "day_start_utc" : "2026-09-11T00:00:00Z", "day_end_utc_exclusive" : "2026-09-12T00:00:00Z"}
+{"twap_event_rows" : 84241, "twap_unique_source_timestamps" : 84241, "twap_source_timestamp_duplicate_groups" : 0, "twap_source_timestamp_conflict_groups" : 0, "twap_nonsecond_source_timestamp_groups" : 0, "first_twap_source_ms" : 1789084800000, "last_twap_source_ms" : 1789171199000}
+{"spot_rows_with_required_margins" : 84383, "spot_day_rows" : 84316, "spot_nonsecond_source_timestamps" : 0, "spot_null_source_timestamps" : 0, "spot_source_floor_key_mismatches" : 0, "first_spot_sample_ms" : 1789084737000, "last_spot_sample_ms" : 1789171203000}

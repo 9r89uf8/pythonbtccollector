@@ -1,0 +1,9 @@
+contract 1 vs 2 on 21600 rows: price/availability/ETA differences = 0; carried split mismatches = 0
+third implementation: checked 3090 sampled forecasts; mismatches vs expected = 0; vs engine = 0
+available forecasts by maximum interior carry age (seconds), all 3,600 decisions:
+  h= 1: {0: 1322, 1: 2081, 2: 60, 6: 122}  -> healthy (no carry) 1322/3585; carry <= 3 s 3463/3585
+  h= 2: {0: 1320, 1: 2085, 2: 60, 6: 120}  -> healthy (no carry) 1320/3585; carry <= 3 s 3465/3585
+  h= 3: {0: 1340, 1: 2069, 2: 59, 6: 117}  -> healthy (no carry) 1340/3585; carry <= 3 s 3468/3585
+  h= 5: {0: 1383, 1: 2031, 2: 57, 6: 114}  -> healthy (no carry) 1383/3585; carry <= 3 s 3471/3585
+  h=10: {0: 1496, 1: 1935, 2: 52, 6: 102}  -> healthy (no carry) 1496/3585; carry <= 3 s 3483/3585
+  h=30: {0: 2066, 1: 1425, 2: 32, 6: 62}  -> healthy (no carry) 2066/3585; carry <= 3 s 3523/3585

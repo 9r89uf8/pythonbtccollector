@@ -1,0 +1,759 @@
+{
+  "status": "accepted",
+  "started_utc": "2026-09-13T19:45:18.056462+00:00",
+  "finished_utc": "2026-09-13T19:45:31.049704+00:00",
+  "scope": "Five TCP connection-time probes to droplet SSH port22; one warmup and ten sequential HTTP GETs through one temporary loopback SSH forward",
+  "endpoint": "/markets/current/live",
+  "tcp_connect_probe_count": 5,
+  "tcp_connect_time_ms": {
+    "p50": "362.2341",
+    "p90": "375.33042",
+    "minimum": "277.6705",
+    "maximum": "382.2495"
+  },
+  "tcp_connect_probes": [
+    {
+      "index": 0,
+      "status": "connected",
+      "connect_duration_ns": 382249500,
+      "local_address": [
+        "10.253.152.155",
+        58865
+      ]
+    },
+    {
+      "index": 1,
+      "status": "connected",
+      "connect_duration_ns": 362234100,
+      "local_address": [
+        "10.253.152.155",
+        58866
+      ]
+    },
+    {
+      "index": 2,
+      "status": "connected",
+      "connect_duration_ns": 297379200,
+      "local_address": [
+        "10.253.152.155",
+        58867
+      ]
+    },
+    {
+      "index": 3,
+      "status": "connected",
+      "connect_duration_ns": 277670500,
+      "local_address": [
+        "10.253.152.155",
+        58868
+      ]
+    },
+    {
+      "index": 4,
+      "status": "connected",
+      "connect_duration_ns": 364951800,
+      "local_address": [
+        "10.253.152.155",
+        58872
+      ]
+    }
+  ],
+  "http_connect_invocations": 1,
+  "http_connect_events": [
+    {
+      "connect_call": 1,
+      "connect_duration_ns": 655400,
+      "socket": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      }
+    }
+  ],
+  "http_socket_object_count": 1,
+  "http_local_port_count": 1,
+  "http_connection_reused": true,
+  "measured_http_requests": 10,
+  "measured_status_counts": {
+    "200": 10
+  },
+  "response_stage_ms": {
+    "request_send": {
+      "p50": "0.15455",
+      "p90": "0.2777",
+      "minimum": "0.1088",
+      "maximum": "0.3236"
+    },
+    "request_to_headers": {
+      "p50": "597.12705",
+      "p90": "613.18781",
+      "minimum": "577.729",
+      "maximum": "619.2521"
+    },
+    "headers_to_full_body": {
+      "p50": "0.04655",
+      "p90": "0.12455",
+      "minimum": "0.0368",
+      "maximum": "0.5741"
+    },
+    "full_response": {
+      "p50": "597.43275",
+      "p90": "613.24819",
+      "minimum": "577.7749",
+      "maximum": "619.2961"
+    }
+  },
+  "http_requests": [
+    {
+      "index": -1,
+      "warmup": true,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "848",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 848,
+      "connect_calls_before": 0,
+      "connect_calls_after": 1,
+      "socket_before_request": null,
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 1053700,
+      "request_to_headers_ns": 1796368800,
+      "headers_to_full_body_ns": 103500,
+      "full_response_ns": 1796472300
+    },
+    {
+      "index": 0,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "844",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 844,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 258200,
+      "request_to_headers_ns": 595788700,
+      "headers_to_full_body_ns": 574100,
+      "full_response_ns": 596362800
+    },
+    {
+      "index": 1,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "845",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 845,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 272600,
+      "request_to_headers_ns": 601645700,
+      "headers_to_full_body_ns": 47200,
+      "full_response_ns": 601692900
+    },
+    {
+      "index": 2,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "843",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 843,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 157600,
+      "request_to_headers_ns": 619252100,
+      "headers_to_full_body_ns": 44000,
+      "full_response_ns": 619296100
+    },
+    {
+      "index": 3,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "844",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 844,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 123500,
+      "request_to_headers_ns": 582944500,
+      "headers_to_full_body_ns": 54400,
+      "full_response_ns": 582998900
+    },
+    {
+      "index": 4,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "844",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 844,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 147800,
+      "request_to_headers_ns": 582312800,
+      "headers_to_full_body_ns": 74600,
+      "full_response_ns": 582387400
+    },
+    {
+      "index": 5,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "844",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 844,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 323600,
+      "request_to_headers_ns": 612514000,
+      "headers_to_full_body_ns": 62200,
+      "full_response_ns": 612576200
+    },
+    {
+      "index": 6,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "843",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 843,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 196200,
+      "request_to_headers_ns": 577729000,
+      "headers_to_full_body_ns": 45900,
+      "full_response_ns": 577774900
+    },
+    {
+      "index": 7,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "845",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 845,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 139400,
+      "request_to_headers_ns": 598465400,
+      "headers_to_full_body_ns": 37300,
+      "full_response_ns": 598502700
+    },
+    {
+      "index": 8,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "847",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 847,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 108800,
+      "request_to_headers_ns": 580840100,
+      "headers_to_full_body_ns": 42400,
+      "full_response_ns": 580882500
+    },
+    {
+      "index": 9,
+      "warmup": false,
+      "status": 200,
+      "http_version": 11,
+      "will_close": false,
+      "response_headers": {
+        "Connection": null,
+        "Content-Length": "844",
+        "Transfer-Encoding": null
+      },
+      "response_body_bytes": 844,
+      "connect_calls_before": 1,
+      "connect_calls_after": 1,
+      "socket_before_request": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_send": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "socket_after_body": {
+        "object_id": 1786037958848,
+        "fileno": 492,
+        "local_address": [
+          "127.0.0.1",
+          58889
+        ],
+        "peer_address": [
+          "127.0.0.1",
+          58873
+        ],
+        "tcp_nodelay": 1
+      },
+      "request_send_ns": 151500,
+      "request_to_headers_ns": 600452400,
+      "headers_to_full_body_ns": 36800,
+      "full_response_ns": 600489200
+    }
+  ],
+  "local_forward_port": 58873,
+  "readiness_tcp_probe_connections": 1,
+  "readiness_note": "The separately closed readiness probe is not an HTTP GET or a measured request connection",
+  "ssh_process_id": 24008,
+  "owned_ssh_process_exited": true,
+  "owned_ssh_exit_code": 1,
+  "local_listener_closed": true,
+  "forced_kill_used": false,
+  "cleanup_started_utc": "2026-09-13T19:45:30.827712+00:00",
+  "cleanup_finished_utc": "2026-09-13T19:45:30.843441+00:00",
+  "total_wall_elapsed_ms": "12993.6867",
+  "errors": [],
+  "limitations": [
+    "TCP connect time is not a one-way-delay estimate and HTTP response time is not a pure RTT measurement",
+    "Response-stage timing locates observed waiting but does not identify its network or implementation cause",
+    "No packet capture, SSH verbose logs, CPU measurement, public API or production changes"
+  ]
+}

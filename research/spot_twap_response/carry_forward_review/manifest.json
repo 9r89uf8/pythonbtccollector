@@ -1,0 +1,40 @@
+{
+  "status": "accepted",
+  "audit_type": "Exact fixed-week per-market section-13 source-clock reproduction; not receipt-causal",
+  "started_utc": "2026-09-13T14:46:50.636918+00:00",
+  "elapsed_seconds": 10.234,
+  "ssh_psql_exit_code": 0,
+  "validation_errors": [],
+  "supplied_rows_match_exactly": true,
+  "rows": 6,
+  "snapshot_ms": "1789310816503",
+  "cohort_audit": {
+    "resolved_markets": 2016,
+    "missing_open": 0,
+    "missing_close": 0,
+    "missing_winner": 0
+  },
+  "host": "152.42.247.86",
+  "database": "price_collector",
+  "read_only": true,
+  "isolation": "repeatable read",
+  "statement_timeout": "20s",
+  "cohort_start_ms": 1788220800000,
+  "cohort_end_ms": 1788825600000,
+  "source_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\research\\spot_twap_response\\pilot_part3b.sql",
+  "source_sha256": "e11c7315ce2b8db684ea0391ada79e538c3792867a079a138e7954068308e6df",
+  "supplied_output_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\results\\spot_twap_response\\2026-09-13-pilot\\pilot_part3b_output.txt",
+  "supplied_output_sha256": "3efe6e09bae234e8d6374a7d23be048848d23a475fcd21626d744353996c5429",
+  "preamble_source_sha256": "62c4392421194ed39e40d4cf3121d85a967edc03cc96f91572c2bafaba07baef",
+  "artifacts_sha256": {
+    "section13_original.sql": "c5d8e81ab849a39ac5ae5bd5b009d56d8f842e3622a47133ae454dbea4e1e8be",
+    "query.sql": "a18fdebef5b6287c41756eb3167ff781454565e8ecd3fe3a72125323209689dc",
+    "stdout.txt": "e3e0f43949fcba938e91b189c7185835989871e4152a14ff7e7a22f8e8281087",
+    "stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results.csv": "2b8798e17ea876e12c7bc9e0589a8a3fe38bf4f4ce5b1e8bcbfc57823e608298",
+    "supplied_output.txt": "3efe6e09bae234e8d6374a7d23be048848d23a475fcd21626d744353996c5429"
+  },
+  "code_sha256": "bc3f63d8bb42a1e2d7fd014d9898d71b11b683880b0bf6310b0dd5516ceb2733",
+  "quantile_note": "Preserves original percentile_cont approximation on finalized dimensionless bps; financial projection arithmetic remains PostgreSQL NUMERIC.",
+  "scope_note": "Only per-market section 13 executed; no pilot_part3.sql per-second queries. Original external files and prior reviews remain unchanged."
+}

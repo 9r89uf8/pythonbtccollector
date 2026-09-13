@@ -1,0 +1,70 @@
+{
+  "status": "accepted",
+  "started_utc": "2026-09-13T18:00:21.037173+00:00",
+  "elapsed_seconds": 26.125,
+  "ssh_psql_exit_code": 0,
+  "validation_errors": [],
+  "snapshot_ms": "1789322427270",
+  "read_only": true,
+  "isolation": "repeatable read",
+  "statement_timeout": "20s",
+  "original_rows_match": true,
+  "original_result_lines": [
+    "5|9199|0.006|0.058|0.194|0.155|0.561|1052|1021|24|55",
+    "10|9172|0.031|0.180|0.448|0.307|1.093|1158|1071|74|161",
+    "30|9135|0.311|1.274|3.095|0.868|3.083|1564|1239|225|550"
+  ],
+  "coverage": [
+    {
+      "h": 5,
+      "candidate_anchors": 10081,
+      "end_boundary_anchor": 1,
+      "missing_exact_twap_now": 461,
+      "missing_exact_twap_future": 462,
+      "missing_target_opening_price": 0,
+      "target_resolution_not_resolved": 0,
+      "missing_target_resolution_record": 0,
+      "exact_targets_with_resolved_market": 9199
+    },
+    {
+      "h": 10,
+      "candidate_anchors": 10081,
+      "end_boundary_anchor": 1,
+      "missing_exact_twap_now": 461,
+      "missing_exact_twap_future": 468,
+      "missing_target_opening_price": 0,
+      "target_resolution_not_resolved": 0,
+      "missing_target_resolution_record": 0,
+      "exact_targets_with_resolved_market": 9172
+    },
+    {
+      "h": 30,
+      "candidate_anchors": 10081,
+      "end_boundary_anchor": 1,
+      "missing_exact_twap_now": 461,
+      "missing_exact_twap_future": 507,
+      "missing_target_opening_price": 0,
+      "target_resolution_not_resolved": 0,
+      "missing_target_resolution_record": 0,
+      "exact_targets_with_resolved_market": 9135
+    }
+  ],
+  "source_sha256": "14e4f228712bb62c04705b7fb23bcc6ef0768128b13862e126456cf5d35fe810",
+  "supplied_output_sha256": "d8d265268410d73b9a6fc7bb4ad8f7a70888495a1dfdf60038c543ade77d0a1a",
+  "code_sha256": "aa8ae5c90c6adc9a6d84d708dfe578f07fb8c53137606701d368b3ed7999ee00",
+  "files_sha256": {
+    "section18_original.sql": "0948477d5b9dccff29e0e6f6711391c54f16916bda36afb7ef59c197249465a7",
+    "supplied_output.txt": "d8d265268410d73b9a6fc7bb4ad8f7a70888495a1dfdf60038c543ade77d0a1a",
+    "attempt1_query.sql": "a02dbb0d52bff30fcc3ca15c1fe443791d14f045c04daac1e84f9b90a9e1a71c",
+    "attempt1_stdout.txt": "46710697ea75fe401575b49c4159fc845d953db657b6f43a51e1083ddcaa752d",
+    "attempt1_stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "summary.csv": "03465151e625463924569283ce1bdb8829cddbc622e7e17e799a756cf98c73cf"
+  },
+  "scope": "Only original fixed-week section18 plus point-lookup target coverage; no other sections",
+  "numeric_note": "Original NUMERIC financial arithmetic and percentile_cont approximation on finalized dimensionless bps preserved; original3decimalrounding",
+  "limitations": [
+    "Source-clock retained-history replay, not causal receipt-clock forecast",
+    "Inclusive final anchor adds the September8 midnight anchor and forecasts beyond the nominal week",
+    "Side correctness is relative to future TWAP and reconciled target-market strike, not official final winner"
+  ]
+}

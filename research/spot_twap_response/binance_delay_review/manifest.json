@@ -1,0 +1,66 @@
+{
+  "status": "accepted",
+  "scope": "Fixed-week Binance sampler-clock profile and section-15 receipt-pairing reproduction only; no economic propagation estimate",
+  "started_utc": "2026-09-13T16:08:42.451509+00:00",
+  "elapsed_seconds": 30.641,
+  "ssh_psql_exit_code": 0,
+  "validation_errors": [],
+  "sample_cohort_start_ms": 1788220800000,
+  "sample_cohort_end_ms_inclusive": 1788825600000,
+  "source_sql_sha256": "57ded904637dfca9ade75f3994e8cfc4ffec1a74eb57556958724cbea519b675",
+  "supplied_output_sha256": "db56df91609bb6d78424dcc8303d4b59cb41a49b434bd414e7f53f6912d2ac1a",
+  "collector_code_sha256": "d2aac4fc4e98070f6c3cc2f84490172f8a3d2f78ca4f497596328edc220b3b09",
+  "profile": {
+    "snapshot_ms": "1789315728563",
+    "transaction_read_only": "on",
+    "transaction_isolation": "repeatable read",
+    "statement_timeout": "20s",
+    "sample_rows": "604756",
+    "missing_source_clock_rows": "0",
+    "first_sample_ms": "1788220800000",
+    "last_sample_ms": "1788825600000",
+    "first_provider_event_ms": "1788220799017",
+    "last_provider_event_ms": "1788825599016",
+    "sampler_key_differs_from_provider_second_rows": "603313",
+    "repeated_cached_state_adjacent_rows": "3551",
+    "repeated_cached_state_consecutive_second_rows": "3551",
+    "sampler_minus_receipt_ms_p10_p50_p90_p99": "{944,948,955,992}",
+    "sampler_minus_receipt_ms_min": "0",
+    "sampler_minus_receipt_ms_max": "9956",
+    "sampler_minus_provider_ms_p10_p50_p90_p99": "{983,984,985,986}",
+    "receipt_minus_provider_ms_p10_p50_p90_p99": "{30,36,40,49}"
+  },
+  "section15_pairs": [
+    {
+      "twap_stamp_offset_s": "3",
+      "n_pairs": "576222",
+      "p10_ms": "5328",
+      "p50_ms": "5707",
+      "p90_ms": "6189",
+      "p99_ms": "6673"
+    },
+    {
+      "twap_stamp_offset_s": "4",
+      "n_pairs": "576219",
+      "p10_ms": "6328",
+      "p50_ms": "6707",
+      "p90_ms": "7190",
+      "p99_ms": "7671"
+    }
+  ],
+  "section15_supplied_values_reproduced": true,
+  "artifacts_sha256": {
+    "query.sql": "502b6ebc6b2d0be4be76023a3ddfdae795aaf6534b5b71eca091fe22d6b9842f",
+    "run_review.py": "ad4fead74e794b15e6fba9d5a257776f8886985cfc344fd08b87585fa33a835f",
+    "stdout.txt": "b9c32a183ce3eec12bbd1750ad9efaa44ba640381633e2279bd0cf693df18bcd",
+    "stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "clock_profile.csv": "9a2f9b988a62e18c073cf91d09e24496b357636f119c45cb32f94e2d8b66d4f3",
+    "pairing.csv": "c268c02b9b79fab4b6f901dcaf60c15bf0de5e5e3c0caba0689f270f9a96a9ad"
+  },
+  "notes": [
+    "Queries execute sequentially within one read-only repeatable-read transaction; each statement timeout is20s",
+    "Expected BTC/USD topic filters are added to the original window-only TWAP restriction to use its source-time index",
+    "Sample endpoints intentionally preserve the supplied SQL's inclusive BETWEEN convention",
+    "Quantiles concern timestamp differences only; financial prices are used solely to detect repeated cached ticker states"
+  ]
+}

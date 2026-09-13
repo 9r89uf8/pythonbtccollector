@@ -1,0 +1,60 @@
+{
+  "status": "passed",
+  "validated_utc": "2026-09-13T20:42:14.449371+00:00",
+  "checkpoint": "A only",
+  "tests": {
+    "command": ".venv/Scripts/python.exe -m pytest -q",
+    "passed": 923,
+    "elapsed_seconds": "33.57",
+    "ghost_cases_in_full_suite": 42
+  },
+  "recorded_replay": {
+    "events": 7505,
+    "decisions": 3600,
+    "horizons": [
+      1,
+      2,
+      3,
+      5,
+      10,
+      30
+    ],
+    "expected_rows": 21600,
+    "exactly_matching_rows": 21600,
+    "available_per_horizon": 3585,
+    "unavailable_per_horizon": 15
+  },
+  "scope": {
+    "collector_integration": false,
+    "api_routes": false,
+    "schema_changes": false,
+    "deployment": false,
+    "network_access_this_checkpoint": false,
+    "default_enabled": false
+  },
+  "checks": [
+    "independent exact Decimal replay on retained prefixes",
+    "receipt/ordering/slot/ETA equality",
+    "frozen artifact hashes",
+    "synthetic edge and failure recovery cases",
+    "nanosecond JSON string preservation",
+    "no production importer of ghost engine",
+    "original leader-risk report hash unchanged"
+  ],
+  "limitations": [
+    "historical spot upserts omit earlier same-second versions",
+    "fixture ordering and monotonic clock are synthetic",
+    "runtime receipt barrier and publication/audit integration remain B",
+    "prospective accuracy and browser delivery remain unmeasured"
+  ],
+  "files_sha256": {
+    "price_collector/ghost_twap.py": "23e2e2d5df839e2616953c1bb4d09797dc0fcd571430616ebb44423a609d3994",
+    "tests/test_ghost_twap.py": "1ecf1748a8f0046e10dc805cc502f579396d2595a69e3b55374a3035dab299e2",
+    "tests/test_ghost_twap_edges.py": "f7ba77b26fcd259cee7af2b6092b224b569a79ea07f941c10069f2b3b3ce8571",
+    "tests/test_ghost_twap_replay.py": "1a656e8fed6ff5c209f83066b260fbe3277b57296a27530763e6e7aee0e39557",
+    "tests/fixtures/ghost_twap/manifest.json": "b1bab833229f3bb4505f8d8faa29a47c9a615c85333c03f50eea64c6235a426c",
+    "research/spot_twap_response/checkpoint_a_replay/build_fixture.py": "4c33afc0eb997976d606629cb4cd1b3805b835b62727c87bd40256404a3ea6b8",
+    "GHOST_TWAP_CHECKPOINT_A.md": "3a917bbd5536f4844b422b1d2f3c9a946e1e7d3058126919794771d75e2a91b5",
+    "GHOST_TWAP_LIVE_PLAN.md": "e8481ead502c01acb24cafb5cf0d214ce6c3af5e70b32f0d799a181bbd36985b"
+  }
+}

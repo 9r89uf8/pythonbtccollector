@@ -1,0 +1,10 @@
+{
+  "started_at_utc": "2026-09-13T14:02:09.843632+00:00",
+  "finished_at_utc": "2026-09-13T14:02:17.718814+00:00",
+  "psql_exit_code": 0,
+  "read_only": true,
+  "isolation": "repeatable read",
+  "statement_timeout": "20s",
+  "sql_sha256": "e709e79cd0027cd11387d443be38e5431efe28c36007cec6df7ea6883c6e76f2",
+  "output_sha256": "2f6e7db3f5c9279a729beacac5bca470ffe084c21e1d90b02c4a664a90c58467"
+}

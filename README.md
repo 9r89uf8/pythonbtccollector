@@ -899,3 +899,17 @@ describes a 250 ms taker delay when `itode=true`; an observed
 defines current fee schedules and minimum size/tick constraints. Their
 timestamped observations describe the available configuration, not realized
 fills or a frozen fee schedule for future markets.
+
+## Ghost TWAP calculation — Checkpoint A
+
+`price_collector/ghost_twap.py` provides an optional pure Decimal engine for
+1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
+through `GhostPolicy`, has no I/O, and is not imported by the collectors or API.
+No live ghost route or collector environment flag is installed in this checkpoint.
+The exact recorded-hour replay covers 21,600 horizon calculations; it does not
+measure prospective publication or frontend latency. Payload contract 2 separates
+pending recent inputs from interior carried slots, with all forecast prices and
+availability unchanged. Pending and future inputs remain explicit assumptions.
+See the
+[Checkpoint A contract and tests](GHOST_TWAP_CHECKPOINT_A.md) and
+[remaining live implementation plan](GHOST_TWAP_LIVE_PLAN.md).
