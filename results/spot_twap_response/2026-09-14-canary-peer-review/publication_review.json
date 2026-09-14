@@ -1,0 +1,385 @@
+{
+  "checked_utc": "2026-09-14T02:22:41.743523+00:00",
+  "code_sha256": "ed27eb89b9df007aa480af8e6b2cc4cb2a5cd30f560d57b2a41405c2d3f53075",
+  "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-canary-2026-09-14\\audit.jsonl",
+  "input_sha256": "d7536bcafcf62170abbf9329f6b720d7df35fb710b9f79f64ec96ca2bda05b80",
+  "interpretation": [
+    "preempted_after_spool is an eligibility rejection after a completed durable write; coalesced_before_publication is a separate status.",
+    "The next same-run publication intent bounds the prior worker's check completion. It is not the missing exact check time.",
+    "Trigger sets describe recorded candidates before that bound; multiple candidates remain ambiguous. No transient unrecorded clock jump is inferred.",
+    "Intent-to-attempt includes serialization, async-lock wait, executor scheduling, file checks/writes, file fsync, rename, directory fsync and post-write recheck.",
+    "No recorded timestamps isolate individual fsync time. Fsync is already offloaded to an executor while durable completion gates publication.",
+    "Timing distributions are per acknowledged decision from latest included receipt, not all feed arrivals, target lead or browser delivery.",
+    "Quantiles use linear interpolation at (n-1)*p; financial values are neither converted nor used in timing arithmetic."
+  ],
+  "manifest_sha256": "520a63985a5dae3f0b4adf572dfddadddbf2bdefc200e1751dbee1bb8a8c33e5",
+  "preempted": {
+    "diagnostics": {
+      "all_horizons_unavailable": 0,
+      "first_target_at_or_after_expiry": 35,
+      "first_target_precedes_expiry": 383,
+      "target_before_or_at_intent": 0,
+      "unbounded_case_with_stop_canary_deadline": 1
+    },
+    "examples": {
+      "no_later_intent_upper_bound": [
+        {
+          "check_completion_upper_bound_ms": null,
+          "decision_id": "7292",
+          "intent_to_expiry_ms": "1685.606361",
+          "intent_to_first_target_ms": "1363.877677",
+          "intent_to_recorded_stop_ms": "15.866031",
+          "next_intent_decision_id": null,
+          "recorded_stop_reason": "canary_deadline",
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        }
+      ],
+      "target_receipt": [
+        {
+          "check_completion_upper_bound_ms": "20.115596",
+          "decision_id": "1106",
+          "intent_to_expiry_ms": "47.895041",
+          "intent_to_first_target_ms": "2.127525",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1107",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        },
+        {
+          "check_completion_upper_bound_ms": "36.439799",
+          "decision_id": "1117",
+          "intent_to_expiry_ms": "307.33155",
+          "intent_to_first_target_ms": "16.410506",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1118",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        },
+        {
+          "check_completion_upper_bound_ms": "35.480094",
+          "decision_id": "1131",
+          "intent_to_expiry_ms": "784.401446",
+          "intent_to_first_target_ms": "18.321436",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1132",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        }
+      ],
+      "target_receipt + validity_expiry": [
+        {
+          "check_completion_upper_bound_ms": "66.982429",
+          "decision_id": "1089",
+          "intent_to_expiry_ms": "15.476687",
+          "intent_to_first_target_ms": "55.977889",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1090",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        },
+        {
+          "check_completion_upper_bound_ms": "206.314565",
+          "decision_id": "1383",
+          "intent_to_expiry_ms": "0.207853",
+          "intent_to_first_target_ms": "193.187233",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1384",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        },
+        {
+          "check_completion_upper_bound_ms": "218.553868",
+          "decision_id": "1897",
+          "intent_to_expiry_ms": "27.551528",
+          "intent_to_first_target_ms": "168.168814",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1898",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        }
+      ],
+      "validity_expiry": [
+        {
+          "check_completion_upper_bound_ms": "34.36836",
+          "decision_id": "1110",
+          "intent_to_expiry_ms": "15.978968",
+          "intent_to_first_target_ms": "1195.973822",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1111",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        },
+        {
+          "check_completion_upper_bound_ms": "47.965424",
+          "decision_id": "1681",
+          "intent_to_expiry_ms": "21.485064",
+          "intent_to_first_target_ms": "952.44928",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1682",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        },
+        {
+          "check_completion_upper_bound_ms": "62.68607",
+          "decision_id": "1685",
+          "intent_to_expiry_ms": "0.67009",
+          "intent_to_first_target_ms": "1250.691125",
+          "intent_to_recorded_stop_ms": null,
+          "next_intent_decision_id": "1686",
+          "recorded_stop_reason": null,
+          "run_id": "06f1134f06c14a94b5cab90a43b2eee6"
+        }
+      ]
+    },
+    "intent_to_check_completion_upper_bound": {
+      "at_most_10_ms": 0,
+      "max_ms": "899.917096",
+      "mean_ms": "55.024550261390887290167865707434052757793764988009592326139088729016786570743405",
+      "min_ms": "20.115596",
+      "n": 417,
+      "negative": 0,
+      "p50_ms": "41.22271",
+      "p90_ms": "83.3845412",
+      "p99_ms": "220.28099704"
+    },
+    "intent_to_first_target": {
+      "at_most_10_ms": 175,
+      "max_ms": "1363.877677",
+      "mean_ms": "56.29336604784688995215311004784688995215311004784688995215311004784688995215311",
+      "min_ms": "1.356163",
+      "n": 418,
+      "negative": 0,
+      "p50_ms": "12.8332145",
+      "p90_ms": "50.1705301",
+      "p99_ms": "1032.77525112"
+    },
+    "intent_to_validity_expiry": {
+      "at_most_10_ms": 15,
+      "max_ms": "1685.606361",
+      "mean_ms": "424.19204235885167464114832535885167464114832535885167464114832535885167464114833",
+      "min_ms": "0.207853",
+      "n": 418,
+      "negative": 0,
+      "p50_ms": "422.460718",
+      "p90_ms": "742.3507193",
+      "p99_ms": "877.99491791"
+    },
+    "n": 418,
+    "recorded_trigger_sets_within_upper_bound": {
+      "no_later_intent_upper_bound": 1,
+      "target_receipt": 375,
+      "target_receipt + validity_expiry": 27,
+      "validity_expiry": 15
+    },
+    "target_only_available_later_horizons_unreceived_through_upper_bound": {
+      "10": 375,
+      "30": 375,
+      "5": 375
+    },
+    "target_only_first_receipt_horizon_sets": {
+      "1": 375
+    }
+  },
+  "publication_statuses": {
+    "acknowledged": 6082,
+    "expired_before_attempt": 1,
+    "expired_or_target_received": 791,
+    "preempted_after_spool": 418
+  },
+  "runtime_sha256": "aa5c061d6d656a33ce6ff76e589d55e79563b53da915f4a477eb04f302eb8b73",
+  "spool_sha256": "ade92a483464eef3645b2610ccc188ba08b3be2809b09e26330c34f115a8ea34",
+  "status": "completed",
+  "timing": {
+    "acknowledged_all": {
+      "attempt_to_ack": {
+        "at_most_10_ms": 6058,
+        "max_ms": "24.030307",
+        "mean_ms": "2.1573413885235120026307135810588622163761920420914172969417954620190726734626768",
+        "min_ms": "0.671256",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "1.762511",
+        "p90_ms": "3.8239334",
+        "p99_ms": "7.94790516"
+      },
+      "computation_to_attempt": {
+        "at_most_10_ms": 0,
+        "max_ms": "457.896099",
+        "mean_ms": "36.344559411871095034528115751397566589937520552449852022361065439000328839197632",
+        "min_ms": "11.252403",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "32.879569",
+        "p90_ms": "52.3733991",
+        "p99_ms": "97.0358829"
+      },
+      "computation_to_intent": {
+        "at_most_10_ms": 4375,
+        "max_ms": "207.318011",
+        "mean_ms": "10.134899244985202236106543900032883919763235777704702400526142716211772443275238",
+        "min_ms": "2.275814",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "7.2536045",
+        "p90_ms": "19.2064956",
+        "p99_ms": "43.21250964"
+      },
+      "decision_to_ack": {
+        "at_most_10_ms": 0,
+        "max_ms": "463.195763",
+        "mean_ms": "39.890977134166392634001973035185794146662282144031568562972706346596514304505097",
+        "min_ms": "13.307676",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "36.0504645",
+        "p90_ms": "57.0006049",
+        "p99_ms": "104.06367289"
+      },
+      "decision_to_computation": {
+        "at_most_10_ms": 6074,
+        "max_ms": "26.243946",
+        "mean_ms": "1.3890763337717855968431437027293653403485695494902992436698454455771127918447879",
+        "min_ms": "0.394983",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "1.0467965",
+        "p90_ms": "2.4119969",
+        "p99_ms": "5.5923809"
+      },
+      "decisions_intent_to_attempt_exceeds_half_receipt_to_ack": 5129,
+      "intent_to_attempt": {
+        "at_most_10_ms": 57,
+        "max_ms": "250.578088",
+        "mean_ms": "26.209660166885892798421571851364682670174284774745149621834922722788556395922394",
+        "min_ms": "7.319992",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "24.275623",
+        "p90_ms": "37.718817",
+        "p99_ms": "68.80901046"
+      },
+      "intent_to_attempt_share_of_computation_to_attempt": "0.72114397838387673775043430214694940317878286360878309329916482244882207005112623",
+      "intent_to_attempt_share_of_total_recorded_latency": "0.60329296912622647588304594411828286649472490830147302491016594727117388903152574",
+      "receipt_to_ack": {
+        "at_most_10_ms": 0,
+        "max_ms": "477.190052",
+        "mean_ms": "43.444332203715882933245642880631371259454126931930286090101940151266030910884577",
+        "min_ms": "14.313965",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "39.1863465",
+        "p90_ms": "62.1298313",
+        "p99_ms": "113.27905431"
+      },
+      "receipt_to_decision": {
+        "at_most_10_ms": 5926,
+        "max_ms": "47.5506",
+        "mean_ms": "3.5533550695494902992436698454455771127918447878987175271292338046695166063794804",
+        "min_ms": "0.4302",
+        "n": 6082,
+        "negative": 0,
+        "p50_ms": "2.9941865",
+        "p90_ms": "6.1919585",
+        "p99_ms": "12.58574431"
+      }
+    },
+    "acknowledged_any_available": {
+      "attempt_to_ack": {
+        "at_most_10_ms": 5998,
+        "max_ms": "24.030307",
+        "mean_ms": "2.1522090147815977412389968443780102972928085035708354094004318219564856336156785",
+        "min_ms": "0.671256",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "1.758994",
+        "p90_ms": "3.819083",
+        "p99_ms": "7.9229614"
+      },
+      "computation_to_attempt": {
+        "at_most_10_ms": 0,
+        "max_ms": "457.896099",
+        "mean_ms": "36.45869757000498256103637269556552067762830094668659691081215744892874937717987",
+        "min_ms": "11.252403",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "32.969583",
+        "p90_ms": "52.440972",
+        "p99_ms": "97.438428"
+      },
+      "computation_to_intent": {
+        "at_most_10_ms": 4321,
+        "max_ms": "207.318011",
+        "mean_ms": "10.165108703537618335824613851519681116093672147483806676631788739412057797708022",
+        "min_ms": "3.321061",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "7.27609",
+        "p90_ms": "19.21298",
+        "p99_ms": "43.1072484"
+      },
+      "decision_to_ack": {
+        "at_most_10_ms": 0,
+        "max_ms": "463.195763",
+        "mean_ms": "40.005522533964457731273874771632619166251453246968942036206610197641587776116924",
+        "min_ms": "13.307676",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "36.126641",
+        "p90_ms": "57.09482",
+        "p99_ms": "104.1047448"
+      },
+      "decision_to_computation": {
+        "at_most_10_ms": 6013,
+        "max_ms": "26.243946",
+        "mean_ms": "1.3946159491778774289985052316890881913303437967115097159940209267563527653213752",
+        "min_ms": "0.459467",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "1.050634",
+        "p90_ms": "2.421418",
+        "p99_ms": "5.5711394"
+      },
+      "decisions_intent_to_attempt_exceeds_half_receipt_to_ack": 5081,
+      "intent_to_attempt": {
+        "at_most_10_ms": 52,
+        "max_ms": "250.578088",
+        "mean_ms": "26.293588866467364225211758844045839561534628799202790234180368709516691579471849",
+        "min_ms": "7.319992",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "24.32072",
+        "p90_ms": "37.797871",
+        "p99_ms": "69.0025232"
+      },
+      "intent_to_attempt_share_of_computation_to_attempt": "0.72118837531101007073394062763214098954546947857035735467562520381549100919329984",
+      "intent_to_attempt_share_of_total_recorded_latency": "0.60336858056527924512225688293896473806493046796554300824710473350535025305271874",
+      "receipt_to_ack": {
+        "at_most_10_ms": 0,
+        "max_ms": "477.190052",
+        "mean_ms": "43.57798817073575817970436804517522006311243979405414382992858329181199136356087",
+        "min_ms": "14.313965",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "39.268966",
+        "p90_ms": "62.24768",
+        "p99_ms": "113.6173902"
+      },
+      "receipt_to_decision": {
+        "at_most_10_ms": 5865,
+        "max_ms": "47.5506",
+        "mean_ms": "3.5724656367713004484304932735426008968609865470852017937219730941704035874439462",
+        "min_ms": "0.791366",
+        "n": 6021,
+        "negative": 0,
+        "p50_ms": "3.00618",
+        "p90_ms": "6.223292",
+        "p99_ms": "12.5880312"
+      }
+    }
+  },
+  "totals": {
+    "acknowledged_all_unavailable": 61,
+    "acknowledged_any_available": 6021,
+    "rows": 7292
+  }
+}

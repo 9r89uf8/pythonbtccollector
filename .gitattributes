@@ -276,3 +276,8 @@
 /GHOST_TWAP_CANARY_RESULTS.md -text
 /research/spot_twap_response/live_canary/* -text
 /results/spot_twap_response/2026-09-14-live-canary/* -text
+
+# Preserve peer-review measurements independently of the initial canary.
+/GHOST_TWAP_CANARY_REVIEW.md -text
+/research/spot_twap_response/canary_peer_review/* -text
+/results/spot_twap_response/2026-09-14-canary-peer-review/* -text

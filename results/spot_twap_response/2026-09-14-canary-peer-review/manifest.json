@@ -1,0 +1,16 @@
+{
+  "reviewed_canary_commit": "aa78346b2c8c2898a0a522798be3105552aaec7d",
+  "original_results_commit": "5f8307bd29a2673c9c0afd59c3650e738a912ebe",
+  "input_export_sha256": "d7536bcafcf62170abbf9329f6b720d7df35fb710b9f79f64ec96ca2bda05b80",
+  "production_policy_changed": false,
+  "artifacts_sha256": {
+    "GHOST_TWAP_CANARY_REVIEW.md": "ee9367fa8423c7e40ae5d5e69e990fe68a4ce2720e6f08e8595573f710e65c61",
+    "GHOST_TWAP_CANARY_RESULTS.md": "b20e41721041d17b01083f44dd5f37ade561bcea09c123464aeedf1a98d383c0",
+    "GHOST_TWAP_LIVE_PLAN.md": "de7b58fcd60453bca70c43bda6dbda5e736d618f100eba5640c62dfc69082fe0",
+    "research/spot_twap_response/canary_peer_review/freshness_review.py": "422edfa439c0a3711723a10b62a19deef1c12c2df3ba122a576f0d237dda6db8",
+    "research/spot_twap_response/canary_peer_review/publication_review.py": "ed27eb89b9df007aa480af8e6b2cc4cb2a5cd30f560d57b2a41405c2d3f53075",
+    "results/spot_twap_response/2026-09-14-canary-peer-review/cohort_comparison.json": "96c13b7c4c265bcfd321ab66ebe4e1cfe0f221415d7294f6373b9b3cbf7342ad",
+    "results/spot_twap_response/2026-09-14-canary-peer-review/freshness_review.json": "2233d9f9d7ab3167c22ffed177294fad36cdeae81dee78197c8d47455d6dcbf3",
+    "results/spot_twap_response/2026-09-14-canary-peer-review/publication_review.json": "6843119dcc37f480bed764c99f8293def48554dfcfc16570f519680cc26b04a8"
+  }
+}

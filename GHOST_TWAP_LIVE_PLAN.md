@@ -8,6 +8,15 @@ are externally verified; C's API/SSE and browser delivery checks remain planned.
 Longer operation still requires a storage review. [A contract](GHOST_TWAP_CHECKPOINT_A.md),
 [B implementation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
 
+The [canary peer-review addendum](GHOST_TWAP_CANARY_REVIEW.md) changes the next work
+order. First evaluate separate source/receipt freshness and corresponding expiry,
+then whole-batch rejection when a short target arrives, then publication profiling.
+Five-second source freshness with three-second wall/monotonic receipt freshness
+is an offline candidate, not the enabled policy: it reduces unavailable saved
+decisions from 771 to 18 after the first minute. Newly eligible forecast errors,
+changed timer/publication behavior and live coverage require validation. The
+single existing age constant cannot implement that split safely by itself.
+
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
 

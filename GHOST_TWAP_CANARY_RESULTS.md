@@ -1,5 +1,11 @@
 # Ghost TWAP: official one-hour canary results
 
+**Follow-up:** the [peer-review addendum](GHOST_TWAP_CANARY_REVIEW.md) verifies the
+freshness-related coverage concern and supersedes the initial work order:
+review freshness/expiry and whole-batch rejection before publication profiling.
+The numerical canary results below are unchanged. The original artifact hashes
+refer to report revision `5f8307b`; the addendum has separate evidence hashes.
+
 The live ghost worked as expected in this hour: it substantially improved on
 holding the last official TWAP unchanged, and useful lead survived publication.
 The under-10-ms receipt-to-Redis objective was **not met**. This completes the
@@ -193,6 +199,7 @@ remain included. This is one hour, not thousands of independent experiments, and
 no confidence interval or market-wide profitability claim is inferred.
 
 **Decision:** the calculation and bounded live operation are supported by this
-canary. Record the publication-speed miss and withheld-update rate as concrete
-optimization work. Checkpoint C still needs Redis-only API/SSE implementation and
-measured browser lead before frontend readiness can be accepted.
+canary. The follow-up review prioritizes freshness/expiry and whole-batch
+rejection, followed by publication profiling without weakening durability.
+Checkpoint C still needs Redis-only API/SSE implementation and measured browser
+lead before frontend readiness can be accepted.
