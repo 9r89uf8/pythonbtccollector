@@ -1,0 +1,63 @@
+{
+  "kind": "15-second disabled-ghost dry run",
+  "directory": "/var/lib/price-collector/ghost-observer-dry-20260914T223231Z",
+  "unit": "ghost-coverage-dry-20260914t223231z",
+  "manifest": {
+    "boot_id": "6557a18a-2a22-4d5f-a7c3-570b051ba915",
+    "campaign_membership": "provisional_v5_decision_window_requires_audit_join",
+    "end_ms": 1789428751674,
+    "files": {
+      "payloads.jsonl": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "samples.jsonl": {
+        "bytes": 79688,
+        "sha256": "ddbd4cc6f13f969da11e994e260342578af86e99b6f908acf48bdcd331bf8c30"
+      }
+    },
+    "finished_monotonic_ns": "5960196644591390",
+    "finished_wall_ns": "1789425166875222134",
+    "flush_interval_ms": 1000,
+    "fsync_each_sample": false,
+    "interval_ms": 100,
+    "max_payload_bytes": 65536,
+    "max_total_bytes": 134217728,
+    "pid": 1372514,
+    "planned_bins": 36000,
+    "read_timeout_ms": 100,
+    "reason": "interrupted",
+    "recorded_bins": 152,
+    "redis_host": "127.0.0.1",
+    "redis_key": "btc:live:ghost_chainlink_twap_60s",
+    "sample_records": 148,
+    "start_ms": 1789425151674,
+    "status": "incomplete",
+    "target_unreceived_at_read": "unobserved",
+    "unique_payloads": 0,
+    "unrecorded_bins": 35848,
+    "version": "ghost-observer-v1"
+  },
+  "full_hour": {
+    "eligible": {},
+    "expiry_boundary_ambiguous": 0,
+    "freshness_reasons": {},
+    "invalid_payloads": 0,
+    "planned_bins": 36000,
+    "reasons": {},
+    "statuses": {
+      "absent": 147,
+      "missed": 5,
+      "unrecorded": 35848
+    },
+    "unknown_bins": 35853,
+    "usable": {}
+  },
+  "read_latency": {
+    "max_ns": 2639344,
+    "p50_ns": 774002,
+    "p90_ns": 1447569,
+    "p99_ns": 2595017
+  },
+  "resources": "Result=timeout\nExecMainStatus=2\nMemoryPeak=[not set]\nCPUUsageNSec=525275000"
+}

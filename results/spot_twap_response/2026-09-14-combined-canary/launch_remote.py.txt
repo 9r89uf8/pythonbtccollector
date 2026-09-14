@@ -1,0 +1,172 @@
+"""Reviewed one-off operator script; streamed to root Python over SSH.
+
+No credentials are printed. The first campaign is never changed. Supply the
+deployed commit as argv[1]; the fixed hour starts only after observer readiness.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+REPO = Path('/opt/price-collector')
+ENV = Path('/etc/price-collector/collector.env')
+OLD = Path('/var/lib/price-collector/ghost-twap')
+OLD_HASH = 'f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86'
+UNIT = 'price-collector-polymarket-chainlink'
+
+
+def run(args, timeout=20):
+    return subprocess.run(args, cwd=REPO, check=True, capture_output=True, text=True, timeout=timeout).stdout.strip()
+
+
+def atomic_env(original, changes, suffix):
+    updated = original
+    for key, value in changes.items():
+        pattern = rb'(?m)^' + key.encode() + rb'=[^\r\n]*'
+        assert len(re.findall(pattern, updated)) == 1, 'missing/duplicate campaign key'
+        updated = re.sub(pattern, key.encode() + b'=' + value.encode(), updated)
+    assert ENV.read_bytes() == original, 'environment changed concurrently'
+    info = ENV.stat()
+    temporary = ENV.with_name(ENV.name + '.ghost-' + suffix + '.tmp')
+    with temporary.open('xb') as stream:
+        os.fchmod(stream.fileno(), stat.S_IMODE(info.st_mode))
+        os.fchown(stream.fileno(), info.st_uid, info.st_gid)
+        stream.write(updated)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, ENV)
+    fd = os.open(str(ENV.parent), os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return updated
+
+
+expected = sys.argv[1]
+assert re.fullmatch(r'[0-9a-f]{40}', expected)
+assert run(['runuser', '-u', 'pricecollector', '--', 'git', 'rev-parse', 'HEAD']) == expected
+assert not run(['runuser', '-u', 'pricecollector', '--', 'git', 'status', '--porcelain'])
+original = ENV.read_bytes()
+values = dict(line.decode().split('=', 1) for line in original.splitlines() if line.startswith(b'GHOST_TWAP_'))
+assert values['GHOST_TWAP_ENABLED'] == 'false'
+assert values['GHOST_TWAP_STATE_DIRECTORY'] == str(OLD)
+assert values['GHOST_TWAP_SOURCE_MAX_AGE_MS'] == '5000'
+assert values['GHOST_TWAP_RECEIPT_MAX_AGE_MS'] == '3000'
+assert hashlib.sha256((OLD / 'campaign.json').read_bytes()).hexdigest() == OLD_HASH
+assert not list(OLD.glob('*.row'))
+assert run(['redis-cli', 'EXISTS', 'btc:live:ghost_chainlink_twap_60s']) == '0'
+assert run(['systemctl', 'is-active', UNIT]) == 'active'
+old_pid = int(run(['systemctl', 'show', UNIT, '--property=MainPID', '--value']))
+collector_pids = run(['pgrep', '-f', '^/opt/price-collector/.venv/bin/python -m price_collector.polymarket_chainlink_collector$'])
+assert collector_pids.splitlines() == [str(old_pid)], 'unexpected collector process count'
+query = """SET statement_timeout='5s'; SELECT json_build_object(
+ 'rows',count(*), 'incomplete',count(*) FILTER(WHERE NOT terminal),
+ 'unverified',count(*) FILTER(WHERE verified_version IS DISTINCT FROM version
+   OR verified_frozen_sha256 IS DISTINCT FROM frozen_sha256
+   OR verified_state_sha256 IS DISTINCT FROM state_sha256),
+ 'bytes',pg_total_relation_size('ghost_twap_audit')) FROM ghost_twap_audit;"""
+audit = json.loads(run(['runuser', '-u', 'postgres', '--', 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d', 'price_collector', '-c', query]))
+assert audit['incomplete'] == 0 and audit['unverified'] == 0
+assert audit['rows'] < 600000 and audit['bytes'] < 1536 * 1024**2
+disk = os.statvfs('/var/lib/postgresql')
+free = disk.f_bavail * disk.f_frsize
+assert free > 10 * 1024**3
+suffix = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+state = Path('/var/lib/price-collector/ghost-twap-combined-' + suffix)
+observer = Path('/var/lib/price-collector/ghost-observer-combined-' + suffix)
+operation = Path('/var/lib/price-collector/ghost-operation-combined-' + suffix)
+observer_unit = 'ghost-twap-coverage-' + suffix.lower()
+assert all(not path.exists() for path in (state, observer, operation))
+identity = pwd.getpwnam('pricecollector')
+state.mkdir(mode=0o700)
+os.chown(state, identity.pw_uid, identity.pw_gid)
+operation.mkdir(mode=0o700)
+backup = ENV.with_name(ENV.name + '.before-ghost-' + suffix)
+with backup.open('xb') as stream:
+    os.fchmod(stream.fileno(), 0o600)
+    stream.write(original)
+    stream.flush()
+    os.fsync(stream.fileno())
+start = time.time_ns() // 1000000 + 15000
+launch = dict(start_ms=start, end_ms=start+3600000, drain_not_before_ms=start+3725000,
+              commit=expected, state_directory=str(state), observer_directory=str(observer),
+              operation_directory=str(operation), observer_unit=observer_unit,
+              old_campaign_sha256=OLD_HASH, old_outbox_rows=0, old_audit=audit,
+              free_database_filesystem_bytes=free, old_collector_pid=old_pid,
+              observer_sha256=hashlib.sha256((REPO/'price_collector/ghost_twap_observer.py').read_bytes()).hexdigest(),
+              status='preparing')
+(operation/'launch.json').write_text(json.dumps(launch, indent=2)+'\n')
+changed = False
+try:
+    run(['systemd-run', '--unit=' + observer_unit, '--property=User=pricecollector',
+         '--property=Group=pricecollector', '--property=WorkingDirectory=/opt/price-collector',
+         '--property=RuntimeMaxSec=3700', '--property=TimeoutStopSec=10',
+         '--property=CPUAccounting=true', '--property=MemoryAccounting=true',
+         '--property=NoNewPrivileges=true', '--property=PrivateTmp=true',
+         '/opt/price-collector/.venv/bin/python', '-m', 'price_collector.ghost_twap_observer',
+         'observe', '--start-ms', str(start), '--output-directory', str(observer)])
+    ready_deadline = time.monotonic() + 5
+    while not (observer/'ready.json').exists() and time.monotonic() < ready_deadline:
+        time.sleep(0.1)
+    ready = json.loads((observer/'ready.json').read_text())
+    assert ready['start_ms'] == start and int(ready['ready_wall_ns']) < start*1000000
+    assert run(['systemctl', 'is-active', observer_unit]) == 'active'
+    launch['observer_ready'] = ready
+    while time.time_ns() // 1000000 < start:
+        time.sleep(0.05)
+    assert time.time_ns() // 1000000 < start + 3000, 'activation missed fixed start'
+    assert run(['systemctl', 'is-active', observer_unit]) == 'active'
+    changed = True
+    atomic_env(original, {'GHOST_TWAP_STATE_DIRECTORY': str(state),
+                          'GHOST_TWAP_CANARY_START_MS': str(start), 'GHOST_TWAP_ENABLED': 'true'}, suffix)
+    run(['systemctl', 'restart', UNIT], timeout=45)
+    assert run(['systemctl', 'is-active', UNIT]) == 'active'
+    launch['collector_pid'] = int(run(['systemctl', 'show', UNIT, '--property=MainPID', '--value']))
+    assert launch['collector_pid'] != old_pid
+    startup_deadline = time.monotonic() + 15
+    while time.monotonic() < startup_deadline:
+        lines = run(['journalctl', '_PID=' + str(launch['collector_pid']), '--since=-2min', '-n', '100', '--no-pager', '-o', 'cat'])
+        started = []
+        for line in lines.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get('message') == 'ghost_runtime_started':
+                started.append(record)
+        if started:
+            break
+        time.sleep(0.2)
+    assert len(started) == 1, 'ghost worker startup not confirmed'
+    assert started[0]['canary_end_ms'] == start + 3600000 and started[0]['stop_reason'] is None
+    launch['runtime_start_event'] = started[0]
+    launch['run_id'] = started[0]['run_id']
+    launch['activated_ms'] = time.time_ns() // 1000000
+    launch['status'] = 'running'
+except Exception as exc:
+    launch['status'] = 'launch_failed'
+    launch['failure_type'] = type(exc).__name__
+    try:
+        current = ENV.read_bytes()
+        if changed and current != original:
+            owned = dict(line.decode().split('=', 1) for line in current.splitlines() if line.startswith(b'GHOST_TWAP_'))
+            assert owned['GHOST_TWAP_CANARY_START_MS'] == str(start) and owned['GHOST_TWAP_STATE_DIRECTORY'] == str(state), 'abort refuses a different campaign'
+            atomic_env(current, {'GHOST_TWAP_ENABLED': 'false'}, suffix+'-abort')
+            run(['systemctl', 'restart', UNIT], timeout=45)
+    except Exception as cleanup:
+        launch['cleanup_failure_type'] = type(cleanup).__name__
+    finally:
+        stopped = subprocess.run(['systemctl', 'stop', observer_unit], capture_output=True, timeout=20)
+        launch['observer_stop_returncode'] = stopped.returncode
+    raise
+finally:
+    (operation/'launch.json').write_text(json.dumps(launch, indent=2)+'\n')
+print(json.dumps(launch))

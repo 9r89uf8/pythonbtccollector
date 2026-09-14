@@ -902,7 +902,10 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-The first one-hour live canary is complete; ghost is disabled again. See the
+The first one-hour live canary is complete. The separately authorized
+[combined canary](GHOST_TWAP_COMBINED_CANARY.md) is running on 2026-09-14 from
+22:34:04.002 to 23:34:04.002 UTC, with automatic admission stop and subsequent
+drain/disable/export. See the first run's
 [official results](GHOST_TWAP_CANARY_RESULTS.md): useful price forecasts and
 confirmed lead, with a 39.19 ms median publication latency that missed the
 under-10-ms objective. API/SSE delivery remains Checkpoint C.

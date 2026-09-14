@@ -1,0 +1,31 @@
+{
+  "code_commit": "770df37cc0f0dbdea1138141ee67746356e9563a",
+  "status": "running",
+  "heartbeat_id": "complete-combined-ghost-canary",
+  "artifacts": {
+    "LAUNCH.json": {
+      "sha256": "6512b0bc452d31087cf323b2a617dc37fc4d3f0db9e075a24575a2956b68dc6b",
+      "bytes": 1594
+    },
+    "OBSERVER_DRY_RUN.json": {
+      "sha256": "368e6624628985224a55567bd887e51780d10e8736c9c83e66ad8aa25830b3b4",
+      "bytes": 1882
+    },
+    "WARMUP_CHECK.json": {
+      "sha256": "ffc6c6f8940801003529cf857ff7dbced35476ccd0911fbb9b43525244177bfa",
+      "bytes": 1264
+    },
+    "launch_remote.py.txt": {
+      "sha256": "e3ea6f3eb11e7ae482df12ef54f24898482e15cdff8a51be3d634227106d3317",
+      "bytes": 8770
+    },
+    "PRELAUNCH_VALIDATION.json": {
+      "sha256": "0ce76370a6eb4029f63a52507564ae3cc562f6456fefddb8874a9d0e40476bd9",
+      "bytes": 1805
+    },
+    "COMPLETION_HANDOFF.md": {
+      "sha256": "57ffbf84f6a30e4dbb3c676727602af1e5fe0eba6f0b7b2085895c2aad395bbd",
+      "bytes": 5936
+    }
+  }
+}

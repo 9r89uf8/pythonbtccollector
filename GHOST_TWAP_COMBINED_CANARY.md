@@ -102,4 +102,14 @@ Report median/tail errors and latency, denominators, distinct targets and losses
 Overlapping forecasts reuse outcomes, and one hour is not a set of independent
 trials or evidence of multi-day retention, frontend readiness or trading edge.
 
-Launch and final findings will be linked here as they are produced.
+## Active run
+
+The combined canary started at **2026-09-14 22:34:04.002 UTC**, with its fixed
+end at **23:34:04.002 UTC**. The observer was ready before activation. Runtime
+startup confirmed the correct deadline and no stop reason. This is a running
+test; coverage and accuracy findings are not available yet.
+
+See the [launch record](results/spot_twap_response/2026-09-14-combined-canary/LAUNCH.json),
+[prelaunch validation](results/spot_twap_response/2026-09-14-combined-canary/PRELAUNCH_VALIDATION.json),
+[observer dry run](results/spot_twap_response/2026-09-14-combined-canary/OBSERVER_DRY_RUN.json)
+and [completion handoff](results/spot_twap_response/2026-09-14-combined-canary/COMPLETION_HANDOFF.md).
