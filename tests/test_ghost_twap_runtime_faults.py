@@ -196,7 +196,7 @@ def test_delayed_feeds_publish_with_split_policy_and_original_expiry():
     body = json.loads(redis.calls[0][-2])
     assert redis.calls[0][-1] == 1750
     assert body["contract_version"] == 3
-    assert body["runtime_version"] == "ghost-canary-v4"
+    assert body["runtime_version"] == "ghost-canary-v5"
     assert body["policy"]["source_max_age_ms"] == 5000
     assert body["policy"]["receipt_max_age_ms"] == 3000
     assert "current_max_age_ms" not in body["policy"]
@@ -326,13 +326,16 @@ def test_first_target_and_frozen_price_remain_immutable_after_conflict():
 
 
 @pytest.mark.parametrize("delay", [0, 1])
-def test_target_admitted_at_or_after_cutoff_preempts_publication(delay):
+def test_target_admitted_at_or_after_cutoff_only_withholds_its_horizon(delay):
     value, clock, _, _, redis = runtime()
     row = issue(value)
     clock.advance(delay)
     value.observe_target(target(value, row, clock))
     run(value.publish(row))
-    assert redis.calls == []
+    assert len(redis.calls) == 1
+    payload = json.loads(redis.calls[0][-2])
+    assert payload["forecasts"][0]["price"] is None
+    assert payload["publication_eligibility"]["eligible_horizons"] == [2, 3, 5, 10, 30]
     assert row.state["targets"]["1"]["confirmed_redis_lead_ns"] is None
 
 
@@ -433,7 +436,7 @@ def test_guard_becoming_stale_during_fsync_prevents_publication():
     assert value.stop_reason is None and value.suspensions["guard"]["reason"] == "stale_guard"
 
 
-def test_target_during_fsync_suppresses_publication():
+def test_target_during_fsync_withholds_only_arrived_horizon():
     value, clock, spool, _, redis = runtime()
     row = issue(value)
     def receive():
@@ -441,7 +444,10 @@ def test_target_during_fsync_suppresses_publication():
         value.observe_target(target(value, row, clock))
     spool.before_write = receive
     run(value.publish(row))
-    assert redis.calls == []
+    assert len(redis.calls) == 1
+    payload = json.loads(redis.calls[0][-2])
+    assert payload["forecasts"][0]["price"] is None
+    assert payload["publication_eligibility"]["eligible_horizons"] == [2, 3, 5, 10, 30]
 
 
 @pytest.mark.parametrize("advance_after_target", [0, 1])

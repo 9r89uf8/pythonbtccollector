@@ -97,6 +97,28 @@ another run or permit resetting the old one; a later canary needs a separately
 reviewed fresh campaign. Old frozen audit JSON, policy and its hash remain
 unchanged; mutable reconciliation state can still be versioned.
 
+The subsequent [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
+uses runtime `ghost-canary-v5`, the same calculation contract 3 and the same two
+freshness settings. It needs the same code-only upgrade sequence above: no
+schema migration, new environment keys or other service restarts. Keep ghost
+disabled and preserve the stopped campaign when installing it.
+
+V5's attempted payload includes `publication_eligibility` with selection clocks,
+eligible horizon IDs and excluded horizon reasons. Arrived forecasts remain in
+the six-entry live array with a null price and unavailable quality. Frozen
+calculation prices and target observation statuses remain unchanged. If all
+originally available forecasts have arrived, publication is withheld with
+`no_eligible_horizons`; the previous cache value expires normally. Existing
+all-unavailable warmup/health messages retain their earlier behavior.
+
+The full calculation evidence and intent are fsynced before Redis. Final
+selection and actual attempt/acknowledgement metadata are reconciled afterward.
+A crash before that state persists can leave the exact transmitted subset
+unknown; restart marks the outcome unconfirmed and never republishes it. For a
+new canary, score acknowledged forecasts only when the exact horizon, target and
+price appear as eligible in the attempted payload. The original September 14
+canary scripts assume complete batches and must not be reused unchanged for v5.
+
 Before an enabled run, verify default tablespace placement and that the configured
 filesystem path shares the database's device. Confirm the writer can inspect
 that filesystem and write its state directory. Review the measured storage

@@ -26,7 +26,8 @@ from price_collector.ghost_twap_spool import GhostSpool
 LOGGER = logging.getLogger(__name__)
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 GHOST_CHANNEL = 'btc:live:ghost_chainlink_twap_60s:updates'
-RUNTIME_VERSION = 'ghost-canary-v4'
+RUNTIME_VERSION = 'ghost-canary-v5'
+PUBLICATION_ELIGIBILITY_POLICY = 'per-horizon-unreceived-v1'
 CANARY_MS = 60 * 60 * 1000
 CAMPAIGN_CHECKPOINT_SECONDS = 30
 AUDIT_BATCH_SECONDS = 2.5
@@ -394,10 +395,44 @@ class GhostRuntime:
         target['confirmed_redis_lead_ns'] = None
         if (first is not None and ack is not None and pub['status'] == 'acknowledged'
                 and not target.get('conflicted') and not target.get('clock_anomaly')
-                and not row.state.get('causality_invalid')):
+                and not row.state.get('causality_invalid')
+                and self._attempted_forecast(row, target)):
             received = int(first['received_monotonic_ns'])
             if ack < received:
                 target['confirmed_redis_lead_ns'] = received - ack
+
+    @staticmethod
+    def _attempted_forecast(row: PendingDecision, target: dict) -> bool:
+        """Membership comes from protected attempted bytes, never intent or ACK alone."""
+        pub = row.state['publication']
+        if pub.get('attempt_monotonic_ns') is None or not pub.get('payload_json'):
+            return False
+        payload = json.loads(pub['payload_json'])
+        if payload.get('publication_state') != 'attempted':
+            return False
+        original = next((f for f in row.decision.forecasts
+                         if str(f.horizon_s) == target['horizon']), None)
+        if original is None or original.price is None:
+            return False
+        matches = [f for f in payload.get('forecasts', [])
+                   if f.get('horizon_s') == original.horizon_s]
+        if len(matches) != 1:
+            return False
+        forecast = matches[0]
+        selection = payload.get('publication_eligibility')
+        # Known v3/v4 complete-batch payloads have no selection object. New or
+        # unknown versions require it; changing RUNTIME_VERSION cannot bypass it.
+        if (payload.get('runtime_version') not in ('ghost-canary-v3', 'ghost-canary-v4')
+                or selection is not None):
+            if (not isinstance(selection, dict) or selection.get('version') != 1
+                    or original.horizon_s not in selection.get('eligible_horizons', [])
+                    or str(original.horizon_s) in selection.get('excluded_horizons', {})):
+                return False
+        return (forecast.get('target_source_timestamp_ms') == target['target_source_timestamp_ms']
+                == original.target_source_timestamp_ms
+                and forecast.get('quality') in ('healthy', 'degraded')
+                and isinstance(forecast.get('price'), str)
+                and Decimal(forecast['price']) == original.price)
 
     def drain_inputs(self) -> None:
         # There is intentionally no await between queue drain and snapshot.
@@ -494,6 +529,7 @@ class GhostRuntime:
         frozen = json.loads(decision.to_audit_json())
         frozen['runtime_policy'] = self.settings.model_dump(mode='json')
         frozen['runtime_version'] = RUNTIME_VERSION
+        frozen['publication_eligibility_policy'] = PUBLICATION_ELIGIBILITY_POLICY
         frozen['campaign_checkpoint_seconds'] = CAMPAIGN_CHECKPOINT_SECONDS
         frozen['runtime_suspension_history'] = dict(self.suspension_history)
         frozen['runtime_counters'] = dict(self.counters)
@@ -579,7 +615,34 @@ class GhostRuntime:
         if now // NS_PER_MS >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono:
             self.stop('canary_deadline')
             return False
-        return not any(t.get('first_event') is not None for t in row.state['targets'].values())
+        return True
+
+    @staticmethod
+    def _select_publication(row: PendingDecision, live: dict, wall: int, mono: int) -> bool:
+        """Mask a live copy as of this cut; keep original forecasts and results intact."""
+        eligible, excluded = [], {}
+        for original, forecast in zip(row.decision.forecasts, live['forecasts']):
+            horizon = str(original.horizon_s)
+            target = row.state['targets'][horizon]
+            if original.price is None:
+                excluded[horizon] = list(original.reasons)
+                continue
+            reason = None
+            if target.get('first_event') is not None:
+                reason = 'target_received_before_publication'
+            elif target['status'] != 'pending' or target.get('conflicted'):
+                reason = 'target_not_pending_before_publication'
+            if reason is None:
+                eligible.append(original.horizon_s)
+            else:
+                forecast.update(price=None, quality='unavailable',
+                                reasons=[*original.reasons, reason])
+                excluded[horizon] = list(forecast['reasons'])
+        live['publication_eligibility'] = dict(version=1, checked_wall_ns=wall,
+            checked_monotonic_ns=mono, eligible_horizons=eligible, excluded_horizons=excluded)
+        # Preserve existing all-null warmup/health messages. A batch that lost
+        # its last calculated forecast to target arrival need not refresh Redis.
+        return bool(eligible) or not any(f.price is not None for f in row.decision.forecasts)
 
     async def publish(self, row: PendingDecision) -> None:
         self._publishing = row.decision.decision_id
@@ -599,7 +662,9 @@ class GhostRuntime:
             row.state['publication']['status'] = 'expired_or_target_received'
             self._changed(row)
             return
-        # Intent bytes and their full constituent audit survive before Redis is touched.
+        # Complete candidate forecasts and constituent evidence survive before
+        # Redis. The final mask/attempt clocks are recorded after this write;
+        # a crash before their persistence leaves wire membership unconfirmed.
         wall, mono = self.wall_ns(), self.mono_ns()
         live = json.loads(row.decision.to_live_json())
         for forecast, audit_forecast in zip(live['forecasts'], json.loads(row.frozen_json)['forecasts']):
@@ -609,17 +674,29 @@ class GhostRuntime:
                     computation_completed_monotonic_ns=row.state['computation_completed_monotonic_ns'],
                     publication_intent_wall_ns=wall, publication_intent_monotonic_ns=mono,
                     publication_state='intent', audit_state='durable_outbox_postgres_pending')
+        selected = self._select_publication(row, live, wall, mono)
         # Quality is about arithmetic inputs; persistence is a separate, explicit state.
         body = _json_bytes(live)
         row.state['publication'] = dict(status='intent', intent_wall_ns=wall,
                                        intent_monotonic_ns=mono, payload_json=body.decode())
         self._changed(row)
+        if not selected:
+            row.state['publication']['status'] = 'no_eligible_horizons'
+            self.counters['publication_no_eligible_horizons'] += 1
+            self._changed(row)
+            return
         await self._spool(self.spool.write, row.record())
         if not self._publishable(row):
             row.state['publication']['status'] = 'preempted_after_spool'
             self._changed(row)
             return
         attempt_wall, attempt_mono = self.wall_ns(), self.mono_ns()
+        if not self._select_publication(row, live, attempt_wall, attempt_mono):
+            row.state['publication'].update(status='no_eligible_horizons',
+                                            payload_json=_json_bytes(live).decode())
+            self.counters['publication_no_eligible_horizons'] += 1
+            self._changed(row)
+            return
         row.state['publication'].update(status='attempting', attempt_wall_ns=attempt_wall,
                                         attempt_monotonic_ns=attempt_mono)
         live.update(publication_state='attempted', publication_attempt_wall_ns=attempt_wall,
@@ -634,6 +711,12 @@ class GhostRuntime:
             row.state['publication']['status'] = 'expired_before_attempt'
             self._changed(row)
             return
+        selection = live['publication_eligibility']
+        excluded_available = sum(f.price is not None and str(f.horizon_s)
+                                 in selection['excluded_horizons'] for f in row.decision.forecasts)
+        self.counters['publication_horizons_withheld'] += excluded_available
+        if excluded_available:
+            self.counters['publication_partial_batches'] += 1
         try:
             await asyncio.wait_for(self.redis.eval(PUBLISH_LUA, 2, GHOST_KEY, GHOST_CHANNEL,
                                                   body, ttl_ms), timeout=0.5)

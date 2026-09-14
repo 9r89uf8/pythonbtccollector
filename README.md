@@ -929,6 +929,15 @@ frozen slot evidence precedes any possible publication; results and publication
 acknowledgements are audited separately. Restart reconciles unfinished audit
 records and warms from new live inputs.
 
+The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
+adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after
+the durable write. An arrived horizon becomes unavailable in the live payload;
+still-eligible siblings keep their original prices. All six entries and the
+original calculation audit remain present. Attempted payloads record the exact
+selection, and confirmed lead requires that horizon's actual attempted price.
+Freshness, expiry and the disabled default are unchanged. A new live canary is
+still needed to measure the combined policy's cache coverage.
+
 The first canary requires an explicit fixed start time and stops new decisions
 after at most one hour, at 1.5 GiB of audit relations, at 600,000 decisions, or
 below 10 GiB free database-filesystem space. Temporary audit/guard failures pause

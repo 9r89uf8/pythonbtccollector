@@ -14,7 +14,9 @@ The [freshness/expiry checkpoint](GHOST_TWAP_FRESHNESS_CHECKPOINT.md) now implem
 separate five-second source and three-second wall/monotonic receipt limits with
 consistent expiry. The original three-second canary remains separate evidence;
 new-policy live publication and browser coverage still require validation.
-Batch eligibility and publication durability are unchanged in this checkpoint.
+The subsequent [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
+implements per-horizon selection after the durable write. Publication profiling
+and the next live canary remain outstanding.
 
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
@@ -64,7 +66,7 @@ Use small nonblocking event offers from the existing [Chainlink collector](price
 
 Trigger refreshes on accepted spot/TWAP events and **publish immediately when idle**. Coalesce only bursts or updates arriving during in-flight work, with a bounded latest-state queue; remove the proposed mandatory 100 ms interval. Keep a separate health/expiry timer. Measure receipt-to-publication latency and skipped updates; freeze any rate cap from those measurements. Never backdate a delayed calculation. Receipt-to-Redis acknowledgement below 10 ms is an initial optimization objective under normal load, not a measured guarantee or a bound during failures.
 
-The current implementation limits below use `ghost-canary-v4` / contract 3.
+The current implementation limits below use `ghost-canary-v5` / contract 3.
 The completed first canary used v3 / contract 2 with three seconds for all age
 checks; it is not a prospective validation of the new source-age policy:
 
@@ -133,6 +135,17 @@ Export the entire canary's frozen inputs/results and hashes to the owner's compu
 
 Serialize one compact snapshot with all horizons, prices as decimal strings, producer run ID and increasing publication sequence. Include input/decision time, computation time, publication-attempt time, ETA, quality and validity deadline; leave the detailed slot audit out of the live payload. One writer atomically executes `SET` with expiry and `PUBLISH` of identical bytes to a dedicated ghost channel. Use a small writer-only Redis script without price arithmetic. Atomic execution prevents interleaving; it does not promise rollback, durable delivery or exactly-once publication. Record acknowledgements, uncertain outcomes and retries in the asynchronous audit.
 
+Runtime v5 rechecks each original forecast against the accepted target state
+after the durable intent write. An already-received target masks only its own
+live price to null/unavailable; longer eligible horizons still publish. The
+attempted payload records selection clocks, eligible IDs and exclusion reasons.
+Those bytes are immutable after the attempt. Targets arriving while Redis is
+in flight retain that attempted membership but receive no confirmed lead unless
+acknowledgement strictly preceded receipt. Selection is an as-of check, not a
+guarantee of freshness at browser delivery. A crash before attempt state is
+persisted leaves the transmitted subset unconfirmed, while all candidate prices
+and constituent inputs remain durable. Recovery never republishes old intent.
+
 **Use SSE push for the local frontend, with snapshot GET as fallback.** After connection, send each new state without a polling wait or a new request per update. Network transport, buffering and browser scheduling still cost time; push latency must be measured. Keep the SSH tunnel and stream open. Prefer a same-origin local frontend proxy to the forwarded port; direct cross-origin browser access would require narrowly scoped local-origin CORS in its own implementation checkpoint.
 
 The [API](price_collector/api.py) uses one long-lived Redis subscriber per process, separate from ordinary request timeouts, and fans out a prebuilt SSE frame. GET reads one key, checks structure/quality/expiry and returns the original JSON bytes; put request-specific age/time in headers rather than re-encoding the body. Neither route calculates forecasts or queries PostgreSQL. Use `Cache-Control: no-store, no-transform`, explicit SSE content type and no stream compression or proxy buffering. Existing source payloads, official TWAP, four-key MGET, reader-only credentials and loopback binding stay intact.
@@ -149,7 +162,16 @@ A second instrumented tunnel run measured 597 ms median with exactly one connect
 
 Match each unseen target U to its first subsequently received canonical TWAP event. Score a **confirmed Redis-visible lead only if successful Redis acknowledgement precedes that target receipt** on the local monotonic clock. A target between attempt and acknowledgement has uncertain publication order. Preserve late, missing, conflicted and unauditable targets.
 
-Compare price errors with persistence on the same published decisions/targets. Report per-horizon availability, observed/carried/pending/future/missing counts, median/tail errors, ETA errors, confirmed publication lead, losses and CPU/memory/queue/storage/core-feed latency. Include every issued decision and boundary-crossing target, without treating overlapping forecasts as independent trials. Short-horizon residuals are diagnostic measurements; 0.003 bp is not a pre-established failure threshold.
+Compare price errors with persistence on the same published decisions/targets.
+For v5, global acknowledgement is insufficient: require the exact horizon,
+target and price in the eligible attempted payload. Keep original calculated
+forecasts as a separate cohort. Version the next canary's scorer accordingly;
+preserve the original complete-batch scripts and results. Report per-horizon
+availability, observed/carried/pending/future/missing counts, median/tail errors,
+ETA errors, confirmed publication lead, losses and CPU/memory/queue/storage/core-feed
+latency. Include every issued decision and boundary-crossing target, without
+treating overlapping forecasts as independent trials. Short-horizon residuals
+are diagnostic measurements; 0.003 bp is not a pre-established failure threshold.
 
 Measure event receipt → computation → Redis acknowledgement → API fan-out separately. Report median/p90/p99 under normal and burst load. API send completion is not browser receipt. For frontend usefulness, timestamp ghost and corresponding official-target delivery on the same browser monotonic clock, matching exact target stamps/identities from later anchor updates; skipped/unobserved targets remain censored. Do not subtract unsynchronized browser/server clocks or divide HTTP round-trip time by two to claim measured one-way latency. Checkpoint C must establish the actual useful lead for each horizon through this computer's tunnel.
 
