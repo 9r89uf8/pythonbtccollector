@@ -1,6 +1,13 @@
 # Live ghost TWAP — implementation plan
 
-**Status: B is installed with ghost disabled; the owner has shortened the first canary to one hour (`ghost-canary-v3`).** B adds the optional worker, audit schema and export/expiry tools. Its first capacity canary is capped at one hour; the originally proposed longer run needs a storage review. No prospective canary has started; C remains planned. [A contract](GHOST_TWAP_CHECKPOINT_A.md), [B implementation and validation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md), [initial B deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
+**Status: the one-hour B canary is complete and ghost is disabled again.**
+The [official results](GHOST_TWAP_CANARY_RESULTS.md) support the calculation and
+bounded live operation. Median receipt-to-Redis publication was 39.19 ms,
+missing the under-10-ms optimization objective. The 7,292 terminal audit rows
+are externally verified; C's API/SSE and browser delivery checks remain planned.
+Longer operation still requires a storage review. [A contract](GHOST_TWAP_CHECKPOINT_A.md),
+[B implementation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
+
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
 
@@ -154,10 +161,9 @@ Compare with the research replay only where inputs and policies coincide; explic
 
 [Verified study results](SPOT_TWAP_RESPONSE_STUDY.md) justify this canary, not a prospective accuracy guarantee. The [causal-opening settlement replay](research/spot_twap_response/receipt_clock_pilot/README.md) is already complete: T−30 had 36 projection errors versus 125 TWAP errors among 1,925 markets. It is not an outstanding prerequisite.
 
-A is accepted and B's implementation is available for review. Its tests and
-bounded PostgreSQL probes establish implementation behavior, not completion of
-the prospective canary. Enabling SSE remains C and follows B's canary review.
-Choosing retention numbers alone does not establish full-capacity or sustained
-maintenance safety. Prospective validation and production rollout remain unfinished.
+A is accepted and B's one-hour prospective canary is complete. Its results support
+bounded operation and forecast utility, while identifying a publication-speed
+miss. Enabling SSE remains C. Longer capacity, retention maintenance and browser
+delivery are not established by this run.
 
 Keep production code under `price_collector/`, with no research imports or retired-pipeline reuse. Each implemented checkpoint gets focused tests and relevant documentation; run the full suite when practical. B/C runtime/schema/API changes require the repository's normal droplet handoff and schema-before-restart ordering. A's standalone module is not imported by running services and needs no service restart.

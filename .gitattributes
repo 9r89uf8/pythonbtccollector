@@ -271,3 +271,8 @@
 /results/spot_twap_response/2026-09-13-checkpoint-b-review/validation.json -text
 /results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json -text
 /results/spot_twap_response/2026-09-14-one-hour/validation.json -text
+
+# Keep completed live-canary evidence and its analysis hashes portable.
+/GHOST_TWAP_CANARY_RESULTS.md -text
+/research/spot_twap_response/live_canary/* -text
+/results/spot_twap_response/2026-09-14-live-canary/* -text

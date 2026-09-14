@@ -902,6 +902,11 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
+The first one-hour live canary is complete; ghost is disabled again. See the
+[official results](GHOST_TWAP_CANARY_RESULTS.md): useful price forecasts and
+confirmed lead, with a 39.19 ms median publication latency that missed the
+under-10-ms objective. API/SSE delivery remains Checkpoint C.
+
 `price_collector/ghost_twap.py` provides an optional pure Decimal engine for
 1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
 through `GhostPolicy` and has no I/O. Checkpoint B adds an optional worker inside

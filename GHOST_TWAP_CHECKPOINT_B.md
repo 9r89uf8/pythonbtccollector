@@ -1,12 +1,12 @@
 # Ghost TWAP — Checkpoint B
 
-Status: B is installed on the droplet with
-`GHOST_TWAP_ENABLED=false`, verified on September 14, 2026 UTC. The schema was
-applied before restarting only the Chainlink collector. The API and source feeds
-are healthy; the ghost audit is empty and the ghost Redis key is absent.
-The owner shortened the first canary to one hour (`ghost-canary-v3`). No live
-canary has started; C's API/SSE work is pending.
-[Initial B deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
+Status: the one-hour `ghost-canary-v3` run completed on September 14, 2026 UTC.
+All 7,292 audit rows are terminal and externally verified. Ghost is disabled
+again; the official collectors and API are healthy. The canary supported the
+forecast calculation and bounded operation, but receipt-to-Redis publication
+was 39.19 ms median and missed the under-10-ms objective. C remains pending.
+[Official canary results](GHOST_TWAP_CANARY_RESULTS.md) supersede the earlier
+installed-but-not-started status. [Initial B deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
 
 The implementation was based on A release `b62285a`. Its review manifests capture
 the files at `3e1ef50`, before these deployment-status edits; compare those hashes
@@ -142,10 +142,11 @@ validation; the cap will not be increased automatically. Longer validation
 requires a new storage review. The unchanged 96-hour minimum retention provides
 no relief during this first run.
 
-Prospective price errors, published coverage, confirmed lead, CPU/memory,
-core-feed effects and event-to-Redis latency still require the bounded live
-canary. The under-10-ms receipt-to-publication objective remains unverified.
-Browser delivery latency belongs to C. No ghost API routes are present in B.
+The [completed canary](GHOST_TWAP_CANARY_RESULTS.md) now records prospective price
+errors, published coverage, confirmed lead, service resources and publication
+latency. The under-10-ms objective was missed. Controlled incremental core-feed
+latency and longer capacity/retention remain unproven. Browser delivery latency
+belongs to C. No ghost API routes are present in B.
 
 ## Deployment boundary
 
