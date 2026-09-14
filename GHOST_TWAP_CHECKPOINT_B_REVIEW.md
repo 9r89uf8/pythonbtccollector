@@ -1,8 +1,11 @@
 # Checkpoint B peer-review corrections
 
 Reviewed commit: `485550e9b26b21b84d6ce5f84e9883f63e47b96b`.
-Production remains the accepted A release `b62285a`; these corrections have not
-been pushed, installed or enabled. No prospective canary is complete.
+The corrections were accepted as release `3e1ef50`, pushed to GitHub and installed
+disabled on the droplet, verified September 14, 2026 UTC. No prospective canary
+has started. [Deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
+The validation manifest describes the reviewed files at `3e1ef50`, before these
+deployment-status edits; its hashes can be checked against that Git revision.
 
 ## Verdict on the supplied review
 

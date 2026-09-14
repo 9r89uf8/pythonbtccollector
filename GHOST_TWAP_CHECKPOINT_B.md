@@ -1,9 +1,15 @@
 # Ghost TWAP — Checkpoint B
 
-Status: implemented and validated in a separate checkout based on
-the accepted A release `b62285a`. No B production installation or live canary has
-started. A remains the installed production version; C's API/SSE work is pending.
-This report distinguishes tested implementation from prospective validation.
+Status: B release `3e1ef50` is installed on the droplet with
+`GHOST_TWAP_ENABLED=false`, verified on September 14, 2026 UTC. The schema was
+applied before restarting only the Chainlink collector. The API and source feeds
+are healthy; the ghost audit is empty and the ghost Redis key is absent.
+No live canary has started; C's API/SSE work is pending.
+[Deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
+
+The implementation was based on A release `b62285a`. Its review manifests capture
+the files at `3e1ef50`, before these deployment-status edits; compare those hashes
+with that Git revision. Installation does not establish prospective validation.
 
 The peer review of `485550e` found defects in terminal-row version ownership,
 transient failure handling and campaign checkpoint frequency. The correction

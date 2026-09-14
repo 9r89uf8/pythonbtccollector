@@ -1,6 +1,6 @@
 # Live ghost TWAP — implementation plan
 
-**Status: A accepted and installed; B peer-review corrections implemented and tested locally.** B adds the default-off optional worker, audit schema and export/expiry tools. Its first capacity canary is now capped at four hours; the originally proposed longer run needs a storage review. B has not been installed or enabled and no prospective canary has started; C remains planned. [A contract](GHOST_TWAP_CHECKPOINT_A.md), [B implementation and validation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
+**Status: B release `3e1ef50` is installed on the droplet with ghost disabled.** B adds the optional worker, audit schema and export/expiry tools. Its first capacity canary is capped at four hours; the originally proposed longer run needs a storage review. No prospective canary has started; C remains planned. [A contract](GHOST_TWAP_CHECKPOINT_A.md), [B implementation and validation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md), [deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
 
