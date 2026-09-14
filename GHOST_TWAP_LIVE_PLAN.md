@@ -8,14 +8,13 @@ are externally verified; C's API/SSE and browser delivery checks remain planned.
 Longer operation still requires a storage review. [A contract](GHOST_TWAP_CHECKPOINT_A.md),
 [B implementation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
 
-The [canary peer-review addendum](GHOST_TWAP_CANARY_REVIEW.md) changes the next work
-order. First evaluate separate source/receipt freshness and corresponding expiry,
+The [canary peer-review addendum](GHOST_TWAP_CANARY_REVIEW.md) prioritized freshness,
 then whole-batch rejection when a short target arrives, then publication profiling.
-Five-second source freshness with three-second wall/monotonic receipt freshness
-is an offline candidate, not the enabled policy: it reduces unavailable saved
-decisions from 771 to 18 after the first minute. Newly eligible forecast errors,
-changed timer/publication behavior and live coverage require validation. The
-single existing age constant cannot implement that split safely by itself.
+The [freshness/expiry checkpoint](GHOST_TWAP_FRESHNESS_CHECKPOINT.md) now implements
+separate five-second source and three-second wall/monotonic receipt limits with
+consistent expiry. The original three-second canary remains separate evidence;
+new-policy live publication and browser coverage still require validation.
+Batch eligibility and publication durability are unchanged in this checkpoint.
 
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
@@ -23,7 +22,7 @@ Build an optional ghost-price worker in the existing Chainlink collector, using 
 ## V1 output
 
 - Source-stamp horizons **1, 2, 3, 5, 10 and 30 seconds**. Short horizons also serve as reconstruction diagnostics; no fixed error tolerance is promised.
-- Each horizon carries its target source timestamp, estimated local arrival time, predicted Decimal price, quality state and observed/carried/pending/future/missing slot counts (payload contract 2).
+- Each horizon carries its target source timestamp, estimated local arrival time, predicted Decimal price, quality state and observed/carried/pending/future/missing slot counts (payload contract 3).
 - No strike, side call or settlement winner in v1. Each target keeps its calendar market window, using the existing [market helper](price_collector/market.py).
 - Proposed Redis key: `btc:live:ghost_chainlink_twap_60s`. Snapshot: `GET /forecasts/chainlink-twap/live`; primary frontend delivery: SSE at `GET /forecasts/chainlink-twap/stream`.
 - The owner confirmed a frontend on their own computer, accessing the loopback API through a persistent SSH tunnel. Frontend code stays in a separate project; no public API binding or frontend on the droplet.
@@ -65,13 +64,15 @@ Use small nonblocking event offers from the existing [Chainlink collector](price
 
 Trigger refreshes on accepted spot/TWAP events and **publish immediately when idle**. Coalesce only bursts or updates arriving during in-flight work, with a bounded latest-state queue; remove the proposed mandatory 100 ms interval. Keep a separate health/expiry timer. Measure receipt-to-publication latency and skipped updates; freeze any rate cap from those measurements. Never backdate a delayed calculation. Receipt-to-Redis acknowledgement below 10 ms is an initial optimization objective under normal load, not a measured guarantee or a bound during failures.
 
-These are proposed operating limits, to freeze and version before the canary:
+The current implementation limits below use `ghost-canary-v4` / contract 3.
+The completed first canary used v3 / contract 2 with three seconds for all age
+checks; it is not a prospective validation of the new source-age policy:
 
 | Policy | Initial choice |
 |---|---|
 | Enablement | Dedicated `GHOST_TWAP_ENABLED=false`; canonical 60-second feed required |
 | Warm-up | Live-only input history; no PostgreSQL bootstrap or predictions for downtime |
-| Current input freshness | Selected spot/TWAP source and receipt ages <= 3,000 ms |
+| Current input freshness | Selected spot/TWAP source age <= 5,000 ms; wall and monotonic receipt ages <= 3,000 ms. Expiry is the earliest source/wall-receipt/monotonic-receipt deadline across both feeds |
 | Historical carry | <= 10,000 ms per slot; expose count and maximum age |
 | Memory | 120 seconds of context plus a necessary bounded seed, with hard event-count/queue caps |
 | Gaps and loss | Invalidate affected windows; record drops/backlog and rebuild coverage before recovery |
@@ -83,7 +84,7 @@ These are proposed operating limits, to freeze and version before the canary:
 
 The carry and freshness limits are stricter than the broad replay. Report the resulting availability loss, including during stalls, rather than imply its historical sample counts will repeat.
 
-Use **healthy / degraded / unavailable**, never an uncalibrated confidence percentage. Healthy passes all checks without interior carried slots; allowed interior carry or incomplete audit persistence is degraded. Pending and future slots remain explicit assumptions even when healthy. Pending does not promise eventual delivery, and an interior absent stamp does not prove producer silence. Missing slots, stale/invalid inputs, relevant gaps, unresolved conflicts or an already-seen target make the affected horizon unavailable. The three-second current freshness guards still detect stalled feeds.
+Use **healthy / degraded / unavailable**, never an uncalibrated confidence percentage. Healthy passes all checks without interior carried slots; allowed interior carry or incomplete audit persistence is degraded. Pending and future slots remain explicit assumptions even when healthy. Pending does not promise eventual delivery, and an interior absent stamp does not prove producer silence. Missing slots, stale/invalid inputs, relevant gaps, unresolved conflicts or an already-seen target make the affected horizon unavailable. The three-second receipt guards and five-second source guards still bound stalled or delayed feeds.
 
 In B, measure constituent-queue high-water marks, input drops, reset causes and unavailable duration/recovery for each horizon. Size and fault-test the bounded queue against observed bursts; never assume overflow is impossible or coalesce away constituent events. After loss, availability recovers as each horizon's required window is covered, not after a universal 62-second timer. Preserve core feed priority and the explicit missingness policy.
 
@@ -170,9 +171,10 @@ Compare with the research replay only where inputs and policies coincide; explic
 
 [Verified study results](SPOT_TWAP_RESPONSE_STUDY.md) justify this canary, not a prospective accuracy guarantee. The [causal-opening settlement replay](research/spot_twap_response/receipt_clock_pilot/README.md) is already complete: T−30 had 36 projection errors versus 125 TWAP errors among 1,925 markets. It is not an outstanding prerequisite.
 
-A is accepted and B's one-hour prospective canary is complete. Its results support
-bounded operation and forecast utility, while identifying a publication-speed
-miss. Enabling SSE remains C. Longer capacity, retention maintenance and browser
+A is accepted and B's original one-hour prospective canary is complete. Its
+results support bounded operation and forecast utility while identifying freshness
+losses and a publication-speed miss. The freshness revision has separate offline
+validation; a new live run is still needed. Enabling SSE remains C. Longer capacity, retention maintenance and browser
 delivery are not established by this run.
 
 Keep production code under `price_collector/`, with no research imports or retired-pipeline reuse. Each implemented checkpoint gets focused tests and relevant documentation; run the full suite when practical. B/C runtime/schema/API changes require the repository's normal droplet handoff and schema-before-restart ordering. A's standalone module is not imported by running services and needs no service restart.

@@ -120,7 +120,7 @@ def test_source_past_unreceived_target_remains_valid_even_when_eta_overdue():
 
 
 def test_current_source_age_limit_is_inclusive():
-    engine, _ = prime()
+    engine, _ = prime(source_max_age_ms=3000)
     assert all(f.price is not None for f in snapshot(engine, 3000).forecasts)
     assert_unavailable(snapshot(engine, 3001, "expired"))
 

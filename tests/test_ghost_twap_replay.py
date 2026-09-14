@@ -40,7 +40,9 @@ def test_recorded_hour_matches_independent_reference_on_all_21600_forecasts():
         sequence=int(row["replay_order"]), event_id=row["event_id"],
         window_s=60 if row["kind"] == "twap" else None,
     ) for row in source_rows]
-    engine = GhostTwapEngine("recorded-hour", GhostPolicy(enabled=True))
+    # The historical fixture retains its original 3s/3s freshness policy.
+    engine = GhostTwapEngine("recorded-hour", GhostPolicy(
+        enabled=True, source_max_age_ms=3000, receipt_max_age_ms=3000))
     next_event = 0
     checked = 0
     available = {h: 0 for h in (1, 2, 3, 5, 10, 30)}

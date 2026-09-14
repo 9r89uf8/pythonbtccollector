@@ -1,0 +1,70 @@
+{
+  "status": "passed_offline_implementation_checkpoint",
+  "created_utc": "2026-09-14T03:01:57.674364+00:00",
+  "base_commit": "2cc04366e52674737b6b87fe48ed5ca1ca8be85f",
+  "branch": "codex/ghost-freshness-expiry",
+  "scope": "Separate source5000ms and receipt3000ms freshness with corresponding expiry; no new live campaign",
+  "contract_version": 3,
+  "runtime_version": "ghost-canary-v4",
+  "default_enabled": false,
+  "production_touched": false,
+  "test_runs": [
+    {
+      "python": "3.9.5",
+      "command": "python -m pytest -q",
+      "passed": 1179,
+      "skipped": 10,
+      "seconds": "51.80",
+      "evidence": "Observed completed local tool run; default tests directory"
+    },
+    {
+      "python": "3.12.0",
+      "command": "python -m pytest tests/test_ghost_twap.py tests/test_ghost_twap_edges.py tests/test_ghost_twap_pending.py tests/test_ghost_twap_replay.py tests/test_ghost_twap_freshness.py tests/test_ghost_twap_runtime_faults.py tests/test_ghost_twap_spool.py tests/test_ghost_twap_deployment.py -q",
+      "passed": 185,
+      "seconds": "17.22",
+      "evidence": "Observed completed local tool run; production interpreter version, focused subset"
+    },
+    {
+      "python": "3.9.5",
+      "command": "python -m pytest research/spot_twap_response/freshness_expiry/test_review.py -q",
+      "passed": 12,
+      "evidence": "Research manifest and completed agent test run"
+    }
+  ],
+  "skip_scope": "Opt-in datastore integration checks; schema/store/Redis Lua unchanged",
+  "original_fixture_rows_matched": 21600,
+  "audit_export_sha256": "d7536bcafcf62170abbf9329f6b720d7df35fb710b9f79f64ec96ca2bda05b80",
+  "replay_decisions": 7292,
+  "original_horizons_matched": 43752,
+  "candidate_available_means_matched": 43035,
+  "mismatch_count": 0,
+  "research_manifest": "research/spot_twap_response/freshness_expiry/results/manifest.json",
+  "limitations": [
+    "Fixed original decision timestamps, not candidate runtime scheduling or live availability",
+    "Newly eligible one-second forecasts have weak persistence improvement and short prepublication headroom",
+    "No API/SSE/browser delivery validation or new canary",
+    "Batch eligibility and durable-before-publication ordering unchanged"
+  ],
+  "artifacts_sha256": {
+    ".gitattributes": "c38b6e5981070e447d51001dec88e0f82a884deed8c7933b7a41c7a96e0fe3ab",
+    "GHOST_TWAP_FRESHNESS_CHECKPOINT.md": "274713e99ad54de09b4c343bac32473fb6f24d8d4449a8a4a70aa1a737a94625",
+    "GHOST_TWAP_LIVE_PLAN.md": "35003253cfb64be0cc08499243ca161283322d619a0ee60e15acd184ff4eb00c",
+    "OPERATIONS.md": "91713003d73949b74f330eea8272e0bb8af44a5fa8132d4151b300638d2eae9c",
+    "README.md": "5ce6b013c15174af7db9c70af17560332c14660422b4ced80a2e5f4738d908e2",
+    "deployment/collector.env.example": "a6bb30abb2e997de1d1dd6a379b067829495f7b18c8f21c3522bc7abe49be869",
+    "price_collector/ghost_twap.py": "c7b5013257f3c9222199cad3d820c696d64794ce0d3441b9253d204557ca2bc6",
+    "price_collector/ghost_twap_runtime.py": "6e74ae47a04e17cbf87a68a430efb8449836f6867ed8a3295b628358637ae5bb",
+    "research/spot_twap_response/freshness_expiry/README.md": "2ce36c7bc2106a5e6817621a370a57f1b252e04b4e999fc13f7b34491cd97709",
+    "research/spot_twap_response/freshness_expiry/results/manifest.json": "39f97c527de1384e9f52eabaf60602d77f03d5116a69ca8230a588c0a861fd73",
+    "research/spot_twap_response/freshness_expiry/results/summary.json": "cfe03f27bd3f9ea59cb1af6fd7ae165be872cae6c5133edc38b19dd0995d9d2e",
+    "research/spot_twap_response/freshness_expiry/review.py": "0b725c12f6e815d4887bcaba3ff4fa143ac65d85d2489413ca82dd7c1f36047b",
+    "research/spot_twap_response/freshness_expiry/test_review.py": "287015fa02fb25516a7d57e5398f50fd8b8092415a13a3acaceef32315962427",
+    "tests/test_ghost_twap_deployment.py": "7b421e0691942f08d9a605f2418124e4d705ed6ef9205fe64c46a255bf03fa46",
+    "tests/test_ghost_twap_edges.py": "fa31c5e6863137d1f0f98a3112fa1c083c567f62a7ed9cc4c73b45952a0bc6de",
+    "tests/test_ghost_twap_freshness.py": "63e07a7095ff4a8f5810df5922a7b4131d6f59827bf2be821c5eadab7e8025a0",
+    "tests/test_ghost_twap_pending.py": "377bb6b6d851d1414fd1a42d6600670095b75113bbd368eaf3771cc7ece175ae",
+    "tests/test_ghost_twap_replay.py": "452409d2e6001076ad882ff9a4deeeb918c4b8ef8da76e2840a43cabefd3203a",
+    "tests/test_ghost_twap_runtime_faults.py": "d534a78e9da4c761b95ccea030edfc8dee3d9ba05ea98e7a608ae41da302d1b5"
+  },
+  "independent_review": "No implementation, causality, cohort or grading blockers; hashes and denominators verified. Report wording refined for per-horizon expiry and mutable audit state."
+}

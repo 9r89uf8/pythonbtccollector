@@ -281,3 +281,9 @@
 /GHOST_TWAP_CANARY_REVIEW.md -text
 /research/spot_twap_response/canary_peer_review/* -text
 /results/spot_twap_response/2026-09-14-canary-peer-review/* -text
+
+# Preserve the split-freshness implementation and offline validation evidence.
+/GHOST_TWAP_FRESHNESS_CHECKPOINT.md -text
+/tests/test_ghost_twap_freshness.py -text
+/research/spot_twap_response/freshness_expiry/** -text
+/results/spot_twap_response/2026-09-14-freshness-expiry/* -text

@@ -152,14 +152,14 @@ def test_arriving_pending_slot_becomes_observed_and_preserves_old_snapshot():
 
 
 def test_pending_label_cannot_mask_stale_current_inputs():
-    decision = primed().snapshot(3001)
+    decision = primed(source_max_age_ms=3000).snapshot(3001)
     assert slot_at(decision, 1000).category == "pending"
     assert all(f.price is None and f.quality == "unavailable" for f in decision.forecasts)
 
 
 def test_pending_age_still_obeys_inclusive_carry_limit():
     # Relax only current freshness to isolate the unchanged ten-second slot guard.
-    decision = primed(current_max_age_ms=20_000).snapshot(11_000)
+    decision = primed(source_max_age_ms=20_000, receipt_max_age_ms=20_000).snapshot(11_000)
     edge = slot_at(decision, 10_000)
     assert edge.category == "pending"
     assert edge.carry_age_ms == 10_000
@@ -192,11 +192,11 @@ def test_spot_gap_recovery_depends_on_horizon_not_a_fixed_62_second_wait():
     assert all(horizon(decision, h).price is None for h in (1, 2, 3, 5, 10))
 
 
-def test_contract_v2_serializes_pending_counts_and_audit_categories():
+def test_contract_v3_preserves_pending_counts_and_audit_categories():
     decision = primed().snapshot()
     live = json.loads(decision.to_live_json())
     audit = json.loads(decision.to_audit_json())
-    assert live["contract_version"] == audit["contract_version"] == 2
+    assert live["contract_version"] == audit["contract_version"] == 3
     assert all("pending" in forecast["counts"] for forecast in live["forecasts"])
     assert any(slot["category"] == "pending" for slot in audit["slots"])
     assert isinstance(live["decision_wall_ns"], str)

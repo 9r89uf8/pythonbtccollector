@@ -33,6 +33,8 @@ def test_ghost_example_is_disabled_and_tunnel_has_no_runtime_credentials():
     assert settings['GHOST_TWAP_CANARY_START_MS'] == '0'
     assert settings['GHOST_TWAP_STATE_DIRECTORY'] == '/var/lib/price-collector/ghost-twap'
     assert settings['GHOST_TWAP_DATABASE_FILESYSTEM_PATH'] == '/var/lib/postgresql'
+    assert settings['GHOST_TWAP_SOURCE_MAX_AGE_MS'] == '5000'
+    assert settings['GHOST_TWAP_RECEIPT_MAX_AGE_MS'] == '3000'
     for name in ('droplet.env.example', 'deployment/api.env.example'):
         active = '\n'.join(line for line in (ROOT / name).read_text().splitlines()
                            if not line.startswith('#'))

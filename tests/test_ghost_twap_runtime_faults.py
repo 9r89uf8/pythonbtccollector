@@ -153,6 +153,101 @@ def target(value, row, clock, horizon=1, price="101", identity="target"):
                       clock.wall, clock.mono, value._sequence + 1, identity, 60)
 
 
+def warm_delayed(value, *, final_source_second=98, delay_ms=2000):
+    """Actual delayed source clocks, rather than refreshed historical inputs."""
+    for second in range(final_source_second - 61, final_source_second + 1):
+        value.offer_price("spot", Decimal("100"), BASE + second * 1000,
+                          (BASE + second * 1000 + delay_ms) * NS_PER_MS,
+                          (second * 1000 + delay_ms) * NS_PER_MS,
+                          "delayed-spot-" + str(second))
+        value.drain_inputs()
+    value.offer_price("twap", Decimal("100"), BASE + final_source_second * 1000,
+                      (BASE + final_source_second * 1000 + delay_ms) * NS_PER_MS,
+                      (final_source_second * 1000 + delay_ms) * NS_PER_MS,
+                      "delayed-anchor", 60)
+
+
+def test_freshness_settings_are_separate_bounded_and_default_off(monkeypatch):
+    from pydantic import ValidationError
+    assert not GhostSettings().enabled
+    monkeypatch.setenv("GHOST_TWAP_SOURCE_MAX_AGE_MS", "4500")
+    monkeypatch.setenv("GHOST_TWAP_RECEIPT_MAX_AGE_MS", "2500")
+    config = GhostSettings()
+    assert (config.source_max_age_ms, config.receipt_max_age_ms) == (4500, 2500)
+    value, _, _, _, _ = runtime()
+    assert value.engine.policy.source_max_age_ms == 4500
+    assert value.engine.policy.receipt_max_age_ms == 2500
+    for overrides in ({"source_max_age_ms": 5001}, {"receipt_max_age_ms": 3001},
+                      {"source_max_age_ms": 0}, {"receipt_max_age_ms": -1}):
+        with pytest.raises(ValidationError):
+            GhostSettings(**overrides)
+
+
+def test_delayed_feeds_publish_with_split_policy_and_original_expiry():
+    value, clock, spool, _, redis = runtime()
+    warm_delayed(value)
+    clock.advance(1250 * NS_PER_MS)
+    row = value.issue()
+    assert row is not None and all(f.price == Decimal("100") for f in row.decision.forecasts)
+    # Both inputs are now 3.25s old by source, but only 1.25s by receipt.
+    assert row.decision.valid_until_wall_ns == (BASE + 103000) * NS_PER_MS
+    run(value.publish(row))
+    assert row.state["publication"]["status"] == "acknowledged"
+    body = json.loads(redis.calls[0][-2])
+    assert redis.calls[0][-1] == 1750
+    assert body["contract_version"] == 3
+    assert body["runtime_version"] == "ghost-canary-v4"
+    assert body["policy"]["source_max_age_ms"] == 5000
+    assert body["policy"]["receipt_max_age_ms"] == 3000
+    assert "current_max_age_ms" not in body["policy"]
+    stored = spool.rows[(row.decision.run_id, row.decision.decision_id)]
+    frozen = json.loads(stored["frozen_json"])
+    assert frozen["runtime_policy"]["source_max_age_ms"] == 5000
+    assert frozen["runtime_policy"]["receipt_max_age_ms"] == 3000
+    assert frozen["policy"] == body["policy"]
+
+
+def test_split_policy_still_rejects_expiry_during_durable_write():
+    value, clock, spool, _, redis = runtime()
+    warm_delayed(value)
+    clock.advance(1250 * NS_PER_MS)
+    row = value.issue()
+    assert row is not None
+    spool.before_write = lambda: clock.advance(1750 * NS_PER_MS)
+    run(value.publish(row))
+    assert not redis.calls
+    assert row.state["publication"]["status"] == "preempted_after_spool"
+
+
+def test_receipt_deadline_expires_before_five_second_source_cap():
+    value, clock, _, _, redis = runtime()
+    warm_delayed(value, final_source_second=99, delay_ms=200)
+    row = value.issue()
+    assert row is not None
+    assert row.decision.valid_until_wall_ns == (BASE + 102200) * NS_PER_MS
+    run(value.publish(row))
+    assert redis.calls[0][-1] == 2200
+    clock.advance(2200 * NS_PER_MS + 1)
+    expired = value.issue()
+    assert expired is not None and all(f.price is None for f in expired.decision.forecasts)
+    assert {"stale_spot", "stale_twap"}.issubset(expired.decision.reasons)
+    run(value.publish(expired))
+    assert len(redis.calls) == 1
+
+
+def test_monotonic_receipt_deadline_controls_redis_ttl_under_clock_skew():
+    value, clock, _, _, redis = runtime()
+    warm_delayed(value, final_source_second=99, delay_ms=200)
+    # Wall age remains 0.8s; monotonic age is 1.8s. The shorter remaining
+    # receipt lifetime must govern both serialized validity and Redis PX.
+    clock.mono += NS_PER_SECOND
+    row = value.issue()
+    assert row is not None
+    assert row.decision.valid_until_wall_ns == (BASE + 101200) * NS_PER_MS
+    run(value.publish(row))
+    assert redis.calls[0][-1] == 1200
+
+
 def test_issue_drains_all_constituents_before_clocked_snapshot():
     value, clock, _, _, _ = runtime()
     warm(value)

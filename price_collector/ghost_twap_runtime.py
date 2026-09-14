@@ -26,7 +26,7 @@ from price_collector.ghost_twap_spool import GhostSpool
 LOGGER = logging.getLogger(__name__)
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 GHOST_CHANNEL = 'btc:live:ghost_chainlink_twap_60s:updates'
-RUNTIME_VERSION = 'ghost-canary-v3'
+RUNTIME_VERSION = 'ghost-canary-v4'
 CANARY_MS = 60 * 60 * 1000
 CAMPAIGN_CHECKPOINT_SECONDS = 30
 AUDIT_BATCH_SECONDS = 2.5
@@ -53,6 +53,10 @@ class GhostSettings(BaseSettings):
     canary_start_ms: int = Field(default=0, ge=0)
     state_directory: Path = Path('/var/lib/price-collector/ghost-twap')
     database_filesystem_path: Path = Path('/var/lib/postgresql')
+    # Source stamps include upstream delivery delay. Receipt freshness remains
+    # stricter; neither clock may silently extend the other one's deadline.
+    source_max_age_ms: int = Field(default=5000, ge=1, le=5000)
+    receipt_max_age_ms: int = Field(default=3000, ge=1, le=3000)
     input_queue_max: int = Field(default=2048, ge=16, le=2048)
     audit_max_records: int = Field(default=512, ge=8, le=512)
     record_max_bytes: int = Field(default=131072, ge=32768, le=131072)
@@ -92,7 +96,9 @@ class GhostRuntime:
         self.wall_ns, self.mono_ns = wall_ns, mono_ns
         self.disk_free = disk_free or (lambda: shutil.disk_usage(settings.database_filesystem_path).free)
         self.run_id = uuid4().hex
-        self.engine = GhostTwapEngine(self.run_id, GhostPolicy(enabled=True))
+        self.engine = GhostTwapEngine(self.run_id, GhostPolicy(
+            enabled=True, source_max_age_ms=settings.source_max_age_ms,
+            receipt_max_age_ms=settings.receipt_max_age_ms))
         self.queue: deque = deque()
         self.records: OrderedDict[str, PendingDecision] = OrderedDict()
         self.late_events: deque = deque()

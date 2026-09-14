@@ -15,7 +15,7 @@ from price_collector.market import MarketWindow, market_for_sample_second
 
 HORIZONS = (1, 2, 3, 5, 10, 30)
 MODEL_VERSION = "chainlink-60s-offset3-v1"
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 NS_PER_MS = 1_000_000
 NS_PER_SECOND = 1_000_000_000
 PRICE_QUANTUM = Decimal("0.000000000000000001")
@@ -48,7 +48,8 @@ def _price_text(value: Decimal | None) -> str | None:
 @dataclass(frozen=True)
 class GhostPolicy:
     enabled: bool = False
-    current_max_age_ms: int = 3_000
+    source_max_age_ms: int = 5_000
+    receipt_max_age_ms: int = 3_000
     max_carry_ms: int = 10_000
     history_ms: int = 120_000
     max_events: int = 1_024
@@ -56,9 +57,9 @@ class GhostPolicy:
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be bool")
-        for name in ("current_max_age_ms", "max_carry_ms", "history_ms", "max_events"):
+        for name in ("source_max_age_ms", "receipt_max_age_ms", "max_carry_ms", "history_ms", "max_events"):
             _integer(getattr(self, name), name, 1)
-        if self.history_ms < 62_000 + self.current_max_age_ms:
+        if self.history_ms < 62_000 + self.source_max_age_ms:
             raise ValueError("history must cover the oldest requested slot")
 
 
@@ -322,7 +323,8 @@ class GhostTwapEngine:
                 wall_ns - event.received_wall_ns, mono_ns - event.received_monotonic_ns)
         if min(ages) < 0 or event.source_timestamp_ms * NS_PER_MS > event.received_wall_ns:
             return [f"future_{feed}"]
-        if max(ages) > self.policy.current_max_age_ms * NS_PER_MS:
+        if (ages[0] > self.policy.source_max_age_ms * NS_PER_MS
+                or max(ages[1:]) > self.policy.receipt_max_age_ms * NS_PER_MS):
             return [f"stale_{feed}"]
         return []
 
@@ -403,9 +405,9 @@ class GhostTwapEngine:
         deadlines = [decision_wall_ns] if reason_tuple else []
         for event in (spot, anchor):
             if event is not None:
-                deadlines.extend((event.received_wall_ns + self.policy.current_max_age_ms * NS_PER_MS,
-                                  (event.source_timestamp_ms + self.policy.current_max_age_ms) * NS_PER_MS,
-                                  decision_wall_ns + self.policy.current_max_age_ms * NS_PER_MS
+                deadlines.extend((event.received_wall_ns + self.policy.receipt_max_age_ms * NS_PER_MS,
+                                  (event.source_timestamp_ms + self.policy.source_max_age_ms) * NS_PER_MS,
+                                  decision_wall_ns + self.policy.receipt_max_age_ms * NS_PER_MS
                                   - (decision_monotonic_ns - event.received_monotonic_ns)))
         return Decision(self.run_id, decision_id, decision_wall_ns, decision_monotonic_ns,
                         None if self._last_event is None else self._last_event.sequence,

@@ -911,13 +911,15 @@ under-10-ms objective. API/SSE delivery remains Checkpoint C.
 1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
 through `GhostPolicy` and has no I/O. Checkpoint B adds an optional worker inside
 the Chainlink collector; `GHOST_TWAP_ENABLED=false` keeps that integration inactive.
-The exact recorded-hour replay covers 21,600 horizon calculations; it does not
-measure prospective publication or frontend latency. Payload contract 2 separates
-pending recent inputs from interior carried slots, with all forecast prices and
-availability unchanged. Pending and future inputs remain explicit assumptions.
-See the
-[Checkpoint A contract and tests](GHOST_TWAP_CHECKPOINT_A.md) and
-[live implementation plan](GHOST_TWAP_LIVE_PLAN.md).
+The [freshness/expiry checkpoint](GHOST_TWAP_FRESHNESS_CHECKPOINT.md) adds payload
+contract 3: separate source age (default 5,000 ms) and wall/monotonic receipt age
+(default 3,000 ms), with expiry at the earliest deadline for either feed.
+`GHOST_TWAP_SOURCE_MAX_AGE_MS` and `GHOST_TWAP_RECEIPT_MAX_AGE_MS` can tighten those
+limits. The existing pending/carried distinction, Decimal calculation and
+10,000 ms historical carry limit remain unchanged. The historical recorded-hour
+replay still matches all 21,600 forecasts under explicit original 3s/3s limits;
+its frozen fixture bytes remain unchanged. See the [Checkpoint A evidence](GHOST_TWAP_CHECKPOINT_A.md)
+and [live implementation plan](GHOST_TWAP_LIVE_PLAN.md).
 
 The B worker uses accepted canonical inputs, an independent Redis connection,
 a bounded fsynced disk outbox, and one PostgreSQL `ghost_twap_audit` table.

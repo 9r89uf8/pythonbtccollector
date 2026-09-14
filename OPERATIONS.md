@@ -63,6 +63,39 @@ credential. Do not put them in the API environment or the local tunnel file.
 | `GHOST_TWAP_CANARY_START_MS` | `0` |
 | `GHOST_TWAP_STATE_DIRECTORY` | `/var/lib/price-collector/ghost-twap` |
 | `GHOST_TWAP_DATABASE_FILESYSTEM_PATH` | `/var/lib/postgresql` |
+| `GHOST_TWAP_SOURCE_MAX_AGE_MS` | `5000` |
+| `GHOST_TWAP_RECEIPT_MAX_AGE_MS` | `3000` |
+
+Runtime `ghost-canary-v4` / calculation contract 3 separates these freshness
+limits. Source age may be at most 5,000 ms; both wall and monotonic receipt ages
+may be at most 3,000 ms. Configuration may tighten either bound, not exceed it.
+The published validity deadline and Redis TTL honor the earliest of all six
+deadlines (three clocks for each feed). The historical ten-second carry limit
+and future-clock checks are unchanged. See the [freshness checkpoint](GHOST_TWAP_FRESHNESS_CHECKPOINT.md).
+
+When upgrading an existing B installation for freshness/expiry, no schema or
+dependency change is required. After this change is pushed to GitHub:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudoedit /etc/price-collector/collector.env
+sudo systemctl restart price-collector-polymarket-chainlink
+sudo systemctl status price-collector-polymarket-chainlink --no-pager
+sudo journalctl -u price-collector-polymarket-chainlink -n 100 --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/markets/current/live
+redis-cli EXISTS btc:live:ghost_chainlink_twap_60s
+```
+
+Review or add only `GHOST_TWAP_SOURCE_MAX_AGE_MS=5000` and
+`GHOST_TWAP_RECEIPT_MAX_AGE_MS=3000` in the existing collector environment. Keep
+`GHOST_TWAP_ENABLED=false` during this upgrade. Preserve the completed campaign's
+start, state directory and stop latch. Installing this revision does not start
+another run or permit resetting the old one; a later canary needs a separately
+reviewed fresh campaign. Old frozen audit JSON, policy and its hash remain
+unchanged; mutable reconciliation state can still be versioned.
 
 Before an enabled run, verify default tablespace placement and that the configured
 filesystem path shares the database's device. Confirm the writer can inspect
