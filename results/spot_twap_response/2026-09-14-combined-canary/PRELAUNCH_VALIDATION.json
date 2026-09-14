@@ -1,0 +1,55 @@
+{
+  "status": "ready_for_deployment_and_dry_run",
+  "protocol": "GHOST_TWAP_COMBINED_CANARY.md",
+  "runtime_version": "ghost-canary-v5",
+  "contract_version": 3,
+  "validation": {
+    "python39_full_suite": {
+      "passed": 1299,
+      "skipped": 10,
+      "seconds": "116.52"
+    },
+    "python312_new_measurement_tools": {
+      "passed": 86,
+      "seconds": "16.91"
+    },
+    "independent_review": "Scorer, observer, exact-payload join and adversarial tests reviewed separately; material findings fixed."
+  },
+  "observer_capacity": {
+    "representative_payload_bytes": 4305,
+    "ledger_line_bytes": 5847,
+    "sample_line_bytes": 857,
+    "unique_payload_planning_count": 7500,
+    "sample_count": 36000,
+    "estimated_bytes": 74737268,
+    "estimate_with_additional_allowance_bytes": 94213268,
+    "cap_bytes": 134217728,
+    "limitation": "Estimate, not worst-case guarantee. Hitting cap produces incomplete observation and never extends the hour."
+  },
+  "earlier_disabled_preflight": {
+    "at_utc": "2026-09-14T22:06:33.505005+00:00",
+    "audit": {
+      "rows": 7292,
+      "incomplete": 0,
+      "unverified_current": 0,
+      "run_ids": [
+        "06f1134f06c14a94b5cab90a43b2eee6"
+      ],
+      "latest_created_ms": 1789350320291
+    },
+    "old_campaign": {
+      "last_wall_ms": 1789350320291,
+      "start_ms": 1789346720328,
+      "stop_reason": "canary_deadline"
+    },
+    "old_campaign_sha256": "f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86",
+    "old_outbox_rows": 0,
+    "ghost_env": {
+      "GHOST_TWAP_ENABLED": "false",
+      "GHOST_TWAP_CANARY_START_MS": "1789346720328",
+      "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-twap",
+      "GHOST_TWAP_SOURCE_MAX_AGE_MS": "5000",
+      "GHOST_TWAP_RECEIPT_MAX_AGE_MS": "3000"
+    }
+  }
+}

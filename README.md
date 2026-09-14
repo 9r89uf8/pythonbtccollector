@@ -936,7 +936,13 @@ still-eligible siblings keep their original prices. All six entries and the
 original calculation audit remain present. Attempted payloads record the exact
 selection, and confirmed lead requires that horizon's actual attempted price.
 Freshness, expiry and the disabled default are unchanged. A new live canary is
-still needed to measure the combined policy's cache coverage.
+prepared under the [combined canary protocol](GHOST_TWAP_COMBINED_CANARY.md) to
+measure the combined policy's cache coverage. Its bounded operational observer,
+`python -m price_collector.ghost_twap_observer`, reads only local Redis and is
+never imported or started by a collector. It samples at 100 ms for one fixed
+hour, retaining exact payload bytes and explicit missing observations. Offline
+research scoring verifies attempted membership and joins those bytes to the
+campaign audit. These are local cache measurements; browser delivery remains C.
 
 The first canary requires an explicit fixed start time and stops new decisions
 after at most one hour, at 1.5 GiB of audit relations, at 600,000 decisions, or

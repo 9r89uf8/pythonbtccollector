@@ -291,4 +291,13 @@
 # Per-horizon publication checkpoint evidence.
 /GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md -text
 /tests/test_ghost_twap_batch_eligibility.py -text
+
+# Freeze the combined-canary observer, scorer and verified evidence bytes.
+/price_collector/ghost_twap_observer.py -text
+/research/spot_twap_response/combined_canary/* -text
+/tests/test_ghost_twap_observer.py -text
+/tests/test_ghost_twap_combined_analysis.py -text
+/tests/test_ghost_twap_combined_join.py -text
+/results/spot_twap_response/2026-09-14-combined-canary/* -text
+/GHOST_TWAP_COMBINED_CANARY.md -text
 /results/spot_twap_response/2026-09-14-batch-eligibility/* -text

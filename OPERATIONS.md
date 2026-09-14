@@ -197,6 +197,78 @@ measure relation/filesystem usage and arrange bounded vacuum maintenance rather
 than assume the bytes returned to the filesystem. Keep the full export and
 bounded findings after removing eligible database rows.
 
+## Combined ghost canary observer
+
+The owner authorized the new one-hour run in
+[GHOST_TWAP_COMBINED_CANARY.md](GHOST_TWAP_COMBINED_CANARY.md). Install the
+observer after pushing the reviewed change to GitHub:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u pricecollector .venv/bin/python -m price_collector.ghost_twap_observer --help
+sudo systemctl status price-collector-polymarket-chainlink --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+```
+
+This adds a standalone operational module, with no schema or dependency change.
+Installation alone needs no restart. The accepted activation procedure below
+restarts only `price-collector-polymarket-chainlink` after changing its three
+campaign keys. The observer is a bounded transient systemd job, not a permanent
+service. It receives no collector/API environment file or database credentials.
+
+First run a 15-second observer dry run while ghost stays disabled. Stop it with
+SIGTERM, verify the resulting incomplete manifest and inspect read latency,
+timeouts, missed bins, CPU and output size. Absence in this test is expected;
+estimate live payload storage separately against the fixed 128 MiB output cap.
+An interrupted dry run is never a completed coverage measurement.
+
+Before the live run, complete the old-campaign checks in the
+[handoff](results/spot_twap_response/2026-09-14-batch-eligibility/CANARY_HANDOFF.md).
+Keep its directory and externally verified export untouched. Create a unique
+empty campaign directory and a separate observer output directory beneath
+`/var/lib/price-collector`, owned by `pricecollector` with mode 0700. The observer
+creates its own output directory exclusively; do not pre-create that directory.
+
+Choose one fixed start and end (start plus 3,600,000 ms). Launch the observer a
+few seconds before that start with the production interpreter:
+
+```bash
+sudo -u pricecollector /opt/price-collector/.venv/bin/python -m price_collector.ghost_twap_observer observe --start-ms "$ghost_start_ms" --output-directory "$ghost_observer_dir"
+```
+
+For an unattended hour, run that command in a transient systemd unit with
+`User=pricecollector`, working directory `/opt/price-collector`, and a bounded
+runtime. Require `ready.json` from an actual successful Redis probe before
+activation. Wait until the configured start is current, then change only
+`GHOST_TWAP_STATE_DIRECTORY`, `GHOST_TWAP_CANARY_START_MS` and
+`GHOST_TWAP_ENABLED=true` in the existing env file. Preserve all other keys,
+including source 5,000 ms and receipt 3,000 ms. Restart only the Chainlink
+collector and record its runtime ID, PID, commit, fixed interval and paths.
+The hour includes startup/warmup; do not extend it after delays or a guard stop.
+
+After the deadline, allow at least 120 seconds for final target matching and
+drain the audit. Disable ghost, restart only the Chainlink collector, verify
+terminal state, empty outbox, absent key and healthy official feeds. Download a
+new complete audit export to the owner's computer with the existing verified
+download command; keep both exports. Copy the observer files and verify their
+manifest before analyzing. Run offline from the repository root:
+
+```bash
+python -m price_collector.ghost_twap_observer analyze --directory "$ghost_observer_copy"
+python research/spot_twap_response/combined_canary/analyze.py --input "$ghost_audit_copy" --campaign-start-ms "$ghost_start_ms" --expected-sha256 "$ghost_export_sha256" --expected-rows "$ghost_export_rows" --output "$ghost_analysis_dir"
+python -m research.spot_twap_response.combined_canary.join_observer --observer-directory "$ghost_observer_copy" --analysis-directory "$ghost_analysis_dir" --output "$ghost_join_file"
+```
+
+Supply hash and row count from the verified download manifest. The scorer checks
+the entire export, filters the exact campaign and produces `payload_index.json`
+for exact observed-byte joining. It distinguishes calculated, acknowledged
+eligible and confirmed-early cohorts. Coverage counts all 36,000 planned bins,
+including missing/error bins, and reports full-hour, post-65-second and minute
+results. It describes freshness at read time, not continued target non-arrival
+or browser delivery. A present but unacknowledged write keeps that audit status.
+
 ## Deploy compact Polymarket evidence
 
 Run these commands **after the change is pushed to GitHub**. This checkpoint
