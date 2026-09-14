@@ -26,6 +26,11 @@ skipped. The archived validation confirms those five ran among 208 passing ghost
 tests on Python 3.12 in a disposable database, separately from production. The
 review correctly distinguishes those tests from a live canary.
 
+Current policy update: the owner subsequently shortened the first canary to
+**one hour**, versioned as `ghost-canary-v3`. The four-hour decision and v2 test
+evidence below describe the original peer review; all other guards, retention
+and forecast calculations are unchanged.
+
 ## Storage decision
 
 The original reviewed commit's complete-runtime probe had 64 decisions and used 1,974,272 relation bytes
@@ -43,7 +48,8 @@ physical size of one live tuple or a proven steady storage slope. The smaller
 engine-only probe had a different slope; actual event rate, compression,
 autovacuum and update shape can change the result.
 
-The first canary is therefore shortened to **four hours for capacity measurement**.
+At this review, the first canary was shortened to **four hours for capacity measurement**
+(subsequently reduced to one hour at the owner's request).
 Keep all decision evidence, the 1.5 GiB stop, 2 GiB budget, bounded reservations
 and 96-hour externally verified retention. It can stop earlier. Completion of
 this first run would not establish multi-day or continuous operation; those need
@@ -52,7 +58,7 @@ raises the cap or deletes unexported rows.
 
 ## Corrections and validation
 
-Runtime policy is now `ghost-canary-v2`:
+The reviewed runtime policy was `ghost-canary-v2`:
 
 - **One version owner per row.** Database late-target updates exclude every
   decision still owned in memory through its terminal commit and outbox removal.

@@ -26,8 +26,8 @@ from price_collector.ghost_twap_spool import GhostSpool
 LOGGER = logging.getLogger(__name__)
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 GHOST_CHANNEL = 'btc:live:ghost_chainlink_twap_60s:updates'
-RUNTIME_VERSION = 'ghost-canary-v2'
-CANARY_MS = 4 * 60 * 60 * 1000
+RUNTIME_VERSION = 'ghost-canary-v3'
+CANARY_MS = 60 * 60 * 1000
 CAMPAIGN_CHECKPOINT_SECONDS = 30
 AUDIT_BATCH_SECONDS = 2.5
 MATCH_NS = 120 * NS_PER_SECOND

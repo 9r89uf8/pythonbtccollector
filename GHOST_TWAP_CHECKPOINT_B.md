@@ -1,11 +1,12 @@
 # Ghost TWAP — Checkpoint B
 
-Status: B release `3e1ef50` is installed on the droplet with
+Status: B is installed on the droplet with
 `GHOST_TWAP_ENABLED=false`, verified on September 14, 2026 UTC. The schema was
 applied before restarting only the Chainlink collector. The API and source feeds
 are healthy; the ghost audit is empty and the ghost Redis key is absent.
-No live canary has started; C's API/SSE work is pending.
-[Deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
+The owner shortened the first canary to one hour (`ghost-canary-v3`). No live
+canary has started; C's API/SSE work is pending.
+[Initial B deployment receipt](results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json).
 
 The implementation was based on A release `b62285a`. Its review manifests capture
 the files at `3e1ef50`, before these deployment-status edits; compare those hashes
@@ -44,7 +45,7 @@ evidence remains preserved.
 
 ## Bounds and restart behavior
 
-The first capacity-canary start is explicit and fixed, with an absolute four-hour deadline and a
+The first capacity-canary start is explicit and fixed, with an absolute one-hour deadline and a
 monotonic remaining-time bound. Persisted stop state and clock high-water marks
 survive restart. Missing/invalid campaign state fails closed. An exclusive outbox
 lock prevents concurrent ownership of its files. Recovery reconciles the newer
@@ -133,9 +134,10 @@ storage slope. At the observed order of magnitude and roughly two decisions per
 second, linear extrapolation of this sample's net allocation reaches the
 1.5 GiB guard in about 7.44 hours (about 826 MiB after four hours). The estimate
 assumes a constant row/update shape and rate; it is not a measured storage slope.
-A 72-hour run is not credible under that extrapolation. The revised first run
-is capped at four hours to measure capacity while preserving every published
-decision's complete evidence. Earlier cap stops remain possible and are incomplete
+A 72-hour run is not credible under that extrapolation. The peer review first
+reduced the cap to four hours; the owner subsequently requested one hour. Runtime
+policy `ghost-canary-v3` enforces the one-hour limit while preserving every
+published decision's complete evidence. Earlier cap stops remain possible and are incomplete
 validation; the cap will not be increased automatically. Longer validation
 requires a new storage review. The unchanged 96-hour minimum retention provides
 no relief during this first run.

@@ -34,7 +34,7 @@ listen on public interfaces. Current/live API checks must remain read-only.
 The optional worker stays inside `price-collector-polymarket-chainlink`. B has
 no ghost HTTP/SSE routes. Its Redis key/channel are separate from official
 prices. Read the [checkpoint report](GHOST_TWAP_CHECKPOINT_B.md) before a canary;
-the first capacity canary is limited to four hours, with earlier guard stops.
+the first capacity canary is limited to one hour, with earlier guard stops.
 Longer validation needs a new storage review; a 72-hour run is not planned with
 the present full-detail row layout.
 
@@ -74,7 +74,7 @@ establish sustained production CPU, latency or storage behavior.
 
 For an accepted canary, set the enabled flag and an explicit current UTC epoch
 millisecond start once. Keep that start through every restart. The worker stops
-new decisions at start plus four hours or an earlier hard guard. Its `campaign.json`
+new decisions at start plus one hour or an earlier hard guard. Its `campaign.json`
 persists stop state; do not delete it or advance the start to bypass a stop.
 Its advisory filesystem lock prevents a second worker sharing that outbox.
 Changing the outbox directory requires a separately reviewed new run, not a

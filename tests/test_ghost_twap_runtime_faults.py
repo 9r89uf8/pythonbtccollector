@@ -536,12 +536,13 @@ def test_stop_during_campaign_fsync_cannot_clear_the_new_dirty_state():
     assert not value._campaign_dirty
 
 
-def test_canary_end_and_stop_survive_restart_without_new_four_hour_allowance():
+def test_canary_end_and_stop_survive_restart_without_new_one_hour_allowance():
     async def scenario():
         value, clock, spool, _, _ = runtime()
-        clock.wall = (BASE + CANARY_MS - 3600000) * NS_PER_MS
+        remaining_ms = 30 * 60 * 1000
+        clock.wall = (BASE + CANARY_MS - remaining_ms) * NS_PER_MS
         await value.start()
-        assert value._end_mono - clock.mono == 3600000 * NS_PER_MS
+        assert value._end_mono - clock.mono == remaining_ms * NS_PER_MS
         value.stop("audit_size_cap")
         await value.close()
         second = GhostRuntime(value.settings, Store(), Redis(), spool,
@@ -549,6 +550,7 @@ def test_canary_end_and_stop_survive_restart_without_new_four_hour_allowance():
                               disk_free=lambda: 2 * RESERVE_BYTES)
         try:
             await second.start()
+            assert second._end_mono - clock.mono == remaining_ms * NS_PER_MS
             assert second.stop_reason == "audit_size_cap"
             assert second.issue() is None
         finally:
@@ -1051,9 +1053,9 @@ def test_started_loops_publish_persist_match_and_release():
 
 
 @pytest.mark.parametrize("clock_kind", ["wall", "monotonic"])
-def test_started_loop_reaches_exact_four_hour_permanent_deadline(clock_kind):
+def test_started_loop_reaches_exact_one_hour_permanent_deadline(clock_kind):
     async def scenario():
-        assert CANARY_MS == 4 * 60 * 60 * 1000
+        assert CANARY_MS == 60 * 60 * 1000
         value, clock, spool, _, redis = runtime()
         await value.start()
         try:

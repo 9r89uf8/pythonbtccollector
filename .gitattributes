@@ -270,3 +270,4 @@
 /results/spot_twap_response/2026-09-13-checkpoint-b-review/postgresql_validation.json -text
 /results/spot_twap_response/2026-09-13-checkpoint-b-review/validation.json -text
 /results/spot_twap_response/2026-09-14-deployment/checkpoint_b.json -text
+/results/spot_twap_response/2026-09-14-one-hour/validation.json -text
