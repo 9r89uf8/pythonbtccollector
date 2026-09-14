@@ -1,0 +1,301 @@
+{
+  "status": "deployed_disabled_verified",
+  "runtime_commit": "45853494ab4e4a178af2076b4b463995f6009694",
+  "verified_at_utc": "2026-09-14T21:55:09.597783+00:00",
+  "runtime_version": "ghost-canary-v5",
+  "scope": "Reviewed batch-eligibility code deployment only; no new canary or environment/schema change",
+  "environment_byte_identical": true,
+  "campaign_byte_identical": true,
+  "other_services_pids_unchanged": true,
+  "dependencies_changed": false,
+  "schema_changed": false,
+  "production_research_checkout_expanded": false,
+  "new_canary_started": false,
+  "preflight": {
+    "at_utc": "2026-09-14T21:50:58.784259+00:00",
+    "commit": "25236ab43bffcaa694085266d3791a8c59ab88ec",
+    "branch": "main",
+    "dirty": "",
+    "ghost_env": {
+      "GHOST_TWAP_ENABLED": [
+        "false"
+      ],
+      "GHOST_TWAP_CANARY_START_MS": [
+        "1789346720328"
+      ],
+      "GHOST_TWAP_STATE_DIRECTORY": [
+        "/var/lib/price-collector/ghost-twap"
+      ],
+      "GHOST_TWAP_SOURCE_MAX_AGE_MS": [
+        "5000"
+      ],
+      "GHOST_TWAP_RECEIPT_MAX_AGE_MS": [
+        "3000"
+      ]
+    },
+    "campaign_sha256": "f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86",
+    "campaign": {
+      "last_wall_ms": 1789350320291,
+      "start_ms": 1789346720328,
+      "stop_reason": "canary_deadline"
+    },
+    "outbox_row_files": 0,
+    "services": {
+      "price-collector-polymarket-chainlink": {
+        "MainPID": "1360477",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Mon 2026-09-14 03:21:54 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-collector": {
+        "MainPID": "1315559",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:43 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-collector-binance-futures": {
+        "MainPID": "1315571",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:44 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-collector-polymarket-probabilities": {
+        "MainPID": "1315593",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:53 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-api": {
+        "MainPID": "1315564",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:43 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "redis-server": {
+        "MainPID": "1315203",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:21 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      }
+    },
+    "ghost_key_exists": 0
+  },
+  "installation": {
+    "at_utc": "2026-09-14T21:53:26.227158+00:00",
+    "commit": "45853494ab4e4a178af2076b4b463995f6009694",
+    "git_artifact_hashes_verified": 10,
+    "checked_out_artifact_hashes_verified": [
+      ".gitattributes",
+      "OPERATIONS.md",
+      "README.md",
+      "price_collector/ghost_twap_runtime.py",
+      "tests/test_ghost_twap_batch_eligibility.py",
+      "tests/test_ghost_twap_runtime_faults.py"
+    ],
+    "runtime_version": "ghost-canary-v5",
+    "contract_version": 3,
+    "publication_eligibility_policy": "per-horizon-unreceived-v1",
+    "env_changed": false,
+    "campaign_changed": false,
+    "enabled": false,
+    "source_max_age_ms": 5000,
+    "receipt_max_age_ms": 3000,
+    "before_restart_ms": 1789422805823,
+    "service": {
+      "MainPID": "1371627",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Mon 2026-09-14 21:53:26 UTC",
+      "ActiveState": "active",
+      "SubState": "running"
+    }
+  },
+  "postflight": {
+    "at_utc": "2026-09-14T21:55:09.597783+00:00",
+    "services": {
+      "price-collector-polymarket-chainlink": {
+        "MainPID": "1371627",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Mon 2026-09-14 21:53:26 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-collector": {
+        "MainPID": "1315559",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:43 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-collector-binance-futures": {
+        "MainPID": "1315571",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:44 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-collector-polymarket-probabilities": {
+        "MainPID": "1315593",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:53 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "price-api": {
+        "MainPID": "1315564",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:43 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      },
+      "redis-server": {
+        "MainPID": "1315203",
+        "NRestarts": "0",
+        "ExecMainStartTimestamp": "Sat 2026-09-12 06:12:21 UTC",
+        "ActiveState": "active",
+        "SubState": "running"
+      }
+    },
+    "running_process_ghost_env": {
+      "GHOST_TWAP_ENABLED": "false",
+      "GHOST_TWAP_CANARY_START_MS": "1789346720328",
+      "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-twap",
+      "GHOST_TWAP_SOURCE_MAX_AGE_MS": "5000",
+      "GHOST_TWAP_RECEIPT_MAX_AGE_MS": "3000"
+    },
+    "campaign_sha256": "f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86",
+    "outbox_row_files": 0,
+    "http": {
+      "/healthz": {
+        "status": 200,
+        "body": {
+          "ok": true,
+          "database": "ok",
+          "service": "price-api"
+        }
+      },
+      "/markets/current/live": {
+        "status": 200,
+        "body": {
+          "server_time_ms": 1789422908966,
+          "market_id": 5964743,
+          "market_start_ms": 1789422900000,
+          "market_end_ms": 1789423200000,
+          "prices": {
+            "binance_spot": {
+              "value": "78770.51000000",
+              "source_timestamp_ms": 1789422908016,
+              "received_ms": 1789422908044,
+              "source_age_ms": 950,
+              "received_age_ms": 922,
+              "provider_event_ms": 1789422908016
+            },
+            "chainlink": {
+              "value": "78757.56320138",
+              "source_timestamp_ms": 1789422907000,
+              "received_ms": 1789422908192,
+              "source_age_ms": 1966,
+              "received_age_ms": 774,
+              "provider_event_ms": 1789422907000
+            },
+            "twap": {
+              "value": "78752.101020937566027776",
+              "source_timestamp_ms": 1789422907000,
+              "received_ms": 1789422908534,
+              "source_age_ms": 1966,
+              "received_age_ms": 432,
+              "provider_event_ms": 1789422907000
+            }
+          },
+          "futures": {
+            "last": {
+              "value": "78739.90",
+              "source_timestamp_ms": 1789422908781,
+              "received_ms": 1789422908960,
+              "source_age_ms": 185,
+              "received_age_ms": 6,
+              "time_ms": 1789422908781
+            }
+          }
+        }
+      }
+    },
+    "official_feed_cache": {
+      "btc:live:chainlink": {
+        "source_timestamp_ms": 1789422907000,
+        "received_ms": 1789422908192,
+        "receipt_age_ms": 794
+      },
+      "btc:live:chainlink_twap_60s": {
+        "source_timestamp_ms": 1789422907000,
+        "received_ms": 1789422908534,
+        "receipt_age_ms": 467
+      }
+    },
+    "ghost_key_exists": 0,
+    "audit_status": {
+      "row_count": 7292,
+      "earliest_created_ms": 1789346723788,
+      "latest_created_ms": 1789350320291,
+      "incomplete_count": 0,
+      "measurement": {
+        "relation_bytes": 95404032,
+        "row_count": 7292,
+        "tablespaces": [
+          "pg_default"
+        ],
+        "db_data_directory": "/var/lib/postgresql/16/main"
+      }
+    },
+    "journal_event_counts": {
+      "polymarket_chainlink_collector_starting": 1,
+      "polymarket_rtds_connecting": 1,
+      "polymarket_twap_connecting": 1,
+      "polymarket_twap_subscribed": 1,
+      "polymarket_twap_message_skipped": 1,
+      "polymarket_rtds_subscribed": 1,
+      "polymarket_chainlink_sample_written": 98
+    },
+    "journal_warnings_errors": [
+      {
+        "at": "2026-09-14T21:53:27.860361Z",
+        "connection_id": "a4810254-28ad-4839-a786-5e682d8ae44e",
+        "error": "non-update TWAP message: 'subscribe'",
+        "event": "polymarket_twap_message_skipped",
+        "level": "WARNING",
+        "logger": "price_collector.polymarket_twap",
+        "message": "polymarket_twap_message_skipped",
+        "receive_sequence": 1
+      }
+    ],
+    "journal_sample_lines": 104,
+    "listen_sockets": "LISTEN 0      200    127.0.0.1:5432 0.0.0.0:*\nLISTEN 0      511    127.0.0.1:6379 0.0.0.0:*\nLISTEN 0      2048   127.0.0.1:9000 0.0.0.0:*\nLISTEN 0      200        [::1]:5432    [::]:*"
+  },
+  "review": {
+    "verified_artifact_count": 10,
+    "tests_repeated_for_deployment": false,
+    "prior_test_counts": {
+      "python39_passed": 1213,
+      "python39_skipped": 10,
+      "python312_focused_passed": 219,
+      "new_test_functions": 15,
+      "new_parameterized_cases": 34
+    }
+  },
+  "journal_note": "One expected warning skipped a non-update subscribe acknowledgement; fresh canonical spot/TWAP followed. No ERROR or CRITICAL messages in bounded post-restart sample.",
+  "commands": [
+    "sudo -u pricecollector git pull --ff-only",
+    "sudo -u pricecollector .venv/bin/pip install -r requirements.txt",
+    "Verify reviewed Git/artifact hashes and unchanged disabled configuration/campaign",
+    "sudo systemctl restart price-collector-polymarket-chainlink",
+    "systemctl status/show; bounded journalctl; loopback health/live API checks",
+    "Ghost key absent; official source receipts fresh; audit row count 7292 and incomplete_count0; old outbox empty",
+    "Verify unchanged other service PIDs and loopback-only datastore/API sockets"
+  ],
+  "canary_handoff": "CANARY_HANDOFF.md documents a later unique-directory campaign; corrected v5 scorer and local timed cache observer remain prerequisites and were not built or started by this deployment."
+}
