@@ -16,6 +16,7 @@ from typing import Any, Iterator, Mapping
 MAX_BIGINT = 9_223_372_036_854_775_807
 MAX_RECORD_BYTES = 128 * 1024
 MAX_BATCH = 100
+MAX_ACTIVE_IDENTITIES = 512
 RETENTION_MS = 96 * 60 * 60 * 1000
 SQL_TIMEOUT_SECONDS = 5
 TABLE = "public.ghost_twap_audit"
@@ -142,14 +143,45 @@ def _transition(old: Mapping, new: Mapping) -> str:
         return "unchanged"
     if old["terminal"] and not new["terminal"]:
         raise GhostAuditConflict("terminal state cannot regress")
-    old_targets = _json_object(old["state_json"]).get("targets", {})
-    new_targets = _json_object(new["state_json"]).get("targets", {})
+    old_state = _json_object(old["state_json"])
+    new_state = _json_object(new["state_json"])
+    for field in ("computation_completed_wall_ns", "computation_completed_monotonic_ns"):
+        if field in old_state and old_state[field] != new_state.get(field):
+            raise GhostAuditConflict("first computation clock is immutable")
+    old_publication = old_state.get("publication", {})
+    new_publication = new_state.get("publication", {})
+    if not isinstance(old_publication, dict) or not isinstance(new_publication, dict):
+        raise GhostAuditConflict("publication evidence must be an object")
+    for field in ("intent_wall_ns", "intent_monotonic_ns", "attempt_wall_ns", "attempt_monotonic_ns",
+                  "ack_wall_ns", "ack_monotonic_ns", "failure_wall_ns", "failure_monotonic_ns"):
+        if field in old_publication and old_publication[field] != new_publication.get(field):
+            raise GhostAuditConflict("first publication clock is immutable")
+    if (old_publication.get("status") not in (None, "reserved", "intent", "attempting")
+            and old_publication["status"] != new_publication.get("status")):
+        raise GhostAuditConflict("terminal publication outcome is immutable")
+    if ("attempt_monotonic_ns" in old_publication and "payload_json" in old_publication
+            and old_publication["payload_json"] != new_publication.get("payload_json")):
+        raise GhostAuditConflict("attempted publication payload is immutable")
+    old_targets = old_state.get("targets", {})
+    new_targets = new_state.get("targets", {})
     for horizon, target in old_targets.items():
+        replacement = new_targets.get(horizon, {})
+        for field in ("horizon", "target_source_timestamp_ms"):
+            if field in target and target[field] != replacement.get(field):
+                raise GhostAuditConflict("target identity is immutable")
         first = target.get("first_event")
         if first is not None:
-            replacement = new_targets.get(horizon, {})
             if replacement.get("first_event") != first or replacement.get("status") != target.get("status"):
                 raise GhostAuditConflict("first target match/status is immutable")
+        elif target.get("status") not in (None, "pending") and target.get("status") != replacement.get("status"):
+            raise GhostAuditConflict("terminal target status is immutable")
+        for field in ("first_late_event", "first_conflicting_event", "error", "error_bps",
+                      "persistence_error", "eta_error_ns", "clock_anomaly"):
+            if field in target and target[field] is not None and target[field] != replacement.get(field):
+                raise GhostAuditConflict("first target result evidence is immutable")
+        for field in ("conflicted", "late_missing"):
+            if target.get(field) is True and replacement.get(field) is not True:
+                raise GhostAuditConflict("observed target flag cannot be cleared")
     return "updated"
 
 
@@ -171,6 +203,8 @@ def _cursor(after: tuple | None) -> tuple:
 class GhostAuditStore:
     def __init__(self, pool: Any):
         self.pool = pool
+        self._db_data_directory = None
+        self._directory_checked = False
 
     @asynccontextmanager
     async def _connection(self):
@@ -192,10 +226,24 @@ class GhostAuditStore:
                 raise RuntimeError("ghost audit schema protection is missing/disabled")
             row = await connection.fetchrow(f"""
                 SELECT count(*) AS row_count, min(created_ms) AS earliest_created_ms,
+                       max(created_ms) AS latest_created_ms,
                        count(*) FILTER (WHERE NOT terminal) AS incomplete_count
                 FROM {TABLE}
                 """)
+        await self._cache_data_directory()
         return dict(row)
+
+    async def _cache_data_directory(self) -> None:
+        """Server placement is fixed for this store lifecycle, including denial."""
+        if self._directory_checked:
+            return
+        try:
+            async with self._connection() as connection:
+                self._db_data_directory = await connection.fetchval("SHOW data_directory")
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) != "42501":
+                raise
+        self._directory_checked = True
 
     async def persist(self, record: Mapping) -> dict:
         incoming = validate_record(record)
@@ -277,13 +325,8 @@ class GhostAuditStore:
         _integer(result["relation_bytes"], "relation_bytes")
         if include_count:
             _integer(result["row_count"], "row_count")
-        result["db_data_directory"] = None
-        try:
-            async with self._connection() as connection:
-                result["db_data_directory"] = await connection.fetchval("SHOW data_directory")
-        except Exception as exc:
-            if getattr(exc, "sqlstate", None) != "42501":
-                raise
+        await self._cache_data_directory()
+        result["db_data_directory"] = self._db_data_directory
         return result
 
     async def mark_verified_export(self, proofs: list, *, export_sha256: str,
@@ -337,12 +380,14 @@ class GhostAuditStore:
         return [dict(row) for row in rows]
 
     async def note_late_target(self, event: Mapping, *, after: tuple | None = None,
-                               limit: int = MAX_BATCH) -> dict:
+                               limit: int = MAX_BATCH, exclude: tuple | list = ()) -> dict:
         """Flag a terminal match once; never replace first match or its score.
 
         Call again with next_after until null. Repeated events are no-ops once
         the first corresponding late/conflict flag is retained (not a total
         later-event census). This remains an asynchronous audit-worker action.
+        The caller excludes every identity still owned by its live state/outbox
+        handoff. Exclusion happens before locking or allocating a DB version.
         """
         event = _json_object(_canonical(event))
         stamp = _integer(event.get("source_timestamp_ms"), "source_timestamp_ms")
@@ -367,12 +412,23 @@ class GhostAuditStore:
             raise ValueError("invalid late target price") from exc
         _batch(limit)
         after = _cursor(after)
+        if not isinstance(exclude, (tuple, list)) or len(exclude) > MAX_ACTIVE_IDENTITIES:
+            raise ValueError("active identity exclusion must contain at most 512 pairs")
+        excluded = []
+        for identity in exclude:
+            if not isinstance(identity, tuple) or len(identity) != 2:
+                raise ValueError("active identity must be (run_id, decision_id)")
+            excluded.append((_text(identity[0], "run_id"), _text(identity[1], "decision_id")))
+        excluded = list(dict.fromkeys(excluded))
         changed = 0
         async with self._connection() as connection:
-            rows = await connection.fetch(f"SELECT {_SELECT} FROM {TABLE} "
+            rows = await connection.fetch(f"SELECT {_SELECT} FROM {TABLE} AS audit "
                 "WHERE terminal AND target_source_timestamps_ms @> ARRAY[$1]::bigint[] "
-                "AND (run_id, decision_id) > ($2,$3) ORDER BY run_id, decision_id LIMIT $4 FOR UPDATE",
-                stamp, *after, limit)
+                "AND (run_id, decision_id) > ($2,$3) "
+                "AND NOT EXISTS (SELECT 1 FROM unnest($5::text[], $6::text[]) AS active(run_id, decision_id) "
+                "WHERE active.run_id=audit.run_id AND active.decision_id=audit.decision_id) "
+                "ORDER BY run_id, decision_id LIMIT $4 FOR UPDATE",
+                stamp, *after, limit, [identity[0] for identity in excluded], [identity[1] for identity in excluded])
             for row in rows:
                 state = _json_object(row["state_json"])
                 dirty = False

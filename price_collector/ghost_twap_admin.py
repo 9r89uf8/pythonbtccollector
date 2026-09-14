@@ -58,7 +58,7 @@ async def serve(command: str, *, limit: int = 100) -> None:
             initial = await store.initialize()
             if initial['incomplete_count']:
                 raise ValueError('Stop ghost and reconcile all decisions before final export')
-            cursor, count, digest = None, 0, sha256()
+            cursor, previous, count, digest = None, None, 0, sha256()
             while True:
                 rows = await store.export_page(after=cursor)
                 if not rows:
@@ -66,10 +66,16 @@ async def serve(command: str, *, limit: int = 100) -> None:
                 for row in rows:
                     if not row['terminal']:
                         raise ValueError('Ghost admissions resumed during export')
+                    identity = (row['run_id'], row['decision_id'])
+                    if previous is not None and identity <= previous:
+                        raise ValueError('Audit export identities must be unique and strictly ordered')
+                    if count >= initial['row_count']:
+                        raise ValueError('Audit row population changed during export; repeat it')
                     raw = encode_export_row(row)
                     sys.stdout.buffer.write(raw)
                     digest.update(raw)
                     count += 1
+                    previous = identity
                 sys.stdout.buffer.flush()
                 cursor = (rows[-1]['run_id'], rows[-1]['decision_id'])
             final = await store.initialize()

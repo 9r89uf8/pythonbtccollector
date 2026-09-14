@@ -100,6 +100,11 @@ class _OptionalGhostSink:
             # A failed offer is a loss of causal coverage, not permission to
             # continue publishing from the old state. Stop this optional sink.
             self.failed = True
+            try:
+                self.runtime.stop("collector_offer_failed")
+            except Exception:
+                # Even failed optional error handling must not reach a reader.
+                LOGGER.exception("ghost_optional_stop_failed")
             for feed in ("spot", "twap"):
                 try:
                     self.runtime.offer_gap(feed, "collector_offer_failed")

@@ -53,6 +53,11 @@ DECLARE
     target_key TEXT;
     old_target JSONB;
     new_target JSONB;
+    old_state JSONB;
+    new_state JSONB;
+    old_publication JSONB;
+    new_publication JSONB;
+    evidence_field TEXT;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         IF NOT OLD.terminal OR OLD.verified_version IS NULL
@@ -68,6 +73,13 @@ BEGIN
     NEW.frozen_sha256 := encode(sha256(convert_to(NEW.frozen_json, 'UTF8')), 'hex');
     NEW.state_sha256 := encode(sha256(convert_to(NEW.state_json, 'UTF8')), 'hex');
     IF TG_OP = 'INSERT' THEN
+        -- Insertion alone never establishes a verified external export.
+        NEW.verified_export_sha256 := NULL;
+        NEW.verified_external_location := NULL;
+        NEW.verified_version := NULL;
+        NEW.verified_frozen_sha256 := NULL;
+        NEW.verified_state_sha256 := NULL;
+        NEW.verified_at := NULL;
         RETURN NEW;
     END IF;
     IF ROW(NEW.run_id, NEW.decision_id, NEW.decision_wall_ns, NEW.created_ms,
@@ -84,16 +96,72 @@ BEGIN
        ROW(NEW.state_json, NEW.terminal) IS DISTINCT FROM ROW(OLD.state_json, OLD.terminal) THEN
         RAISE EXCEPTION 'ghost audit state mutation requires a new version';
     END IF;
-    FOR target_key, old_target IN
-        SELECT key, value FROM jsonb_each(COALESCE(OLD.state_json::jsonb -> 'targets', '{}'::jsonb))
+    old_state := OLD.state_json::jsonb;
+    new_state := NEW.state_json::jsonb;
+    FOREACH evidence_field IN ARRAY ARRAY['computation_completed_wall_ns', 'computation_completed_monotonic_ns']
     LOOP
+        IF old_state ? evidence_field AND
+           (new_state -> evidence_field) IS DISTINCT FROM (old_state -> evidence_field) THEN
+            RAISE EXCEPTION 'ghost first computation clock is immutable';
+        END IF;
+    END LOOP;
+    old_publication := COALESCE(old_state -> 'publication', '{}'::jsonb);
+    new_publication := COALESCE(new_state -> 'publication', '{}'::jsonb);
+    IF jsonb_typeof(old_publication) <> 'object' OR jsonb_typeof(new_publication) <> 'object' THEN
+        RAISE EXCEPTION 'ghost publication evidence must be an object';
+    END IF;
+    FOREACH evidence_field IN ARRAY ARRAY['intent_wall_ns', 'intent_monotonic_ns',
+        'attempt_wall_ns', 'attempt_monotonic_ns', 'ack_wall_ns', 'ack_monotonic_ns',
+        'failure_wall_ns', 'failure_monotonic_ns']
+    LOOP
+        IF old_publication ? evidence_field AND
+           (new_publication -> evidence_field) IS DISTINCT FROM (old_publication -> evidence_field) THEN
+            RAISE EXCEPTION 'ghost first publication clock is immutable';
+        END IF;
+    END LOOP;
+    IF old_publication ->> 'status' NOT IN ('reserved', 'intent', 'attempting') AND
+       (new_publication -> 'status') IS DISTINCT FROM (old_publication -> 'status') THEN
+        RAISE EXCEPTION 'ghost terminal publication outcome is immutable';
+    END IF;
+    IF old_publication ? 'attempt_monotonic_ns' AND old_publication ? 'payload_json' AND
+       (new_publication -> 'payload_json') IS DISTINCT FROM (old_publication -> 'payload_json') THEN
+        RAISE EXCEPTION 'ghost attempted publication payload is immutable';
+    END IF;
+    FOR target_key, old_target IN
+        SELECT key, value FROM jsonb_each(COALESCE(old_state -> 'targets', '{}'::jsonb))
+    LOOP
+        new_target := new_state -> 'targets' -> target_key;
+        FOREACH evidence_field IN ARRAY ARRAY['horizon', 'target_source_timestamp_ms']
+        LOOP
+            IF old_target ? evidence_field AND
+               (new_target -> evidence_field) IS DISTINCT FROM (old_target -> evidence_field) THEN
+                RAISE EXCEPTION 'ghost target identity is immutable';
+            END IF;
+        END LOOP;
         IF old_target -> 'first_event' IS NOT NULL AND old_target -> 'first_event' <> 'null'::jsonb THEN
-            new_target := NEW.state_json::jsonb -> 'targets' -> target_key;
             IF new_target -> 'first_event' IS DISTINCT FROM old_target -> 'first_event'
                OR new_target -> 'status' IS DISTINCT FROM old_target -> 'status' THEN
                 RAISE EXCEPTION 'ghost first target match/status is immutable';
             END IF;
+        ELSIF old_target ->> 'status' <> 'pending' AND
+              (new_target -> 'status') IS DISTINCT FROM (old_target -> 'status') THEN
+            RAISE EXCEPTION 'ghost terminal target status is immutable';
         END IF;
+        FOREACH evidence_field IN ARRAY ARRAY['first_late_event', 'first_conflicting_event',
+            'error', 'error_bps', 'persistence_error', 'eta_error_ns', 'clock_anomaly']
+        LOOP
+            IF old_target ? evidence_field AND old_target -> evidence_field <> 'null'::jsonb AND
+               (new_target -> evidence_field) IS DISTINCT FROM (old_target -> evidence_field) THEN
+                RAISE EXCEPTION 'ghost first target result evidence is immutable';
+            END IF;
+        END LOOP;
+        FOREACH evidence_field IN ARRAY ARRAY['conflicted', 'late_missing']
+        LOOP
+            IF old_target -> evidence_field = 'true'::jsonb AND
+               (new_target -> evidence_field) IS DISTINCT FROM 'true'::jsonb THEN
+                RAISE EXCEPTION 'ghost observed target flag cannot be cleared';
+            END IF;
+        END LOOP;
     END LOOP;
     IF NEW.version > OLD.version THEN
         NEW.updated_at := clock_timestamp();
@@ -1416,6 +1484,28 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO price_reader;
 REVOKE UPDATE, DELETE ON polymarket_evidence_payloads FROM price_writer;
 REVOKE UPDATE, DELETE ON polymarket_market_observations FROM price_writer;
 REVOKE UPDATE, DELETE ON polymarket_quote_observations FROM price_writer;
+
+-- Ghost audit privilege boundary.
+-- The operator installing this schema owns the audit table. The collector can
+-- append evidence and advance state, but cannot attest to an external export,
+-- delete/truncate rows, replace guards, or alter previously frozen inputs.
+ALTER TABLE public.ghost_twap_audit OWNER TO CURRENT_USER;
+REVOKE ALL ON public.ghost_twap_audit FROM price_writer;
+REVOKE INSERT (run_id, decision_id, decision_wall_ns, created_ms, frozen_json,
+    frozen_sha256, target_source_timestamps_ms, state_json, state_sha256, version,
+    terminal, updated_at, verified_export_sha256, verified_external_location,
+    verified_version, verified_frozen_sha256, verified_state_sha256, verified_at),
+    UPDATE (run_id, decision_id, decision_wall_ns, created_ms, frozen_json,
+    frozen_sha256, target_source_timestamps_ms, state_json, state_sha256, version,
+    terminal, updated_at, verified_export_sha256, verified_external_location,
+    verified_version, verified_frozen_sha256, verified_state_sha256, verified_at)
+    ON public.ghost_twap_audit FROM price_writer;
+GRANT SELECT ON public.ghost_twap_audit TO price_writer;
+GRANT INSERT (run_id, decision_id, decision_wall_ns, created_ms, frozen_json,
+    target_source_timestamps_ms, state_json, version, terminal)
+    ON public.ghost_twap_audit TO price_writer;
+GRANT UPDATE (state_json, version, terminal) ON public.ghost_twap_audit TO price_writer;
+-- End ghost audit privilege boundary.
 
 
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, price_reader;

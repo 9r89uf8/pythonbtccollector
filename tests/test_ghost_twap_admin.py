@@ -322,6 +322,119 @@ def test_status_and_expiry_are_explicit_bounded_operations(monkeypatch):
     assert closed == [True, True]
 
 
+class PagedExportStore(FakeStore):
+    def __init__(self, count):
+        super().__init__()
+        self.rows = [json.loads(line) for line in export_bytes(count).splitlines()]
+        self.cursors = []
+        self.initializations = 0
+        self.initial_incomplete = 0
+        self.final_incomplete = 0
+        self.final_count_delta = 0
+
+    async def initialize(self):
+        self.initializations += 1
+        final = self.initializations > 1
+        return {'row_count': len(self.rows) + (self.final_count_delta if final else 0),
+                'incomplete_count': self.final_incomplete if final else self.initial_incomplete}
+
+    async def export_page(self, *, after):
+        self.cursors.append(after)
+        rows = self.rows if after is None else [row for row in self.rows
+                                                if (row['run_id'], row['decision_id']) > after]
+        return rows[:100]
+
+
+def wire_export_server(monkeypatch, store):
+    incoming, output, closed = wire_server(monkeypatch, store)
+    errors = CapturedOutput()
+    monkeypatch.setattr(admin.sys, 'stderr', errors)
+    return output, errors, closed
+
+
+def test_server_export_streams_all_pages_and_hashes_the_exact_emitted_bytes(monkeypatch):
+    store = PagedExportStore(205)
+    output, errors, closed = wire_export_server(monkeypatch, store)
+    asyncio.run(admin.serve('export'))
+    expected = export_bytes(205)
+    assert output.buffer.getvalue() == expected
+    assert json.loads(errors.buffer.getvalue()) == {
+        'row_count': 205, 'sha256': sha256(expected).hexdigest()}
+    assert store.cursors == [None, ('run', 'd000099'), ('run', 'd000199'), ('run', 'd000204')]
+    assert store.initializations == 2
+    assert not store.batches and not store.expiry_limits
+    assert closed == [True]
+
+
+def test_server_empty_export_has_a_valid_empty_manifest(monkeypatch):
+    store = PagedExportStore(0)
+    output, errors, closed = wire_export_server(monkeypatch, store)
+    asyncio.run(admin.serve('export'))
+    assert output.buffer.getvalue() == b''
+    assert json.loads(errors.buffer.getvalue()) == {'row_count': 0, 'sha256': sha256(b'').hexdigest()}
+    assert closed == [True]
+
+
+@pytest.mark.parametrize('fault', ['initial_incomplete', 'nonterminal_page',
+                                  'final_count', 'final_incomplete', 'bad_row_hash'])
+def test_server_failed_export_emits_no_success_manifest_and_closes_pool(monkeypatch, fault):
+    store = PagedExportStore(2)
+    if fault == 'initial_incomplete':
+        store.initial_incomplete = 1
+    elif fault == 'nonterminal_page':
+        store.rows[1]['terminal'] = False
+    elif fault == 'final_count':
+        store.final_count_delta = 1
+    elif fault == 'final_incomplete':
+        store.final_incomplete = 1
+    else:
+        store.rows[1]['state_sha256'] = '0' * 64
+    output, errors, closed = wire_export_server(monkeypatch, store)
+    with pytest.raises(ValueError):
+        asyncio.run(admin.serve('export'))
+    assert errors.buffer.getvalue() == b''
+    assert closed == [True]
+    assert not store.batches and not store.expiry_limits
+    if fault == 'initial_incomplete':
+        assert output.buffer.getvalue() == b''
+        assert store.cursors == []
+
+
+@pytest.mark.parametrize('fault', ['duplicate_page', 'reversed_page', 'excess_rows'])
+def test_server_export_rejects_nonprogressing_or_growing_streams_early(monkeypatch, fault):
+    store = PagedExportStore(2)
+    if fault == 'duplicate_page':
+        async def repeated(*, after):
+            store.cursors.append(after)
+            return store.rows[:1]
+        store.export_page = repeated
+    elif fault == 'reversed_page':
+        store.rows.reverse()
+    else:
+        async def initial_count():
+            return {'row_count': 1, 'incomplete_count': 0}
+        store.initialize = initial_count
+    output, errors, closed = wire_export_server(monkeypatch, store)
+    with pytest.raises(ValueError, match='ordered|population changed'):
+        asyncio.run(admin.serve('export'))
+    assert errors.buffer.getvalue() == b''
+    assert output.buffer.getvalue().count(b'\n') == 1
+    assert closed == [True]
+
+
+def test_server_broken_output_pipe_closes_database_without_success_manifest(monkeypatch):
+    store = PagedExportStore(1)
+    output, errors, closed = wire_export_server(monkeypatch, store)
+    class ClosedPipe(io.BytesIO):
+        def write(self, value):
+            raise BrokenPipeError('external reader disconnected')
+    output.buffer = ClosedPipe()
+    with pytest.raises(BrokenPipeError):
+        asyncio.run(admin.serve('export'))
+    assert errors.buffer.getvalue() == b''
+    assert closed == [True]
+
+
 @pytest.mark.parametrize('limit', [0, 101, True, -1])
 def test_invalid_direct_expiry_limit_never_opens_database(monkeypatch, limit):
     import asyncpg

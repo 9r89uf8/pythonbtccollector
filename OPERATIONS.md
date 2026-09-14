@@ -34,7 +34,9 @@ listen on public interfaces. Current/live API checks must remain read-only.
 The optional worker stays inside `price-collector-polymarket-chainlink`. B has
 no ghost HTTP/SSE routes. Its Redis key/channel are separate from official
 prices. Read the [checkpoint report](GHOST_TWAP_CHECKPOINT_B.md) before a canary;
-the fixed limits permit an early stop and do not guarantee 72-hour coverage.
+the first capacity canary is limited to four hours, with earlier guard stops.
+Longer validation needs a new storage review; a 72-hour run is not planned with
+the present full-detail row layout.
 
 After the reviewed B change is pushed to GitHub, install the schema **before**
 restarting the Chainlink service. Keep ghost disabled during this installation:
@@ -43,7 +45,7 @@ restarting the Chainlink service. Keep ghost disabled during this installation:
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+sudo -u postgres psql --single-transaction -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
 sudoedit /etc/price-collector/collector.env
 sudo systemctl restart price-collector-polymarket-chainlink
 sudo systemctl status price-collector-polymarket-chainlink --no-pager
@@ -72,11 +74,24 @@ establish sustained production CPU, latency or storage behavior.
 
 For an accepted canary, set the enabled flag and an explicit current UTC epoch
 millisecond start once. Keep that start through every restart. The worker stops
-new decisions at start plus 72 hours or an earlier guard. Its `campaign.json`
+new decisions at start plus four hours or an earlier hard guard. Its `campaign.json`
 persists stop state; do not delete it or advance the start to bypass a stop.
 Its advisory filesystem lock prevents a second worker sharing that outbox.
 Changing the outbox directory requires a separately reviewed new run, not a
 way around existing limits. Redis/API/PostgreSQL bindings remain loopback only.
+
+Temporary guard/query, outbox or persistence failures suspend new forecasts and
+let the cache expire. Recovery requires a fresh successful guard and audit
+catch-up, then a new decision. Actual clock-order faults, evidence conflicts,
+capacity and deadline stops remain latched for review. Suspension/resumption
+logs and audit counters distinguish these cases; do not restart just to clear a
+temporary pause. Campaign progress is checkpointed every 30 seconds and at
+stop/shutdown, with persisted decisions also constraining restart clock checks.
+
+Apply the schema in one transaction as shown so trigger replacement never leaves
+an unguarded committed interval. Collector credentials can insert evidence and
+update result state; only the operator's PostgreSQL role acknowledges exports
+or expires eligible rows. Do not grant those maintenance privileges to the writer.
 
 Check the isolated audit state and bounded logs with:
 

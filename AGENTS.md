@@ -157,10 +157,14 @@ The corresponding Python entry points are:
 - Persist complete frozen evidence in the bounded fsynced outbox before Redis
   publication. Keep first target matches immutable and distinguish successful
   acknowledgement, uncertain publication, late results and conflicting reports.
-- Preserve the fixed 72-hour canary deadline and persisted stop latch across
+- Preserve the fixed four-hour initial canary deadline and persisted hard-stop latch across
   restarts. Keep 1.5 GiB relation stop/2 GiB budget, 600,000 rows, 10 GiB free-space
   reserve, bounded records and fresh guard readings. A cap stop is incomplete
   validation. Never reset the canary clock or raise limits automatically.
+- Suspend admission/publication during transient guard or audit failures; resume
+  only after fresh guards and successful audit catch-up. Keep actual causality,
+  integrity, capacity and deadline failures latched. Only the operator role may
+  acknowledge exports or delete eligible ghost rows.
 - Expire only terminal rows aged at least 96 hours whose current version and
   hashes match an externally verified export. Later updates invalidate export
   eligibility. No automatic unverified deletion or indefinite summary tier.

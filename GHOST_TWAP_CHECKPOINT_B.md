@@ -5,6 +5,12 @@ the accepted A release `b62285a`. No B production installation or live canary ha
 started. A remains the installed production version; C's API/SSE work is pending.
 This report distinguishes tested implementation from prospective validation.
 
+The peer review of `485550e` found defects in terminal-row version ownership,
+transient failure handling and campaign checkpoint frequency. The correction
+record is [Checkpoint B review](GHOST_TWAP_CHECKPOINT_B_REVIEW.md). Its validation
+supersedes the original implementation test counts below; the original hashed
+evidence remains preserved.
+
 ## Implemented behavior
 
 - The existing canonical spot/TWAP readers offer original receipt clocks and
@@ -32,7 +38,7 @@ This report distinguishes tested implementation from prospective validation.
 
 ## Bounds and restart behavior
 
-The canary start is explicit and fixed, with an absolute 72-hour deadline and a
+The first capacity-canary start is explicit and fixed, with an absolute four-hour deadline and a
 monotonic remaining-time bound. Persisted stop state and clock high-water marks
 survive restart. Missing/invalid campaign state fails closed. An exclusive outbox
 lock prevents concurrent ownership of its files. Recovery reconciles the newer
@@ -53,9 +59,11 @@ consistent disk/database version before discarding any outbox record.
 
 The reservation also limits result-update memory. Existing data can drain after
 a stop. Events and gaps remain separate from coalesced calculations/publications;
-warm-up/recovery is per horizon. Non-ASCII event IDs, integer overflow, record
-growth beyond its bound and persistent I/O failures fail closed for the optional
-worker. Core source collection remains independently supervised.
+warm-up/recovery is per horizon. Invalid event IDs and integer overflow invalidate
+coverage; record growth beyond its bound or conflicting evidence stops the
+optional worker. Transient I/O failures suspend admission/publication until a
+fresh guard and successful audit catch-up. Recovery publishes only a newly frozen
+decision. Core source collection remains independently supervised.
 
 The outbox makes prices and their selected inputs reproducible after a crash.
 It does not invent a lost Redis acknowledgement or missing target receipt. A
@@ -79,11 +87,14 @@ Ordinary row deletion need not immediately release allocated filesystem space.
 
 ## Verification and limits
 
-The final full local suite passed **1,084 tests**, with five PostgreSQL tests
+The original B commit's full local suite passed **1,084 tests**, with five PostgreSQL tests
 skipped only because they require explicit disposable-database opt-in. All
 **208 ghost tests**, including those five, passed on Python 3.12 in the isolated
 droplet validation environment. The production database and services were not
-updated or enabled by these checks.
+updated or enabled by these checks. After peer-review corrections, the full
+local suite passes **1,130 tests** with ten opt-in tests skipped; all **259 ghost
+tests**, including the eight PostgreSQL and two private Redis checks, pass on
+Python 3.12. See the separate [review validation record](results/spot_twap_response/2026-09-13-checkpoint-b-review/validation.json).
 
 The final package normalizes edited text to LF. A
 [source comparison](results/spot_twap_response/2026-09-13-checkpoint-b/source_line_endings.json)
@@ -113,8 +124,15 @@ exported, verified and expired. The relation reached 1,974,272 bytes before
 expiry/vacuum; the Redis and receipt clocks were controlled test doubles. These
 figures measure this bounded test shape and recovery. Neither probe establishes a sustained
 storage slope. At the observed order of magnitude and roughly two decisions per
-second, the 1.5 GiB guard may stop the run before 72 hours. Such a run must be
-reported as incomplete; the cap will not be increased automatically.
+second, linear extrapolation of this sample's net allocation reaches the
+1.5 GiB guard in about 7.44 hours (about 826 MiB after four hours). The estimate
+assumes a constant row/update shape and rate; it is not a measured storage slope.
+A 72-hour run is not credible under that extrapolation. The revised first run
+is capped at four hours to measure capacity while preserving every published
+decision's complete evidence. Earlier cap stops remain possible and are incomplete
+validation; the cap will not be increased automatically. Longer validation
+requires a new storage review. The unchanged 96-hour minimum retention provides
+no relief during this first run.
 
 Prospective price errors, published coverage, confirmed lead, CPU/memory,
 core-feed effects and event-to-Redis latency still require the bounded live

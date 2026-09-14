@@ -14,7 +14,7 @@ def test_ghost_install_applies_schema_before_chainlink_restart():
         'cd /opt/price-collector',
         'sudo -u pricecollector git pull --ff-only',
         'sudo -u pricecollector .venv/bin/pip install -r requirements.txt',
-        'sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql',
+        'sudo -u postgres psql --single-transaction -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql',
         'sudoedit /etc/price-collector/collector.env',
         'sudo systemctl restart price-collector-polymarket-chainlink',
         'sudo systemctl status price-collector-polymarket-chainlink --no-pager',

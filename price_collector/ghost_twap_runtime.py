@@ -26,8 +26,10 @@ from price_collector.ghost_twap_spool import GhostSpool
 LOGGER = logging.getLogger(__name__)
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 GHOST_CHANNEL = 'btc:live:ghost_chainlink_twap_60s:updates'
-RUNTIME_VERSION = 'ghost-canary-v1'
-CANARY_MS = 72 * 60 * 60 * 1000
+RUNTIME_VERSION = 'ghost-canary-v2'
+CANARY_MS = 4 * 60 * 60 * 1000
+CAMPAIGN_CHECKPOINT_SECONDS = 30
+AUDIT_BATCH_SECONDS = 2.5
 MATCH_NS = 120 * NS_PER_SECOND
 WARN_BYTES = 1024 ** 3
 STOP_BYTES = 1536 * 1024 ** 2
@@ -94,6 +96,7 @@ class GhostRuntime:
         self.queue: deque = deque()
         self.records: OrderedDict[str, PendingDecision] = OrderedDict()
         self.late_events: deque = deque()
+        self._late_cursors: dict = {}
         self.counters: Counter = Counter()
         self.gaps: deque = deque(maxlen=128)
         self.recovery: dict = {}
@@ -109,10 +112,17 @@ class GhostRuntime:
         self._tasks: list = []
         self._closed = False
         self.stop_reason: str | None = None
+        self.suspensions: dict = {}
+        self.suspension_history: dict = {}
+        self._publication_epoch = 0
+        self._publishing: str | None = None
+        self._audit_cursor: str | None = None
         self.guard: dict | None = None
         self.campaign: dict = {}
         self._campaign_dirty = False
+        self._campaign_saved_mono: int | None = None
         self._start_mono = self.mono_ns()
+        self._last_check_mono = self._start_mono
         self._end_mono = self._start_mono
         self.initial_rows = 0
         self._last_admitted_receipt: tuple | None = None
@@ -143,9 +153,15 @@ class GhostRuntime:
         self.campaign = await self._spool(self.spool.campaign, self.settings.canary_start_ms)
         self.stop_reason = self.campaign.get('stop_reason')
         self._end_mono = self.mono_ns() + max(0, self.settings.canary_start_ms + CANARY_MS - now_ms) * NS_PER_MS
-        await self.store.initialize()
+        initial = await self.store.initialize()
+        saved_records = await self._spool(self.spool.read_all)
+        latest_decision_ms = max([initial.get('latest_created_ms') or 0]
+                                 + [record['created_ms'] for record in saved_records])
+        self.campaign['last_wall_ms'] = max(self.campaign['last_wall_ms'], latest_decision_ms)
+        if now_ms < self.campaign['last_wall_ms']:
+            self.stop('wall_clock_regression')
         # Reconcile disk intent before any new admission. Never replay prices to Redis.
-        for record in await self._spool(self.spool.read_all):
+        for record in saved_records:
             await self._recover(record)
             await self._spool(self.spool.remove, record)
         cursor = None
@@ -210,7 +226,8 @@ class GhostRuntime:
                 row.state['runtime_stop'] = dict(reason=reason, observed_wall_ns=self.wall_ns(),
                                                  observed_monotonic_ns=self.mono_ns())
                 self._changed(row)
-        if reason in ('receipt_order_fault', 'publication_clock_regression', 'wall_clock_regression'):
+        if reason in ('receipt_order_fault', 'publication_clock_regression', 'wall_clock_regression',
+                      'monotonic_clock_regression'):
             for row in self.records.values():
                 if not row.state.get('causality_invalid'):
                     row.state['causality_invalid'] = True
@@ -219,6 +236,58 @@ class GhostRuntime:
                         target['confirmed_redis_lead_ns'] = None
                     self._changed(row)
         self._audit_wake.set()
+
+    @staticmethod
+    def _integrity_failure(exc: Exception) -> bool:
+        if isinstance(exc, (ValueError, TypeError, AssertionError)):
+            return True
+        code = getattr(exc, 'sqlstate', None)
+        # Connection, resource, lock, cancellation and serialization errors may
+        # recover. Data/schema/authentication errors require operator repair.
+        return bool(code and code[:2] not in ('08', '40', '53', '55', '57'))
+
+    def suspend(self, scope: str, reason: str) -> None:
+        if scope not in ('guard', 'audit', 'publication'):
+            raise ValueError('invalid ghost suspension scope')
+        if self.stop_reason or scope in self.suspensions:
+            return
+        self._publication_epoch += 1
+        status = dict(reason=reason, started_wall_ns=self.wall_ns(),
+                      started_monotonic_ns=self.mono_ns(), active=True)
+        self.suspensions[scope] = status
+        self.suspension_history[scope] = status
+        self.counters['suspensions'] += 1
+        for row in self.records.values():
+            row.state.setdefault('runtime_suspensions', {})[scope] = dict(status)
+            self._changed(row)
+        LOGGER.warning('ghost_decisions_suspended', extra={'scope': scope, 'reason': reason})
+        self._audit_wake.set()
+
+    def _io_failure(self, scope: str, reason: str, exc: Exception) -> None:
+        if self._integrity_failure(exc):
+            self.stop(scope + '_integrity_failure')
+        else:
+            self.suspend(scope, reason)
+
+    def _resume_if_caught_up(self) -> None:
+        if (not self.suspensions or self.stop_reason or self.guard is None
+                or self.mono_ns() - self.guard['monotonic_ns'] > 3 * NS_PER_SECOND
+                or self._dirty or self.late_events or self._campaign_dirty
+                or self._publishing is not None):
+            return
+        for scope, status in self.suspensions.items():
+            completed = dict(status, active=False, resumed_wall_ns=self.wall_ns(),
+                             resumed_monotonic_ns=self.mono_ns())
+            self.suspension_history[scope] = completed
+            for row in self.records.values():
+                row.state.setdefault('runtime_suspensions', {})[scope] = dict(completed)
+                self._changed(row)
+        self.suspensions.clear()
+        self.counters['resumptions'] += 1
+        LOGGER.info('ghost_decisions_resumed', extra={'run_id': self.run_id})
+        # The next snapshot drains the full current receipt prefix. Never retry
+        # a decision from an earlier publication epoch after a suspension.
+        self._wake.set()
 
     def offer_gap(self, feed: str, reason: str) -> None:
         if self._closed:
@@ -342,6 +411,8 @@ class GhostRuntime:
                     self.stop('receipt_order_fault')
 
     async def refresh_guard(self) -> None:
+        if self.stop_reason:
+            return
         try:
             measurement = await asyncio.wait_for(self.store.measure(), timeout=2)
             if measurement.get('tablespaces', ['pg_default']) != ['pg_default']:
@@ -360,23 +431,32 @@ class GhostRuntime:
             if free < RESERVE_BYTES:
                 self.stop('database_disk_reserve')
             self.guard = sample
-        except Exception:
+            self._resume_if_caught_up()
+        except Exception as exc:
             self.guard = None
-            self.stop('guard_unavailable')
-            LOGGER.exception('ghost_guard_failed')
+            self._io_failure('guard', 'guard_unavailable', exc)
 
     def _can_issue(self, wall: int, mono: int) -> bool:
+        if self.stop_reason:
+            return False
         now = wall // NS_PER_MS
+        if mono < self._last_check_mono:
+            self.stop('monotonic_clock_regression')
+        self._last_check_mono = max(mono, self._last_check_mono)
         if now < self.campaign.get('last_wall_ms', now):
             self.stop('wall_clock_regression')
         self.campaign['last_wall_ms'] = max(now, self.campaign.get('last_wall_ms', now))
-        self._campaign_dirty = True
+        if (self._campaign_saved_mono is None
+                or mono - self._campaign_saved_mono >= CAMPAIGN_CHECKPOINT_SECONDS * NS_PER_SECOND):
+            self._campaign_dirty = True
         if now >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono:
             self.stop('canary_deadline')
-        if self.stop_reason or self.guard is None:
+        if self.stop_reason:
             return False
-        if mono - self.guard['monotonic_ns'] > 3 * NS_PER_SECOND:
-            self.stop('stale_guard')
+        if self.guard is None or mono - self.guard['monotonic_ns'] > 3 * NS_PER_SECOND:
+            self.suspend('guard', 'stale_guard')
+            return False
+        if self.suspensions:
             return False
         if max(self.guard['row_count'], self.initial_rows + self._decisions) >= MAX_ROWS:
             self.stop('audit_row_reserve')
@@ -408,6 +488,8 @@ class GhostRuntime:
         frozen = json.loads(decision.to_audit_json())
         frozen['runtime_policy'] = self.settings.model_dump(mode='json')
         frozen['runtime_version'] = RUNTIME_VERSION
+        frozen['campaign_checkpoint_seconds'] = CAMPAIGN_CHECKPOINT_SECONDS
+        frozen['runtime_suspension_history'] = dict(self.suspension_history)
         frozen['runtime_counters'] = dict(self.counters)
         frozen['operational_gaps'] = list(self.gaps)
         for forecast in frozen['forecasts']:
@@ -417,6 +499,7 @@ class GhostRuntime:
                                                     if slot.category == 'carried'), default=0)
         state = dict(computation_completed_wall_ns=complete_wall,
                      computation_completed_monotonic_ns=complete_mono,
+                     publication_epoch=self._publication_epoch,
                      publication={'status': 'reserved'}, targets={})
         for forecast in decision.forecasts:
             h = str(forecast.horizon_s)
@@ -472,7 +555,8 @@ class GhostRuntime:
                 self.issue()
 
     def _publishable(self, row: PendingDecision) -> bool:
-        if self.stop_reason or row.terminal:
+        if (self.stop_reason or row.terminal or self.suspensions
+                or row.state.get('publication_epoch', 0) != self._publication_epoch):
             return False
         now, mono = self.wall_ns(), self.mono_ns()
         remaining = row.decision.valid_until_wall_ns - now
@@ -484,7 +568,7 @@ class GhostRuntime:
         if remaining <= 0 or mono_remaining <= 0:
             return False
         if self.guard is None or mono - self.guard['monotonic_ns'] > 3 * NS_PER_SECOND:
-            self.stop('stale_guard')
+            self.suspend('guard', 'stale_guard')
             return False
         if now // NS_PER_MS >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono:
             self.stop('canary_deadline')
@@ -492,6 +576,19 @@ class GhostRuntime:
         return not any(t.get('first_event') is not None for t in row.state['targets'].values())
 
     async def publish(self, row: PendingDecision) -> None:
+        self._publishing = row.decision.decision_id
+        try:
+            await self._publish(row)
+        except Exception as exc:
+            row.state['publication']['status'] = 'spool_unavailable'
+            self._changed(row)
+            self._io_failure('publication', 'spool_unavailable', exc)
+            raise
+        finally:
+            self._publishing = None
+            self._audit_wake.set()
+
+    async def _publish(self, row: PendingDecision) -> None:
         if not self._publishable(row):
             row.state['publication']['status'] = 'expired_or_target_received'
             self._changed(row)
@@ -552,38 +649,88 @@ class GhostRuntime:
             self._publish_wake.clear()
             key, self._pending_publication = self._pending_publication, None
             if key is not None:
-                await self.publish(self.records[key])
+                try:
+                    await self.publish(self.records[key])
+                except Exception:
+                    # publish() records the fault and preserves its reservation.
+                    # Resume only after audit catchup, using a new decision.
+                    await asyncio.sleep(0.5)
 
     async def flush_audit_once(self) -> None:
+        errors = []
+        started = asyncio.get_running_loop().time()
         if self._campaign_dirty:
             campaign = dict(self.campaign)
-            await self._spool(self.spool.save_campaign, campaign)
-            if self.campaign == campaign:
-                self._campaign_dirty = False
-        for key in list(self._dirty)[:32]:
+            try:
+                await self._spool(self.spool.save_campaign, campaign)
+                self._campaign_saved_mono = self.mono_ns()
+                # Ordinary progress during fsync does not force another write;
+                # an intervening stop or full checkpoint interval does.
+                self._campaign_dirty = (self.campaign.get('stop_reason') != campaign.get('stop_reason')
+                    or self.campaign.get('last_wall_ms', 0) - campaign.get('last_wall_ms', 0)
+                    >= CAMPAIGN_CHECKPOINT_SECONDS * 1000)
+            except Exception as exc:
+                errors.append(exc)
+                self._io_failure('audit', 'campaign_persistence_unavailable', exc)
+        # Rotate the starting identity after every attempt, including failures.
+        # A poisoned row or a full batch of timeouts cannot starve later rows.
+        keys = sorted(self._dirty)
+        if self._audit_cursor is not None:
+            keys = [key for key in keys if key > self._audit_cursor] + [key for key in keys if key <= self._audit_cursor]
+        for key in keys[:32]:
+            self._audit_cursor = key
             row = self.records.get(key)
             if row is None:
                 self._dirty.discard(key)
                 continue
             record = row.record()
-            await self._spool(self.spool.write, record)
-            await asyncio.wait_for(self.store.persist(record), timeout=2)
-            row.persisted_version = record['version']
-            if row.version == record['version']:
-                self._dirty.discard(key)
-                if row.terminal and self._pending_publication != key:
-                    await self._spool(self.spool.remove, record)
-                    if row.version == record['version']:
-                        self.records.pop(key)
+            try:
+                await self._spool(self.spool.write, record)
+                await asyncio.wait_for(self.store.persist(record), timeout=2)
+                row.persisted_version = record['version']
+                if row.version == record['version']:
+                    self._dirty.discard(key)
+                    if (row.terminal and self._pending_publication != key
+                            and self._publishing != key):
+                        await self._spool(self.spool.remove, record)
+                        if row.version == record['version']:
+                            self.records.pop(key)
+            except Exception as exc:
+                self._dirty.add(key)
+                errors.append(exc)
+                self.counters['audit_failures'] += 1
+                self._io_failure('audit', 'audit_persistence_unavailable', exc)
+            if asyncio.get_running_loop().time() - started >= AUDIT_BATCH_SECONDS:
+                break
         for _ in range(min(32, len(self.late_events))):
+            if asyncio.get_running_loop().time() - started >= AUDIT_BATCH_SECONDS:
+                break
             event = self.late_events[0]
-            cursor = None
-            while True:
-                result = await asyncio.wait_for(self.store.note_late_target(event, after=cursor), timeout=2)
-                cursor = None if result is None else result.get('next_after')
-                if cursor is None:
-                    break
-            self.late_events.popleft()
+            event_key = id(event)
+            cursor = self._late_cursors.get(event_key)
+            try:
+                while True:
+                    # The audit task is the sole database writer for these
+                    # in-memory identities until commit + outbox removal.
+                    owned = [(row.decision.run_id, row.decision.decision_id) for row in self.records.values()]
+                    result = await asyncio.wait_for(self.store.note_late_target(
+                        event, after=cursor, exclude=owned), timeout=2)
+                    cursor = None if result is None else result.get('next_after')
+                    if cursor is None:
+                        self.late_events.popleft()
+                        self._late_cursors.pop(event_key, None)
+                        break
+                    self._late_cursors[event_key] = cursor
+                    if asyncio.get_running_loop().time() - started >= AUDIT_BATCH_SECONDS:
+                        break  # Keep event; already committed flags are idempotent.
+            except Exception as exc:
+                self.late_events.rotate(-1)
+                errors.append(exc)
+                self.counters['audit_failures'] += 1
+                self._io_failure('audit', 'late_target_persistence_unavailable', exc)
+        self._resume_if_caught_up()
+        if errors:
+            raise errors[0]
 
     async def _audit_loop(self) -> None:
         while not self._closed:
@@ -595,24 +742,29 @@ class GhostRuntime:
             try:
                 await self.flush_audit_once()
             except Exception:
-                self.counters['audit_failures'] += 1
-                self.stop('audit_persistence_failure')
-                LOGGER.exception('ghost_audit_failed')
+                # The batch recorded each failure and continued unrelated rows.
                 await asyncio.sleep(0.5)
             if self._dirty or self.late_events:
                 self._audit_wake.set()
 
     async def _guard_loop(self) -> None:
         while not self._closed:
-            await asyncio.sleep(1)
-            await self.refresh_guard()
-            self._can_issue(self.wall_ns(), self.mono_ns())
+            started = asyncio.get_running_loop().time()
+            if not self.stop_reason:
+                await self.refresh_guard()
+                self._can_issue(self.wall_ns(), self.mono_ns())
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(max(0.05, 1 - elapsed))
 
     async def close(self) -> None:
         self._closed = True
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        if not self.stop_reason:
+            self.campaign['last_wall_ms'] = max(self.wall_ns() // NS_PER_MS,
+                                               self.campaign.get('last_wall_ms', 0))
+        self._campaign_dirty = True
         for row in self.records.values():
             for target in row.state['targets'].values():
                 if target['status'] == 'pending':

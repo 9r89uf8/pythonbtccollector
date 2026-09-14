@@ -1,6 +1,6 @@
 # Live ghost TWAP — implementation plan
 
-**Status: A accepted and installed; B implemented and validated for review.** B adds the default-off optional worker, audit schema and export/expiry tools. Its prospective canary has not started; C remains planned. [A contract](GHOST_TWAP_CHECKPOINT_A.md), [B implementation and validation](GHOST_TWAP_CHECKPOINT_B.md).
+**Status: A accepted and installed; B peer-review corrections implemented and tested locally.** B adds the default-off optional worker, audit schema and export/expiry tools. Its first capacity canary is now capped at four hours; the originally proposed longer run needs a storage review. B has not been installed or enabled and no prospective canary has started; C remains planned. [A contract](GHOST_TWAP_CHECKPOINT_A.md), [B implementation and validation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
 
@@ -59,10 +59,10 @@ These are proposed operating limits, to freeze and version before the canary:
 | Historical carry | <= 10,000 ms per slot; expose count and maximum age |
 | Memory | 120 seconds of context plus a necessary bounded seed, with hard event-count/queue caps |
 | Gaps and loss | Invalidate affected windows; record drops/backlog and rebuild coverage before recovery |
-| First canary | At most 72 hours, then automatic stop of new ghost decisions; earlier stop on any audit/disk guard |
+| First canary | At most four hours for initial capacity measurement, then automatic stop; earlier stop on hard capacity/deadline/integrity guards |
 | Audit retention | Whole decision rows for 96 hours, eligible for expiry only after terminal matching and a verified external export; no indefinite compact-row history |
 | Audit guards | Warn at 1 GiB; stop new ghost decisions at 1.5 GiB, with a 2 GiB total-relation budget; maximum 600,000 decision rows |
-| Filesystem reserve | Stop new ghost decisions below 10 GiB available on the database filesystem, or when the guard cannot obtain a fresh reading |
+| Filesystem reserve | Stop below 10 GiB available on the database filesystem; suspend admission/publication when no fresh guard reading is available |
 | Target matching | Terminal missing status 120 seconds after decision time; later reports are separately flagged and never replace frozen scoring |
 
 The carry and freshness limits are stricter than the broad replay. Report the resulting availability loss, including during stalls, rather than imply its historical sample counts will repeat.
@@ -108,9 +108,9 @@ count plus all subsequent decision admissions bounds rows without scanning a
 growing audit table every second. Relation size, filesystem reserve and reading
 freshness are checked independently.
 
-The limits above define the first canary, not an approved continuous-production retention policy. Measure representative inserts, all six result updates, indexes, TOAST, dead tuples and maintenance overhead before enabling it. The 1.5 GiB stop threshold leaves 0.5 GiB for bounded in-flight writes/updates within the 2 GiB budget; verify that margin and freeze queue/batch/record limits first. A sampled size check alone cannot guarantee zero overshoot. An early cap stop is an incomplete canary, not a successful 72-hour run; do not silently raise caps or reduce evidence.
+The limits above define the first canary, not an approved continuous-production retention policy. Measure representative inserts, all six result updates, indexes, TOAST, dead tuples and maintenance overhead before enabling it. The 1.5 GiB stop threshold leaves 0.5 GiB for bounded in-flight writes/updates within the 2 GiB budget; verify that margin and freeze queue/batch/record limits first. A sampled size check alone cannot guarantee zero overshoot. An early cap stop is an incomplete canary; do not silently raise caps or reduce evidence.
 
-Export the entire canary's frozen inputs/results and hashes to the owner's computer, verify the export, then expire eligible whole rows in bounded maintenance batches. Expiry must atomically match the currently stored result/status version to its verified export; any later status or conflict update invalidates export eligibility until re-exported. The 96-hour age leaves the earliest rows one day of review/export grace after a full 72-hour run. If export fails, retain the bounded evidence and keep ghost production paused. Keep only bounded reports/aggregates outside the production database afterward. No in-place slot stripping or indefinite per-decision summary tier in v1. Expiry, restart, disk-pressure and space-reuse behavior must be tested before enablement; deleting rows does not itself return their allocated storage to the filesystem. [Capacity evidence and retention rationale](research/spot_twap_response/storage_review/README.md).
+Export the entire canary's frozen inputs/results and hashes to the owner's computer, verify the export, then expire eligible whole rows in bounded maintenance batches. Expiry must atomically match the currently stored result/status version to its verified export; any later status or conflict update invalidates export eligibility until re-exported. The 96-hour age is unchanged after shortening the first run to four hours; it does not relieve storage pressure during that run. Longer validation needs a new capacity review. If export fails, retain the bounded evidence and keep ghost production paused. Keep only bounded reports/aggregates outside the production database afterward. No in-place slot stripping or indefinite per-decision summary tier in v1. Expiry, restart, disk-pressure and space-reuse behavior must be tested before enablement; deleting rows does not itself return their allocated storage to the filesystem. [Capacity evidence and retention rationale](research/spot_twap_response/storage_review/README.md).
 
 ## Publication and frontend delivery
 

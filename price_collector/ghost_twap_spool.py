@@ -85,6 +85,8 @@ class GhostSpool:
                 return
             if existing['version'] == record['version'] and existing != record:
                 raise ValueError('outbox version conflict')
+            if existing == record:
+                return
         self._atomic(path, raw)
 
     def read_all(self) -> list[dict]:
@@ -126,8 +128,11 @@ class GhostSpool:
 
     def save_campaign(self, state: dict) -> None:
         self._validate_campaign(state)
-        self._atomic(self.directory / 'campaign.json',
-                     json.dumps(state, sort_keys=True, separators=(',', ':')).encode())
+        path = self.directory / 'campaign.json'
+        raw = json.dumps(state, sort_keys=True, separators=(',', ':')).encode()
+        if path.exists() and path.read_bytes() == raw:
+            return
+        self._atomic(path, raw)
 
     @staticmethod
     def _validate_campaign(state: dict) -> None:

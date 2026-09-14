@@ -91,14 +91,17 @@ class Connection:
         if "pg_total_relation_size" in sql:
             return dict(relation_bytes=8192, row_count=None if "NULL::bigint" in sql else len(self.rows), tablespaces=["pg_default"])
         return dict(row_count=len(self.rows), earliest_created_ms=1000000 if self.rows else None,
+                    latest_created_ms=1000000 if self.rows else None,
                     incomplete_count=sum(not x["terminal"] for x in self.rows.values()))
 
     async def fetch(self, sql, *args):
         self.calls.append((sql, args))
         if "target_source_timestamps_ms @>" in sql:
-            stamp, run, decision, limit = args
+            stamp, run, decision, limit, excluded_runs, excluded_decisions = args
+            excluded = set(zip(excluded_runs, excluded_decisions))
             return [deepcopy(row) for key, row in sorted(self.rows.items()) if
-                    key > (run, decision) and row["terminal"] and stamp in row["target_source_timestamps_ms"]][:limit]
+                    key not in excluded and key > (run, decision) and row["terminal"]
+                    and stamp in row["target_source_timestamps_ms"]][:limit]
         if "DELETE FROM" in sql:
             return []
         run, decision, limit = args
@@ -128,7 +131,8 @@ def test_persistence_retries_versions_and_immutable_inputs():
         changed = dict(first, state_json='{"targets":{},"failure":"lost"}')
         with pytest.raises(GhostAuditConflict, match="same state version"):
             await store.persist(changed)
-        newer = dict(changed, version=4, terminal=True)
+        newer = dict(first, state_json=json.dumps(dict(json.loads(first["state_json"]), failure="lost")),
+                     version=4, terminal=True)
         assert (await store.persist(newer))["outcome"] == "updated"
         assert await store.persist(first) == {"version": 4, "outcome": "stale"}
         with pytest.raises(GhostAuditConflict, match="terminal"):
@@ -180,7 +184,8 @@ def test_startup_is_read_only_and_recovery_paginates():
         await store.persist(record(decision_id="d2", terminal=True))
         await store.persist(record(decision_id="d3"))
         pool.connection.calls.clear()
-        assert await store.initialize() == dict(row_count=3, earliest_created_ms=1000000, incomplete_count=2)
+        assert await store.initialize() == dict(row_count=3, earliest_created_ms=1000000,
+                                               latest_created_ms=1000000, incomplete_count=2)
         first = await store.list_incomplete(limit=1)
         assert first[0]["decision_id"] == "d1"
         assert [x["decision_id"] for x in await store.list_incomplete(after=("run", "d1"))] == ["d3"]
@@ -231,7 +236,7 @@ def test_export_acknowledgement_compare_and_swap_and_invalidation():
         result = await store.mark_verified_export([proof], export_sha256="a" * 64,
                                                   external_location="owner-computer:/exports/canary.jsonl")
         assert result["verified"] == [("run", "d1")]
-        await store.persist(dict(row, version=1, state_json='{"targets":{},"restart":true}'))
+        await store.persist(dict(row, version=1, state_json=json.dumps(dict(json.loads(row["state_json"]), restart=True))))
         assert pool.connection.rows[("run", "d1")]["verified"] is False
         assert (await store.mark_verified_export([proof], export_sha256="a" * 64,
                 external_location="owner-computer:/exports/canary.jsonl"))["stale_or_ineligible"] == 1
@@ -272,6 +277,146 @@ def test_terminal_late_flags_are_idempotent_keep_first_match_and_paginate():
 def test_invalid_late_event_fails_before_database(change):
     with pytest.raises(ValueError):
         asyncio.run(GhostAuditStore(None).note_late_target(dict(late_event(), **change)))
+
+
+def test_live_ownership_excludes_rows_before_database_version_allocation_and_limit():
+    async def scenario():
+        pool = Pool()
+        store = GhostAuditStore(pool)
+        state = {"targets": {"1": {"target_source_timestamp_ms": 1001000,
+                                  "status": "missing", "first_event": None}}}
+        original = record(terminal=True, state=state)
+        await store.persist(original)
+        # Reproduce two owners independently allocating version 1.
+        live_state = deepcopy(state)
+        live_state["targets"]["1"]["first_late_event"] = late_event()
+        live = dict(original, version=1, state_json=json.dumps(live_state))
+        assert (await store.note_late_target(late_event()))["updated"] == 1
+        with pytest.raises(GhostAuditConflict, match="same state version"):
+            await store.persist(live)
+
+        pool = Pool()
+        store = GhostAuditStore(pool)
+        await store.persist(original)
+        await store.persist(record(terminal=True, decision_id="d2", state=state))
+        result = await store.note_late_target(late_event(), limit=1,
+                                              exclude=[("run", "d1"), ("run", "d1")])
+        assert result == dict(examined=1, updated=1, next_after=("run", "d2"))
+        sql, args = next((sql, args) for sql, args in pool.connection.calls if "unnest" in sql)
+        assert sql.index("NOT EXISTS") < sql.index("LIMIT") < sql.index("FOR UPDATE")
+        assert args[-2:] == (["run"], ["d1"])
+        assert (await store.persist(live))["outcome"] == "updated"
+        # After committed handoff, the same event is already known and stays idempotent.
+        assert (await store.note_late_target(late_event()))["updated"] == 0
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("exclude", [None, "run", [("run",)], [["run", "d1"]],
+                                    [("", "d1")], [("run", "d1")] * 513])
+def test_invalid_live_ownership_fails_before_database(exclude):
+    with pytest.raises(ValueError):
+        asyncio.run(GhostAuditStore(None).note_late_target(late_event(), exclude=exclude))
+
+
+def test_server_directory_is_cached_but_counts_remain_fresh():
+    async def scenario():
+        pool = Pool()
+        store = GhostAuditStore(pool)
+        assert (await store.initialize())["row_count"] == 0
+        await store.persist(record())
+        assert (await store.initialize())["row_count"] == 1
+        for _ in range(3):
+            before = len(pool.connection.calls)
+            assert (await store.measure())["db_data_directory"] == "/db/data"
+            calls = pool.connection.calls[before:]
+            assert sum("SET LOCAL statement_timeout" in sql for sql, _ in calls) == 1
+        assert sum("SHOW data_directory" in sql for sql, _ in pool.connection.calls) == 1
+    asyncio.run(scenario())
+
+
+def test_server_directory_permission_denial_is_cached_and_transient_failure_retried():
+    class Denied(RuntimeError):
+        sqlstate = "42501"
+
+    async def scenario():
+        for failure, cached in ((Denied("denied"), True), (RuntimeError("offline"), False)):
+            pool = Pool()
+            store = GhostAuditStore(pool)
+            fetchval = pool.connection.fetchval
+            attempts = []
+
+            async def show(sql, *args):
+                if "SHOW data_directory" in sql:
+                    attempts.append(sql)
+                    if len(attempts) == 1:
+                        raise failure
+                return await fetchval(sql, *args)
+
+            pool.connection.fetchval = show
+            if cached:
+                assert (await store.measure())["db_data_directory"] is None
+            else:
+                with pytest.raises(RuntimeError, match="offline"):
+                    await store.measure()
+            result = await store.measure()
+            assert result["db_data_directory"] == (None if cached else "/db/data")
+            assert len(attempts) == (1 if cached else 2)
+    asyncio.run(scenario())
+
+
+def evidence_state():
+    return {"computation_completed_wall_ns": "1000", "computation_completed_monotonic_ns": "900",
+            "publication": {"status": "acknowledged", "attempt_wall_ns": "1100",
+                            "attempt_monotonic_ns": "1000", "ack_wall_ns": "1200",
+                            "ack_monotonic_ns": "1100", "payload_json": "{\"price\":\"1\"}"},
+            "targets": {"1": {"horizon": 1, "target_source_timestamp_ms": 1001000,
+                              "status": "matched", "first_event": late_event(),
+                              "first_conflicting_event": late_event("62000"), "conflicted": True,
+                              "error": "1.000000000000000001", "error_bps": "0.001",
+                              "persistence_error": "2", "eta_error_ns": "3", "clock_anomaly": True,
+                              "confirmed_redis_lead_ns": "1000000"}}}
+
+
+@pytest.mark.parametrize("path,value", [
+    (("computation_completed_wall_ns",), "2"),
+    (("publication", "ack_wall_ns"), "2"),
+    (("publication", "status"), "failed"),
+    (("publication", "payload_json"), "{}"),
+    (("targets", "1", "horizon"), 2),
+    (("targets", "1", "error"), "2"),
+    (("targets", "1", "error_bps"), "2"),
+    (("targets", "1", "persistence_error"), "3"),
+    (("targets", "1", "eta_error_ns"), "4"),
+    (("targets", "1", "clock_anomaly"), False),
+    (("targets", "1", "first_conflicting_event"), late_event("63000")),
+    (("targets", "1", "conflicted"), False),
+])
+def test_first_evidence_and_observed_flags_cannot_be_rewritten(path, value):
+    state = evidence_state()
+    changed = deepcopy(state)
+    target = changed
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(GhostAuditConflict):
+        _transition(validate_record(record(terminal=True, state=state)),
+                    validate_record(record(terminal=True, state=changed, version=1)))
+
+
+def test_missing_status_and_first_late_evidence_stay_fixed_but_lead_can_be_invalidated():
+    state = evidence_state()
+    changed = deepcopy(state)
+    changed["targets"]["1"]["confirmed_redis_lead_ns"] = None
+    assert _transition(validate_record(record(terminal=True, state=state)),
+                       validate_record(record(terminal=True, state=changed, version=1))) == "updated"
+    state = {"targets": {"1": {"target_source_timestamp_ms": 1001000, "status": "missing",
+                              "first_event": None, "first_late_event": late_event(), "late_missing": True}}}
+    for patch in ({"status": "matched"}, {"first_late_event": late_event("63000")}, {"late_missing": False}):
+        changed = deepcopy(state)
+        changed["targets"]["1"].update(patch)
+        with pytest.raises(GhostAuditConflict):
+            _transition(validate_record(record(terminal=True, state=state)),
+                        validate_record(record(terminal=True, state=changed, version=1)))
 
 
 def test_ghost_schema_is_single_table_with_hash_and_expiry_protection():

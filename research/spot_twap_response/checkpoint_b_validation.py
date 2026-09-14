@@ -28,11 +28,15 @@ def record_hashes(manifest):
 
 
 def main():
+    global OUTPUT
     parser = argparse.ArgumentParser()
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--postgres-receipt', type=Path)
+    parser.add_argument('--output', type=Path, default=OUTPUT,
+                        help='Use a new directory for later reviews; preserve earlier evidence.')
     parser.add_argument('--refresh-hashes-only', action='store_true')
     args = parser.parse_args()
+    OUTPUT = args.output.resolve()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     path = OUTPUT/'validation.json'
     if args.refresh_hashes_only:
@@ -60,11 +64,12 @@ def main():
         manifest = dict(status='passed', checkpoint='B implementation; prospective canary not started',
                         validated_utc=datetime.now(timezone.utc).isoformat(),
                         base_commit='b62285a040aff4787414327d42c75cb651058099',
+                        reviewed_commit='485550e9b26b21b84d6ce5f84e9883f63e47b96b',
                         local_tests=dict(passed=int(match[1]), skipped=int(match[2] or 0),
                                          elapsed_seconds=match[3], command=[args.python, '-m', 'pytest', '-q'],
                                          python=subprocess.check_output([args.python, '--version'], text=True).strip()),
                         production_python_tests=dict(passed=int(pg_match[1]), elapsed_seconds=pg_match[2],
-                                                     environment='Python 3.12, disposable PostgreSQL database, controlled Redis/clocks'),
+                                                     environment='Python 3.12, disposable PostgreSQL database; isolated Redis server where opted in, otherwise test doubles'),
                         postgres_database_removed=True, production_deployed=False, canary_started=False,
                         limitations=['Bounded synthetic storage probes, not a full-capacity canary.',
                                      'No measured live publication or browser delivery latency.',

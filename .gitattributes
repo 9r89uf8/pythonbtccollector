@@ -262,3 +262,10 @@
 /tests/test_ghost_twap_store.py -text
 /tests/test_ghost_twap_store_postgres.py -text
 /results/spot_twap_response/2026-09-13-checkpoint-b/source_line_endings.json -text
+
+# Preserve the bytes covered by the Checkpoint B peer-review validation.
+/GHOST_TWAP_CHECKPOINT_B_REVIEW.md -text
+/tests/test_ghost_twap_redis_integration.py -text
+/results/spot_twap_response/2026-09-13-checkpoint-b-review/local_tests.txt -text
+/results/spot_twap_response/2026-09-13-checkpoint-b-review/postgresql_validation.json -text
+/results/spot_twap_response/2026-09-13-checkpoint-b-review/validation.json -text

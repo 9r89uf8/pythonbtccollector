@@ -34,7 +34,12 @@ async def prepare():
             if not name.startswith("ghost_checkpoint_b_validation_") or len(name) <= len("ghost_checkpoint_b_validation_"):
                 raise RuntimeError("refusing any database except the named disposable validation database")
             await connection.execute("DROP TABLE IF EXISTS public.ghost_twap_audit CASCADE")
-            sql = SCHEMA.read_text(encoding="utf-8").split("CREATE TABLE IF NOT EXISTS providers", 1)[0]
+            schema = SCHEMA.read_text(encoding="utf-8")
+            sql = schema.split("CREATE TABLE IF NOT EXISTS providers", 1)[0]
+            # Only this disposable table receives the real production ACL.
+            # price_writer must already exist; never create/alter a cluster role.
+            sql += schema.split("-- Ghost audit privilege boundary.", 1)[1].split(
+                "-- End ghost audit privilege boundary.", 1)[0]
             await connection.execute(sql)
             await connection.execute(sql)  # Migration is repeatable on its own table.
         return pool
@@ -263,6 +268,138 @@ def test_postgres_bounded_representative_storage_probe(tmp_path):
             report_path = Path(os.environ.get("GHOST_TEST_STORAGE_REPORT", tmp_path / "storage_probe.json"))
             report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(report, sort_keys=True))
+        finally:
+            await pool.close()
+    asyncio.run(scenario())
+
+
+def test_postgres_writer_can_persist_and_annotate_but_cannot_attest_or_delete(tmp_path):
+    async def scenario():
+        pool = await prepare()
+        writer_pool = None
+        try:
+            async def writer_role(connection):
+                await connection.execute("SET ROLE price_writer")
+
+            writer_pool = await asyncpg.create_pool(DSN, min_size=1, max_size=1,
+                                                    command_timeout=5, setup=writer_role)
+            writer = GhostAuditStore(writer_pool)
+            admin = GhostAuditStore(pool)
+            await writer.initialize()
+            async with pool.acquire() as connection:
+                now_ms = await connection.fetchval("SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+            created = now_ms - 98 * 60 * 60 * 1000
+            original = row(created)
+            assert (await writer.persist(original))["outcome"] == "inserted"
+            state = json.loads(original["state_json"])
+            state["targets"]["1"]["status"] = "missing"
+            terminal = dict(original, state_json=json.dumps(state), version=1, terminal=True)
+            assert (await writer.persist(terminal))["outcome"] == "updated"
+            # Exercises the same SELECT FOR UPDATE path under column UPDATE grants.
+            assert (await writer.note_late_target(event(created + 1000)))["updated"] == 1
+            assert (await writer.note_late_target(event(created + 1000)))["updated"] == 0
+            current = await stored(pool)
+            content = encode_export_row(current)
+            path = tmp_path / "writer_boundary_verified.jsonl"
+            path.write_bytes(content)
+            digest = sha256(content).hexdigest()
+            proofs = list(iter_export_proofs(path, expected_sha256=digest, expected_rows=1))
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await writer.mark_verified_export(proofs, export_sha256=digest,
+                                                   external_location="owner-computer:/verified.jsonl")
+            assert (await admin.mark_verified_export(proofs, export_sha256=digest,
+                    external_location="owner-computer:/verified.jsonl"))["verified"] == [("integration", "d1")]
+            async with writer_pool.acquire() as connection:
+                for sql in (
+                    "UPDATE ghost_twap_audit SET frozen_json='{}'",
+                    "UPDATE ghost_twap_audit SET verified_export_sha256=repeat('a',64)",
+                    "INSERT INTO ghost_twap_audit (verified_export_sha256) VALUES (repeat('a',64))",
+                    "DELETE FROM ghost_twap_audit",
+                    "TRUNCATE ghost_twap_audit",
+                    "ALTER TABLE ghost_twap_audit DISABLE TRIGGER ghost_twap_audit_guard_trigger",
+                ):
+                    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                        await connection.execute(sql)
+            assert (await admin.expire_verified(limit=1)) == [{"run_id": "integration", "decision_id": "d1"}]
+        finally:
+            if writer_pool is not None:
+                await writer_pool.close()
+            await pool.close()
+    asyncio.run(scenario())
+
+
+def test_postgres_live_record_exclusion_prevents_same_version_collision():
+    async def scenario():
+        pool = await prepare()
+        try:
+            store = GhostAuditStore(pool)
+            original = row(1000000, terminal=True)
+            await store.persist(original)
+            late = event(1001000)
+            live_state = json.loads(original["state_json"])
+            live_state["targets"]["1"]["first_late_event"] = late
+            live = dict(original, version=1, state_json=json.dumps(live_state))
+            # Deterministic interleaving of the former two version owners.
+            assert (await store.note_late_target(late))["updated"] == 1
+            with pytest.raises(GhostAuditConflict, match="same state version"):
+                await store.persist(live)
+            safe = row(1000000, "safe", terminal=True)
+            await store.persist(safe)
+            unowned = row(1000000, "z_unowned", terminal=True)
+            await store.persist(unowned)
+            result = await store.note_late_target(late, after=("integration", "d1"), limit=1,
+                                                  exclude=[("integration", "safe")])
+            assert result == dict(examined=1, updated=1, next_after=("integration", "z_unowned"))
+            safe_live = dict(safe, version=1, state_json=json.dumps(live_state))
+            assert (await store.persist(safe_live))["outcome"] == "updated"
+            assert (await store.note_late_target(late))["updated"] == 0
+        finally:
+            await pool.close()
+    asyncio.run(scenario())
+
+
+def test_postgres_first_clocks_and_target_results_are_immutable_even_to_direct_sql():
+    async def scenario():
+        pool = await prepare()
+        try:
+            store = GhostAuditStore(pool)
+            original = row(1000000, terminal=True)
+            state = json.loads(original["state_json"])
+            state["computation_completed_wall_ns"] = "1000"
+            state["publication"] = dict(status="acknowledged", attempt_monotonic_ns="1000",
+                                        ack_wall_ns="1200", payload_json='{"price":"1"}')
+            state["targets"]["1"].update(status="matched", first_event=event(1001000),
+                first_conflicting_event=event(1001000, value="62000"), conflicted=True,
+                error="1.000000000000000001", error_bps="0.01", persistence_error="2",
+                eta_error_ns="3", confirmed_redis_lead_ns="1000")
+            original["state_json"] = json.dumps(state)
+            await store.persist(original)
+            changes = [(("computation_completed_wall_ns",), "2"),
+                       (("publication", "ack_wall_ns"), "2"),
+                       (("publication", "status"), "failed"),
+                       (("publication", "payload_json"), "{}"),
+                       (("targets", "1", "target_source_timestamp_ms"), 1002000),
+                       (("targets", "1", "error"), "2"),
+                       (("targets", "1", "error_bps"), "2"),
+                       (("targets", "1", "persistence_error"), "3"),
+                       (("targets", "1", "eta_error_ns"), "4"),
+                       (("targets", "1", "first_conflicting_event"), event(1001000, value="63000")),
+                       (("targets", "1", "conflicted"), False)]
+            async with pool.acquire() as connection:
+                for path, value in changes:
+                    changed = deepcopy(state)
+                    target = changed
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                    with pytest.raises(asyncpg.PostgresError):
+                        await connection.execute("UPDATE ghost_twap_audit SET state_json=$1,version=1 WHERE decision_id='d1'",
+                                                 json.dumps(changed))
+                assert json.loads(await connection.fetchval("SELECT state_json FROM ghost_twap_audit")) == state
+                # Revoking a positive lead after an observed conflict remains allowed.
+                changed = deepcopy(state)
+                changed["targets"]["1"]["confirmed_redis_lead_ns"] = None
+                await connection.execute("UPDATE ghost_twap_audit SET state_json=$1,version=1", json.dumps(changed))
         finally:
             await pool.close()
     asyncio.run(scenario())

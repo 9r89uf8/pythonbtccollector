@@ -22,6 +22,7 @@ class RecordingGhost:
         self.fail_gap = fail_gap
         self.prices = []
         self.gaps = []
+        self.stop_reasons = []
         self.closed = 0
 
     def offer_price(self, **event):
@@ -38,6 +39,9 @@ class RecordingGhost:
 
     async def close(self):
         self.closed += 1
+
+    def stop(self, reason):
+        self.stop_reasons.append(reason)
 
 
 async def stop(task):
@@ -207,9 +211,15 @@ def test_background_start_shared_admission_order_and_owned_cleanup(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_optional_offer_failure_marks_both_feeds_lost_and_logs_once(monkeypatch, caplog):
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_optional_offer_failure_marks_both_feeds_lost_and_logs_once(monkeypatch, caplog, stop_fails):
     async def scenario():
         runtime = RecordingGhost(fail_price=True)
+        if stop_fails:
+            def broken_stop(reason):
+                runtime.stop_reasons.append(reason)
+                raise RuntimeError("optional stop failed")
+            runtime.stop = broken_stop
         async def start(_settings):
             return runtime
         monkeypatch.setattr(collector, "start_ghost_runtime", start)
@@ -218,6 +228,7 @@ def test_optional_offer_failure_marks_both_feeds_lost_and_logs_once(monkeypatch,
         sink.offer_price(feed="spot", value=Decimal(1))
         sink.offer_price(feed="spot", value=Decimal(2))
         assert len(runtime.prices) == 1
+        assert runtime.stop_reasons == ["collector_offer_failed"]
         assert runtime.gaps == [("spot", "collector_offer_failed"), ("twap", "collector_offer_failed")]
         assert sum(record.message == "ghost_optional_offer_failed" for record in caplog.records) == 1
         await sink.close()

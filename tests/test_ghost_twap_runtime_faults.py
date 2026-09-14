@@ -9,7 +9,7 @@ import pytest
 
 from price_collector.ghost_twap import NS_PER_MS, NS_PER_SECOND, PriceEvent
 from price_collector.ghost_twap_runtime import (
-    CANARY_MS, MATCH_NS, MAX_ROWS, RESERVE_BYTES, STOP_BYTES,
+    CAMPAIGN_CHECKPOINT_SECONDS, CANARY_MS, MATCH_NS, MAX_ROWS, RESERVE_BYTES, STOP_BYTES,
     GhostRuntime, GhostSettings,
 )
 from price_collector.ghost_twap_spool import GhostSpool
@@ -81,7 +81,8 @@ class Store:
                                 tablespaces=["pg_default"], db_data_directory=None)
         self.failure = None
     async def initialize(self):
-        return {"row_count": self.measurement["row_count"]}
+        return {"row_count": self.measurement["row_count"],
+                "latest_created_ms": max((r['created_ms'] for r in self.persisted), default=None)}
     async def list_incomplete(self, *, limit, after=None):
         return deepcopy(self.incomplete if after is None else [])
     async def measure(self):
@@ -98,7 +99,7 @@ class Store:
             if (record["run_id"], record["decision_id"]) == (run_id, decision_id):
                 return deepcopy(record)
         return None
-    async def note_late_target(self, event, *, after=None, limit=100):
+    async def note_late_target(self, event, *, after=None, limit=100, exclude=()):
         self.late_calls.append((deepcopy(event), after))
         return {"next_after": None}
 
@@ -334,7 +335,7 @@ def test_guard_becoming_stale_during_fsync_prevents_publication():
     spool.before_write = lambda: clock.advance(101 * NS_PER_MS)
     run(value.publish(row))
     assert redis.calls == []
-    assert value.stop_reason == "stale_guard"
+    assert value.stop_reason is None and value.suspensions["guard"]["reason"] == "stale_guard"
 
 
 def test_target_during_fsync_suppresses_publication():
@@ -499,7 +500,10 @@ def test_guard_failures_block_only_optional_admission(fault):
             store.failure = RuntimeError("database guard unavailable")
         run(value.refresh_guard())
     assert value.issue() is None
-    assert value.stop_reason is not None
+    if fault in ("stale", "error"):
+        assert value.stop_reason is None and "guard" in value.suspensions
+    else:
+        assert value.stop_reason is not None
     value.offer_price("spot", Decimal("100"), BASE + 100000, clock.wall, clock.mono, "still-accepted")
     assert value.queue, "optional pause does not turn a feed offer into blocking I/O"
 
@@ -532,7 +536,7 @@ def test_stop_during_campaign_fsync_cannot_clear_the_new_dirty_state():
     assert not value._campaign_dirty
 
 
-def test_canary_end_and_stop_survive_restart_without_new_72h_allowance():
+def test_canary_end_and_stop_survive_restart_without_new_four_hour_allowance():
     async def scenario():
         value, clock, spool, _, _ = runtime()
         clock.wall = (BASE + CANARY_MS - 3600000) * NS_PER_MS
@@ -592,6 +596,52 @@ def test_restart_preserves_already_durable_matched_lead_and_first_price():
         assert matched["error"] == "-1.000000000000000000"
         assert int(matched["confirmed_redis_lead_ns"]) == NS_PER_SECOND
         assert result["targets"]["30"]["status"] == "restart_unmatched"
+    run(scenario())
+
+
+def test_restart_from_fsynced_inflight_publication_keeps_outcome_unconfirmed(tmp_path):
+    async def scenario():
+        value, clock, _, _, redis = runtime(state_directory=tmp_path)
+        value.spool = GhostSpool(tmp_path)
+        await value._spool(value.spool.open)
+        value.campaign = await value._spool(value.spool.campaign, BASE)
+        row = issue(value)
+        entered = asyncio.Event()
+        async def waiting_for_ack(*args):
+            redis.calls.append(args)
+            entered.set()
+            await asyncio.Future()
+        redis.eval = waiting_for_ack
+        publication = asyncio.create_task(value.publish(row))
+        await entered.wait()
+        durable = (await value._spool(value.spool.read_all))[0]
+        assert json.loads(durable['state_json'])['publication']['status'] == 'intent'
+        assert durable['frozen_json'] == row.frozen_json
+        # Simulate loss of the process with Redis outcome unknown. Release only
+        # the filesystem lock; deliberately do not run graceful runtime.close().
+        publication.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await publication
+        await value._spool(value.spool.close)
+        recovered_store, recovered_redis = Store(), Redis()
+        recovered = GhostRuntime(value.settings, recovered_store, recovered_redis,
+            GhostSpool(tmp_path), wall_ns=lambda: clock.wall,
+            mono_ns=lambda: clock.mono, disk_free=lambda: 2 * RESERVE_BYTES)
+        try:
+            await recovered.start()
+            saved = recovered_store.persisted[0]
+            state = json.loads(saved['state_json'])
+            assert saved['terminal'] and saved['version'] == durable['version'] + 1
+            assert saved['frozen_json'] == durable['frozen_json']
+            assert state['publication']['restart_outcome'] == 'unconfirmed_after_restart'
+            assert 'ack_monotonic_ns' not in state['publication']
+            assert all(target['status'] == 'restart_unmatched' and
+                       target['confirmed_redis_lead_ns'] is None
+                       for target in state['targets'].values())
+            assert recovered_redis.calls == []
+            assert await recovered._spool(recovered.spool.read_all) == []
+        finally:
+            await recovered.close()
     run(scenario())
 
 
@@ -769,10 +819,253 @@ def test_late_target_pagination_is_fully_drained_before_event_is_discarded():
     event = target(value, row, clock)
     value.late_events.clear()  # isolate the target from the warming anchor
     value.late_events.append({"event_id": event.event_id})
-    async def paged(event, *, after=None, limit=100):
+    async def paged(event, *, after=None, limit=100, exclude=()):
         store.late_calls.append((event, after))
         return {"next_after": ("run", "100") if after is None else None}
     store.note_late_target = paged
     run(value.flush_audit_once())
     assert [after for _, after in store.late_calls] == [None, ("run", "100")]
     assert not value.late_events
+
+
+def test_transient_guard_recovers_only_after_audit_catchup_and_new_snapshot():
+    async def scenario():
+        value, _, _, store, redis = runtime()
+        old = issue(value)
+        store.failure = TimeoutError("temporary guard timeout")
+        await value.refresh_guard()
+        assert value.stop_reason is None and "guard" in value.suspensions
+        store.failure = None
+        await value.refresh_guard()
+        assert value.suspensions, "a fresh guard alone cannot discard pending audit work"
+        await value.flush_audit_once()
+        assert not value.suspensions and value.counters["resumptions"] == 1
+        value._pending_publication = None
+        await value.publish(old)
+        assert not redis.calls, "recovery cannot publish an earlier suspended decision"
+        new = value.issue()
+        assert new is not None
+        value._pending_publication = None
+        await value.publish(new)
+        assert len(redis.calls) == 1 and value.stop_reason is None
+    run(scenario())
+
+
+def test_one_failing_row_does_not_starve_later_batches_and_io_recovers():
+    async def scenario():
+        value, clock, _, store, _ = runtime(audit_max_records=64)
+        issue(value)
+        for _ in range(39):
+            clock.advance(101 * NS_PER_MS)
+            value.guard["monotonic_ns"] = clock.mono
+            assert value.issue() is not None
+        original = store.persist
+        blocked = True
+        async def selective(record):
+            if blocked and record["decision_id"] == "1":
+                raise OSError("one row's write is temporarily unavailable")
+            return await original(record)
+        store.persist = selective
+        for _ in range(2):
+            with pytest.raises(OSError):
+                await value.flush_audit_once()
+        assert {r["decision_id"] for r in store.persisted} == set(value.records) - {"1"}
+        assert "audit" in value.suspensions and value.stop_reason is None
+        blocked = False
+        await value.flush_audit_once()
+        assert not value.suspensions
+        assert "1" in {r["decision_id"] for r in store.persisted}
+    run(scenario())
+
+
+def test_integrity_failure_remains_permanent_after_guard_recovers():
+    async def scenario():
+        value, _, spool, store, _ = runtime()
+        issue(value)
+        original = store.persist
+        async def conflict(record):
+            raise ValueError("same-version evidence differs")
+        store.persist = conflict
+        with pytest.raises(ValueError):
+            await value.flush_audit_once()
+        assert value.stop_reason == "audit_integrity_failure"
+        store.persist = original
+        await value.flush_audit_once()
+        await value.refresh_guard()
+        assert value.issue() is None
+        assert spool.saved_campaign["stop_reason"] == "audit_integrity_failure"
+    run(scenario())
+
+
+def test_campaign_checkpoint_is_periodic_and_stopped_polling_never_fsyncs_again():
+    async def scenario():
+        value, clock, spool, _, _ = runtime()
+        saves = []
+        original = spool.save_campaign
+        def save(state):
+            saves.append(deepcopy(state))
+            original(state)
+        spool.save_campaign = save
+        for _ in range(200):
+            value.guard["monotonic_ns"] = clock.mono
+            value._can_issue(clock.wall, clock.mono)
+            await value.flush_audit_once()
+            clock.advance(100 * NS_PER_MS)
+        assert len(saves) == 1
+        clock.advance((CAMPAIGN_CHECKPOINT_SECONDS - 20) * NS_PER_SECOND)
+        value.guard["monotonic_ns"] = clock.mono
+        value._can_issue(clock.wall, clock.mono)
+        await value.flush_audit_once()
+        assert len(saves) == 2
+        value.stop("audit_size_cap")
+        await value.flush_audit_once()
+        assert len(saves) == 3
+        for _ in range(100):
+            clock.advance(NS_PER_SECOND)
+            assert not value._can_issue(clock.wall, clock.mono)
+            await value.refresh_guard()
+            await value.flush_audit_once()
+        assert len(saves) == 3 and not value._campaign_dirty
+    run(scenario())
+
+
+def test_terminal_late_update_keeps_runtime_ownership_during_commit():
+    async def scenario():
+        value, clock, _, store, _ = runtime()
+        row = issue(value)
+        value._pending_publication = None
+        clock.advance(MATCH_NS)
+        value.finalize_due()
+        persisted_terminal_version = row.version
+        original = store.persist
+        injected = False
+        async def commit_then_receive(record):
+            nonlocal injected
+            result = await original(record)
+            if record["terminal"] and not injected:
+                injected = True
+                clock.advance(1)
+                event = target(value, row, clock, identity="arrived-during-terminal-commit")
+                value.offer_price("twap", event.value, event.source_timestamp_ms,
+                                  event.received_wall_ns, event.received_monotonic_ns, event.event_id, 60)
+            return result
+        exclusions = []
+        async def late(event, *, after=None, limit=100, exclude=()):
+            exclusions.append(exclude)
+            assert (row.decision.run_id, row.decision.decision_id) in exclude
+            # Without ownership exclusion, this independent path could also
+            # allocate persisted_terminal_version+1 with different state bytes.
+            assert row.version == persisted_terminal_version + 1
+            return {"next_after": None}
+        store.persist, store.note_late_target = commit_then_receive, late
+        await value.flush_audit_once()
+        assert exclusions and row.decision.decision_id in value.records
+        await value.flush_audit_once()
+        assert row.decision.decision_id not in value.records
+        saved = store.persisted[-1]
+        assert saved["version"] == persisted_terminal_version + 1
+        target_state = json.loads(saved["state_json"])["targets"]["1"]
+        assert target_state["status"] == "missing"
+        assert target_state["first_late_event"]["event_id"] == "arrived-during-terminal-commit"
+    run(scenario())
+
+
+def test_terminal_row_is_not_evicted_while_redis_ack_is_inflight():
+    async def scenario():
+        value, clock, spool, store, redis = runtime()
+        row = issue(value)
+        value._pending_publication = None
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def blocked(*args):
+            redis.calls.append(args)
+            entered.set()
+            await release.wait()
+            return 1
+        redis.eval = blocked
+        publication = asyncio.create_task(value.publish(row))
+        await entered.wait()
+        clock.advance(MATCH_NS)
+        value.finalize_due()
+        await value.flush_audit_once()
+        assert row.terminal and row.decision.decision_id in value.records and spool.rows
+        release.set()
+        await publication
+        await value.flush_audit_once()
+        assert row.decision.decision_id not in value.records and not spool.rows
+        assert json.loads(store.persisted[-1]["state_json"])["publication"]["status"] == "acknowledged"
+    run(scenario())
+
+
+def test_late_target_cursor_survives_a_batch_budget_yield(monkeypatch):
+    async def scenario():
+        value, _, _, store, _ = runtime()
+        # Force a yield after every page without introducing wall-clock sleeps.
+        monkeypatch.setattr("price_collector.ghost_twap_runtime.AUDIT_BATCH_SECONDS", 0)
+        # Start budget positive, then exhaust it inside each successful page.
+        value.late_events.append({"event_id": "three-pages"})
+        calls = []
+        async def page(event, *, after=None, limit=100, exclude=()):
+            calls.append(after)
+            monkeypatch.setattr("price_collector.ghost_twap_runtime.AUDIT_BATCH_SECONDS", 0)
+            return {"next_after": ("run", "100") if after is None else
+                    ("run", "200") if after == ("run", "100") else None}
+        store.note_late_target = page
+        for _ in range(3):
+            monkeypatch.setattr("price_collector.ghost_twap_runtime.AUDIT_BATCH_SECONDS", 2.5)
+            await value.flush_audit_once()
+        assert calls == [None, ("run", "100"), ("run", "200")]
+        assert not value.late_events and not value._late_cursors
+    run(scenario())
+
+
+async def until(predicate):
+    deadline = asyncio.get_running_loop().time() + 3
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("started worker did not reach expected state")
+        await asyncio.sleep(0.01)
+
+
+def test_started_loops_publish_persist_match_and_release():
+    async def scenario():
+        value, clock, spool, store, redis = runtime()
+        await value.start()
+        try:
+            warm(value)
+            await until(lambda: bool(redis.calls) and bool(store.persisted))
+            row = next(iter(value.records.values()))
+            clock.advance(NS_PER_SECOND)
+            event = target(value, row, clock)
+            value.offer_price("twap", event.value, event.source_timestamp_ms,
+                              event.received_wall_ns, event.received_monotonic_ns, event.event_id, 60)
+            await until(lambda: any(json.loads(r["state_json"])["targets"]["1"]["first_event"]
+                                    for r in store.persisted if r["decision_id"] == row.decision.decision_id))
+            value.stop("audit_size_cap")  # Stop new rows; drain existing work normally.
+            clock.advance(MATCH_NS)
+            value._wake.set()
+            await until(lambda: not value.records)
+            assert not spool.rows and not value._dirty
+        finally:
+            await value.close()
+    run(scenario())
+
+
+@pytest.mark.parametrize("clock_kind", ["wall", "monotonic"])
+def test_started_loop_reaches_exact_four_hour_permanent_deadline(clock_kind):
+    async def scenario():
+        assert CANARY_MS == 4 * 60 * 60 * 1000
+        value, clock, spool, _, redis = runtime()
+        await value.start()
+        try:
+            if clock_kind == "wall":
+                clock.wall = (BASE + CANARY_MS) * NS_PER_MS
+            else:
+                clock.mono = value._end_mono
+            value._wake.set()
+            await until(lambda: value.stop_reason == "canary_deadline")
+            await until(lambda: spool.saved_campaign is not None and
+                        spool.saved_campaign["stop_reason"] == "canary_deadline")
+            assert not redis.calls and value.issue() is None
+        finally:
+            await value.close()
+    run(scenario())

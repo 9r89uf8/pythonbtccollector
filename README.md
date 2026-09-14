@@ -923,9 +923,10 @@ acknowledgements are audited separately. Restart reconciles unfinished audit
 records and warms from new live inputs.
 
 The first canary requires an explicit fixed start time and stops new decisions
-after at most 72 hours, at 1.5 GiB of audit relations, at 600,000 decisions, on
-audit failure, or below 10 GiB free database-filesystem space. It can finish early
-without completing validation. Verified external export is required before
+after at most four hours, at 1.5 GiB of audit relations, at 600,000 decisions, or
+below 10 GiB free database-filesystem space. Temporary audit/guard failures pause
+new forecasts until recovery. This first run measures capacity and does not
+complete longer validation. Verified external export is required before
 96-hour whole-row expiry. See the [B report](GHOST_TWAP_CHECKPOINT_B.md) and
 [operating procedure](OPERATIONS.md#ghost-twap-checkpoint-b).
 

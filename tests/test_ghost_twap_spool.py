@@ -51,6 +51,18 @@ def test_retries_are_idempotent_and_stale_versions_do_not_replace_newer(spool):
     assert spool.read_all() == [original]
 
 
+def test_identical_record_and_campaign_retries_do_not_repeat_fsync(spool, monkeypatch):
+    original = record()
+    campaign = spool.campaign(1800000000000)
+    spool.write(original)
+    def unexpected_sync(*args):
+        raise AssertionError("unchanged durable bytes do not need another fsync")
+    monkeypatch.setattr(os, "fsync", unexpected_sync)
+    spool.write(deepcopy(original))
+    spool.save_campaign(deepcopy(campaign))
+    assert spool.read_all() == [original]
+
+
 @pytest.mark.parametrize("field,new_value", [("frozen_json", '{"price":"99"}'),
                                               ("state_json", '{"different":true}')])
 def test_same_version_conflicts_never_modify_existing_bytes(spool, field, new_value):
