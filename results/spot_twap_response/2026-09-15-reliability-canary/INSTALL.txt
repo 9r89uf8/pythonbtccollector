@@ -1,0 +1,33 @@
+From https://github.com/9r89uf8/pythonbtccollector
+   7bfe7e3..81ee6f1  main                    -> origin/main
+   7bfe7e3..81ee6f1  codex/ghost-reliability -> origin/codex/ghost-reliability
+Updating 7bfe7e3..81ee6f1
+Fast-forward
+ .gitattributes                                     |   6 +
+ GHOST_TWAP_RELIABILITY_CANARY.md                   | 110 ++++++++
+ OPERATIONS.md                                      |  10 +-
+ README.md                                          |   5 +
+ price_collector/ghost_twap_canary_stop.py          | 259 +++++++++++++++++++
+ .../BROWSER_DRY_RUN.json                           |   1 +
+ .../FULL_SUITE_TAIL.txt                            |  28 +++
+ .../OBSERVER_DRY_RUN.json                          |  68 +++++
+ .../2026-09-15-reliability-canary/PREFLIGHT.json   | 278 +++++++++++++++++++++
+ .../PRELAUNCH_MANIFEST.json                        |  40 +++
+ .../instrumentation.tar.gz                         | Bin 0 -> 15934 bytes
+ tests/test_ghost_twap_canary_stop.py               | 252 +++++++++++++++++++
+ 12 files changed, 1055 insertions(+), 2 deletions(-)
+ create mode 100644 GHOST_TWAP_RELIABILITY_CANARY.md
+ create mode 100644 price_collector/ghost_twap_canary_stop.py
+ create mode 100644 results/spot_twap_response/2026-09-15-reliability-canary/BROWSER_DRY_RUN.json
+ create mode 100644 results/spot_twap_response/2026-09-15-reliability-canary/FULL_SUITE_TAIL.txt
+ create mode 100644 results/spot_twap_response/2026-09-15-reliability-canary/OBSERVER_DRY_RUN.json
+ create mode 100644 results/spot_twap_response/2026-09-15-reliability-canary/PREFLIGHT.json
+ create mode 100644 results/spot_twap_response/2026-09-15-reliability-canary/PRELAUNCH_MANIFEST.json
+ create mode 100644 results/spot_twap_response/2026-09-15-reliability-canary/instrumentation.tar.gz
+ create mode 100644 tests/test_ghost_twap_canary_stop.py
+
+[notice] A new release of pip is available: 26.1.2 -> 26.2.1
+[notice] To update, run: /opt/price-collector/.venv/bin/python3 -m pip install --upgrade pip
+..........................                                               [100%]
+26 passed in 0.37s
+INSTALLED_AND_TESTED_PRODUCER_STILL_OFF

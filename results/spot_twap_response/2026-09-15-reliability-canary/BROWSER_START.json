@@ -1,0 +1,1 @@
+{"started":true,"observation_ms":3600000,"drain_ms":120000,"start_browser_ms":994716.8000000119,"origin":"http://127.0.0.1:19016","max_records":100000,"max_bytes":134217728,"campaign_attachment":"window.ghostProbe.setCampaign(start_ms, optional_run_id)"}

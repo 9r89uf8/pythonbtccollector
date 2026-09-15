@@ -1,0 +1,90 @@
+{
+  "captured_wall_ns": "1789513071743976599",
+  "services": {
+    "price-collector": "active",
+    "price-collector-polymarket-chainlink": "active",
+    "price-collector-binance-futures": "active",
+    "price-collector-polymarket-probabilities": "active",
+    "price-api": "active",
+    "redis-server": "active",
+    "ghost-reliability-stop-20260915t225638z.timer": "active",
+    "ghost-reliability-observer-20260915t225638z.service": "active"
+  },
+  "settings": {
+    "GHOST_TWAP_ENABLED": "true",
+    "GHOST_TWAP_CANARY_START_MS": "1789512998000",
+    "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-reliability-20260915T225638Z"
+  },
+  "previous_hashes_unchanged": true,
+  "latest_payload": {
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+    "decision_id": "138",
+    "runtime_version": "ghost-canary-v6",
+    "contract_version": 4,
+    "decision_wall_ns": "1789513070946897876",
+    "valid_until_wall_ns": "1789513073926349088",
+    "publication_eligibility": {
+      "checked_monotonic_ns": "6048100744625322",
+      "checked_wall_ns": "1789513070975258792",
+      "eligible_horizons": [
+        1,
+        2,
+        3,
+        5,
+        10,
+        30
+      ],
+      "excluded_horizons": {},
+      "version": 1
+    },
+    "forecasts": [
+      {
+        "horizon_s": 1,
+        "quality": "healthy",
+        "reason": null,
+        "target_source_timestamp_ms": 1789513070000
+      },
+      {
+        "horizon_s": 2,
+        "quality": "healthy",
+        "reason": null,
+        "target_source_timestamp_ms": 1789513071000
+      },
+      {
+        "horizon_s": 3,
+        "quality": "healthy",
+        "reason": null,
+        "target_source_timestamp_ms": 1789513072000
+      },
+      {
+        "horizon_s": 5,
+        "quality": "healthy",
+        "reason": null,
+        "target_source_timestamp_ms": 1789513074000
+      },
+      {
+        "horizon_s": 10,
+        "quality": "healthy",
+        "reason": null,
+        "target_source_timestamp_ms": 1789513079000
+      },
+      {
+        "horizon_s": 30,
+        "quality": "healthy",
+        "reason": null,
+        "target_source_timestamp_ms": 1789513099000
+      }
+    ],
+    "receipt_to_decision_ns": null
+  },
+  "campaign": {
+    "last_wall_ms": 1789513060670,
+    "start_ms": 1789512998000,
+    "stop_reason": null
+  },
+  "snapshot": {
+    "status": 200,
+    "bytes": 4593
+  },
+  "observer_sample_bytes": 632588
+}
