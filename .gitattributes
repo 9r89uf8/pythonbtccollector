@@ -334,3 +334,9 @@
 /tests/test_ghost_twap_stream_tcp.py -text
 /tests/test_ghost_twap_shutdown.py -text
 /results/spot_twap_response/2026-09-15-ghost-reliability/** -text
+
+# Preserve the new bounded canary protocol, helper and evidence.
+/GHOST_TWAP_RELIABILITY_CANARY.md -text
+/price_collector/ghost_twap_canary_stop.py -text
+/tests/test_ghost_twap_canary_stop.py -text
+/results/spot_twap_response/2026-09-15-reliability-canary/** -text

@@ -397,8 +397,14 @@ leave retained rows; use the recovery checks above rather than assuming a
 disabled restart reconciles them. Verify the stopped worker, absent key, empty
 outbox, terminal audit and externally verified export. Never repoint an active
 process at another campaign to bypass a guard. Another run needs separate
-authorization; ongoing forecast production also requires the shutdown-budget fix and a
-reviewed capacity/retention policy.
+authorization; continuous forecast production still requires a reviewed
+capacity/retention policy. The reliability release has since fixed the shutdown
+budgets. The owner-authorized [one-hour reliability canary](GHOST_TWAP_RELIABILITY_CANARY.md)
+stops at the one-hour deadline with a pending tail, using the versioned
+`price_collector.ghost_twap_canary_stop` operator command. Its launch record
+contains the exact state, output path and timer. This stop-only command refuses
+other campaign identities and preserves prior stop records; it never enables
+forecasts or modifies audit evidence.
 
 ## Deploy compact Polymarket evidence
 

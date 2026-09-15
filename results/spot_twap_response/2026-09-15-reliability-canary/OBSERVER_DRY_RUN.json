@@ -1,0 +1,68 @@
+{
+  "unit": "ghost-reliability-observer-dry-1789512202160",
+  "directory": "/var/lib/price-collector/ghost-reliability-observer-dry-1789512202160",
+  "command": [
+    "systemd-run",
+    "--unit=ghost-reliability-observer-dry-1789512202160",
+    "--collect",
+    "--property=User=pricecollector",
+    "--property=WorkingDirectory=/opt/price-collector",
+    "--property=RuntimeMaxSec=15s",
+    "--property=TimeoutStopSec=10s",
+    "/opt/price-collector/.venv/bin/python",
+    "-m",
+    "price_collector.ghost_twap_observer",
+    "observe",
+    "--start-ms",
+    "1789512202160",
+    "--output-directory",
+    "/var/lib/price-collector/ghost-reliability-observer-dry-1789512202160"
+  ],
+  "manifest": {
+    "boot_id": "6557a18a-2a22-4d5f-a7c3-570b051ba915",
+    "campaign_membership": "provisional_decision_window_requires_audit_join",
+    "end_ms": 1789515802160,
+    "files": {
+      "payloads.jsonl": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "samples.jsonl": {
+        "bytes": 76778,
+        "sha256": "89e3d6090ac38839db8043edfba0f126a63c7b20d303deee89d7529070a2afc7"
+      }
+    },
+    "finished_monotonic_ns": "6047246130743475",
+    "finished_wall_ns": "1789512216361374530",
+    "flush_interval_ms": 1000,
+    "fsync_each_sample": false,
+    "interval_ms": 100,
+    "max_payload_bytes": 65536,
+    "max_total_bytes": 134217728,
+    "pid": 1393449,
+    "planned_bins": 36000,
+    "read_timeout_ms": 100,
+    "reason": "interrupted",
+    "recorded_bins": 142,
+    "redis_host": "127.0.0.1",
+    "redis_key": "btc:live:ghost_chainlink_twap_60s",
+    "sample_records": 142,
+    "start_ms": 1789512202160,
+    "status": "incomplete",
+    "target_unreceived_at_read": "unobserved",
+    "unique_payloads": 0,
+    "unrecorded_bins": 35858,
+    "version": "ghost-observer-v1"
+  },
+  "read_latency": {
+    "max_ns": 4404297,
+    "p50_ns": 712945,
+    "p90_ns": 1128308,
+    "p99_ns": 2193001
+  },
+  "statuses": {
+    "absent": 142,
+    "unrecorded": 35858
+  },
+  "qualification": "Interrupted 15-second disabled-producer readiness check, not a completed coverage measurement."
+}

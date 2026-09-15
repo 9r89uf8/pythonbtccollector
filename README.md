@@ -914,6 +914,11 @@ was 38.22 ms, still above the 10 ms objective. A spot reconnect required history
 rebuilding. The [first run](GHOST_TWAP_CANARY_RESULTS.md) retains separate evidence.
 The [Checkpoint C report](GHOST_TWAP_CHECKPOINT_C.md) describes the implemented
 Redis-only API/SSE contract and completed bounded browser validation.
+The subsequent [one-hour reliability canary](GHOST_TWAP_RELIABILITY_CANARY.md)
+tests the revised shutdown with recent targets still pending. Its automatic
+stop uses a versioned root-only operator CLI and an exact campaign identity;
+it does not alter the producer's existing one-hour cap or authorize continuous
+operation. Run-specific clocks and status belong to its launch/results files.
 
 The [reconnect recovery checkpoint](GHOST_TWAP_RECONNECT_CHECKPOINT.md) adds
 runtime `ghost-canary-v6` / contract 4. A short spot connection end can retain

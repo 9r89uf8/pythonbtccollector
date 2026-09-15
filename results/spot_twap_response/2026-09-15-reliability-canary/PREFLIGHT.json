@@ -1,0 +1,278 @@
+{
+  "read_only": true,
+  "mode": "pre",
+  "started_wall_ns": "1789511798541036129",
+  "errors": [],
+  "commit": "7bfe7e3881058ae77bf7e1e60d59893595379737",
+  "git_status": "",
+  "services": {
+    "price-collector": {
+      "MainPID": "1315559",
+      "ActiveState": "active",
+      "SubState": "running"
+    },
+    "price-collector-polymarket-chainlink": {
+      "MainPID": "1392720",
+      "ActiveState": "active",
+      "SubState": "running"
+    },
+    "price-collector-binance-futures": {
+      "MainPID": "1315571",
+      "ActiveState": "active",
+      "SubState": "running"
+    },
+    "price-collector-polymarket-probabilities": {
+      "MainPID": "1315593",
+      "ActiveState": "active",
+      "SubState": "running"
+    },
+    "price-api": {
+      "MainPID": "1392712",
+      "ActiveState": "active",
+      "SubState": "running"
+    },
+    "redis-server": {
+      "MainPID": "1315203",
+      "ActiveState": "active",
+      "SubState": "running"
+    }
+  },
+  "safe_settings": {
+    "files": {
+      "collector.env": {
+        "values": {
+          "GHOST_TWAP_ENABLED": "false",
+          "GHOST_TWAP_CANARY_START_MS": "1789438552981",
+          "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-c-api-20260915T021552Z",
+          "GHOST_TWAP_SOURCE_MAX_AGE_MS": "5000",
+          "GHOST_TWAP_RECEIPT_MAX_AGE_MS": "3000"
+        },
+        "duplicate_keys": []
+      },
+      "api.env": {
+        "values": {
+          "GHOST_TWAP_API_ENABLED": "true"
+        },
+        "duplicate_keys": []
+      }
+    },
+    "processes": {
+      "price-collector-polymarket-chainlink": {
+        "values": {
+          "GHOST_TWAP_ENABLED": "false",
+          "GHOST_TWAP_CANARY_START_MS": "1789438552981",
+          "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-c-api-20260915T021552Z",
+          "GHOST_TWAP_SOURCE_MAX_AGE_MS": "5000",
+          "GHOST_TWAP_RECEIPT_MAX_AGE_MS": "3000"
+        },
+        "duplicate_keys": []
+      },
+      "price-api": {
+        "values": {
+          "GHOST_TWAP_API_ENABLED": "true"
+        },
+        "duplicate_keys": []
+      }
+    }
+  },
+  "listeners": [
+    "127.0.0.1:5432",
+    "127.0.0.1:6379",
+    "127.0.0.1:9000",
+    "[::1]:5432"
+  ],
+  "ghost_key_exists": 0,
+  "audit_status": {
+    "row_count": 16329,
+    "incomplete_count": 0,
+    "earliest_created_ms": 1789346723788,
+    "latest_created_ms": 1789439573308,
+    "measurement": {
+      "relation_bytes": 218710016,
+      "row_count": 16329,
+      "tablespaces": [
+        "pg_default"
+      ],
+      "db_data_directory": "/var/lib/postgresql/16/main"
+    }
+  },
+  "audit_verification": {
+    "row_count": 16329,
+    "terminal_count": 16329,
+    "current_verified_count": 16329,
+    "matching_export_count": 16329,
+    "transaction_read_only": "on"
+  },
+  "state_files": {
+    "current_state_directory": "/var/lib/price-collector/ghost-c-api-20260915T021552Z",
+    "outbox_rows": 0,
+    "outbox_atomic_temporaries": 0,
+    "campaign_hashes": {
+      "/var/lib/price-collector/ghost-twap/campaign.json": "f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86",
+      "/var/lib/price-collector/ghost-twap-combined-20260914T223348Z/campaign.json": "0a43a62d76676172d4c3227fed39c6b1f2deff0767c6e71930c38a40bf06c58f",
+      "/var/lib/price-collector/ghost-c-api-20260915T021552Z/campaign.json": "e42e769e4251c3043a4c43ebae798251a3a599d0932b9759f4212e3f1e390c50"
+    }
+  },
+  "health": {
+    "status": 200,
+    "ok": true,
+    "database": "ok",
+    "service": "price-api",
+    "elapsed_ns": "70458347"
+  },
+  "current_live": {
+    "status": 200,
+    "server_time_ms": 1789511799265,
+    "sources": {
+      "binance_spot": {
+        "source_timestamp_ms": 1789511799017,
+        "received_ms": 1789511799048,
+        "source_age_ms": 248,
+        "received_age_ms": 217,
+        "value_present": true
+      },
+      "chainlink": {
+        "source_timestamp_ms": 1789511797000,
+        "received_ms": 1789511798279,
+        "source_age_ms": 2265,
+        "received_age_ms": 986,
+        "value_present": true
+      },
+      "twap": {
+        "source_timestamp_ms": 1789511797000,
+        "received_ms": 1789511798336,
+        "source_age_ms": 2265,
+        "received_age_ms": 929,
+        "value_present": true
+      },
+      "futures": {
+        "source_timestamp_ms": 1789511799052,
+        "received_ms": 1789511799232,
+        "source_age_ms": 213,
+        "received_age_ms": 33,
+        "value_present": true
+      }
+    },
+    "elapsed_ns": "2199700"
+  },
+  "ghost_snapshot": {
+    "status": 503,
+    "state": "unavailable",
+    "reason": "no_current_publication",
+    "cache_control": "no-store, no-transform",
+    "elapsed_ns": "1448752"
+  },
+  "ghost_stream": {
+    "status": 200,
+    "content_type": "text/event-stream; charset=utf-8",
+    "cache_control": "no-store, no-transform",
+    "content_encoding": null,
+    "ghost_is_null": true,
+    "api": {
+      "instance_id": "517b6bf9b1ed4a44ac2c389f9f02f39f",
+      "generation": 1,
+      "sequence": 62,
+      "state": "unavailable",
+      "reason": "absent",
+      "resync": true,
+      "skipped_updates": 0,
+      "remaining_ns": "0"
+    },
+    "elapsed_ns": "1862840"
+  },
+  "source_sha256": {
+    "price_collector/api.py": "41a0cb3447ed4e6188770756eeb9c0b971cc61df9d61bd37b322426d44a5dc1e",
+    "price_collector/ghost_twap_api.py": "532d918f64c6d60ed527acc85c4e35d05ddbd90f9a2e6c93a1613719c4d5e54f",
+    "price_collector/ghost_twap_stream.py": "e4cf17ff6660ed38cd2b1789bec1e56bb37fc393b3b7c521be340675d97afbeb",
+    "price_collector/ghost_twap_runtime.py": "099078749a465e5d2f024314be97467e02f30d74e80705a34b9ce9f1370a407b",
+    "price_collector/polymarket_chainlink_collector.py": "dabbc0e9394f4fecddb9fe292671d366bfed1338c81106ff1b5b095709cc0417",
+    "deployment/price-collector-polymarket-chainlink.service": "2c69085f00f648258177f1f6411bd23383d45e738959ea90193cd3a408eec107"
+  },
+  "disk_usage": {
+    "/var/lib/postgresql/16/main": {
+      "total_bytes": 50884108288,
+      "used_bytes": 26339160064,
+      "free_bytes": 24528171008
+    },
+    "/var/lib/price-collector": {
+      "total_bytes": 50884108288,
+      "used_bytes": 26339160064,
+      "free_bytes": 24528171008
+    }
+  },
+  "completed_wall_ns": "1789511799270896253",
+  "storage_headroom": {
+    "relation_bytes_to_stop": 1391902720,
+    "disk_bytes_above_reserve": {
+      "/var/lib/postgresql/16/main": 13790752768,
+      "/var/lib/price-collector": 13790752768
+    },
+    "limitation": "Point-in-time capacity margin, not a sustained storage or one-hour sufficiency guarantee."
+  },
+  "status": "passed",
+  "checks": {
+    "expected_commit": true,
+    "deployed_runtime_hashes_unchanged": true,
+    "disk_headroom_above_10gib_reserve": true,
+    "audit_below_1_5gib_stop": true,
+    "clean_checkout": true,
+    "six_services_active": true,
+    "loopback_only_datastores_api": true,
+    "files_safe_settings_unchanged": true,
+    "processes_safe_settings_unchanged": true,
+    "ghost_key_absent": true,
+    "all_audit_rows_terminal": true,
+    "all_audit_rows_verified_for_saved_export": true,
+    "current_outbox_empty": true,
+    "three_campaign_hashes_unchanged": true,
+    "core_health": true,
+    "four_sources_present_and_source_received_within_10s": true,
+    "snapshot_typed_503": true,
+    "initial_sse_unavailable_resync": true
+  },
+  "expected": {
+    "mode": "pre",
+    "commit": "7bfe7e3881058ae77bf7e1e60d59893595379737",
+    "campaign_hashes": {
+      "/var/lib/price-collector/ghost-twap/campaign.json": "f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86",
+      "/var/lib/price-collector/ghost-twap-combined-20260914T223348Z/campaign.json": "0a43a62d76676172d4c3227fed39c6b1f2deff0767c6e71930c38a40bf06c58f",
+      "/var/lib/price-collector/ghost-c-api-20260915T021552Z/campaign.json": "e42e769e4251c3043a4c43ebae798251a3a599d0932b9759f4212e3f1e390c50"
+    },
+    "state_directory": "/var/lib/price-collector/ghost-c-api-20260915T021552Z",
+    "safe_settings": {
+      "GHOST_TWAP_API_ENABLED": "true",
+      "GHOST_TWAP_ENABLED": "false",
+      "GHOST_TWAP_CANARY_START_MS": "1789438552981",
+      "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-c-api-20260915T021552Z",
+      "GHOST_TWAP_SOURCE_MAX_AGE_MS": "5000",
+      "GHOST_TWAP_RECEIPT_MAX_AGE_MS": "3000"
+    },
+    "export_sha256": "8cf583804c51855d5b443e359ca1fd3f8f751066ff07924498428e15a188a9be",
+    "row_count": 16329,
+    "runtime_reference_commit": "d404312dadd1748f38c91cf4911c74b5c47206ea",
+    "source_sha256": {
+      "price_collector/api.py": "41a0cb3447ed4e6188770756eeb9c0b971cc61df9d61bd37b322426d44a5dc1e",
+      "price_collector/ghost_twap_api.py": "532d918f64c6d60ed527acc85c4e35d05ddbd90f9a2e6c93a1613719c4d5e54f",
+      "price_collector/ghost_twap_stream.py": "e4cf17ff6660ed38cd2b1789bec1e56bb37fc393b3b7c521be340675d97afbeb",
+      "price_collector/ghost_twap_runtime.py": "099078749a465e5d2f024314be97467e02f30d74e80705a34b9ce9f1370a407b",
+      "price_collector/polymarket_chainlink_collector.py": "dabbc0e9394f4fecddb9fe292671d366bfed1338c81106ff1b5b095709cc0417",
+      "deployment/price-collector-polymarket-chainlink.service": "2c69085f00f648258177f1f6411bd23383d45e738959ea90193cd3a408eec107"
+    },
+    "relation_stop_bytes": 1610612736,
+    "disk_reserve_bytes": 10737418240
+  },
+  "limitations": [
+    "Sequential point-in-time checks, not continuous feed-health or transport-delivery proof.",
+    "Audit acknowledgement columns are checked against the prior verified external-export hash; this does not re-download or rehash the full export.",
+    "One initial SSE frame is read and the client closes; there is no sustained subscription or producer activation."
+  ],
+  "evidence_sha256": {
+    "results/spot_twap_response/2026-09-15-checkpoint-c-review/production_state.json": "1ce77db373a1409458960670cf44c76d89783f8e12bb6e25bf878d2dc27f7cc5",
+    "results/spot_twap_response/2026-09-15-checkpoint-c/export_verified.json": "86b7804c890035302063730e6c34e4c26644cde86327a9bbf40980f7cde67588",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/post_deploy.json": "0bd498163e24c6d452a80d119bcc0277d5cdf99918221b52a74fdf4ebfa894b9",
+    "dist/ghost-reliability-canary/verify_preflight.py": "d1445097937168a72501600e0b9eb178e2982f1a9b39c640fa7e24ffcd306668"
+  },
+  "remote_script_sha256": "f516dd21ea38ba63a9b49e9bf9ebe547925dc4b656af976143488b59af8a0eee",
+  "publication_note": "Unrelated local task-automation metadata omitted; production checks unchanged.",
+  "original_local_sha256": "98b11647f24f1b98f9048893f2ac39f4a620f70caf765a46cae61676f9eb7fa7"
+}
