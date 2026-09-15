@@ -310,3 +310,4 @@
 /results/spot_twap_response/2026-09-15-reconnect-recovery/* -text
 /tests/test_ghost_twap_reconnect.py -text
 /tests/test_ghost_twap_reconnect_runtime.py -text
+/results/spot_twap_response/2026-09-15-reconnect-deployment/* -text

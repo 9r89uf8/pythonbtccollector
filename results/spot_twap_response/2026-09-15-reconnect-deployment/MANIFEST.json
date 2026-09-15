@@ -1,0 +1,22 @@
+{
+  "runtime_code_commit": "f575d1170810b4285e6e6a6ce537624ce3b84254",
+  "status": "deployed_ghost_disabled",
+  "artifacts": {
+    ".gitattributes": {
+      "bytes": 19679,
+      "sha256": "e6257d93310bd02e9f58d43394d817c7e020e71e9a64d773c5de6c11d5b11c52"
+    },
+    "README.md": {
+      "bytes": 45040,
+      "sha256": "1465b3954d2ee6e177b697802a549d999c78302427e064267ddf5917ca00e023"
+    },
+    "results/spot_twap_response/2026-09-15-reconnect-deployment/README.md": {
+      "bytes": 4254,
+      "sha256": "1ba39316304457212ba0fd03fe4a932faa7f886ef0c3831d842ac1bc9b127e44"
+    },
+    "results/spot_twap_response/2026-09-15-reconnect-deployment/DEPLOYMENT.json": {
+      "bytes": 3795,
+      "sha256": "50b00a9a29e670ac168db33dad8c6e74f8bce987c47c62623b0018e6b5f8ff6c"
+    }
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "status": "deployed_and_verified",
+  "at_ms": 1789435144602,
+  "operation_directory": "/var/lib/price-collector/ghost-reconnect-deploy-20260915T011853Z",
+  "old_head": "770df37cc0f0dbdea1138141ee67746356e9563a",
+  "deployed_commit": "f575d1170810b4285e6e6a6ce537624ce3b84254",
+  "restart_ms": 1789435138716,
+  "runtime": {
+    "contract": 4,
+    "runtime": "ghost-canary-v6",
+    "reconnect_limit": 10000
+  },
+  "runtime_hashes": {
+    "price_collector/ghost_twap.py": "dc01ea0b450137def77a44f522b73c7f9203d21fb9096a6eadcfdcd7a425d489",
+    "price_collector/ghost_twap_runtime.py": "e074350184b80a6d0c1d00fb15bb1f5afe704fcab1894dc0873188707e8b332a",
+    "price_collector/ghost_twap_observer.py": "399c143fb5634f29de50a8e9dc576882a5f83cd38e83766bfe026789346d8963"
+  },
+  "ghost_enabled": false,
+  "ghost_key_exists": 0,
+  "environment_unchanged": true,
+  "sparse_checkout_unchanged": true,
+  "states": {
+    "/var/lib/price-collector/ghost-twap/campaign.json": {
+      "sha256": "f570421579fd0156096ea522e5afd7817953e19593820fb3962ea0eed61efa86",
+      "row_files": 0
+    },
+    "/var/lib/price-collector/ghost-twap-combined-20260914T223348Z/campaign.json": {
+      "sha256": "0a43a62d76676172d4c3227fed39c6b1f2deff0767c6e71930c38a40bf06c58f",
+      "row_files": 0
+    }
+  },
+  "services": {
+    "price-collector": {
+      "MainPID": "1315559",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "0ef17a14686c4446a9ecc6af9fd883a2"
+    },
+    "price-collector-polymarket-chainlink": {
+      "MainPID": "1376629",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "0e99eb3c5a044fd9a18ff68080e28872"
+    },
+    "price-collector-binance-futures": {
+      "MainPID": "1315571",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "7b3031340d0846dd84bcaa439ccf2343"
+    },
+    "price-collector-polymarket-probabilities": {
+      "MainPID": "1315593",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "873572aad1da4c9a8884c8a731613015"
+    },
+    "price-api": {
+      "MainPID": "1315564",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "c5c971448004454ca26571dc4b1f424f"
+    },
+    "redis-server": {
+      "MainPID": "1315203",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "862f200da1a34bdfb6d28fca0b3f7db4"
+    }
+  },
+  "feeds": {
+    "btc:live:binance_spot": {
+      "received_ms": 1789435143044,
+      "source_timestamp_ms": 1789435143016,
+      "receipt_age_ms": 439,
+      "source_age_ms": 467
+    },
+    "btc:live:chainlink": {
+      "received_ms": 1789435143258,
+      "source_timestamp_ms": 1789435142000,
+      "receipt_age_ms": 225,
+      "source_age_ms": 1483
+    },
+    "btc:live:chainlink_twap_60s": {
+      "received_ms": 1789435143328,
+      "source_timestamp_ms": 1789435142000,
+      "receipt_age_ms": 155,
+      "source_age_ms": 1483
+    },
+    "btc:live:futures": {
+      "received_ms": 1789435142979,
+      "source_timestamp_ms": 1789435142801,
+      "receipt_age_ms": 504,
+      "source_age_ms": 682
+    }
+  },
+  "health": {
+    "ok": true,
+    "database": "ok",
+    "service": "price-api"
+  },
+  "live_api_ok": true,
+  "audit": {
+    "row_count": 14346,
+    "earliest_created_ms": 1789346723788,
+    "latest_created_ms": 1789428842883,
+    "incomplete_count": 0,
+    "measurement": {
+      "relation_bytes": 191275008,
+      "row_count": 14346,
+      "tablespaces": [
+        "pg_default"
+      ],
+      "db_data_directory": "/var/lib/postgresql/16/main"
+    }
+  },
+  "journal_records_checked": 15,
+  "ghost_runtime_started": false
+}

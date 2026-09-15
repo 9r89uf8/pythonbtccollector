@@ -917,8 +917,10 @@ spot arrives. Source and both receipt gaps must fit the bounded 10-second
 allowance; intervening prices are still carried estimates. Invalid/long gaps,
 queue loss and other integrity failures keep the clear-and-rebuild behavior.
 Every explicit gap fences older pending publications before their Redis attempt.
-This revision is a local implementation; a new live recovery measurement has
-not been run. Both completed canaries retain their original versioned evidence.
+This revision was pushed and installed with ghost disabled on September 15 UTC;
+see the [deployment verification](results/spot_twap_response/2026-09-15-reconnect-deployment/README.md).
+A new live recovery measurement has not been run. Both completed canaries retain
+their original versioned evidence.
 
 `price_collector/ghost_twap.py` provides an optional pure Decimal engine for
 1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
