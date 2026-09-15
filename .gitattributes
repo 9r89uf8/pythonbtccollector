@@ -311,3 +311,15 @@
 /tests/test_ghost_twap_reconnect.py -text
 /tests/test_ghost_twap_reconnect_runtime.py -text
 /results/spot_twap_response/2026-09-15-reconnect-deployment/* -text
+
+# Read-only ghost API and independently replayable browser evidence.
+/GHOST_TWAP_CHECKPOINT_C.md -text
+/price_collector/ghost_twap_api.py -text
+/price_collector/ghost_twap_payload.py -text
+/price_collector/ghost_twap_stream.py -text
+/tests/test_ghost_twap_api.py -text
+/tests/test_ghost_twap_payload.py -text
+/tests/test_ghost_twap_stream.py -text
+/tests/test_ghost_browser_analysis.py -text
+/research/spot_twap_response/checkpoint_c/* -text
+/results/spot_twap_response/2026-09-15-checkpoint-c/** -text

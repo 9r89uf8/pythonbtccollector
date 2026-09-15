@@ -908,7 +908,8 @@ key coverage of 99.632%, five-second forecast usability of 98.003%, and 314
 partial batches retained by the new publication rule. Median publication latency
 was 38.22 ms, still above the 10 ms objective. A spot reconnect required history
 rebuilding. The [first run](GHOST_TWAP_CANARY_RESULTS.md) retains separate evidence;
-API/SSE and browser delivery remain Checkpoint C.
+The [Checkpoint C report](GHOST_TWAP_CHECKPOINT_C.md) tracks the optional
+Redis-only API/SSE implementation and its separate browser validation.
 
 The [reconnect recovery checkpoint](GHOST_TWAP_RECONNECT_CHECKPOINT.md) adds
 runtime `ghost-canary-v6` / contract 4. A short spot connection end can retain
@@ -967,6 +968,20 @@ complete longer validation. Verified external export is required before
 96-hour whole-row expiry. See the [B report](GHOST_TWAP_CHECKPOINT_B.md) and
 [operating procedure](OPERATIONS.md#ghost-twap-checkpoint-b).
 
-No ghost API routes or frontend are added in B. Snapshot GET and SSE remain C,
-after prospective canary review. Ghost values are forecasts, not official
-settlement prices or demonstrated trading signals.
+Checkpoint C adds `GET /forecasts/chainlink-twap/live` and
+`GET /forecasts/chainlink-twap/stream` behind `GHOST_TWAP_API_ENABLED=false` in the
+API environment. The snapshot performs one Redis GET and returns the original
+JSON bytes with request-time clock headers. The SSE stream shares one subscriber,
+resyncs current state after reconnect, expires stale values, and isolates slow
+clients with bounded queues and send deadlines. It carries delivery metadata in
+`api` and the producer object in `ghost`; unavailable state has `ghost: null`.
+Neither route queries PostgreSQL or calculates forecasts. Both bypass compression
+and use `no-store, no-transform`. Existing source routes retain their behavior.
+
+Use the API only through an SSH tunnel; no frontend assets are installed on the
+droplet. Browser clients must enforce expiry independently when a tunnel stalls,
+using a conservative clock bracket rather than assuming server and browser wall
+clocks match. See [the delivery contract and validation plan](GHOST_TWAP_CHECKPOINT_C.md)
+and [deployment instructions](OPERATIONS.md#ghost-twap-checkpoint-c).
+Ghost values are forecasts, not official settlement prices or demonstrated
+trading signals. Enabling the API does not enable the bounded producer campaign.

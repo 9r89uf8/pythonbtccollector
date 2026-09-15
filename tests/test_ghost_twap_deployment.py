@@ -38,4 +38,7 @@ def test_ghost_example_is_disabled_and_tunnel_has_no_runtime_credentials():
     for name in ('droplet.env.example', 'deployment/api.env.example'):
         active = '\n'.join(line for line in (ROOT / name).read_text().splitlines()
                            if not line.startswith('#'))
-        assert 'GHOST_TWAP_' not in active
+        ghost_settings = dict(line.split('=', 1) for line in active.splitlines()
+                              if line.startswith('GHOST_TWAP_') and '=' in line)
+        assert ghost_settings == ({'GHOST_TWAP_API_ENABLED': 'false'}
+                                  if name == 'deployment/api.env.example' else {})

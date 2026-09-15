@@ -302,6 +302,66 @@ including missing/error bins, and reports full-hour, post-65-second and minute
 results. It describes freshness at read time, not continued target non-arrival
 or browser delivery. A present but unacknowledged write keeps that audit status.
 
+## Ghost TWAP Checkpoint C
+
+After the change is pushed to GitHub, install the read-only API with the producer
+disabled. No schema, collector code, service unit or dependency change is needed.
+Keep the API's reader credentials and existing environment entries; add only
+`GHOST_TWAP_API_ENABLED=true` to `/etc/price-collector/api.env` when activating
+these routes. The example defaults to false. This flag does not start forecasts.
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudoedit /etc/price-collector/api.env
+sudo systemctl restart price-api
+sudo systemctl status price-api --no-pager
+sudo journalctl -u price-api -n 100 --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/markets/current/live
+curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/live
+curl -N --max-time 12 http://127.0.0.1:9000/forecasts/chainlink-twap/stream
+```
+
+With the producer off, GET correctly returns 503 `no_current_publication`; SSE
+stays connected and reports unavailable state. The bounded curl stream command
+ends with a timeout by design. With the API flag off, both routes return 503
+`disabled`. Roll back delivery independently by setting that API flag false and
+restarting only `price-api`. Do not reset or remove a completed collector state.
+
+Default limits are 16 SSE clients, 250 ms Redis snapshot reads and 2,000 ms ASGI
+send waits. Optional `GHOST_TWAP_API_MAX_CLIENTS`,
+`GHOST_TWAP_API_READ_TIMEOUT_MS` and `GHOST_TWAP_API_SEND_TIMEOUT_MS` may tighten
+capacity/send bounds; read timeout is bounded between 10 and 1,000 ms. SSE idle
+health uses a separate connection and never inherits the snapshot read timeout.
+
+On the owner's computer, forward the API without opening public ports:
+
+```powershell
+ssh -N -L 127.0.0.1:19000:127.0.0.1:9000 root@152.42.247.86
+```
+
+The local frontend should use that same origin, or its own local same-origin
+proxy. No broad CORS permission is installed. Subscribe to `event: ghost` and
+read the nested `ghost` object; treat `api.resync`, instance/generation changes
+and skipped-update counts as explicit current-state replacement. Event IDs do
+not provide replay. Expire displayed values locally even if no more bytes
+arrive. Do not restart a full `remaining_ns` lifetime at browser receipt.
+
+The first C observation is predeclared in [the C report](GHOST_TWAP_CHECKPOINT_C.md):
+15 minutes of browser forecast admissions plus 120 seconds of anchor collection,
+with a fresh directory and unchanged one-hour producer cap. Follow the existing old-campaign export,
+disk, permissions and fixed-start checks. Set only the new state directory,
+start and enabled flag; restart only the Chainlink service. After 15 minutes the
+browser stops admitting forecasts to its measured cohort but continues reading
+official anchors for 120 seconds. Then disable the producer flag and restart
+the Chainlink service. Editing the environment alone does not stop the running
+worker. The final two minutes of extra audit decisions are outside the browser
+cohort; shutdown records unmatched tail targets explicitly. Verify the stopped
+worker, absent key, terminal audit and externally verified export. Never repoint
+an active process at another campaign to bypass a guard.
+
 ## Deploy compact Polymarket evidence
 
 Run these commands **after the change is pushed to GitHub**. This checkpoint

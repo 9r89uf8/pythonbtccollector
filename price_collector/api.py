@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
@@ -6,10 +6,13 @@ from typing import Any, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
-from starlette.middleware.gzip import GZipMiddleware
 
 from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
+from price_collector.ghost_twap_api import (
+    GhostApiSettings, GhostCompressionBypass, create_ghost_api_service,
+    router as ghost_router,
+)
 from price_collector.db import (
     create_read_pool,
     decimal_string_or_none,
@@ -320,20 +323,26 @@ def requested_microstructure_groups(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
-    pool = await create_read_pool(settings)
-    live_cache = create_live_cache(settings)
-    app.state.settings = settings
-    app.state.pool = pool
-    app.state.live_cache = live_cache
-    try:
+    ghost_settings = GhostApiSettings()
+    async with AsyncExitStack() as cleanup:
+        pool = await create_read_pool(settings)
+        cleanup.push_async_callback(pool.close)
+        live_cache = create_live_cache(settings)
+        cleanup.push_async_callback(live_cache.close)
+        app.state.settings = settings
+        app.state.pool = pool
+        app.state.live_cache = live_cache
+        ghost_api = create_ghost_api_service(settings, ghost_settings) if ghost_settings.enabled else None
+        app.state.ghost_api = ghost_api
+        if ghost_api is not None:
+            cleanup.push_async_callback(ghost_api.close)
+            await ghost_api.start()
         yield
-    finally:
-        await live_cache.close()
-        await pool.close()
 
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=1_000)
+app.add_middleware(GhostCompressionBypass, minimum_size=1_000)
+app.include_router(ghost_router)
 
 
 @app.get("/healthz")
