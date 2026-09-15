@@ -2,6 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal, localcontext
 import hashlib
+import gzip
 import json
 from pathlib import Path
 
@@ -309,3 +310,33 @@ def test_output_hashes_no_overwrite_and_cli_duration_contract(tmp_path):
     with pytest.raises(SystemExit) as error:
         main(['--input', str(path), '--output', str(tmp_path/'bad'), '--observation-ms', '1'])
     assert error.value.code == 2 and not (tmp_path/'bad').exists()
+
+
+def test_gzip_capture_has_identical_analysis_and_hashes_exact_compressed_input(tmp_path, capsys):
+    plain = capture(tmp_path, [ghost(10), probe(11, (5,)),
+                               ghost(1000, source=BASE+5000, decision=2, eligible=())])
+    compressed = tmp_path/'capture.jsonl.gz'
+    compressed.write_bytes(gzip.compress(plain.read_bytes(), mtime=0))
+    original, packed = analyze_capture(plain), analyze_capture(compressed)
+    provenance = {'source_path', 'source_sha256', 'source_bytes'}
+    assert {k: v for k, v in original.items() if k not in provenance} == {
+        k: v for k, v in packed.items() if k not in provenance}
+    expected = hashlib.sha256(compressed.read_bytes()).hexdigest()
+    assert packed['source_sha256'] == expected != original['source_sha256']
+    assert packed['source_bytes'] == compressed.stat().st_size
+    output = tmp_path/'compressed-analysis'
+    main(['--input', str(compressed), '--output', str(output)])
+    assert json.loads(capsys.readouterr().out)['source_sha256'] == expected
+    assert json.loads((output/'manifest.json').read_text())['source_sha256'] == expected
+
+
+@pytest.mark.parametrize('invalid', ['truncated_footer', 'invalid_utf8'])
+def test_invalid_gzip_capture_cannot_publish_an_accepted_manifest(tmp_path, invalid):
+    plain = capture(tmp_path)
+    data = gzip.compress(plain.read_bytes(), mtime=0)
+    data = data[:-8] if invalid == 'truncated_footer' else gzip.compress(b'\xff\n', mtime=0)
+    path = tmp_path/'invalid.jsonl.gz'
+    path.write_bytes(data)
+    with pytest.raises(InvalidCapture, match='could not be read completely'):
+        write_results(path, tmp_path/'invalid-analysis')
+    assert not (tmp_path/'invalid-analysis').exists()

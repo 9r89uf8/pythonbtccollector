@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from decimal import Decimal, localcontext
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -305,13 +306,21 @@ def analyze_capture(path, *, observation_ms=None, drain_ms=None, warmup_ms=65_00
     """Read a complete immutable capture and return a JSON-safe summary."""
     with localcontext() as context:
         context.prec = 80
-        return _jsonable(_analyze_capture(Path(path), observation_ms=observation_ms,
-                                         drain_ms=drain_ms, warmup_ms=warmup_ms))
+        try:
+            return _jsonable(_analyze_capture(Path(path), observation_ms=observation_ms,
+                                             drain_ms=drain_ms, warmup_ms=warmup_ms))
+        except (OSError, EOFError, UnicodeError) as exc:
+            raise InvalidCapture('capture input could not be read completely: '+str(exc)) from exc
 
 
 def _analyze_capture(path, *, observation_ms, drain_ms, warmup_ms):
     stat_before = path.stat()
     digest = hashlib.sha256()
+    # Provenance always hashes the exact supplied file, including gzip headers
+    # and footer when compressed. Decompressed record bytes are not substituted.
+    with path.open('rb') as supplied:
+        for chunk in iter(lambda: supplied.read(1_048_576), b''):
+            digest.update(chunk)
     kinds, states, api_reasons = Counter(), Counter(), Counter()
     rows, anchors, decisions, runs, instances = [], {}, {}, set(), set()
     probes, load_events = [], []
@@ -322,15 +331,15 @@ def _analyze_capture(path, *, observation_ms, drain_ms, warmup_ms):
     snapshots, durations = Counter(), []
     first_snapshot = last_snapshot = None
     record_count = 0
-    with path.open('rb') as stream:
+    opener = gzip.open if path.suffix.lower() == '.gz' else open
+    with opener(path, 'rt', encoding='utf-8', newline='') as stream:
         while True:
             raw = stream.readline(MAX_RECORD_BYTES+1)
             if not raw:
                 break
             record_count += 1
-            require(record_count <= MAX_RECORDS and len(raw) <= MAX_RECORD_BYTES and raw.endswith(b'\n'),
+            require(record_count <= MAX_RECORDS and len(raw.encode('utf-8')) <= MAX_RECORD_BYTES and raw.endswith('\n'),
                     'capture record exceeds bound or has truncated final line')
-            digest.update(raw)
             record = decode(raw)
             require(isinstance(record, dict), 'capture record is not an object')
             kind = record.get('kind')
@@ -503,7 +512,7 @@ def write_results(input_path, output_path, **kwargs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input', required=True, type=Path)
+    parser.add_argument('--input', required=True, type=Path, help='Complete UTF-8 JSONL or .jsonl.gz; hashes supplied file bytes')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--observation-ms', type=int)
     parser.add_argument('--drain-ms', type=int)
