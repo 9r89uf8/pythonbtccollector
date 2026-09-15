@@ -299,5 +299,7 @@
 /tests/test_ghost_twap_combined_analysis.py -text
 /tests/test_ghost_twap_combined_join.py -text
 /results/spot_twap_response/2026-09-14-combined-canary/* -text
+/results/spot_twap_response/2026-09-14-combined-canary/audit_analysis/* -text
+/GHOST_TWAP_COMBINED_CANARY_RESULTS.md -text
 /GHOST_TWAP_COMBINED_CANARY.md -text
 /results/spot_twap_response/2026-09-14-batch-eligibility/* -text

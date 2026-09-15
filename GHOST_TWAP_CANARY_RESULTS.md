@@ -1,5 +1,10 @@
 # Ghost TWAP: official one-hour canary results
 
+**Latest run:** the [combined freshness/batch-eligibility canary](GHOST_TWAP_COMBINED_CANARY_RESULTS.md)
+completed later on September 14 with a direct cache observer. Its results and
+reconnect-recovery findings have separate provenance; the first-run figures below
+are unchanged.
+
 **Follow-up:** the [peer-review addendum](GHOST_TWAP_CANARY_REVIEW.md) verifies the
 freshness-related coverage concern and supersedes the initial work order:
 review freshness/expiry and whole-batch rejection before publication profiling.

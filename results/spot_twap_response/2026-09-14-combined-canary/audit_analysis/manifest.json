@@ -1,0 +1,18 @@
+{
+  "artifacts_sha256": {
+    "payload_index.json": "e9db017844b026735cccab7f8ab894d7ea69089624c391b8efe1b14be0a165f2",
+    "report.md": "ca247a95bc389d08956148cc9e1a190c96f55d96030831d7323d58389a8bf0cb",
+    "summary.json": "afc071fc7b7f090c3b88363cfca0e36463fe3cf90c268bae47055d72c5d6a526"
+  },
+  "campaign_end_ms_exclusive": 1789428844002,
+  "campaign_start_ms": 1789425244002,
+  "code_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\research\\spot_twap_response\\combined_canary\\analyze.py",
+  "code_sha256": "572d46d7beee4b5787cd270dd136b338cc7c7175d736e3364184039e38f8ab04",
+  "created_utc": "2026-09-14T23:53:32.255171+00:00",
+  "expected_export_rows": 14346,
+  "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-combined-canary-2026-09-14\\audit.jsonl",
+  "input_sha256": "2353132cbc689a02d6eaf3009d93c6550f9693205ee6978c70c77a3faf51fdc3",
+  "selected_rows": 7054,
+  "started_utc": "2026-09-14T23:47:52.870228+00:00",
+  "status": "accepted"
+}

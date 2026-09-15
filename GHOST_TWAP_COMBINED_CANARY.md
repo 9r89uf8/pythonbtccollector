@@ -102,12 +102,15 @@ Report median/tail errors and latency, denominators, distinct targets and losses
 Overlapping forecasts reuse outcomes, and one hour is not a set of independent
 trials or evidence of multi-day retention, frontend readiness or trading edge.
 
-## Active run
+## Completed run
 
 The combined canary started at **2026-09-14 22:34:04.002 UTC**, with its fixed
-end at **23:34:04.002 UTC**. The observer was ready before activation. Runtime
-startup confirmed the correct deadline and no stop reason. This is a running
-test; coverage and accuracy findings are not available yet.
+end at **23:34:04.002 UTC**. The observer was ready before activation. The run
+stopped by its deadline, matching/audit writes drained, and ghost was disabled
+again. All 7,054 new decisions and all 36,000 observation bins were verified.
+The [official combined findings](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) record
+coverage, forecast error, actual Redis lead, partial batches, reconnect recovery
+and publication latency. The first campaign remains separate evidence.
 
 See the [launch record](results/spot_twap_response/2026-09-14-combined-canary/LAUNCH.json),
 [prelaunch validation](results/spot_twap_response/2026-09-14-combined-canary/PRELAUNCH_VALIDATION.json),

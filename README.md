@@ -902,13 +902,13 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-The first one-hour live canary is complete. The separately authorized
-[combined canary](GHOST_TWAP_COMBINED_CANARY.md) is running on 2026-09-14 from
-22:34:04.002 to 23:34:04.002 UTC, with automatic admission stop and subsequent
-drain/disable/export. See the first run's
-[official results](GHOST_TWAP_CANARY_RESULTS.md): useful price forecasts and
-confirmed lead, with a 39.19 ms median publication latency that missed the
-under-10-ms objective. API/SSE delivery remains Checkpoint C.
+Both one-hour live canaries are complete; ghost is disabled again. The latest
+[combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) show post-warm-up sampled
+key coverage of 99.632%, five-second forecast usability of 98.003%, and 314
+partial batches retained by the new publication rule. Median publication latency
+was 38.22 ms, still above the 10 ms objective. A spot reconnect required history
+rebuilding. The [first run](GHOST_TWAP_CANARY_RESULTS.md) retains separate evidence;
+API/SSE and browser delivery remain Checkpoint C.
 
 `price_collector/ghost_twap.py` provides an optional pure Decimal engine for
 1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
@@ -938,9 +938,9 @@ the durable write. An arrived horizon becomes unavailable in the live payload;
 still-eligible siblings keep their original prices. All six entries and the
 original calculation audit remain present. Attempted payloads record the exact
 selection, and confirmed lead requires that horizon's actual attempted price.
-Freshness, expiry and the disabled default are unchanged. A new live canary is
-prepared under the [combined canary protocol](GHOST_TWAP_COMBINED_CANARY.md) to
-measure the combined policy's cache coverage. Its bounded operational observer,
+Freshness, expiry and the disabled default are unchanged. The run under the
+[combined canary protocol](GHOST_TWAP_COMBINED_CANARY.md) completed and measured
+the combined policy's cache coverage. Its bounded operational observer,
 `python -m price_collector.ghost_twap_observer`, reads only local Redis and is
 never imported or started by a collector. It samples at 100 ms for one fixed
 hour, retaining exact payload bytes and explicit missing observations. Offline
