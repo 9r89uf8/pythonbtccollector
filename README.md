@@ -955,8 +955,10 @@ C's early operator stop exposed nested five-second shutdown budgets. Cleanup was
 invoked but its outer deadline expired, leaving 64 nonterminal audit rows and 65
 outbox files, including one terminal record. A reviewed, publication-free
 recovery pass resolved that tail while preserving frozen inputs and observed
-target/publication evidence. The producer remained disabled. Ongoing forecast production
-requires a shutdown-budget fix and a reviewed capacity/retention policy; a
+target/publication evidence. The producer remained disabled. The
+[reliability checkpoint](GHOST_TWAP_RELIABILITY_CHECKPOINT.md) fixes the nested
+shutdown budgets and distinguishes completed drainage from retained evidence.
+Continuous production still requires a reviewed capacity/retention policy; a
 successful service restart alone is not evidence of a drained outbox.
 
 The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
@@ -994,6 +996,10 @@ clients with bounded queues and send deadlines. It carries delivery metadata in
 `api` and the producer object in `ghost`; unavailable state has `ghost: null`.
 Neither route queries PostgreSQL or calculates forecasts. Both bypass compression
 and use `no-store, no-transform`. Existing source routes retain their behavior.
+Redis library resubscriptions invalidate the stream immediately and trigger a
+fresh authoritative cache read, even if no further publication arrives. Invalid
+optional ghost settings disable only the ghost routes with `invalid_settings`;
+ordinary API startup and source routes remain available.
 
 Use the API only through an SSH tunnel; no frontend assets are installed on the
 droplet. Browser clients must enforce expiry independently when a tunnel stalls,

@@ -209,7 +209,9 @@ observation is complete. Their results support bounded operation while retaining
 the measured freshness, publication-speed and transport limitations. C also
 exposed the shutdown-budget issue described above. Browser event-handler receipt
 is distinct from rendering and from every official feed receipt. Longer capacity,
-retention maintenance, the shutdown fix and publication profiling remain
-outstanding; no continuous campaign is enabled.
+retention maintenance and publication profiling remain outstanding; no continuous
+campaign is enabled. The subsequent
+[reliability checkpoint](GHOST_TWAP_RELIABILITY_CHECKPOINT.md) fixes shutdown
+budgets, internal Redis resubscription handling and invalid optional API settings.
 
 Keep production code under `price_collector/`, with no research imports or retired-pipeline reuse. Each implemented checkpoint gets focused tests and relevant documentation; run the full suite when practical. B/C runtime/schema/API changes require the repository's normal droplet handoff and schema-before-restart ordering. A's standalone module is not imported by running services and needs no service restart.

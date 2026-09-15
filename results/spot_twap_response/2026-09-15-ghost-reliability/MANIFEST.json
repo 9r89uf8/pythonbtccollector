@@ -1,0 +1,67 @@
+{
+  "created_at_utc": "2026-09-15T22:23:41.683368+00:00",
+  "base_commit": "6c6115d6047c546cde13e412e83fb4d010d12501",
+  "validated_source_basis": "Git index bytes; financial engine, schema, store, spool, payload parser, requirements and frozen fixtures unchanged from base.",
+  "validated_source_sha256": {
+    "deployment/price-collector-polymarket-chainlink.service": "2c69085f00f648258177f1f6411bd23383d45e738959ea90193cd3a408eec107",
+    "price_collector/api.py": "41a0cb3447ed4e6188770756eeb9c0b971cc61df9d61bd37b322426d44a5dc1e",
+    "price_collector/ghost_twap_api.py": "532d918f64c6d60ed527acc85c4e35d05ddbd90f9a2e6c93a1613719c4d5e54f",
+    "price_collector/ghost_twap_runtime.py": "099078749a465e5d2f024314be97467e02f30d74e80705a34b9ce9f1370a407b",
+    "price_collector/ghost_twap_stream.py": "e4cf17ff6660ed38cd2b1789bec1e56bb37fc393b3b7c521be340675d97afbeb",
+    "price_collector/polymarket_chainlink_collector.py": "dabbc0e9394f4fecddb9fe292671d366bfed1338c81106ff1b5b095709cc0417",
+    "tests/test_ghost_twap_api.py": "080c3ed661bda16f45b30b506cac1c3fa836e20c246a6522b1886a070ca3a18e",
+    "tests/test_ghost_twap_deployment.py": "6d5c65a78ef050dd2edd9005281e76058a8975a89fde6413b696318e9fa564c5",
+    "tests/test_ghost_twap_shutdown.py": "52db4f47e8d4642f20be54ffe8ea53060a95be8ef4faff8a7086fc5c8263aa98",
+    "tests/test_ghost_twap_stream.py": "36494462b71a81ac4c07f7414f94624916e3cc2560fd336f77ef684fb073c115",
+    "tests/test_ghost_twap_stream_tcp.py": "06605685e3c77e2c3adb13745550e93111b05cf2ab4fc93a9047f294544df816"
+  },
+  "artifact_sha256": {
+    "results/spot_twap_response/2026-09-15-ghost-reliability/full_suite.json": "a92284fde18bee00295d1a9ba5b148f67650628afe8b986ce33d05953f9532d4",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/full_suite.txt": "95429c3b446888d6cd41b5e41020142ad1db647d6c0ba2b95c35e6ed6e82a251",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/operator_cleanup.json": "332f2b32078faaf153c8af9add038f1e0558e34cd4f10ffdc43948d121a2ecc2",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/pre_deploy.json": "70145260f702b5a30895b5b7910a1901065301daf972119a434a270d1a39fc2c",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/redis8_suite.json": "81845c971afe75eea7dc7074fda8528c41be33689f1c0a348304b61e3203fbe2",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/redis8_suite.txt": "1d7b2df68b82fc02987dcec7ff5ac0bb4b1e66844f3f967c34f28b1b03fe8a5f"
+  },
+  "full_suite": {
+    "passed": 1554,
+    "skipped": 10,
+    "warnings": 2
+  },
+  "redis8_python312_stream_suite": {
+    "passed": 32
+  },
+  "staged_scan": {
+    "files": 40,
+    "total_bytes": 605390,
+    "secret_pattern_hits": [],
+    "unchanged_baseline_url_examples": [
+      {
+        "path": "README.md",
+        "pattern": "credential_url",
+        "line": 470
+      },
+      {
+        "path": "README.md",
+        "pattern": "credential_url",
+        "line": 471
+      },
+      {
+        "path": "tests/test_ghost_twap_api.py",
+        "pattern": "credential_url",
+        "line": 184
+      },
+      {
+        "path": "tests/test_ghost_twap_api.py",
+        "pattern": "credential_url",
+        "line": 226
+      },
+      {
+        "path": "tests/test_ghost_twap_api.py",
+        "pattern": "credential_url",
+        "line": 263
+      }
+    ],
+    "scope": "Literal credential-pattern scan of all staged files. Five unchanged URLs in existing documentation/tests are reported separately; full audit export is excluded."
+  }
+}

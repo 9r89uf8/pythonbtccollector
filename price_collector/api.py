@@ -2,15 +2,17 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
+import logging
 from typing import Any, Mapping, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 
 from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
 from price_collector.ghost_twap_api import (
-    GhostApiSettings, GhostCompressionBypass, create_ghost_api_service,
+    GhostApiDisabledReason, GhostApiSettings, GhostCompressionBypass, create_ghost_api_service,
     router as ghost_router,
 )
 from price_collector.db import (
@@ -46,6 +48,7 @@ from price_collector.microstructure_api import (
 DEFAULT_PROVIDER = "binance_spot"
 DEFAULT_SYMBOL = "BTCUSDT"
 SERVICE_NAME = "price-api"
+logger = logging.getLogger(__name__)
 DOWNLOAD_FLOW_FIELDS = (
     "taker_imbalance",
     "cvd_10s",
@@ -323,7 +326,15 @@ def requested_microstructure_groups(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
-    ghost_settings = GhostApiSettings()
+    app.state.ghost_api_disabled_reason = GhostApiDisabledReason.DISABLED
+    try:
+        ghost_settings = GhostApiSettings()
+    except ValidationError:
+        # Optional configuration must not take down the ordinary API. Do not
+        # log validation details: they include the rejected environment values.
+        ghost_settings = None
+        app.state.ghost_api_disabled_reason = GhostApiDisabledReason.INVALID_SETTINGS
+        logger.error("Ghost API disabled: reason=invalid_settings error_type=ValidationError")
     async with AsyncExitStack() as cleanup:
         pool = await create_read_pool(settings)
         cleanup.push_async_callback(pool.close)
@@ -332,7 +343,10 @@ async def lifespan(app: FastAPI):
         app.state.settings = settings
         app.state.pool = pool
         app.state.live_cache = live_cache
-        ghost_api = create_ghost_api_service(settings, ghost_settings) if ghost_settings.enabled else None
+        ghost_api = (
+            create_ghost_api_service(settings, ghost_settings)
+            if ghost_settings is not None and ghost_settings.enabled else None
+        )
         app.state.ghost_api = ghost_api
         if ghost_api is not None:
             cleanup.push_async_callback(ghost_api.close)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from enum import Enum
 import json
 import time
 from typing import Any
@@ -31,6 +32,11 @@ class GhostApiSettings(BaseSettings):
     max_clients: int = Field(default=16, ge=1, le=16)
     read_timeout_ms: int = Field(default=250, ge=10, le=1000)
     send_timeout_ms: int = Field(default=2000, ge=100, le=2000)
+
+
+class GhostApiDisabledReason(str, Enum):
+    DISABLED = 'disabled'
+    INVALID_SETTINGS = 'invalid_settings'
 
 
 class GhostUnavailable(Exception):
@@ -103,11 +109,16 @@ def _service(request: Request) -> GhostApiService | None:
     return service if service is not None and service.settings.enabled else None
 
 
+def _disabled_response(request: Request) -> JSONResponse:
+    reason = getattr(request.app.state, 'ghost_api_disabled_reason', GhostApiDisabledReason.DISABLED)
+    return unavailable(reason)
+
+
 @router.get('/live', response_class=Response)
 async def ghost_live(request: Request) -> Response:
     service = _service(request)
     if service is None:
-        return unavailable('disabled')
+        return _disabled_response(request)
     try:
         read = await service.get_snapshot()
     except GhostUnavailable as exc:
@@ -209,7 +220,7 @@ class GhostStreamResponse(Response):
 async def ghost_stream(request: Request) -> Response:
     service = _service(request)
     if service is None:
-        return unavailable('disabled')
+        return _disabled_response(request)
     try:
         client = service.hub.register()
     except TooManyGhostClients:

@@ -183,7 +183,12 @@ exclusive lock, durably archive it, and use a reviewed campaign-specific recover
 procedure. Never re-enable forecasts just to clean up audit state, fetch later
 prices to replace missing targets, or reset the campaign. See the
 [C findings and recovery evidence](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md).
-The shutdown-budget fix remains outstanding. Stop admissions before a final export.
+The [reliability checkpoint](GHOST_TWAP_RELIABILITY_CHECKPOINT.md) replaces those
+nested deadlines with separate bounded shutdown stages and raises the Chainlink
+unit's stop timeout to 120 seconds. Install that exact unit before restarting the
+collector; the checkpoint contains the combined collector/API upgrade commands.
+Persistence failure must still be treated as retained evidence requiring review,
+not as a completed drain. Stop admissions before a final export.
 Run this on the **owner's computer** from its B checkout and development Python:
 
 ```powershell
@@ -357,6 +362,13 @@ send waits. Optional `GHOST_TWAP_API_MAX_CLIENTS`,
 `GHOST_TWAP_API_READ_TIMEOUT_MS` and `GHOST_TWAP_API_SEND_TIMEOUT_MS` may tighten
 capacity/send bounds; read timeout is bounded between 10 and 1,000 ms. SSE idle
 health uses a separate connection and never inherits the snapshot read timeout.
+Invalid optional ghost settings, including an invalid enable flag, disable both
+ghost routes with HTTP 503 `invalid_settings` and log a fixed diagnostic without
+the rejected values. Core API settings still fail visibly if invalid. Correct
+the optional values in `api.env` and restart `price-api` to restore the feature.
+After a Redis subscription is re-established internally by the client library,
+the hub invalidates its old snapshot and fetches current cache state before
+resuming; no new producer publication is required.
 
 On the owner's computer, forward the API without opening public ports:
 

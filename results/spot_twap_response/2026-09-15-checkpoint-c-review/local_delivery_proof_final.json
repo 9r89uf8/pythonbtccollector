@@ -1,0 +1,131 @@
+{
+  "status": "reproduced",
+  "scope": "local synthetic TCP peer, no production connection",
+  "python": "3.9.5 (tags/v3.9.5:0a7dcbd, May  3 2021, 17:27:52) [MSC v.1928 64 bit (AMD64)]",
+  "redis_py_version": "7.0.1",
+  "checkout_commit": "6c6115d6047c546cde13e412e83fb4d010d12501",
+  "reconnect": [
+    {
+      "drop": "client_disconnected",
+      "retry_policy": "default",
+      "before": {
+        "generation": 1,
+        "decision": 1,
+        "authoritative_reads": 1
+      },
+      "after_hidden_reconnect": {
+        "generation": 1,
+        "decision": 1,
+        "authoritative_reads": 1,
+        "cache_decision": 2,
+        "real_pubsub_objects": 1,
+        "tcp_connections": 2,
+        "subscribe_acks_consumed_by_real_client": 2
+      },
+      "after_next_publication": {
+        "decision": 3,
+        "generation": 1,
+        "authoritative_reads": 1
+      },
+      "peer_commands": [
+        [
+          1,
+          "CLIENT"
+        ],
+        [
+          1,
+          "CLIENT"
+        ],
+        [
+          1,
+          "SUBSCRIBE"
+        ],
+        [
+          2,
+          "CLIENT"
+        ],
+        [
+          2,
+          "CLIENT"
+        ],
+        [
+          2,
+          "SUBSCRIBE"
+        ]
+      ]
+    },
+    {
+      "drop": "server_closed",
+      "retry_policy": "one retry, zero backoff",
+      "before": {
+        "generation": 1,
+        "decision": 1,
+        "authoritative_reads": 1
+      },
+      "after_hidden_reconnect": {
+        "generation": 1,
+        "decision": 1,
+        "authoritative_reads": 1,
+        "cache_decision": 2,
+        "real_pubsub_objects": 1,
+        "tcp_connections": 2,
+        "subscribe_acks_consumed_by_real_client": 2
+      },
+      "after_next_publication": {
+        "decision": 3,
+        "generation": 1,
+        "authoritative_reads": 1
+      },
+      "peer_commands": [
+        [
+          1,
+          "CLIENT"
+        ],
+        [
+          1,
+          "CLIENT"
+        ],
+        [
+          1,
+          "SUBSCRIBE"
+        ],
+        [
+          2,
+          "CLIENT"
+        ],
+        [
+          2,
+          "CLIENT"
+        ],
+        [
+          2,
+          "SUBSCRIBE"
+        ]
+      ]
+    }
+  ],
+  "optional_settings": {
+    "ghost_enabled": false,
+    "malformed_setting": "GHOST_TWAP_API_MAX_CLIENTS=0",
+    "startup_failed": true,
+    "core_pool_started": false,
+    "error_type": "ValidationError",
+    "error": "1 validation error for GhostApiSettings\nmax_clients\n  Input should be greater than or equal to 1 [type=greater_than_equal, input_value='0', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/greater_than_equal"
+  },
+  "wholly_unavailable": {
+    "GET_unavailable_reason": "no_eligible_forecasts",
+    "SSE_state": "snapshot",
+    "SSE_reason": "no_eligible_horizons",
+    "SSE_preserves_official_anchor": true,
+    "SSE_all_forecast_prices_null": true
+  },
+  "source_sha256": {
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\research\\spot_twap_response\\checkpoint_c_review\\reproduce_delivery_review.py": "6070d6fc0b6f3eecc592905c1724012a0cb5e7291fc2354d2319fe12ffb83604",
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\price_collector\\ghost_twap_stream.py": "55e2eecb6f03d94874c546dd9e7f9b77d26f5421172a97f7df20625e0bebe3b4",
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\price_collector\\ghost_twap_api.py": "b851ea726657355108fbaeacdcb846878bdb2490bd31436d93af8f85a0076752",
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\price_collector\\api.py": "032063fcb0130074c936643964691f1c1efecc72bdff3714c6f386a2f2c9196f",
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\tests\\test_ghost_twap_payload.py": "4dce0c556a5f7450c35ddc8591f1b865e62e568939dd29548a6c6b4b0887cd52",
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\.venv\\lib\\site-packages\\redis\\asyncio\\client.py": "ffed3826f9cab47dc91658f9c04dfe5c5124a85e289090c58aefe3e0db532aa4",
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\.venv\\lib\\site-packages\\redis\\asyncio\\connection.py": "401a91f9da2a6617cc6c540e643634892ea7e85eff96ed0c264f644eb9831a74"
+  }
+}

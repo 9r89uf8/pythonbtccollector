@@ -14,7 +14,8 @@ ExecStart=/opt/price-collector/.venv/bin/python -m price_collector.polymarket_ch
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=30
+# Allow core feed teardown followed by the bounded optional ghost audit drain.
+TimeoutStopSec=120
 
 NoNewPrivileges=true
 PrivateTmp=true

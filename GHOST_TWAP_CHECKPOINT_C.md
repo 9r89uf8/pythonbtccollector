@@ -5,6 +5,9 @@ The producer is disabled again; the read-only API remains enabled. The full loca
 suite passed 1,517 tests with 10 opt-in datastore skips. The collector remains the
 only forecast producer. [Completed observations, limitations and export status](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
 are recorded separately; this short run does not approve ongoing forecast production.
+The subsequent [independent review](GHOST_TWAP_CHECKPOINT_C_REVIEW.md) records
+corrections to interpretation, and the [reliability checkpoint](GHOST_TWAP_RELIABILITY_CHECKPOINT.md)
+addresses Redis resubscription, optional-setting isolation and shutdown budgets.
 
 ## Delivery contract
 
@@ -80,8 +83,9 @@ It preserved frozen inputs, existing target matches and acknowledged publication
 evidence; unresolved targets were marked `restart_unmatched`, not filled from
 later data. The producer stayed disabled and no Redis publication or new forecast
 was issued. Disabled collector startup does not run this recovery automatically.
-External export status remains recorded with the findings. Ongoing forecast production
-requires a shutdown-budget fix and a reviewed capacity/retention policy.
+External export status remains recorded with the findings. The subsequent
+reliability checkpoint fixes the shutdown budgets; continuous forecast production
+still requires a reviewed capacity/retention policy.
 
 Use the owner's browser through the SSH tunnel. Instrument EventSource on the
 forwarded API origin, without adding frontend assets or broad CORS on the

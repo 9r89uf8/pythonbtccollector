@@ -450,3 +450,73 @@ def test_ten_ms_get_deadline_does_not_cancel_healthy_hundred_ms_idle_subscriptio
         finally:
             await hub.close()
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('cache_state', ['newer', 'missing', 'new_run', 'expired_identity'])
+def test_hidden_reconnect_rebootstraps_without_a_subsequent_publication(cache_state):
+    async def check():
+        hub, clock, reader, subscriber = setup()
+        await hub.start()
+        try:
+            await until(lambda: hub.snapshot.read is not None)
+            original = hub.snapshot
+            if cache_state == 'missing':
+                reader.value, reader.ttl = None, -2
+            elif cache_state == 'new_run':
+                reader.value = body(1, 'replacement-run')
+            elif cache_state == 'expired_identity':
+                # A stalled wall clock and reissued Redis TTL cannot extend
+                # the original API monotonic deadline of identical bytes.
+                clock.mono = original.read.api_deadline_monotonic_ns + 1
+            else:
+                reader.value = body(2)
+            reader.gate = asyncio.Event()
+            subscriber.sessions[0].ack()
+            await until(lambda: reader.calls == 2)
+            assert hub.snapshot.read is None
+            assert hub.snapshot.resync and hub.generation > original.generation
+            assert subscriber.sessions[0].closed
+            reader.gate.set()
+            expected_reason = {'missing': 'absent', 'expired_identity': 'expired'}.get(cache_state, 'fresh')
+            await until(lambda: hub.snapshot.reason == expected_reason)
+            assert hub.snapshot.resync
+            if cache_state in ('missing', 'expired_identity'):
+                assert hub.snapshot.read is None
+            else:
+                assert hub.snapshot.read.payload.raw == reader.value
+                assert hub.snapshot.read.payload.run_id == ('replacement-run' if cache_state == 'new_run' else 'wire-run')
+            assert reader.calls == 2
+        finally:
+            await hub.close()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('message_type', ['subscribe', 'unsubscribe'])
+def test_subscription_boundary_fences_inflight_bootstrap_and_discards_buffer(message_type):
+    async def check():
+        hub, _, reader, subscriber = setup()
+        reader.gate = asyncio.Event()
+        emitted = []
+        original_emit = hub._emit
+        def capture(*args, **kwargs):
+            original_emit(*args, **kwargs)
+            emitted.append(hub.snapshot)
+        hub._emit = capture
+        await hub.start()
+        try:
+            await until(lambda: reader.calls == 1)
+            subscriber.sessions[0].publish(body(2))
+            subscriber.sessions[0].queue.put_nowait(
+                dict(type=message_type, channel=GHOST_CHANNEL.encode(), data=1 if message_type == 'subscribe' else 0))
+            await until(lambda: hub.snapshot.reason == 'subscriber_reconnected')
+            assert hub.snapshot.read is None and hub.snapshot.resync
+            assert reader.calls == 1  # The original GET remains blocked.
+            reader.value = body(3)
+            reader.gate.set()
+            await until(lambda: reader.calls == 2 and hub.snapshot.read is not None)
+            assert hub.snapshot.read.payload.raw == body(3)
+            assert hub.snapshot.generation == 2
+            assert all(update.read is None or update.read.payload.decision_id == 3 for update in emitted)
+        finally:
+            await hub.close()
+    asyncio.run(check())

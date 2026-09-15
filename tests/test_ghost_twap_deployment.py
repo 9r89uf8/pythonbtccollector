@@ -42,3 +42,18 @@ def test_ghost_example_is_disabled_and_tunnel_has_no_runtime_credentials():
                               if line.startswith('GHOST_TWAP_') and '=' in line)
         assert ghost_settings == ({'GHOST_TWAP_API_ENABLED': 'false'}
                                   if name == 'deployment/api.env.example' else {})
+
+
+def test_chainlink_stop_budget_covers_core_and_optional_ghost_cleanup():
+    from price_collector import polymarket_chainlink_collector as collector
+    from price_collector.config import Settings
+
+    unit = (ROOT / 'deployment/price-collector-polymarket-chainlink.service').read_text()
+    stop_seconds = int(re.search(r'^TimeoutStopSec=(\d+)$', unit, re.MULTILINE).group(1))
+    settings = Settings()
+    readers = max(collector.CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS,
+                  settings.POLYMARKET_TWAP_PERSIST_SHUTDOWN_TIMEOUT_SECONDS + 2)
+    # Core delivery and ghost shutdown run sequentially, after reader teardown.
+    # Leave ten seconds for normal final cache/pool cleanup and scheduler slack.
+    assert stop_seconds >= (readers + collector.CHAINLINK_DELIVERY_SHUTDOWN_TIMEOUT_SECONDS
+                            + collector.GHOST_SHUTDOWN_TIMEOUT_SECONDS + 10)

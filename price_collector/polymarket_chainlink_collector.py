@@ -18,7 +18,9 @@ from price_collector.collector import (
     setup_logging,
 )
 from price_collector.config import Settings
-from price_collector.ghost_twap_runtime import GhostSettings, start_ghost_runtime
+from price_collector.ghost_twap_runtime import (
+    GHOST_SHUTDOWN_TIMEOUT_SECONDS, GhostSettings, start_ghost_runtime,
+)
 from price_collector.db import (
     create_pool,
     create_raw_capture_backend,
@@ -54,7 +56,7 @@ CHAINLINK_DELIVERY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 CHAINLINK_READER_SHUTDOWN_TIMEOUT_SECONDS = 12.0
 CHAINLINK_CANCEL_CONFIRM_TIMEOUT_SECONDS = 0.1
 CHAINLINK_DELIVERY_DROP_WARNING_INTERVAL_NS = 60_000_000_000
-GHOST_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_GHOST_CLEANUP_TASKS: set = set()
 CHAINLINK_MAX_PROVIDER_EVENT_MS = (
     ((POSTGRES_BIGINT_MAX - 300_000) // 300_000) * 300_000
     + 299_999
@@ -76,13 +78,14 @@ class _OptionalGhostSink:
         self.runtime: Any = None
         self.closed = False
         self.failed = False
+        self._close_task = None
         self.start_task = asyncio.create_task(self._start(settings))
 
     async def _start(self, settings: Settings) -> None:
         try:
             runtime = await start_ghost_runtime(settings)
             if self.closed and runtime is not None:
-                await asyncio.wait_for(runtime.close(), GHOST_SHUTDOWN_TIMEOUT_SECONDS)
+                await runtime.close()
             else:
                 self.runtime = runtime
         except asyncio.CancelledError:
@@ -120,19 +123,33 @@ class _OptionalGhostSink:
 
     async def close(self) -> None:
         self.closed = True
-        await _cancel_and_wait(self.start_task, timeout_seconds=1.0)
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close(), name='ghost-collector-close')
+            _GHOST_CLEANUP_TASKS.add(self._close_task)
+            def completed(task):
+                _GHOST_CLEANUP_TASKS.discard(task)
+                if not task.cancelled() and task.exception() is not None:
+                    LOGGER.error('ghost_optional_shutdown_failed', extra={'error': repr(task.exception())})
+            self._close_task.add_done_callback(completed)
+        # Never cancel runtime cleanup at the collector's outer deadline. A
+        # filesystem thread cannot be killed; its task keeps pool/spool ownership.
+        done, _ = await asyncio.wait({self._close_task}, timeout=GHOST_SHUTDOWN_TIMEOUT_SECONDS)
+        if not done:
+            LOGGER.error('ghost_optional_shutdown_incomplete_cleanup_still_owned')
+            return
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
+        if not self.start_task.done():
+            self.start_task.cancel()
+        try:
+            await self.start_task
+        except asyncio.CancelledError:
+            pass
         runtime, self.runtime = self.runtime, None
         if runtime is None:
             return
-        task = asyncio.create_task(runtime.close())
-        done, _pending = await asyncio.wait({task}, timeout=GHOST_SHUTDOWN_TIMEOUT_SECONDS)
-        if not done:
-            await _cancel_and_wait(task, timeout_seconds=CHAINLINK_CANCEL_CONFIRM_TIMEOUT_SECONDS)
-            LOGGER.error("ghost_optional_shutdown_incomplete")
-            return
-        results = await asyncio.gather(task, return_exceptions=True)
-        if isinstance(results[0], BaseException):
-            LOGGER.error("ghost_optional_shutdown_failed", extra={"error": repr(results[0])})
+        await runtime.close()
 
 
 def _create_optional_ghost_sink(settings: Settings) -> Optional[_OptionalGhostSink]:

@@ -1,0 +1,13 @@
+{
+  "command": [
+    "C:/Python312/python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_ghost_twap_stream.py",
+    "tests/test_ghost_twap_stream_tcp.py"
+  ],
+  "exit_code": 0,
+  "finished_at_utc": "2026-09-15T22:20:39.660238+00:00",
+  "output_sha256": "1d7b2df68b82fc02987dcec7ff5ac0bb4b1e66844f3f967c34f28b1b03fe8a5f"
+}

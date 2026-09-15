@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 import json
+import logging
 import socket
 import threading
 import time
@@ -12,10 +13,11 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import price_collector.api as api
 from price_collector.ghost_twap_api import (
-    GHOST_KEY, GhostApiService, GhostApiSettings, GhostCompressionBypass, router,
+    GHOST_KEY, GhostApiDisabledReason, GhostApiService, GhostApiSettings, GhostCompressionBypass, router,
 )
 from price_collector.ghost_twap_payload import bind_read_clock, parse_ghost_payload
 from test_ghost_twap_payload import API_MONO_NS, READ_WALL_NS, raw_payload, wire_payload
@@ -191,7 +193,7 @@ def test_actual_api_lifespan_default_off_never_constructs_ghost_clients(monkeypa
     assert pool.closed and cache.closed
 
 
-@pytest.mark.parametrize('fault', ['settings', 'factory', 'start', 'close'])
+@pytest.mark.parametrize('fault', ['factory', 'start', 'close'])
 def test_optional_ghost_lifecycle_failure_cleans_every_acquired_api_resource(monkeypatch, fault):
     acquired, closed = set(), set()
 
@@ -223,17 +225,164 @@ def test_optional_ghost_lifecycle_failure_cleans_every_acquired_api_resource(mon
 
     monkeypatch.setenv('DATABASE_URL', 'postgresql://price_reader:unused@127.0.0.1:5432/price_collector')
     monkeypatch.setenv('GHOST_TWAP_API_ENABLED', 'true')
-    monkeypatch.setenv('GHOST_TWAP_API_MAX_CLIENTS', '0' if fault == 'settings' else '16')
+    monkeypatch.setenv('GHOST_TWAP_API_MAX_CLIENTS', '16')
     monkeypatch.setattr(api, 'create_read_pool', create_pool)
     monkeypatch.setattr(api, 'create_live_cache', lambda settings: Resource('cache'))
     monkeypatch.setattr(api, 'create_ghost_api_service', create_ghost)
 
     async def scenario():
-        with pytest.raises((ValueError, RuntimeError)):
+        with pytest.raises(RuntimeError, match='ghost ' + fault + ' fault'):
             async with api.lifespan(FastAPI()):
                 pass
         assert acquired == closed
     asyncio.run(scenario())
+
+
+@pytest.fixture
+def core_api_resources(monkeypatch):
+    class Resource(PostgreSQLTrap):
+        def __init__(self):
+            self.closed = False
+            self.requested_keys = []
+
+        async def close(self):
+            self.closed = True
+
+        async def get_prices(self, keys):
+            self.requested_keys.append(list(keys))
+            return {key: None for key in keys}
+
+    pool, cache = Resource(), Resource()
+
+    async def create_pool(settings):
+        return pool
+
+    async def health_check(actual_pool):
+        assert actual_pool is pool
+
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://price_reader:unused@127.0.0.1:5432/price_collector')
+    for field in ('ENABLED', 'MAX_CLIENTS', 'READ_TIMEOUT_MS', 'SEND_TIMEOUT_MS'):
+        monkeypatch.delenv('GHOST_TWAP_API_' + field, raising=False)
+    monkeypatch.setattr(api, 'create_read_pool', create_pool)
+    monkeypatch.setattr(api, 'create_live_cache', lambda settings: cache)
+    monkeypatch.setattr(api, 'health_check', health_check)
+    return pool, cache
+
+
+@pytest.mark.parametrize('enabled,field,value', [
+    ('false', 'MAX_CLIENTS', '0'),
+    ('true', 'MAX_CLIENTS', '17'),
+    ('false', 'READ_TIMEOUT_MS', 'private-invalid-timeout'),
+    ('true', 'SEND_TIMEOUT_MS', '2001'),
+    ('private-invalid-enabled', 'MAX_CLIENTS', '16'),
+])
+def test_invalid_optional_settings_disable_only_ghost_with_safe_reason(
+        monkeypatch, caplog, core_api_resources, enabled, field, value):
+    pool, cache = core_api_resources
+    monkeypatch.setenv('GHOST_TWAP_API_ENABLED', enabled)
+    monkeypatch.setenv('GHOST_TWAP_API_' + field, value)
+
+    def forbidden_factory(*args):
+        raise AssertionError('invalid configuration must not fall back to operational defaults')
+
+    monkeypatch.setattr(api, 'create_ghost_api_service', forbidden_factory)
+    with caplog.at_level(logging.ERROR, logger=api.__name__):
+        with TestClient(api.app) as client:
+            assert api.app.state.ghost_api is None
+            assert api.app.state.ghost_api_disabled_reason is GhostApiDisabledReason.INVALID_SETTINGS
+            health = client.get('/healthz')
+            assert health.status_code == 200 and health.json() == {
+                'ok': True, 'database': 'ok', 'service': 'price-api',
+            }
+            live = client.get('/markets/current/live')
+            assert live.status_code == 200
+            assert set(live.json()['prices']) == {'binance_spot', 'chainlink', 'twap'}
+            assert 'last' in live.json()['futures']
+            assert cache.requested_keys == [[
+                api.BINANCE_SPOT_LIVE_KEY, api.CHAINLINK_LIVE_KEY,
+                api.TWAP_LIVE_KEY, api.FUTURES_LIVE_KEY,
+            ]]
+            for path in ('/live', '/stream'):
+                response = client.get('/forecasts/chainlink-twap' + path)
+                assert response.status_code == 503
+                assert response.json() == {'state': 'unavailable', 'reason': 'invalid_settings'}
+                assert 'no-store' in response.headers['cache-control']
+    assert pool.closed and cache.closed
+    records = [record for record in caplog.records if record.name == api.__name__]
+    assert len(records) == 1
+    assert records[0].getMessage() == 'Ghost API disabled: reason=invalid_settings error_type=ValidationError'
+    assert records[0].exc_info is None and not records[0].args
+    assert 'private-invalid' not in caplog.text
+
+
+@pytest.mark.parametrize('enabled', ['false', 'true'])
+def test_valid_settings_survive_prior_invalid_lifespan_without_fallback(
+        monkeypatch, core_api_resources, enabled):
+    monkeypatch.setenv('GHOST_TWAP_API_MAX_CLIENTS', '0')
+    with TestClient(api.app) as client:
+        assert client.get('/forecasts/chainlink-twap/live').json()['reason'] == 'invalid_settings'
+
+    monkeypatch.setenv('GHOST_TWAP_API_ENABLED', enabled)
+    monkeypatch.setenv('GHOST_TWAP_API_MAX_CLIENTS', '2')
+    monkeypatch.setenv('GHOST_TWAP_API_READ_TIMEOUT_MS', '31')
+    monkeypatch.setenv('GHOST_TWAP_API_SEND_TIMEOUT_MS', '499')
+    constructed, started = [], []
+    service, _, reader = service_for(raw_payload())
+
+    async def start():
+        started.append(True)
+        seed(service, raw_payload())
+
+    def factory(settings, ghost_settings):
+        constructed.append(ghost_settings.model_dump())
+        service.settings = ghost_settings
+        return service
+
+    monkeypatch.setattr(service, 'start', start)
+    monkeypatch.setattr(api, 'create_ghost_api_service', factory)
+    with TestClient(api.app) as client:
+        response = client.get('/forecasts/chainlink-twap/live')
+        assert api.app.state.ghost_api_disabled_reason is GhostApiDisabledReason.DISABLED
+        if enabled == 'true':
+            assert response.status_code == 200 and response.content == raw_payload()
+            assert constructed == [{'enabled': True, 'max_clients': 2,
+                                    'read_timeout_ms': 31, 'send_timeout_ms': 499}]
+            assert started == [True] and reader.calls == [GHOST_KEY]
+        else:
+            assert response.status_code == 503 and response.json()['reason'] == 'disabled'
+            assert not constructed and not started and not reader.calls
+    if enabled == 'true':
+        assert reader.closed and service.subscriber.closed
+
+
+@pytest.mark.parametrize('fault', ['core_settings', 'ghost_unexpected', 'pool', 'cache'])
+def test_optional_settings_isolation_does_not_swallow_other_startup_errors(
+        monkeypatch, core_api_resources, fault):
+    pool, cache = core_api_resources
+    with pytest.raises(ValidationError) as caught:
+        GhostApiSettings(max_clients=0)
+    validation_error = caught.value
+
+    def fail():
+        if fault == 'core_settings':
+            raise validation_error
+        raise RuntimeError('unrelated startup fault')
+
+    if fault == 'core_settings':
+        monkeypatch.setattr(api, 'Settings', fail)
+    elif fault == 'ghost_unexpected':
+        monkeypatch.setattr(api, 'GhostApiSettings', fail)
+    elif fault == 'pool':
+        async def fail_pool(settings):
+            fail()
+        monkeypatch.setattr(api, 'create_read_pool', fail_pool)
+    else:
+        monkeypatch.setattr(api, 'create_live_cache', lambda settings: fail())
+    with pytest.raises(ValidationError if fault == 'core_settings' else RuntimeError):
+        with TestClient(api.app):
+            raise AssertionError('startup error was swallowed')
+    assert pool.closed is (fault == 'cache')
+    assert not cache.closed
 
 
 def test_get_returns_original_partial_payload_bytes_one_get_and_no_postgres():

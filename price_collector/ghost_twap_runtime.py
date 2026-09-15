@@ -31,6 +31,14 @@ PUBLICATION_ELIGIBILITY_POLICY = 'per-horizon-unreceived-v1'
 CANARY_MS = 60 * 60 * 1000
 CAMPAIGN_CHECKPOINT_SECONDS = 30
 AUDIT_BATCH_SECONDS = 2.5
+SHUTDOWN_QUIESCE_SECONDS = 5.0
+SHUTDOWN_SPOOL_SECONDS = 15.0
+SHUTDOWN_DRAIN_SECONDS = 30.0
+SHUTDOWN_RESOURCE_SECONDS = 5.0
+SHUTDOWN_RETRY_SECONDS = 0.1
+# Includes the stages above, spool close, and both independently owned clients.
+GHOST_SHUTDOWN_TIMEOUT_SECONDS = 70.0
+_CLEANUP_TASKS: set = set()
 MATCH_NS = 120 * NS_PER_SECOND
 WARN_BYTES = 1024 ** 3
 STOP_BYTES = 1536 * 1024 ** 2
@@ -46,6 +54,56 @@ redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('PUBLISH', KEYS[2], ARGV[1])
 return 1
 """
+
+
+def _retain_cleanup(coroutine, name: str):
+    task = asyncio.create_task(coroutine, name=name)
+    _CLEANUP_TASKS.add(task)
+    def completed(done):
+        _CLEANUP_TASKS.discard(done)
+        if not done.cancelled() and done.exception() is not None:
+            LOGGER.error('ghost_cleanup_failed cleanup=%s error=%r', name, done.exception())
+    task.add_done_callback(completed)
+    return task
+
+
+async def _settle_cleanup(task):
+    """Cancellation of the caller must not release resources an I/O task owns."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # In particular, _spool still owns its executor future and lock.
+            continue
+        except Exception:
+            break
+    return task.result()
+
+
+async def _shutdown_stage(coroutine, seconds: float, stage: str) -> bool:
+    task = _retain_cleanup(coroutine, 'ghost-close-' + stage)
+    deadline = asyncio.get_running_loop().time() + seconds
+    while not task.done():
+        try:
+            done, _ = await asyncio.wait({task}, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+            if not done:
+                LOGGER.error('ghost_shutdown_stage_deadline stage=%s; waiting for owned I/O', stage)
+                task.cancel()
+                # A stuck filesystem operation can exceed this budget. The
+                # collector detaches after its outer budget, retaining owners.
+                try:
+                    await _settle_cleanup(task)
+                except (Exception, asyncio.CancelledError):
+                    pass
+                return False
+        except asyncio.CancelledError:
+            continue
+    try:
+        task.result()
+    except (Exception, asyncio.CancelledError) as exc:
+        LOGGER.error('ghost_shutdown_stage_failed stage=%s error=%r', stage, exc)
+        return False
+    return True
 
 
 class GhostSettings(BaseSettings):
@@ -118,6 +176,8 @@ class GhostRuntime:
         self._expired_emitted = True
         self._tasks: list = []
         self._closed = False
+        self._close_task = None
+        self.shutdown_summary: dict = {}
         self.stop_reason: str | None = None
         self.suspensions: dict = {}
         self.suspension_history: dict = {}
@@ -271,13 +331,18 @@ class GhostRuntime:
         self._audit_wake.set()
 
     def _io_failure(self, scope: str, reason: str, exc: Exception) -> None:
+        if self._closed:
+            # Closing rows were frozen for the final outbox pass. Do not keep
+            # changing all their versions while retrying an unavailable DB.
+            self.counters['shutdown_io_failures'] += 1
+            return
         if self._integrity_failure(exc):
             self.stop(scope + '_integrity_failure')
         else:
             self.suspend(scope, reason)
 
     def _resume_if_caught_up(self) -> None:
-        if (not self.suspensions or self.stop_reason or self.guard is None
+        if (self._closed or not self.suspensions or self.stop_reason or self.guard is None
                 or self.mono_ns() - self.guard['monotonic_ns'] > 3 * NS_PER_SECOND
                 or self._dirty or self.late_events or self._campaign_dirty
                 or self._publishing is not None):
@@ -499,7 +564,7 @@ class GhostRuntime:
             self._io_failure('guard', 'guard_unavailable', exc)
 
     def _can_issue(self, wall: int, mono: int) -> bool:
-        if self.stop_reason:
+        if self._closed or self.stop_reason:
             return False
         now = wall // NS_PER_MS
         if mono < self._last_check_mono:
@@ -622,7 +687,7 @@ class GhostRuntime:
                 self.issue()
 
     def _publishable(self, row: PendingDecision) -> bool:
-        if (self.stop_reason or row.terminal or self.suspensions
+        if (self._closed or self.stop_reason or row.terminal or self.suspensions
                 or row.state.get('publication_epoch', 0) != self._publication_epoch):
             return False
         now, mono = self.wall_ns(), self.mono_ns()
@@ -745,6 +810,13 @@ class GhostRuntime:
         try:
             await asyncio.wait_for(self.redis.eval(PUBLISH_LUA, 2, GHOST_KEY, GHOST_CHANNEL,
                                                   body, ttl_ms), timeout=0.5)
+        except asyncio.CancelledError:
+            # A cancellation cannot establish whether Redis applied the bytes.
+            row.state['publication'].update(status='uncertain', failure_wall_ns=self.wall_ns(),
+                                            failure_monotonic_ns=self.mono_ns())
+            self.counters['redis_uncertain'] += 1
+            self._changed(row)
+            raise
         except Exception:
             row.state['publication'].update(status='uncertain', failure_wall_ns=self.wall_ns(),
                                             failure_monotonic_ns=self.mono_ns())
@@ -871,14 +943,30 @@ class GhostRuntime:
             await asyncio.sleep(max(0.05, 1 - elapsed))
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = _retain_cleanup(self._close(), 'ghost-runtime-close')
+        # A collector timeout/cancellation may stop waiting, but it must not
+        # cancel the owner of an in-flight fsync, audit write, or Redis attempt.
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         self._closed = True
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        if not self.stop_reason:
+        self._publication_epoch += 1
+        self._pending_publication = None
+        self._wake.set()
+        self._publish_wake.set()
+        self._audit_wake.set()
+        async def quiesce():
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        await _shutdown_stage(quiesce(), SHUTDOWN_QUIESCE_SECONDS, 'quiesce')
+        # A cancelled gather waits for its children, including _spool's actual
+        # executor future. Only now can final versions be frozen without races.
+        self.drain_inputs()
+        initial_records = len(self.records)
+        if self.campaign and not self.stop_reason:
             self.campaign['last_wall_ms'] = max(self.wall_ns() // NS_PER_MS,
                                                self.campaign.get('last_wall_ms', 0))
-        self._campaign_dirty = True
+        self._campaign_dirty = bool(self.campaign)
         for row in self.records.values():
             for target in row.state['targets'].values():
                 if target['status'] == 'pending':
@@ -886,15 +974,53 @@ class GhostRuntime:
             row.terminal = True
             row.state['shutdown'] = 'unobserved_after_shutdown'
             self._changed(row)
-        try:
-            async def drain():
-                while self._dirty or self._campaign_dirty:
+        saved_keys = set()
+        async def preserve():
+            # Save every terminal version before slow PostgreSQL work. A tail
+            # larger than one 32-row audit batch must survive an unavailable DB.
+            errors = []
+            for key, row in self.records.items():
+                try:
+                    await self._spool(self.spool.write, row.record())
+                    saved_keys.add(key)
+                except Exception as exc:
+                    errors.append(exc)
+            if self._campaign_dirty:
+                try:
+                    await self._spool(self.spool.save_campaign, dict(self.campaign))
+                    self._campaign_dirty = False
+                except Exception as exc:
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
+        preserved = await _shutdown_stage(preserve(), SHUTDOWN_SPOOL_SECONDS, 'preserve')
+        async def drain():
+            deadline = asyncio.get_running_loop().time() + SHUTDOWN_DRAIN_SECONDS
+            while self._dirty or self._campaign_dirty or self.late_events:
+                # An explicit loop deadline also covers a cancellation racing
+                # an already-completed wait_for operation on older Python.
+                if asyncio.get_running_loop().time() >= deadline:
+                    return
+                try:
                     await self.flush_audit_once()
-            await asyncio.wait_for(drain(), timeout=5)
-        except Exception:
-            LOGGER.exception('ghost_shutdown_audit_incomplete_outbox_retained')
-        finally:
-            await self._spool(self.spool.close)
+                except Exception:
+                    await asyncio.sleep(SHUTDOWN_RETRY_SECONDS)
+        await _shutdown_stage(drain(), SHUTDOWN_DRAIN_SECONDS, 'drain')
+        drained = not (self._dirty or self._campaign_dirty or self.late_events)
+        await _shutdown_stage(self._spool(self.spool.close), SHUTDOWN_RESOURCE_SECONDS, 'spool-close')
+        self.shutdown_summary = dict(initial_records=initial_records,
+            drained_records=initial_records-len(self.records), retained_records=len(self.records),
+            pending_dirty=len(self._dirty), pending_late_events=len(self.late_events),
+            pending_campaign=self._campaign_dirty, final_outbox_pass_complete=preserved,
+            final_outbox_rows_saved=len(saved_keys), drain_complete=drained)
+        LOGGER.log(logging.INFO if drained else logging.ERROR,
+                   '%s initial_records=%s drained_records=%s retained_records=%s '
+                   'pending_dirty=%s pending_late_events=%s pending_campaign=%s '
+                   'final_outbox_pass_complete=%s final_outbox_rows_saved=%s drain_complete=%s',
+                   'ghost_shutdown_drained' if drained else 'ghost_shutdown_incomplete_outbox_retained',
+                   initial_records, initial_records-len(self.records), len(self.records),
+                   len(self._dirty), len(self.late_events), self._campaign_dirty,
+                   preserved, len(saved_keys), drained)
 
 
 async def start_ghost_runtime(settings: Any) -> GhostRuntime | None:
@@ -907,6 +1033,16 @@ async def start_ghost_runtime(settings: Any) -> GhostRuntime | None:
     from price_collector.ghost_twap_store import GhostAuditStore
     from price_collector.polymarket_twap import validate_twap_runtime_identity
     pool = client = runtime = None
+    async def release_owned(original_close=None):
+        if original_close is not None:
+            # This is deliberately not a finally: if runtime cleanup fails,
+            # its workers may still own these clients and the spool lock.
+            task = _retain_cleanup(original_close(), 'ghost-owned-runtime-close')
+            await _settle_cleanup(task)
+        if client is not None:
+            await _shutdown_stage(client.aclose(), SHUTDOWN_RESOURCE_SECONDS, 'redis-close')
+        if pool is not None:
+            await _shutdown_stage(pool.close(), SHUTDOWN_RESOURCE_SECONDS, 'pool-close')
     try:
         # Validate the live instrument independently of ordinary RTDS context.
         if getattr(settings, 'POLYMARKET_TWAP_ENABLED', False) is not True:
@@ -929,19 +1065,16 @@ async def start_ghost_runtime(settings: Any) -> GhostRuntime | None:
         runtime = GhostRuntime(config, GhostAuditStore(pool), client, spool)
         await runtime.start()
     except BaseException:
-        if runtime is not None:
-            await runtime.close()
-        if client is not None:
-            await client.aclose()
-        if pool is not None:
-            await pool.close()
+        cleanup = _retain_cleanup(release_owned(runtime.close if runtime is not None else None),
+                                  'ghost-startup-cleanup')
+        await _settle_cleanup(cleanup)
         raise
     original_close = runtime.close
+    owned_close_task = None
     async def close_owned():
-        try:
-            await original_close()
-        finally:
-            await client.aclose()
-            await pool.close()
+        nonlocal owned_close_task
+        if owned_close_task is None:
+            owned_close_task = _retain_cleanup(release_owned(original_close), 'ghost-owned-close')
+        await asyncio.shield(owned_close_task)
     runtime.close = close_owned
     return runtime

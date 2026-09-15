@@ -1,0 +1,32 @@
+{
+  "artifacts_sha256": {
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\DELIVERY_REVIEW.md": "2a1bf8c1f1853913d55641c79f981b213a977bf1017b7f117aff091603b3e254",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\api_probe.json": "3431f2585b752045dba71782244316926f4a8927ee293051d576503798dd7809",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\audit_review.json": "3cd70a612259ccf36fa5a3375a8ca312bc0bb86f315a1cc1a1e1a30a80531937",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\delivery_review_manifest.json": "1e35f4a92a240235869fa704f78dc4eb24f457c9bcec76e430526c21e1408d1a",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\full_suite.txt": "c463f0c099bacf15ef7bac4e6c5212321ff28d78519c38ac26bc026c262c9b23",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\local_delivery_proof_final.json": "f9266bfbcefe6ffdc2c046b94da7575576e09d0ee44d66604adc6d31e3b98323",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\operator_inventory.json": "b397e6e63c074b43c02e23b359fe244003e2fcb1b128e0498ec9631782bfbc46",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\production_redis_source.json": "2a1f410db31c3f7a4d4f1956bb8adb77714283c52b0cb77973907aa577962fb4",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\production_state.json": "1ce77db373a1409458960670cf44c76d89783f8e12bb6e25bf878d2dc27f7cc5",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\redis8_delivery_proof.json": "7c28c3f9c914461ab7b447826a49bcc46c4f4787def5dd1751f5435046fc0759",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\storage_review.json": "488907ec67a154c97110b87184e0ba95aade6a4aca70a5850a392e81570c8cea",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\transport_claim_review.json": "98579feaaed5f788412c88a8cc7af31b63d5e0a49a8e74b6b0a67c281dd539cc",
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\uvicorn_source_probe.json": "f20422d2b06b1bf5d3ec322205cc8f224b36e8ca5077f2791095abf2f2daf1cd"
+  },
+  "basis": "Working-tree evidence bytes, preserved by repository attributes; review is local and no production changes were made.",
+  "created_at_utc": "2026-09-15T21:29:16.665144+00:00",
+  "full_suite": {
+    "passed": 1523,
+    "seconds": "47.75",
+    "skipped": 10,
+    "warnings": 2
+  },
+  "reviewed_commit": "6c6115d6047c546cde13e412e83fb4d010d12501",
+  "source_sha256": {
+    "GHOST_TWAP_CHECKPOINT_C_REVIEW.md": "8d0a4e0894c6014788bcd0c37e01e5093b0f68102a7e0bab91a46d1f1179e717",
+    "research\\spot_twap_response\\checkpoint_c_review\\audit_review.py": "10720dff7da2aff1f19cf4ba17f81956a792ab26c141496a4bf125c512357dd5",
+    "research\\spot_twap_response\\checkpoint_c_review\\reproduce_delivery_review.py": "6070d6fc0b6f3eecc592905c1724012a0cb5e7291fc2354d2319fe12ffb83604"
+  },
+  "superseded_artifact": "local_delivery_proof.json is superseded by local_delivery_proof_final.json."
+}

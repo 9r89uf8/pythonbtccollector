@@ -1,0 +1,26 @@
+{
+  "status": "verified",
+  "redis8_module_hashes_match_production": true,
+  "artifacts": {
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\DELIVERY_REVIEW.md": {
+      "bytes": 6931,
+      "sha256": "2a1bf8c1f1853913d55641c79f981b213a977bf1017b7f117aff091603b3e254"
+    },
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\redis8_delivery_proof.json": {
+      "bytes": 3928,
+      "sha256": "7c28c3f9c914461ab7b447826a49bcc46c4f4787def5dd1751f5435046fc0759"
+    },
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\local_delivery_proof_final.json": {
+      "bytes": 4434,
+      "sha256": "f9266bfbcefe6ffdc2c046b94da7575576e09d0ee44d66604adc6d31e3b98323"
+    },
+    "results\\spot_twap_response\\2026-09-15-checkpoint-c-review\\production_redis_source.json": {
+      "bytes": 10395,
+      "sha256": "2a1f410db31c3f7a4d4f1956bb8adb77714283c52b0cb77973907aa577962fb4"
+    },
+    "research\\spot_twap_response\\checkpoint_c_review\\reproduce_delivery_review.py": {
+      "bytes": 12408,
+      "sha256": "6070d6fc0b6f3eecc592905c1724012a0cb5e7291fc2354d2319fe12ffb83604"
+    }
+  }
+}

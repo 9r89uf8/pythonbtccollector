@@ -279,6 +279,17 @@ class GhostStreamHub:
                                                  SUBSCRIBER_IO_SECONDS)
                 now = loop.time()
                 if message is not None:
+                    if (message.get('type') in ('subscribe', 'unsubscribe')
+                            and message.get('channel') in (GHOST_CHANNEL, GHOST_CHANNEL.encode())):
+                        # redis-py can reconnect and resubscribe inside a read
+                        # without raising to this supervisor. Only _connection
+                        # consumes the initial ACK; a later ACK is a new loss
+                        # boundary, even if no subsequent publication arrives.
+                        # Invalidate now, including while bootstrap GET awaits.
+                        # The shared fault check fences that read's result.
+                        self._needs_authoritative = True
+                        self._emit(None, 'subscriber_reconnected', resync=True)
+                        raise _Resync('subscriber_reconnected')
                     last_server, ping_sent = now, None
                     if message.get('type') == 'message' and message.get('channel') in (GHOST_CHANNEL, GHOST_CHANNEL.encode()):
                         raw = message.get('data')
