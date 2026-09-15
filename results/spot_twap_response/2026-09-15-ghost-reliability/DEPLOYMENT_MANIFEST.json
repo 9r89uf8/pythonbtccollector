@@ -1,0 +1,28 @@
+{
+  "created_at_utc": "2026-09-15T22:29:38.488137+00:00",
+  "runtime_commit": "d404312dadd1748f38c91cf4911c74b5c47206ea",
+  "release_validation_manifest_sha256": "6f6736a2100156439f40bd5ea1289c1b9ac65190bbe6f68e6728eff85a824c7a",
+  "droplet_tests": {
+    "passed": 210,
+    "warnings": 1,
+    "python": "3.12.3",
+    "redis_py": "8.0.1"
+  },
+  "deployment_checks_passed": 15,
+  "ghost_producer_enabled": false,
+  "ghost_api_enabled": true,
+  "deployed_source_hashes_match": true,
+  "artifact_sha256": {
+    "GHOST_TWAP_RELIABILITY_CHECKPOINT.md": "f11b8b89bdf057517f006e702733495db4bc59ef725bcb0fe2a0e4ef657ad3e0",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/README.md": "e86fa01229e8bbf6e6dc8cabd924e28a8321f7c74e3c3947a1b1bc57a90c9379",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/install.json": "d9bc1cbfe4b1ae2c3fb15aa62bcc4316d6a172433c0656ae2fafa427e99ecbcf",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/install.txt": "0a0741961c28f02d53b0058b3777d290489f6a962361db81e0aeb9a0815b83b9",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/log_review.json": "c77e5afafc5958b9560bf7f88e4e6ebf4805c4b5b967291bd5a8f834abc98b4c",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/post_deploy.json": "0bd498163e24c6d452a80d119bcc0277d5cdf99918221b52a74fdf4ebfa894b9",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/restart.json": "6f8ae1aaf4186b28d665fee54413f2c1106f40e17e361d3bb4be513af594628a",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/restart.txt": "4129b42f2fc78c67a23a372821c15a023eeccf468b587ba5aa76bdbfd8bd67a7",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/tests.json": "f9312c2c5fffd850d4563a0d395f1fd43da87b1fd3a1aa97314ba7feba592084",
+    "results/spot_twap_response/2026-09-15-ghost-reliability/tests.txt": "21663cf169cf8970cdecc9e5ae235ef0357791aaa85246b2bddf71ed480ec656"
+  },
+  "new_credential_pattern_hits": []
+}

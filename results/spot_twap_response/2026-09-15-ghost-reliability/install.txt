@@ -1,0 +1,78 @@
+From https://github.com/9r89uf8/pythonbtccollector
+   6c6115d..d404312  main                    -> origin/main
+ * [new branch]      codex/ghost-reliability -> origin/codex/ghost-reliability
+Updating 6c6115d..d404312
+Fast-forward
+ .gitattributes                                     |  11 +
+ GHOST_TWAP_CHECKPOINT_C.md                         |   8 +-
+ GHOST_TWAP_CHECKPOINT_C_REVIEW.md                  | 222 +++++
+ GHOST_TWAP_LIVE_PLAN.md                            |   6 +-
+ GHOST_TWAP_RELIABILITY_CHECKPOINT.md               | 117 +++
+ OPERATIONS.md                                      |  14 +-
+ README.md                                          |  10 +-
+ .../price-collector-polymarket-chainlink.service   |   3 +-
+ price_collector/api.py                             |  20 +-
+ price_collector/ghost_twap_api.py                  |  15 +-
+ price_collector/ghost_twap_runtime.py              | 187 +++-
+ price_collector/ghost_twap_stream.py               |  11 +
+ price_collector/polymarket_chainlink_collector.py  |  43 +-
+ .../checkpoint_c_review/audit_review.py            | 392 +++++++++
+ .../reproduce_delivery_review.py                   | 281 ++++++
+ .../DELIVERY_REVIEW.md                             | 114 +++
+ .../REVIEW_MANIFEST.json                           |  32 +
+ .../2026-09-15-checkpoint-c-review/api_probe.json  |  97 ++
+ .../audit_review.json                              | 979 +++++++++++++++++++++
+ .../delivery_review_manifest.json                  |  26 +
+ .../2026-09-15-checkpoint-c-review/full_suite.txt  |  33 +
+ .../local_delivery_proof_final.json                | 131 +++
+ .../operator_inventory.json                        |  58 ++
+ .../production_redis_source.json                   |  34 +
+ .../production_state.json                          |  76 ++
+ .../redis8_delivery_proof.json                     | 132 +++
+ .../storage_review.json                            |  18 +
+ .../transport_claim_review.json                    | 205 +++++
+ .../uvicorn_source_probe.json                      |  89 ++
+ .../2026-09-15-ghost-reliability/MANIFEST.json     |  67 ++
+ .../2026-09-15-ghost-reliability/full_suite.json   |  11 +
+ .../2026-09-15-ghost-reliability/full_suite.txt    |  33 +
+ .../operator_cleanup.json                          |  38 +
+ .../2026-09-15-ghost-reliability/pre_deploy.json   | 241 +++++
+ .../2026-09-15-ghost-reliability/redis8_suite.json |  13 +
+ .../2026-09-15-ghost-reliability/redis8_suite.txt  |   2 +
+ tests/test_ghost_twap_api.py                       | 157 +++-
+ tests/test_ghost_twap_deployment.py                |  15 +
+ tests/test_ghost_twap_shutdown.py                  | 336 +++++++
+ tests/test_ghost_twap_stream.py                    |  70 ++
+ tests/test_ghost_twap_stream_tcp.py                | 172 ++++
+ 41 files changed, 4462 insertions(+), 57 deletions(-)
+ create mode 100644 GHOST_TWAP_CHECKPOINT_C_REVIEW.md
+ create mode 100644 GHOST_TWAP_RELIABILITY_CHECKPOINT.md
+ create mode 100644 research/spot_twap_response/checkpoint_c_review/audit_review.py
+ create mode 100644 research/spot_twap_response/checkpoint_c_review/reproduce_delivery_review.py
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/DELIVERY_REVIEW.md
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/REVIEW_MANIFEST.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/api_probe.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/audit_review.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/delivery_review_manifest.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/full_suite.txt
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/local_delivery_proof_final.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/operator_inventory.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/production_redis_source.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/production_state.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/redis8_delivery_proof.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/storage_review.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/transport_claim_review.json
+ create mode 100644 results/spot_twap_response/2026-09-15-checkpoint-c-review/uvicorn_source_probe.json
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/MANIFEST.json
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/full_suite.json
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/full_suite.txt
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/operator_cleanup.json
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/pre_deploy.json
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/redis8_suite.json
+ create mode 100644 results/spot_twap_response/2026-09-15-ghost-reliability/redis8_suite.txt
+ create mode 100644 tests/test_ghost_twap_shutdown.py
+ create mode 100644 tests/test_ghost_twap_stream_tcp.py
+
+[notice] A new release of pip is available: 26.1.2 -> 26.2.1
+[notice] To update, run: /opt/price-collector/.venv/bin/python3 -m pip install --upgrade pip
+RELEASE_INSTALLED_NO_SERVICE_RESTART d404312dadd1748f38c91cf4911c74b5c47206ea

@@ -7,13 +7,24 @@ timeout. It preserves calculation contract 4, the six forecast horizons, exact
 producer bytes, input freshness policies and durable-before-publication ordering.
 The producer remains bounded and default-off.
 
+Status: pushed to GitHub `main` and deployed as runtime commit `d404312` on
+September 15 at 22:26 UTC. The Chainlink collector and API were restarted; the
+installed Chainlink stop timeout is 120 seconds. The API is enabled, and the
+ghost producer remains disabled. No new campaign was started.
+
 Validation: the full development suite passes **1,554 tests**, with 10 opt-in
 datastore tests skipped and two existing dependency warnings. The real-client
 Redis stream regressions also pass all **32 tests** on Python 3.12 with redis-py
 8.0.1. The full run includes 12 new shutdown cases covering delayed and failed
 storage, a 243-row tail, in-flight acknowledgements, caller cancellation and
 pending late-event persistence. [Validation and preflight evidence](results/spot_twap_response/2026-09-15-ghost-reliability/)
-is retained separately. Deployment verification is recorded after installation.
+is retained separately. An additional **210 tests passed** in the droplet's
+Python 3.12.3 / redis-py 8.0.1 environment before service restart. The
+[post-deployment check](results/spot_twap_response/2026-09-15-ghost-reliability/post_deploy.json)
+passed: six active services, fresh source feeds, loopback-only listeners, typed
+ghost GET/SSE unavailable responses, empty outbox and all 16,329 audit rows still
+terminal and verified against the saved export. All three campaign hashes and
+the deployed source hashes match their expected values.
 
 ## Redis resubscription
 

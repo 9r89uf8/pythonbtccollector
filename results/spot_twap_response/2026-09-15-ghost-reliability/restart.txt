@@ -1,0 +1,24 @@
+● price-collector-polymarket-chainlink.service - Polymarket Chainlink BTC/USD RTDS price collector
+     Loaded: loaded (/etc/systemd/system/price-collector-polymarket-chainlink.service; enabled; preset: enabled)
+     Active: active (running) since Tue 2026-09-15 22:26:29 UTC; 47ms ago
+   Main PID: 1392720 ((python))
+      Tasks: 1 (limit: 2316)
+     Memory: 1.1M (peak: 1.4M)
+        CPU: 8ms
+     CGroup: /system.slice/price-collector-polymarket-chainlink.service
+             └─1392720 "(python)"
+
+Sep 15 22:26:29 ubuntu-s-1vcpu-2gb-amd-sgp1 systemd[1]: Started price-collector-polymarket-chainlink.service - Polymarket Chainlink BTC/USD RTDS price collector.
+
+● price-api.service - Local read-only price API
+     Loaded: loaded (/etc/systemd/system/price-api.service; enabled; preset: enabled)
+     Active: active (running) since Tue 2026-09-15 22:26:29 UTC; 1s ago
+   Main PID: 1392712 (uvicorn)
+      Tasks: 1 (limit: 2316)
+     Memory: 16.0M (peak: 16.2M)
+        CPU: 270ms
+     CGroup: /system.slice/price-api.service
+             └─1392712 /opt/price-collector/.venv/bin/python3 /opt/price-collector/.venv/bin/uvicorn price_collector.api:app --host 127.0.0.1 --port 9000 --workers 1
+
+Sep 15 22:26:29 ubuntu-s-1vcpu-2gb-amd-sgp1 systemd[1]: Started price-api.service - Local read-only price API.
+TimeoutStopUSec=2min
