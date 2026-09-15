@@ -26,7 +26,7 @@ from price_collector.ghost_twap_spool import GhostSpool
 LOGGER = logging.getLogger(__name__)
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 GHOST_CHANNEL = 'btc:live:ghost_chainlink_twap_60s:updates'
-RUNTIME_VERSION = 'ghost-canary-v5'
+RUNTIME_VERSION = 'ghost-canary-v6'
 PUBLICATION_ELIGIBILITY_POLICY = 'per-horizon-unreceived-v1'
 CANARY_MS = 60 * 60 * 1000
 CAMPAIGN_CHECKPOINT_SECONDS = 30
@@ -302,6 +302,9 @@ class GhostRuntime:
         if feed not in ('spot', 'twap'):
             self.stop('invalid_gap_feed')
             return
+        # Fence every older candidate immediately, including one waiting for
+        # fsync. An already-started Redis attempt retains its real outcome/order.
+        self._publication_epoch += 1
         if len(self.queue) >= self.settings.input_queue_max:
             self.counters['input_drops'] += len(self.queue)
             self.queue.clear()
@@ -343,6 +346,7 @@ class GhostRuntime:
                 self.late_events.append(json.loads(_json_bytes(_event_record(event))))
                 self._audit_wake.set()
         if len(self.queue) >= self.settings.input_queue_max:
+            self._publication_epoch += 1
             self.counters['input_drops'] += len(self.queue)
             self.queue.clear()
             self.queue.extend([('gap', 'spot', 'input_overflow'), ('gap', 'twap', 'input_overflow')])
@@ -440,16 +444,33 @@ class GhostRuntime:
             item = self.queue.popleft()
             if isinstance(item, tuple):
                 _, feed, reason, *boundary = item
-                self.engine.record_gap(feed, reason)
                 sequence, wall, mono = boundary or (self._sequence, self.wall_ns(), self.mono_ns())
+                recovery = self.engine.spot_reconnect
+                try:
+                    self.engine.record_gap(feed, reason, observed_wall_ns=wall, observed_monotonic_ns=mono)
+                except ValueError:
+                    self.stop('receipt_order_fault')
+                after = self.engine.spot_reconnect
+                if (recovery is not None and recovery.status == 'waiting'
+                        and after is not None and after.status == 'cleared'):
+                    self.counters['spot_reconnect_cleared'] += 1
                 self.gaps.append(dict(feed=feed, reason=reason, after_sequence=sequence,
                                       observed_wall_ns=wall, observed_monotonic_ns=mono))
-                self.counters['resets'] += 1
+                self.counters['input_gap_markers'] += 1
+                if (feed == 'spot' and self.engine.spot_reconnect is not None
+                        and self.engine.spot_reconnect.status == 'waiting'):
+                    self.counters['spot_reconnect_waits'] += 1
+                else:
+                    self.counters['resets'] += 1
             else:
+                recovery = self.engine.spot_reconnect
                 try:
                     self.engine.accept(item)
                 except ValueError:
                     self.stop('receipt_order_fault')
+                after = self.engine.spot_reconnect
+                if recovery is not None and recovery.status == 'waiting' and after.status != 'waiting':
+                    self.counters['spot_reconnect_' + after.status] += 1
 
     async def refresh_guard(self) -> None:
         if self.stop_reason:
@@ -522,7 +543,11 @@ class GhostRuntime:
         if not self._can_issue(wall, mono):
             return None
         self._decisions += 1
+        before_recovery = self.engine.spot_reconnect
         decision = self.engine.snapshot(str(self._decisions), wall, mono)
+        if (before_recovery is not None and before_recovery.status == 'waiting'
+                and decision.spot_reconnect.status == 'cleared'):
+            self.counters['spot_reconnect_cleared'] += 1
         self._last_frozen_receipt = (wall, mono)
         complete_wall, complete_mono = self.wall_ns(), self.mono_ns()
         self._admission_times.append(mono)

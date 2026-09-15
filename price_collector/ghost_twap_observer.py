@@ -20,6 +20,9 @@ import signal
 import time
 
 VERSION = 'ghost-observer-v1'
+# The observation-file schema is unchanged. Keep historical v1 reanalysis
+# stable while accepting only explicitly reviewed payload contracts.
+PAYLOAD_CONTRACTS = {('ghost-canary-v5', 3), ('ghost-canary-v6', 4)}
 KEY = 'btc:live:ghost_chainlink_twap_60s'
 HORIZONS = (1, 2, 3, 5, 10, 30)
 CANARY_MS = 3_600_000
@@ -59,6 +62,79 @@ def _reject_constant(value):
     raise ValueError('non-finite JSON number')
 
 
+def _validate_reconnect(p: dict, eligible: list, decision: int, decision_mono: int) -> None:
+    """Check bounded recovery evidence/availability, not retained slot history."""
+    policy = p['policy']
+    limit = policy.get('spot_reconnect_max_gap_ms')
+    carry = policy.get('max_carry_ms')
+    if (type(limit) is not int or not 0 <= limit <= 10000
+            or type(carry) is not int or carry <= 0 or 'spot_reconnect' not in p):
+        raise ValueError('unexpected reconnect policy/snapshot')
+    recovery = p['spot_reconnect']
+    if recovery is None:
+        return
+    fields = {'gap_ordinal', 'gap_wall_ns', 'gap_monotonic_ns', 'previous_spot',
+              'first_post_gap_spot', 'status', 'reason'}
+    if (not isinstance(recovery, dict) or set(recovery) != fields
+            or type(recovery['gap_ordinal']) is not int
+            or not 0 < recovery['gap_ordinal'] <= _integer(p['gap_count'])
+            or recovery['status'] not in ('waiting', 'retained', 'cleared')
+            or not isinstance(recovery['reason'], str) or not 0 < len(recovery['reason']) <= 265):
+        raise ValueError('invalid reconnect metadata')
+    wall, mono = recovery['gap_wall_ns'], recovery['gap_monotonic_ns']
+    if wall is not None and _integer(wall) > decision:
+        raise ValueError('gap wall clock after decision')
+    if mono is not None and _integer(mono) > decision_mono:
+        raise ValueError('gap monotonic clock after decision')
+    previous, first = recovery['previous_spot'], recovery['first_post_gap_spot']
+    for event in (previous, first):
+        if event is None:
+            continue
+        if (not isinstance(event, dict) or event['feed'] != 'spot' or event['window_s'] is not None
+                or not isinstance(event['value'], str)
+                or re.fullmatch(r'[0-9]{1,20}\.[0-9]{18}', event['value']) is None
+                or Decimal(event['value']) <= 0 or type(event['source_timestamp_ms']) is not int
+                or _integer(event['source_timestamp_ms']) % 1000
+                or type(event['sequence']) is not int or event['sequence'] <= 0
+                or not isinstance(event['event_id'], str) or not 0 < len(event['event_id']) <= 256
+                or _integer(event['received_wall_ns']) > decision
+                or _integer(event['received_monotonic_ns']) > decision_mono
+                or event['received_ms'] != _integer(event['received_wall_ns']) // NS_MS):
+            raise ValueError('invalid reconnect event')
+    if recovery['status'] == 'cleared':
+        # A rejected first event may be source-future/stale; it is evidence,
+        # never a fallback input. Normal current-input checks still apply.
+        return
+    if not limit or wall is None or mono is None or previous is None:
+        raise ValueError('retention lacks gap clocks/previous event/policy')
+    wall, mono = _integer(wall), _integer(mono)
+    if not any(g['feed'] == 'spot' and g['reason'] == 'connection_end'
+               and g['ordinal'] == recovery['gap_ordinal'] for g in p['last_gaps']):
+        raise ValueError('retention lacks transport gap marker')
+    source = _integer(previous['source_timestamp_ms']) * NS_MS
+    ages = (wall-source, wall-_integer(previous['received_wall_ns']),
+            mono-_integer(previous['received_monotonic_ns']))
+    if (source > _integer(previous['received_wall_ns']) or min(ages) < 0
+            or ages[0] > 5000*NS_MS or max(ages[1:]) > 3000*NS_MS):
+        raise ValueError('retention previous event invalid at gap')
+    if recovery['status'] == 'waiting':
+        if first is not None or p['current_spot'] is not None or eligible:
+            raise ValueError('waiting reconnect cannot expose current prices')
+        return
+    if first is None or p['current_spot'] is None:
+        raise ValueError('retained recovery lacks resumed input')
+    first_wall, first_mono = _integer(first['received_wall_ns']), _integer(first['received_monotonic_ns'])
+    source_delta = (_integer(first['source_timestamp_ms']) - _integer(previous['source_timestamp_ms'])) * NS_MS
+    deltas = (source_delta, first_wall-_integer(previous['received_wall_ns']),
+              first_mono-_integer(previous['received_monotonic_ns']))
+    first_source_age = first_wall - _integer(first['source_timestamp_ms'])*NS_MS
+    if (first_wall < wall or first_mono < mono or source_delta <= 0
+            or first['sequence'] <= previous['sequence'] or not 0 <= first_source_age <= 5000*NS_MS
+            or max(deltas) > min(limit, carry)*NS_MS
+            or _integer(p['current_spot']['sequence']) < first['sequence']):
+        raise ValueError('retained recovery does not satisfy bounded resume clocks')
+
+
 def classify_payload(raw: bytes, ttl_ms: int, *, start_ms: int, end_ms: int,
                      read_start_wall_ns: int, read_end_wall_ns: int,
                      read_start_monotonic_ns: int, read_end_monotonic_ns: int) -> dict:
@@ -80,7 +156,10 @@ def classify_payload(raw: bytes, ttl_ms: int, *, start_ms: int, end_ms: int,
         decision_mono = _integer(p['decision_monotonic_ns'])
         deadline = _integer(p['valid_until_wall_ns'])
         result['decision_time_ms'] = decision // NS_MS
-        if p.get('runtime_version') != 'ghost-canary-v5' or p.get('contract_version') != 3:
+        contract = p.get('contract_version')
+        runtime_version = p.get('runtime_version')
+        if (not isinstance(runtime_version, str) or type(contract) is not int
+                or (runtime_version, contract) not in PAYLOAD_CONTRACTS):
             raise ValueError('unexpected runtime/contract')
         if not start_ms * NS_MS <= decision < end_ms * NS_MS:
             raise ValueError('outside campaign decision window')
@@ -110,6 +189,8 @@ def classify_payload(raw: bytes, ttl_ms: int, *, start_ms: int, end_ms: int,
         policy = p['policy']
         if policy['source_max_age_ms'] != 5000 or policy['receipt_max_age_ms'] != 3000:
             raise ValueError('unexpected freshness policy')
+        if contract == 4:
+            _validate_reconnect(p, eligible, decision, decision_mono)
         fresh = result['freshness_reasons']
         if read_end_wall_ns >= deadline or read_end_monotonic_ns >= decision_mono + deadline - decision:
             fresh.append('payload_expired')
@@ -255,7 +336,7 @@ async def observe(client, directory: Path, start_ms: int, *, stop=None,
     manifest = dict(version=VERSION, start_ms=start_ms, end_ms=end_ms, interval_ms=INTERVAL_MS,
                     planned_bins=count, read_timeout_ms=100, max_payload_bytes=MAX_PAYLOAD_BYTES,
                     max_total_bytes=max_bytes, flush_interval_ms=1000, fsync_each_sample=False,
-                    campaign_membership='provisional_v5_decision_window_requires_audit_join',
+                    campaign_membership='provisional_decision_window_requires_audit_join',
                     target_unreceived_at_read='unobserved', status='incomplete', reason=None,
                     pid=os.getpid(), redis_host='127.0.0.1', redis_key=KEY)
     boot = Path('/proc/sys/kernel/random/boot_id')

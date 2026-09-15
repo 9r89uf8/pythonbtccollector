@@ -197,6 +197,39 @@ measure relation/filesystem usage and arrange bounded vacuum maintenance rather
 than assume the bytes returned to the filesystem. Keep the full export and
 bounded findings after removing eligible database rows.
 
+## Ghost reconnect recovery upgrade
+
+The [reconnect checkpoint](GHOST_TWAP_RECONNECT_CHECKPOINT.md) is runtime
+`ghost-canary-v6` / contract 4. Only a qualified short spot connection end may
+preserve its bounded observed history. Current input remains unavailable until
+the first new spot passes the advancing-source, freshness and source/wall/mono
+gap bounds. Bridged seconds remain carried/degraded; hard loss still resets.
+Gap admission fences older pending publications, including those awaiting fsync.
+Redis attempts already begun retain their actual recorded outcome.
+
+This is a code-only Chainlink collector update. After the reviewed change is
+pushed to GitHub, keep `GHOST_TWAP_ENABLED=false` and run:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo systemctl restart price-collector-polymarket-chainlink
+sudo systemctl status price-collector-polymarket-chainlink --no-pager
+sudo journalctl -u price-collector-polymarket-chainlink -n 100 --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/markets/current/live
+redis-cli EXISTS btc:live:ghost_chainlink_twap_60s
+```
+
+No schema, dependencies, systemd units or environment keys change. Do not alter
+either completed campaign's start, outbox or stop latch. The pure policy's
+`spot_reconnect_max_gap_ms` is frozen at 10,000 ms in production; there is no
+environment override. The effective bound also cannot exceed historical carry.
+The cache key should be absent while ghost is disabled. Installation does not
+enable a new canary. A later run must use reviewed fresh campaign state and the
+contract-4-aware observer; the archived combined-canary scorer remains v5/3-only.
+
 ## Combined ghost canary observer
 
 The owner authorized the new one-hour run in

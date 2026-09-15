@@ -195,8 +195,8 @@ def test_delayed_feeds_publish_with_split_policy_and_original_expiry():
     assert row.state["publication"]["status"] == "acknowledged"
     body = json.loads(redis.calls[0][-2])
     assert redis.calls[0][-1] == 1750
-    assert body["contract_version"] == 3
-    assert body["runtime_version"] == "ghost-canary-v5"
+    assert body["contract_version"] == 4
+    assert body["runtime_version"] == "ghost-canary-v6"
     assert body["policy"]["source_max_age_ms"] == 5000
     assert body["policy"]["receipt_max_age_ms"] == 3000
     assert "current_max_age_ms" not in body["policy"]

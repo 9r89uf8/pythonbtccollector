@@ -196,7 +196,7 @@ def test_contract_v3_preserves_pending_counts_and_audit_categories():
     decision = primed().snapshot()
     live = json.loads(decision.to_live_json())
     audit = json.loads(decision.to_audit_json())
-    assert live["contract_version"] == audit["contract_version"] == 3
+    assert live["contract_version"] == audit["contract_version"] == 4
     assert all("pending" in forecast["counts"] for forecast in live["forecasts"])
     assert any(slot["category"] == "pending" for slot in audit["slots"])
     assert isinstance(live["decision_wall_ns"], str)

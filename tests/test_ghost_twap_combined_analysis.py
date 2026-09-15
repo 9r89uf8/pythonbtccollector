@@ -4,6 +4,7 @@ The analyzer itself imports neither the runtime nor its arithmetic helpers.
 """
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal, localcontext
 from hashlib import sha256
 import importlib.util
@@ -20,6 +21,43 @@ SPEC.loader.exec_module(analysis)
 HELPERS = runpy.run_path(str(ROOT / 'tests/test_ghost_twap_runtime_faults.py'))
 
 
+def legacy_runtime():
+    """Generate only legacy behavior; never feed reconnect rows to the v5 audit."""
+    settings = {}
+    if 'spot_reconnect_max_gap_ms' in HELPERS['GhostSettings'].model_fields:
+        settings['spot_reconnect_max_gap_ms'] = 0
+    result = HELPERS['runtime'](**settings)
+    value = result[0]
+    if 'spot_reconnect_max_gap_ms' in value.engine.policy.__dataclass_fields__:
+        policy = replace(value.engine.policy, spot_reconnect_max_gap_ms=0)
+        value.engine = type(value.engine)(value.run_id, policy)
+    return result
+
+
+def legacy_record(row):
+    """Explicit test fixture adapter, not a production/export migration.
+
+    These fixtures contain no gap or retained-history state. Only the versioned
+    additive reconnect fields are removed; original pricing evidence stays
+    subject to the archived independent v5 verifier.
+    """
+    frozen, state = json.loads(row['frozen_json']), json.loads(row['state_json'])
+    def legacy_body(body):
+        assert (body['runtime_version'], body['contract_version']) in (
+            ('ghost-canary-v5', 3), ('ghost-canary-v6', 4))
+        assert not body['last_gaps']
+        assert body.pop('spot_reconnect', None) is None
+        assert body['policy'].pop('spot_reconnect_max_gap_ms', 0) == 0
+        body.update(runtime_version='ghost-canary-v5', contract_version=3)
+    legacy_body(frozen)
+    assert frozen['runtime_policy'].pop('spot_reconnect_max_gap_ms', 0) == 0
+    if state['publication'].get('payload_json') is not None:
+        payload = json.loads(state['publication']['payload_json'])
+        legacy_body(payload)
+        state['publication']['payload_json'] = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    return encode(row, frozen, state)
+
+
 def encode(row, frozen=None, state=None):
     row = deepcopy(row)
     if frozen is not None:
@@ -33,7 +71,7 @@ def encode(row, frozen=None, state=None):
 
 def make_row(*, filtered=False, uncertain=False, unavailable=False, tiny=False):
     async def scenario():
-        value, clock, spool, store, redis = HELPERS['runtime']()
+        value, clock, spool, store, redis = legacy_runtime()
         if tiny:
             offer = value.offer_price
             def priced(feed, amount, *args, **kwargs):
@@ -61,7 +99,7 @@ def make_row(*, filtered=False, uncertain=False, unavailable=False, tiny=False):
                     price='100' if tiny else '101', identity='target-' + str(h)))
         clock.advance(start + 120 * analysis.SECOND - clock.mono)
         value.finalize_due()
-        return encode(row.record())
+        return legacy_record(row.record())
     return asyncio.run(scenario())
 
 
@@ -88,6 +126,16 @@ def test_filtered_published_and_early_denominators_are_distinct(tmp_path):
     assert h2['counts']['confirmed_early'] == 1
     assert h2['confirmed_lead_ms']['p50'] == '1000.0'
     assert result['withheld_forecast_reasons'] == {'target_received_before_publication': 1}
+
+
+def test_legacy_fixture_is_explicit_and_cannot_relabel_reconnect_evidence():
+    row = make_row()
+    frozen = json.loads(row['frozen_json'])
+    assert frozen['runtime_version'] == 'ghost-canary-v5' and frozen['contract_version'] == 3
+    assert 'spot_reconnect' not in frozen and 'spot_reconnect_max_gap_ms' not in frozen['policy']
+    frozen['spot_reconnect'] = {'status': 'retained'}
+    with pytest.raises(AssertionError):
+        legacy_record(encode(row, frozen=frozen))
 
 
 def test_other_campaign_is_excluded_only_after_envelope_hash_validation(tmp_path):
@@ -177,14 +225,14 @@ def test_target_between_attempt_and_ack_stays_in_accuracy_but_not_early(tmp_path
 
 def test_intent_only_restart_is_unconfirmed_without_inferred_wire_membership(tmp_path):
     async def scenario():
-        value, _, spool, _, _ = HELPERS['runtime']()
+        value, _, spool, _, _ = legacy_runtime()
         row = HELPERS['issue'](value)
         await value.publish(row)
         intent = next(iter(spool.rows.values()))
-        recovered, _, _, store, redis = HELPERS['runtime']()
+        recovered, _, _, store, redis = legacy_runtime()
         await recovered._recover(intent)
         assert not redis.calls
-        return encode(store.persisted[-1])
+        return legacy_record(store.persisted[-1])
     result = audit(tmp_path, [asyncio.run(scenario())])
     assert result['publication_statuses'] == {'intent': 1}
     assert result['counts']['restart_reconciled_rows'] == 1
@@ -195,7 +243,7 @@ def test_intent_only_restart_is_unconfirmed_without_inferred_wire_membership(tmp
 @pytest.mark.parametrize('fault', ['missing_anchor', 'twap_regression'])
 def test_global_reasons_keep_engine_immediate_expiry(tmp_path, fault):
     async def scenario():
-        value, clock, _, _, _ = HELPERS['runtime']()
+        value, clock, _, _, _ = legacy_runtime()
         if fault == 'missing_anchor':
             value.offer_price('spot', Decimal('100'), HELPERS['BASE'] + 100000,
                               clock.wall, clock.mono, 'spot')
@@ -209,7 +257,7 @@ def test_global_reasons_keep_engine_immediate_expiry(tmp_path, fault):
         await value.publish(row)
         clock.advance(120 * analysis.SECOND)
         value.finalize_due()
-        return encode(row.record())
+        return legacy_record(row.record())
     result = audit(tmp_path, [asyncio.run(scenario())])
     assert result['publication_statuses'] == {'expired_or_target_received': 1}
     assert all(h['counts']['calculated'] == 0 for h in result['horizons'])

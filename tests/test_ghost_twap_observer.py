@@ -18,8 +18,11 @@ BASE = 1_800_000_000_000
 NS = 1_000_000
 
 
-def payload():
-    engine = GhostTwapEngine('test-run', GhostPolicy(enabled=True))
+def primed_engine(*, reconnect_contract=False):
+    policy = {'enabled': True}
+    if 'spot_reconnect_max_gap_ms' in GhostPolicy.__dataclass_fields__:
+        policy['spot_reconnect_max_gap_ms'] = 10000 if reconnect_contract else 0
+    engine = GhostTwapEngine('test-run', GhostPolicy(**policy))
     sequence = 0
     for second in range(-65, 1):
         sequence += 1
@@ -29,8 +32,23 @@ def payload():
     sequence += 1
     engine.accept(PriceEvent('twap', Decimal('100'), BASE, BASE*NS, 100_000*NS,
                              sequence, str(sequence), 60))
+    return engine
+
+
+def payload(*, reconnect_contract=False):
+    # Existing observer-v1 tests must continue to exercise actual v5 bytes,
+    # regardless of the current engine's additive contract fields.
+    engine = primed_engine(reconnect_contract=reconnect_contract)
     row = json.loads(engine.snapshot('1', BASE*NS, 100_000*NS).to_live_json())
-    row.update(runtime_version='ghost-canary-v5', publication_state='attempted',
+    if not reconnect_contract:
+        assert row.pop('spot_reconnect', None) is None
+        assert row['policy'].pop('spot_reconnect_max_gap_ms', 0) == 0
+        row['contract_version'] = 3
+    else:
+        row['contract_version'] = 4
+        row['policy'].setdefault('spot_reconnect_max_gap_ms', 10000)
+        row.setdefault('spot_reconnect', None)
+    row.update(runtime_version='ghost-canary-v6' if reconnect_contract else 'ghost-canary-v5', publication_state='attempted',
                publication_attempt_wall_ns=str(BASE*NS+NS),
                publication_attempt_monotonic_ns=str(100_001*NS),
                publication_eligibility=dict(version=1, checked_wall_ns=str(BASE*NS+NS),
@@ -55,6 +73,131 @@ def test_healthy_payload_and_exact_decimal_price_are_not_target_arrival_claims()
     assert result['payload_valid'] and result['campaign_qualified']
     assert result['usable_horizons'] == list(HORIZONS)
     assert not result['reasons'] and not result['freshness_reasons']
+
+
+def test_legacy_classification_fields_and_v1_reanalysis_label_are_unchanged(tmp_path):
+    result = classify()
+    assert result == dict(payload_valid=True, campaign_qualified=True,
+        eligible_horizons=list(HORIZONS), usable_horizons=list(HORIZONS),
+        reasons=[], freshness_reasons=[], run_id='test-run', decision_id='1', decision_time_ms=BASE)
+    directory = tmp_path/'legacy'
+    run_observer(directory, [(None, -2, 1), (raw_payload(), 1000, 1)])
+    path = directory/'manifest.json'
+    old_manifest = json.loads(path.read_bytes())
+    old_manifest['campaign_membership'] = 'provisional_v5_decision_window_requires_audit_join'
+    path.write_text(json.dumps(old_manifest))
+    summary = analyze(directory)
+    assert summary['version'] == 'ghost-observer-v1'
+    assert summary['campaign_membership'] == old_manifest['campaign_membership']
+    assert summary['full_hour']['usable'] == {str(h): 1 for h in HORIZONS}
+
+
+def test_v6_contract4_is_usable_with_existing_observation_schema(tmp_path):
+    body = raw_payload(payload(reconnect_contract=True))
+    assert classify(body)['usable_horizons'] == list(HORIZONS)
+    directory = tmp_path/'new'
+    run_observer(directory, [(None, -2, 1), (body, 1000, 1)])
+    summary = analyze(directory)
+    assert summary['version'] == 'ghost-observer-v1'
+    assert summary['campaign_membership'] == 'provisional_decision_window_requires_audit_join'
+    assert summary['full_hour']['usable'] == {str(h): 1 for h in HORIZONS}
+
+
+@pytest.mark.parametrize('runtime,contract', [
+    ('ghost-canary-v5', 4), ('ghost-canary-v6', 3), ('ghost-canary-v7', 4),
+    ('ghost-canary-v6', True), ('ghost-canary-v6', '4'),
+])
+def test_only_reviewed_runtime_contract_pairs_are_supported(runtime, contract):
+    p = payload(reconnect_contract=True)
+    p.update(runtime_version=runtime, contract_version=contract)
+    assert not classify(raw_payload(p))['payload_valid']
+
+
+@pytest.mark.parametrize('limit', [True, -1, 10001, '10000'])
+def test_new_contract_reconnect_policy_is_bounded(limit):
+    p = payload(reconnect_contract=True)
+    p['policy']['spot_reconnect_max_gap_ms'] = limit
+    assert not classify(raw_payload(p))['payload_valid']
+
+
+def test_new_contract_requires_explicit_reconnect_snapshot():
+    p = payload(reconnect_contract=True)
+    p.pop('spot_reconnect')
+    assert not classify(raw_payload(p))['payload_valid']
+
+
+def recovery_payload(state='retained'):
+    engine = primed_engine(reconnect_contract=True)
+    sequence = engine.snapshot('before-gap', BASE*NS, 100_000*NS).included_sequence
+    if state == 'cleared':
+        engine.record_gap('spot', 'connection_end')  # Missing gap clocks are explicit.
+    else:
+        engine.record_gap('spot', 'connection_end', observed_wall_ns=(BASE+100)*NS,
+                          observed_monotonic_ns=100_100*NS)
+    when = 200
+    if state in ('retained', 'future_cleared'):
+        source = BASE+1000 if state == 'retained' else BASE+10000
+        engine.accept(PriceEvent('spot', Decimal('101'), source, (BASE+1000)*NS,
+                                 101_000*NS, sequence+1, 'resumed-spot'))
+        when = 1100
+    row = json.loads(engine.snapshot('after-gap', (BASE+when)*NS, (100_000+when)*NS).to_live_json())
+    eligible = [f['horizon_s'] for f in row['forecasts'] if f['price'] is not None]
+    row.update(runtime_version='ghost-canary-v6', publication_state='attempted',
+        publication_attempt_wall_ns=str((BASE+when+1)*NS),
+        publication_attempt_monotonic_ns=str((100_000+when+1)*NS),
+        publication_eligibility=dict(version=1,
+            checked_wall_ns=str((BASE+when+1)*NS), checked_monotonic_ns=str((100_000+when+1)*NS),
+            eligible_horizons=eligible,
+            excluded_horizons={str(f['horizon_s']): f['reasons'] for f in row['forecasts'] if f['price'] is None}))
+    clocks = dict(read_start_wall_ns=(BASE+when+10)*NS, read_end_wall_ns=(BASE+when+11)*NS,
+                  read_start_monotonic_ns=(100_000+when+10)*NS, read_end_monotonic_ns=(100_000+when+11)*NS)
+    return row, clocks
+
+
+def test_retained_recovery_payload_uses_normal_freshness_without_continuity_claim():
+    p, clocks = recovery_payload()
+    assert p['spot_reconnect']['status'] == 'retained'
+    result = classify(raw_payload(p), **clocks)
+    assert result['payload_valid'] and result['usable_horizons'] == list(HORIZONS)
+    assert 'history_complete' not in result and 'recovery_math_verified' not in result
+
+
+@pytest.mark.parametrize('state', ['waiting', 'cleared', 'future_cleared'])
+def test_unavailable_reconnect_states_remain_observable_without_fresh_prices(state):
+    p, clocks = recovery_payload(state)
+    result = classify(raw_payload(p), **clocks)
+    assert result['payload_valid'] and not result['usable_horizons']
+    assert not result['eligible_horizons']
+
+
+@pytest.mark.parametrize('mutation', [
+    lambda p: p['spot_reconnect'].update(status='unknown'),
+    lambda p: p['spot_reconnect'].update(gap_wall_ns=None),
+    lambda p: p['spot_reconnect'].update(previous_spot=None),
+    lambda p: p['spot_reconnect']['first_post_gap_spot'].update(source_timestamp_ms=BASE),
+    lambda p: p['spot_reconnect']['first_post_gap_spot'].update(sequence=1),
+    lambda p: p['spot_reconnect']['previous_spot'].update(value='NaN'),
+    lambda p: p['policy'].update(spot_reconnect_max_gap_ms=0),
+    lambda p: p.update(last_gaps=[]),
+])
+def test_retained_metadata_cannot_bypass_resume_requirements(mutation):
+    p, clocks = recovery_payload()
+    mutation(p)
+    assert not classify(raw_payload(p), **clocks)['payload_valid']
+
+
+def test_waiting_state_cannot_claim_a_current_spot_or_selected_price():
+    p, clocks = recovery_payload('waiting')
+    p['current_spot'] = p['spot_reconnect']['previous_spot']
+    assert not classify(raw_payload(p), **clocks)['payload_valid']
+
+
+def test_recovery_reason_bound_preserves_maximum_hard_gap_reason():
+    p, clocks = recovery_payload('cleared')
+    p['spot_reconnect']['reason'] = 'hard_gap:' + 'x'*256
+    assert classify(raw_payload(p), **clocks)['payload_valid']
+    p['spot_reconnect']['reason'] += 'x'
+    assert not classify(raw_payload(p), **clocks)['payload_valid']
 
 
 @pytest.mark.parametrize('ttl,reason', [(-1, 'no_expiry'), (-2, 'inconsistent_ttl'), (0, 'expiry_boundary_ambiguous'), (1, 'expiry_boundary_ambiguous')])

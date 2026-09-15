@@ -72,8 +72,8 @@ def test_one_received_target_before_publish_preserves_other_five_and_frozen_inpu
     payload = body(row)
     expect_mask(payload, (2, 3, 5, 10, 30), {'1': ['target_received_before_publication']})
     expect_forecast_preservation(row, payload, {1})
-    assert payload['runtime_version'] == 'ghost-canary-v5'
-    assert payload['contract_version'] == 3
+    assert payload['runtime_version'] == 'ghost-canary-v6'
+    assert payload['contract_version'] == 4
     assert int(payload['publication_eligibility']['checked_monotonic_ns']) == clock.mono
     assert row.state['publication']['status'] == 'acknowledged'
     assert value.counters['publication_partial_batches'] == 1

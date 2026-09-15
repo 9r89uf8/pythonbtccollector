@@ -1,0 +1,38 @@
+{
+  "decisions": 414,
+  "events": 413,
+  "files": {
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\research\\spot_twap_response\\reconnect_recovery\\recorded_reconnect_check.py": {
+      "bytes": 17281,
+      "sha256": "385c3361a0b0451b456d61819109d31adfd7c3e6e840a0290e909fd186bf2860"
+    },
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-reconnect-recovery-2026-09-14\\fixture.json": {
+      "bytes": 2215595,
+      "sha256": "06e444dcf63efd66cb17506a918f1326bbf0349c0868209713578221b40c40ca"
+    },
+    "research\\spot_twap_response\\reconnect_recovery\\result_final.json": {
+      "bytes": 26151,
+      "sha256": "10c53d1b3fb7f4a45547da961705f552a7cc375fdcc288c1885fff76f291e066"
+    }
+  },
+  "first_sequence": 1353,
+  "gaps": [
+    {
+      "after_sequence": 1588,
+      "feed": "spot",
+      "observed_monotonic_ns": 5961087685163650,
+      "observed_wall_ns": 1789426057915796688,
+      "reason": "connection_end"
+    }
+  ],
+  "last_sequence": 1765,
+  "missing_sequences": [],
+  "receipt_end_ms": 1789426147919,
+  "receipt_start_ms": 1789425937919,
+  "run_id": "9b3cf7d21f9640de989062ddd4001d5b",
+  "source_audit_sha256": "2353132cbc689a02d6eaf3009d93c6550f9693205ee6978c70c77a3faf51fdc3",
+  "source_rows": 14346,
+  "status": "completed",
+  "version": "recorded-spot-reconnect-v1",
+  "warmup_ms": 65000
+}

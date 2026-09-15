@@ -37,7 +37,9 @@ def scripted_transfer(monkeypatch, content, *, export_code=0, ack=None, manifest
         command = argv[-1].split()[-1]
         assert kwargs['stdout'] != subprocess.PIPE
         assert kwargs['stderr'] != subprocess.PIPE
-        assert 0 < kwargs['timeout'] <= admin.DEFAULT_TRANSFER_TIMEOUT_SECONDS
+        # Subtracting floating monotonic deadlines can round a few picoseconds
+        # above the integer limit. Allow 1 ns; this is not a price calculation.
+        assert 0 < kwargs['timeout'] <= admin.DEFAULT_TRANSFER_TIMEOUT_SECONDS + 1e-9
         calls.append((command, kwargs))
         if command == 'export':
             assert kwargs['stdin'] == subprocess.DEVNULL

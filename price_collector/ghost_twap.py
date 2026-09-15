@@ -2,12 +2,12 @@
 
 Inputs are already accepted canonical Chainlink spot / sixty-second TWAP events.
 The caller supplies one acceptance sequence across both streams and all clocks.
-This module is not imported by any collector or API in checkpoint A.
+The optional collector worker supplies events; this engine has no I/O.
 """
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 import json
 
@@ -15,7 +15,7 @@ from price_collector.market import MarketWindow, market_for_sample_second
 
 HORIZONS = (1, 2, 3, 5, 10, 30)
 MODEL_VERSION = "chainlink-60s-offset3-v1"
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 4
 NS_PER_MS = 1_000_000
 NS_PER_SECOND = 1_000_000_000
 PRICE_QUANTUM = Decimal("0.000000000000000001")
@@ -53,12 +53,17 @@ class GhostPolicy:
     max_carry_ms: int = 10_000
     history_ms: int = 120_000
     max_events: int = 1_024
+    # Zero preserves the old disconnect-reset policy for historical replay.
+    spot_reconnect_max_gap_ms: int = 10_000
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be bool")
         for name in ("source_max_age_ms", "receipt_max_age_ms", "max_carry_ms", "history_ms", "max_events"):
             _integer(getattr(self, name), name, 1)
+        _integer(self.spot_reconnect_max_gap_ms, "spot_reconnect_max_gap_ms")
+        if self.spot_reconnect_max_gap_ms > 10_000:
+            raise ValueError("spot reconnect allowance must not exceed 10000 ms")
         if self.history_ms < 62_000 + self.source_max_age_ms:
             raise ValueError("history must cover the oldest requested slot")
 
@@ -120,6 +125,18 @@ class GapMarker:
 
 
 @dataclass(frozen=True)
+class SpotReconnect:
+    """Bounded evidence for the latest transport gap; never proves continuity."""
+    gap_ordinal: int
+    gap_wall_ns: int | None
+    gap_monotonic_ns: int | None
+    previous_spot: PriceEvent | None
+    first_post_gap_spot: PriceEvent | None
+    status: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class Forecast:
     horizon_s: int
     target_source_timestamp_ms: int | None
@@ -172,8 +189,14 @@ class Decision:
     gap_count: int
     last_gaps: tuple[GapMarker, ...]
     valid_until_wall_ns: int
+    spot_reconnect: SpotReconnect | None
 
     def _record(self) -> dict:
+        reconnect = None
+        if self.spot_reconnect is not None:
+            reconnect = asdict(self.spot_reconnect)
+            reconnect["previous_spot"] = _event_record(self.spot_reconnect.previous_spot)
+            reconnect["first_post_gap_spot"] = _event_record(self.spot_reconnect.first_post_gap_spot)
         forecasts = []
         for forecast in self.forecasts:
             record = asdict(forecast)
@@ -190,6 +213,7 @@ class Decision:
             current_twap=_event_record(self.current_twap),
             forecasts=forecasts, reasons=self.reasons, gap_count=self.gap_count,
             last_gaps=[asdict(gap) for gap in self.last_gaps],
+            spot_reconnect=reconnect,
             valid_until_wall_ns=self.valid_until_wall_ns,
             valid_until_ms=self.valid_until_wall_ns // NS_PER_MS,
             publication_state="not_published",
@@ -216,7 +240,8 @@ class GhostTwapEngine:
     """Single-owner state machine. A snapshot cannot be backdated.
 
     Bad acceptance clock/sequence ordering latches a fault: rebuild a new run to
-    recover. Explicit feed gaps and capacity loss discard coverage and rewarm.
+    recover. Hard loss discards coverage and rewarms. A bounded spot transport
+    reconnect may preserve observed history, with unobserved seconds estimated.
     Source disorder is retained; a TWAP regression needs a strict new high-water
     stamp before forecasts resume. Same-source spot revisions replace history,
     while already frozen decisions keep their original immutable objects.
@@ -238,6 +263,7 @@ class GhostTwapEngine:
         self._last_decision: tuple[int, int] | None = None
         self._gap_count = 0
         self._last_gaps: dict[str, GapMarker] = {}
+        self._spot_reconnect: SpotReconnect | None = None
 
     @property
     def policy(self) -> GhostPolicy:
@@ -247,18 +273,85 @@ class GhostTwapEngine:
     def history_size(self) -> int:
         return len(self._history)
 
-    def record_gap(self, feed: str, reason: str) -> None:
+    @property
+    def spot_reconnect(self) -> SpotReconnect | None:
+        return self._spot_reconnect
+
+    def record_gap(self, feed: str, reason: str, *, observed_wall_ns: int | None = None,
+                   observed_monotonic_ns: int | None = None) -> None:
         if feed not in ("spot", "twap"):
             raise ValueError("unsupported feed")
         _text(reason, "gap reason")
-        self._history = {key: value for key, value in self._history.items() if key[0] != feed}
-        self._current.pop(feed, None)
+        for value, name in ((observed_wall_ns, "gap wall clock"),
+                            (observed_monotonic_ns, "gap monotonic clock")):
+            if value is not None:
+                _integer(value, name)
         self._gap_count += 1
         self._last_gaps[feed] = GapMarker(feed, reason, self._gap_count,
                                          None if self._last_event is None else self._last_event.sequence)
+        retain = False
+        if feed == "spot" and reason == "connection_end":
+            previous = self._current.get("spot")
+            exclusion = "policy_disabled"
+            if self.policy.enabled and self.policy.spot_reconnect_max_gap_ms and not self._fault:
+                exclusion = "missing_gap_clocks"
+                if observed_wall_ns is not None and observed_monotonic_ns is not None:
+                    boundaries = [] if self._last_decision is None else [self._last_decision]
+                    if self._last_event is not None:
+                        boundaries.append((self._last_event.received_wall_ns, self._last_event.received_monotonic_ns))
+                    if any(observed_wall_ns < wall or observed_monotonic_ns < mono for wall, mono in boundaries):
+                        self._fault = "gap_order"
+                        raise ValueError("gap clocks predate accepted data or an issued decision")
+                    invalid = self._current_reasons(previous, "spot", observed_wall_ns, observed_monotonic_ns)
+                    exclusion = invalid[0] if invalid else "pre_gap_source_regression"
+                    frontier = max((source for (kind, source), event in self._history.items()
+                                    if kind == "spot" and source * NS_PER_MS <= event.received_wall_ns), default=None)
+                    retain = not invalid and previous.source_timestamp_ms == frontier
+                    if retain:
+                        exclusion = "awaiting_fresh_advancing_spot"
+            self._spot_reconnect = SpotReconnect(
+                self._gap_count, observed_wall_ns, observed_monotonic_ns,
+                previous, None, "waiting" if retain else "cleared", exclusion)
+        elif feed == "spot" and self._spot_reconnect is not None:
+            self._spot_reconnect = replace(self._spot_reconnect, status="cleared", reason=("hard_gap:" + reason)[:256])
+        if not retain:
+            self._history = {key: value for key, value in self._history.items() if key[0] != feed}
+        self._current.pop(feed, None)
         if feed == "twap":
             self._conflicts.clear()
             self._twap_regressed = self._twap_high_water is not None
+
+    def _reconnect_limit_ns(self) -> int:
+        return min(self.policy.spot_reconnect_max_gap_ms, self.policy.max_carry_ms) * NS_PER_MS
+
+    def _clear_spot_reconnect(self, reason: str, event: PriceEvent | None = None) -> None:
+        self._history = {key: value for key, value in self._history.items() if key[0] != "spot"}
+        self._current.pop("spot", None)
+        self._spot_reconnect = replace(self._spot_reconnect, status="cleared", reason=reason,
+                                       first_post_gap_spot=event)
+
+    def _resolve_spot_reconnect(self, event: PriceEvent) -> None:
+        recovery = self._spot_reconnect
+        if event.feed != "spot" or recovery is None or recovery.status != "waiting":
+            return
+        previous = recovery.previous_spot
+        if (event.received_wall_ns < recovery.gap_wall_ns
+                or event.received_monotonic_ns < recovery.gap_monotonic_ns):
+            self._fault = "gap_order"
+            raise ValueError("post-gap event predates its gap")
+        invalid = self._current_reasons(event, "spot", event.received_wall_ns, event.received_monotonic_ns)
+        source_delta = (event.source_timestamp_ms - previous.source_timestamp_ms) * NS_PER_MS
+        wall_delta = event.received_wall_ns - previous.received_wall_ns
+        mono_delta = event.received_monotonic_ns - previous.received_monotonic_ns
+        if invalid:
+            self._clear_spot_reconnect("post_gap:" + invalid[0], event)
+        elif source_delta <= 0:
+            self._clear_spot_reconnect("source_not_advanced", event)
+        elif max(source_delta, wall_delta, mono_delta) > self._reconnect_limit_ns():
+            self._clear_spot_reconnect("reconnect_limit_exceeded", event)
+        else:
+            self._spot_reconnect = replace(recovery, first_post_gap_spot=event,
+                                           status="retained", reason="bounded_carry_estimates")
 
     def accept(self, event: PriceEvent) -> bool:
         if not isinstance(event, PriceEvent):
@@ -282,6 +375,7 @@ class GhostTwapEngine:
         if previous is not None and event.sequence > previous.sequence + 1:
             self.record_gap("spot", "sequence_gap")
             self.record_gap("twap", "sequence_gap")
+        self._resolve_spot_reconnect(event)
         key = (event.feed, event.source_timestamp_ms)
         old = self._history.get(key)
         if event.feed == "twap":
@@ -339,6 +433,13 @@ class GhostTwapEngine:
         if any(decision_wall_ns < wall or decision_monotonic_ns < mono for wall, mono in boundaries):
             raise ValueError("snapshot cutoff predates already accepted data or an issued decision")
         self._last_decision = (decision_wall_ns, decision_monotonic_ns)
+        recovery = self._spot_reconnect
+        if recovery is not None and recovery.status == "waiting":
+            if (decision_wall_ns < recovery.gap_wall_ns or decision_monotonic_ns < recovery.gap_monotonic_ns):
+                raise ValueError("snapshot cutoff predates a connection gap")
+            if max(decision_wall_ns - recovery.previous_spot.received_wall_ns,
+                   decision_monotonic_ns - recovery.previous_spot.received_monotonic_ns) > self._reconnect_limit_ns():
+                self._clear_spot_reconnect("reconnect_timeout")
         self._prune(decision_wall_ns // NS_PER_MS)
         spot, anchor = self._current.get("spot"), self._current.get("twap")
         reasons: list[str] = []
@@ -413,4 +514,4 @@ class GhostTwapEngine:
                         None if self._last_event is None else self._last_event.sequence,
                         self.policy, spot, anchor, tuple(slots), tuple(forecasts), reason_tuple,
                         self._gap_count, tuple(self._last_gaps[feed] for feed in sorted(self._last_gaps)),
-                        min(deadlines, default=decision_wall_ns))
+                        min(deadlines, default=decision_wall_ns), self._spot_reconnect)

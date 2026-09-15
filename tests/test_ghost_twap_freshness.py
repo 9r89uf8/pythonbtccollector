@@ -163,7 +163,7 @@ def test_history_budget_covers_source_age_and_current_policy_is_explicit():
     decision = snapshot(engine)
     assert all(f.price == Decimal("100") for f in decision.forecasts)
     live, audit = json.loads(decision.to_live_json()), json.loads(decision.to_audit_json())
-    assert live["contract_version"] == audit["contract_version"] == 3
+    assert live["contract_version"] == audit["contract_version"] == 4
     assert live["policy"] == audit["policy"] == asdict(policy)
     assert live["policy"]["max_carry_ms"] == 10_000
     assert "current_max_age_ms" not in live["policy"]

@@ -1,0 +1,75 @@
+{
+  "archived_analyzer": {
+    "matches_frozen_analysis_manifest": true,
+    "path": "research\\spot_twap_response\\combined_canary\\analyze.py",
+    "sha256": "572d46d7beee4b5787cd270dd136b338cc7c7175d736e3364184039e38f8ab04"
+  },
+  "campaign_membership": "provisional_v5_decision_window_requires_audit_join",
+  "comparison": "Exact JSON types, dictionary fields, list ordering and scalar values; no excluded fields",
+  "created_utc": "2026-09-15T00:53:16.890116+00:00",
+  "difference_count": 0,
+  "differences": [],
+  "elapsed_seconds_display": "123.761",
+  "expected_canonical_sha256": "14e7146775290f6c61d90142e42a29e37f19bdb093cbc46dabf9f1a82be8c4c9",
+  "frozen_result_path": "results\\spot_twap_response\\2026-09-14-combined-canary\\observer_analysis.json",
+  "frozen_result_sha256": "08804cd22434ddbaa6d091571980ecaa7f294fa580a851a74160fc03c3fca4a9",
+  "historical_fixtures": [
+    {
+      "artifacts": [
+        {
+          "path": "tests\\fixtures\\ghost_twap\\recorded_hour_decisions.csv.gz",
+          "sha256": "62642b8a450e4fe578597931975cf188d83c5e9041a0863481f520c99e138f4e"
+        },
+        {
+          "path": "tests\\fixtures\\ghost_twap\\recorded_hour_events.csv.gz",
+          "sha256": "26b54a5b91efd163f2cecc02fb529c0e1a563da1227b2c4f0e0f00fbcf226c2f"
+        },
+        {
+          "path": "tests\\fixtures\\ghost_twap\\recorded_hour_expected.csv.gz",
+          "sha256": "fa0829a9295a21a224554930061d289096718350c9b2070326ac658773b103ba"
+        }
+      ],
+      "artifacts_match": true,
+      "generator": "research\\spot_twap_response\\checkpoint_a_replay\\build_fixture.py",
+      "generator_sha256": "4c33afc0eb997976d606629cb4cd1b3805b835b62727c87bd40256404a3ea6b8",
+      "manifest": "tests\\fixtures\\ghost_twap\\manifest.json",
+      "manifest_sha256": "b1bab833229f3bb4505f8d8faa29a47c9a615c85333c03f50eea64c6235a426c"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "tests\\fixtures\\ghost_twap\\pending_v2\\recorded_hour_decisions.csv.gz",
+          "sha256": "62642b8a450e4fe578597931975cf188d83c5e9041a0863481f520c99e138f4e"
+        },
+        {
+          "path": "tests\\fixtures\\ghost_twap\\pending_v2\\recorded_hour_events.csv.gz",
+          "sha256": "26b54a5b91efd163f2cecc02fb529c0e1a563da1227b2c4f0e0f00fbcf226c2f"
+        },
+        {
+          "path": "tests\\fixtures\\ghost_twap\\pending_v2\\recorded_hour_expected.csv.gz",
+          "sha256": "345ff83a5e77e0d1f0695a88f4896e284adc277bc7864e2e47f53bcfc96f828d"
+        }
+      ],
+      "artifacts_match": true,
+      "generator": "research\\spot_twap_response\\checkpoint_a_replay\\build_fixture_pending.py",
+      "generator_sha256": "ec3206cbacb3b7f8b06a4c4cf9eb842d7d73e79ae6cc9ddad574a68d5de264b6",
+      "manifest": "tests\\fixtures\\ghost_twap\\pending_v2\\manifest.json",
+      "manifest_sha256": "81a18e476fdedbb1678934d10ea39d32e34da5b3a6580631e9cdb95c27c1e599"
+    }
+  ],
+  "notes": [
+    "Only this comparison file is new; frozen observer result, source recordings, archived analyzer and fixture bytes were not overwritten.",
+    "Observer analysis revalidated source artifact hashes and raw payload classifications under the updated module."
+  ],
+  "observer_code_sha256": "399c143fb5634f29de50a8e9dc576882a5f83cd38e83766bfe026789346d8963",
+  "observer_directory": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-combined-canary-2026-09-14\\observer",
+  "observer_manifest_sha256": "8c2250c603b9ec14b2159a11233da277e92d1fa3903929633df9d555eeb89cce",
+  "planned_bins": 36000,
+  "python": "3.9.5",
+  "qualified_unique_payloads": 6231,
+  "recomputed_canonical_sha256": "14e7146775290f6c61d90142e42a29e37f19bdb093cbc46dabf9f1a82be8c4c9",
+  "reproduction_command": "python -c \"import json; from pathlib import Path; from price_collector.ghost_twap_observer import analyze; expected=json.loads(Path('results/spot_twap_response/2026-09-14-combined-canary/observer_analysis.json').read_text()); actual=json.loads(json.dumps(analyze(Path('../ghost-combined-canary-2026-09-14/observer')))); assert actual==expected; print('Legacy observer equality passed')\"",
+  "reproduction_working_directory": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release",
+  "status": "passed",
+  "version": "ghost-observer-v1"
+}

@@ -303,3 +303,10 @@
 /GHOST_TWAP_COMBINED_CANARY_RESULTS.md -text
 /GHOST_TWAP_COMBINED_CANARY.md -text
 /results/spot_twap_response/2026-09-14-batch-eligibility/* -text
+
+# Preserve the reconnect contract, regression fixture results and validation.
+/GHOST_TWAP_RECONNECT_CHECKPOINT.md -text
+/research/spot_twap_response/reconnect_recovery/* -text
+/results/spot_twap_response/2026-09-15-reconnect-recovery/* -text
+/tests/test_ghost_twap_reconnect.py -text
+/tests/test_ghost_twap_reconnect_runtime.py -text

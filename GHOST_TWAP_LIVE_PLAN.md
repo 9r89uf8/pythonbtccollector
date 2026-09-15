@@ -1,10 +1,12 @@
 # Live ghost TWAP — implementation plan
 
-**Status: the one-hour B canary is complete and ghost is disabled again.**
-The [official results](GHOST_TWAP_CANARY_RESULTS.md) support the calculation and
-bounded live operation. Median receipt-to-Redis publication was 39.19 ms,
-missing the under-10-ms optimization objective. The 7,292 terminal audit rows
-are externally verified; C's API/SSE and browser delivery checks remain planned.
+**Status: both one-hour B canaries are complete and ghost is disabled again.**
+The [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) support the calculation
+and bounded live operation. Median receipt-to-Redis publication was 38.22 ms,
+missing the under-10-ms optimization objective. The combined campaign's 7,054
+terminal audit rows are externally verified; C's API/SSE and browser delivery
+checks remain planned. The [reconnect recovery checkpoint](GHOST_TWAP_RECONNECT_CHECKPOINT.md)
+implements the next reliability change locally; it has no new live result yet.
 Longer operation still requires a storage review. [A contract](GHOST_TWAP_CHECKPOINT_A.md),
 [B implementation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
 
@@ -12,11 +14,11 @@ The [canary peer-review addendum](GHOST_TWAP_CANARY_REVIEW.md) prioritized fresh
 then whole-batch rejection when a short target arrives, then publication profiling.
 The [freshness/expiry checkpoint](GHOST_TWAP_FRESHNESS_CHECKPOINT.md) now implements
 separate five-second source and three-second wall/monotonic receipt limits with
-consistent expiry. The original three-second canary remains separate evidence;
-new-policy live publication and browser coverage still require validation.
+consistent expiry. The original three-second canary remains separate evidence.
 The subsequent [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
-implements per-horizon selection after the durable write. Publication profiling
-and the next live canary remain outstanding.
+implements per-horizon selection after the durable write. The combined canary
+measured those policies together. Reconnect-policy live validation, publication
+profiling and browser delivery remain outstanding.
 
 
 Build an optional ghost-price worker in the existing Chainlink collector, using its accepted spot and TWAP events. Publish forecasts separately from official TWAP, then expose them through a Redis-only read API after a prospective shadow run.
@@ -24,7 +26,7 @@ Build an optional ghost-price worker in the existing Chainlink collector, using 
 ## V1 output
 
 - Source-stamp horizons **1, 2, 3, 5, 10 and 30 seconds**. Short horizons also serve as reconstruction diagnostics; no fixed error tolerance is promised.
-- Each horizon carries its target source timestamp, estimated local arrival time, predicted Decimal price, quality state and observed/carried/pending/future/missing slot counts (payload contract 3).
+- Each horizon carries its target source timestamp, estimated local arrival time, predicted Decimal price, quality state and observed/carried/pending/future/missing slot counts (payload contract 4).
 - No strike, side call or settlement winner in v1. Each target keeps its calendar market window, using the existing [market helper](price_collector/market.py).
 - Proposed Redis key: `btc:live:ghost_chainlink_twap_60s`. Snapshot: `GET /forecasts/chainlink-twap/live`; primary frontend delivery: SSE at `GET /forecasts/chainlink-twap/stream`.
 - The owner confirmed a frontend on their own computer, accessing the loopback API through a persistent SSH tunnel. Frontend code stays in a separate project; no public API binding or frontend on the droplet.
@@ -66,7 +68,8 @@ Use small nonblocking event offers from the existing [Chainlink collector](price
 
 Trigger refreshes on accepted spot/TWAP events and **publish immediately when idle**. Coalesce only bursts or updates arriving during in-flight work, with a bounded latest-state queue; remove the proposed mandatory 100 ms interval. Keep a separate health/expiry timer. Measure receipt-to-publication latency and skipped updates; freeze any rate cap from those measurements. Never backdate a delayed calculation. Receipt-to-Redis acknowledgement below 10 ms is an initial optimization objective under normal load, not a measured guarantee or a bound during failures.
 
-The current implementation limits below use `ghost-canary-v5` / contract 3.
+The current local implementation uses `ghost-canary-v6` / contract 4. The
+completed combined canary used `ghost-canary-v5` / contract 3.
 The completed first canary used v3 / contract 2 with three seconds for all age
 checks; it is not a prospective validation of the new source-age policy:
 
@@ -77,7 +80,7 @@ checks; it is not a prospective validation of the new source-age policy:
 | Current input freshness | Selected spot/TWAP source age <= 5,000 ms; wall and monotonic receipt ages <= 3,000 ms. Expiry is the earliest source/wall-receipt/monotonic-receipt deadline across both feeds |
 | Historical carry | <= 10,000 ms per slot; expose count and maximum age |
 | Memory | 120 seconds of context plus a necessary bounded seed, with hard event-count/queue caps |
-| Gaps and loss | Invalidate affected windows; record drops/backlog and rebuild coverage before recovery |
+| Gaps and loss | Only a qualified short spot `connection_end` retains observed history; current spot is unavailable until fresh advancing input passes the source/wall/monotonic gap bounds. All inferred slots keep carry limits/labels. Hard loss and other resets clear affected history. See the reconnect contract |
 | First canary | At most one hour for initial capacity measurement, then automatic stop; earlier stop on hard capacity/deadline/integrity guards |
 | Audit retention | Whole decision rows for 96 hours, eligible for expiry only after terminal matching and a verified external export; no indefinite compact-row history |
 | Audit guards | Warn at 1 GiB; stop new ghost decisions at 1.5 GiB, with a 2 GiB total-relation budget; maximum 600,000 decision rows |
