@@ -1,0 +1,6 @@
+{
+  "operator_stop_wall_ns": "1789439578947913370",
+  "state_directory": "/var/lib/price-collector/ghost-c-api-20260915T021552Z",
+  "reason": "checkpoint_c_observation_complete",
+  "flag_enabled": false
+}

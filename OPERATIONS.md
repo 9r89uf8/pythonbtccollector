@@ -31,8 +31,9 @@ listen on public interfaces. Current/live API checks must remain read-only.
 
 ## Ghost TWAP checkpoint B
 
-The optional worker stays inside `price-collector-polymarket-chainlink`. B has
-no ghost HTTP/SSE routes. Its Redis key/channel are separate from official
+The optional worker stays inside `price-collector-polymarket-chainlink`. B adds
+the worker; optional HTTP/SSE routes are covered separately in Checkpoint C below.
+Its Redis key/channel are separate from official
 prices. Read the [checkpoint report](GHOST_TWAP_CHECKPOINT_B.md) before a canary;
 the first capacity canary is limited to one hour, with earlier guard stops.
 Longer validation needs a new storage review; a 72-hour run is not planned with
@@ -167,8 +168,22 @@ matching deadline is late. Frozen forecasts, first matches and terminal missing
 statuses are never replaced by a more favorable later result.
 
 At the end, disable the ghost flag and restart only the Chainlink service to
-reconcile pending audit records. Review shutdown/outbox errors and ensure
-`incomplete_count=0` before exporting. Stop admissions before a final export.
+stop production and request its bounded shutdown drain. A disabled startup does
+**not** create the ghost worker or reconcile retained audit rows. Review
+shutdown/outbox errors and require both an empty outbox and `incomplete_count=0`
+before final export; do not infer completion from a successful service restart.
+
+The completed C observation exposed nested five-second shutdown budgets: the
+optional sink's outer deadline includes worker cancellation plus the runtime's
+separate five-second drain. It expired with 64 nonterminal audit rows and 65
+retained outbox files. A reviewed recovery-only pass resolved that tail with the
+producer disabled, preserving frozen inputs and observed target/publication
+evidence. If this recurs, preserve the exact campaign and outbox, acquire its
+exclusive lock, durably archive it, and use a reviewed campaign-specific recovery
+procedure. Never re-enable forecasts just to clean up audit state, fetch later
+prices to replace missing targets, or reset the campaign. See the
+[C findings and recovery evidence](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md).
+The shutdown-budget fix remains outstanding. Stop admissions before a final export.
 Run this on the **owner's computer** from its B checkout and development Python:
 
 ```powershell
@@ -304,6 +319,13 @@ or browser delivery. A present but unacknowledged write keeps that audit status.
 
 ## Ghost TWAP Checkpoint C
 
+The API was deployed at `5bc676c` and the bounded browser observation has
+completed. The producer is disabled; the API remains enabled and reports
+unavailable while no current publication exists. The
+[findings](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md) record
+the measurements, recovered audit tail and external-export status. The commands
+below remain an installation procedure, not authorization for another campaign.
+
 After the change is pushed to GitHub, install the read-only API with the producer
 disabled. No schema, collector code, service unit or dependency change is needed.
 Keep the API's reader credentials and existing environment entries; add only
@@ -349,7 +371,7 @@ and skipped-update counts as explicit current-state replacement. Event IDs do
 not provide replay. Expire displayed values locally even if no more bytes
 arrive. Do not restart a full `remaining_ns` lifetime at browser receipt.
 
-The first C observation is predeclared in [the C report](GHOST_TWAP_CHECKPOINT_C.md):
+The completed C observation followed [the C report](GHOST_TWAP_CHECKPOINT_C.md):
 15 minutes of browser forecast admissions plus 120 seconds of anchor collection,
 with a fresh directory and unchanged one-hour producer cap. Follow the existing old-campaign export,
 disk, permissions and fixed-start checks. Set only the new state directory,
@@ -358,9 +380,13 @@ browser stops admitting forecasts to its measured cohort but continues reading
 official anchors for 120 seconds. Then disable the producer flag and restart
 the Chainlink service. Editing the environment alone does not stop the running
 worker. The final two minutes of extra audit decisions are outside the browser
-cohort; shutdown records unmatched tail targets explicitly. Verify the stopped
-worker, absent key, terminal audit and externally verified export. Never repoint
-an active process at another campaign to bypass a guard.
+cohort. Shutdown attempts to mark the unmatched tail, but its nested deadline can
+leave retained rows; use the recovery checks above rather than assuming a
+disabled restart reconciles them. Verify the stopped worker, absent key, empty
+outbox, terminal audit and externally verified export. Never repoint an active
+process at another campaign to bypass a guard. Another run needs separate
+authorization; ongoing forecast production also requires the shutdown-budget fix and a
+reviewed capacity/retention policy.
 
 ## Deploy compact Polymarket evidence
 

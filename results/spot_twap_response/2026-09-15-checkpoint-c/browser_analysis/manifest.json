@@ -1,0 +1,12 @@
+{
+  "artifacts_sha256": {
+    "report.md": "902a58ce425f34b4fd5e4aaeb6b32187721cef0a56f18c7190df510b17611c39",
+    "summary.json": "0b1c2620ff01f9ec4c5a18d36cec8678e09ace9e868ffe9a37f82357a2eeb30a"
+  },
+  "code_sha256": "5c706179413205512fbae4635ac3a78ce3f439c0f321ce1dbbb0ffcf9bae82d5",
+  "source_bytes": 793169,
+  "source_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\results\\spot_twap_response\\2026-09-15-checkpoint-c\\browser.jsonl.gz",
+  "source_sha256": "1f15469f371fb345407384701c29f0860a4f3302a8a5d855c9f271ba3a46729b",
+  "status": "accepted",
+  "version": "ghost-browser-analysis-v1"
+}

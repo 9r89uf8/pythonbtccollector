@@ -340,3 +340,48 @@ def test_invalid_gzip_capture_cannot_publish_an_accepted_manifest(tmp_path, inva
     with pytest.raises(InvalidCapture, match='could not be read completely'):
         write_results(path, tmp_path/'invalid-analysis')
     assert not (tmp_path/'invalid-analysis').exists()
+
+
+def api_clocks(record, *, read='900000000000', fanout='900002000000', send='900002500000'):
+    return mutate(record, lambda e: e['api'].update(read_monotonic_ns=read,
+        fanout_monotonic_ns=fanout, send_monotonic_ns=send))
+
+
+def test_api_delivery_metrics_use_unique_envelopes_and_only_same_api_differences(tmp_path):
+    first = api_clocks(ghost(100))
+    duplicate = deepcopy(first)
+    duplicate['browser_ms'] = 200
+    # An unrelated API clock origin produces the same 2 ms and 0.5 ms intervals.
+    second = api_clocks(ghost(300, decision=2, instance='api-b'), read='1', fanout='2000001', send='2500001')
+    result = analyze_capture(capture(tmp_path, [first, duplicate, second]))['api_delivery']
+    assert result['unique_fresh_envelopes'] == result['valid_metadata_envelopes'] == 2
+    assert result['duplicate_fresh_envelopes'] == 1 and result['invalid_metadata_envelopes'] == 0
+    assert Decimal(result['read_to_fanout_ms']['median']) == 2
+    assert Decimal(result['fanout_to_send_ms']['p99']) == Decimal('0.5')
+
+
+def test_invalid_api_clock_metadata_is_counted_without_dropping_capture(tmp_path):
+    missing = ghost(10)
+    negative = api_clocks(ghost(20, decision=2), read='10', fanout='9', send='11')
+    invalid = api_clocks(ghost(30, decision=3), read=True)
+    result = analyze_capture(capture(tmp_path, [missing, negative, invalid]))
+    assert horizon(result)['admitted'] == 3
+    delivery = result['api_delivery']
+    assert delivery['unique_fresh_envelopes'] == delivery['invalid_metadata_envelopes'] == 3
+    assert delivery['invalid_metadata_reasons'] == {'invalid_clock': 1, 'missing_clock': 1, 'negative_interval': 1}
+    assert delivery['read_to_fanout_ms']['median'] is None
+
+
+def test_snapshot_abort_and_sse_error_counts_are_separate_without_invented_latencies(tmp_path):
+    rows = [dict(kind='snapshot', start_ms=100, end_ms=400, status=200, server_time_ns=None, data=None),
+        dict(kind='error', browser_ms=3500, reason='snapshot_error', message='AbortError: signal is aborted without reason'),
+        dict(kind='error', browser_ms=6600, reason='snapshot_error', message='TimeoutError: operation timed out'),
+        dict(kind='error', browser_ms=6700, reason='eventsource_error', ready_state=0)]
+    result = analyze_capture(capture(tmp_path, rows))
+    assert result['connection_errors'] == 1
+    assert result['record_counts']['error'] == 3
+    snapshots = result['snapshots']
+    assert snapshots['error_count'] == 2 and snapshots['aborted_request_count'] == 1
+    assert snapshots['explicit_timeout_error_count'] == 1
+    assert snapshots['completed_http_responses'] == snapshots['full_response_ms']['n'] == 1
+    assert Decimal(snapshots['full_response_ms']['median']) == 300

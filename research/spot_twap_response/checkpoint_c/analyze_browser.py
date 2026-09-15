@@ -27,6 +27,7 @@ LIMITATIONS = [
     'Server remaining lifetime is not a new TTL at browser receipt; this analysis does not certify browser display freshness.',
     'Positive lead among matched pairs is guaranteed by excluding targets already observed at forecast receipt.',
     'GET snapshots are timing diagnostics only and never substitute for SSE target anchors.',
+    'The post_warmup panel begins at warmup_ms after browser capture start; it does not certify that producer history has warmed up.',
     'Accuracy is conditional on observed, nonconflicting, later targets; it is not a trading or settlement result.',
 ]
 
@@ -302,6 +303,32 @@ def _probe_panel(probes, lower, upper):
         by_horizon=by_horizon)
 
 
+def _delivery_metrics(envelopes, duplicate_count):
+    invalid = Counter()
+    read_to_fanout, fanout_to_send = [], []
+    for api in envelopes.values():
+        fields = ('read_monotonic_ns', 'fanout_monotonic_ns', 'send_monotonic_ns')
+        if any(api.get(field) is None for field in fields):
+            invalid['missing_clock'] += 1
+            continue
+        try:
+            read, fanout, send = (ns(api[field], field) for field in fields)
+        except InvalidCapture:
+            invalid['invalid_clock'] += 1
+            continue
+        if not read <= fanout <= send:
+            invalid['negative_interval'] += 1
+            continue
+        read_to_fanout.append(Decimal(fanout-read)/1_000_000)
+        fanout_to_send.append(Decimal(send-fanout)/1_000_000)
+    return dict(unique_fresh_envelopes=len(envelopes), duplicate_fresh_envelopes=duplicate_count,
+        valid_metadata_envelopes=len(read_to_fanout), invalid_metadata_envelopes=sum(invalid.values()),
+        invalid_metadata_reasons=dict(sorted(invalid.items())),
+        read_to_fanout_ms=distribution(read_to_fanout), fanout_to_send_ms=distribution(fanout_to_send),
+        sample_unit='First browser receipt of each non-null envelope per (API instance_id, sequence), across the complete capture.',
+        clock_domain='Read, fanout, and send monotonic timestamps from the same API instance only; no producer or browser clock subtraction.')
+
+
 def analyze_capture(path, *, observation_ms=None, drain_ms=None, warmup_ms=65_000):
     """Read a complete immutable capture and return a JSON-safe summary."""
     with localcontext() as context:
@@ -324,11 +351,14 @@ def _analyze_capture(path, *, observation_ms, drain_ms, warmup_ms):
     kinds, states, api_reasons = Counter(), Counter(), Counter()
     rows, anchors, decisions, runs, instances = [], {}, {}, set(), set()
     probes, load_events = [], []
+    delivery_envelopes, duplicate_delivery = {}, 0
     start = end = previous = None
     connection = 0
     skips = {}
     skipped_total = resyncs = duplicates = outside_anchors = 0
     snapshots, durations = Counter(), []
+    error_reasons = Counter()
+    snapshot_aborts = snapshot_timeouts = 0
     first_snapshot = last_snapshot = None
     record_count = 0
     opener = gzip.open if path.suffix.lower() == '.gz' else open
@@ -367,6 +397,14 @@ def _analyze_capture(path, *, observation_ms, drain_ms, warmup_ms):
                 end = browser
             elif kind == 'open':
                 connection += 1
+            elif kind == 'error':
+                reason = text(record.get('reason', 'eventsource_error'), 'capture error reason')
+                error_reasons[reason] += 1
+                if reason == 'snapshot_error':
+                    message = record.get('message', '')
+                    require(isinstance(message, str), 'invalid snapshot error message')
+                    snapshot_aborts += int(message.startswith('AbortError:'))
+                    snapshot_timeouts += int(message.startswith('TimeoutError:'))
             elif kind == 'probe':
                 calibrated = record['calibrated']
                 require(type(calibrated) is bool, 'invalid probe calibration flag')
@@ -407,6 +445,11 @@ def _analyze_capture(path, *, observation_ms, drain_ms, warmup_ms):
                 skips[skip_key] = api['skipped_updates']
                 if identity is None:
                     continue
+                delivery_key = (api['instance_id'], api['sequence'])
+                if delivery_key in delivery_envelopes:
+                    duplicate_delivery += 1
+                else:
+                    delivery_envelopes[delivery_key] = api
                 run, decision, signature = identity
                 runs.add(run)
                 if anchor is not None:
@@ -436,14 +479,21 @@ def _analyze_capture(path, *, observation_ms, drain_ms, warmup_ms):
         capture_start_browser_ms=start, capture_end_browser_ms=end, capture_elapsed_ms=end-start,
         observation_ms=observation_ms, drain_ms=drain_ms, warmup_ms=warmup_ms,
         admission_interval='[start, start + observation_ms)', anchor_interval='[start, start + observation_ms + drain_ms]',
-        record_counts=dict(sorted(kinds.items())), connects=kinds['open'], connection_errors=kinds['error'],
+        record_counts=dict(sorted(kinds.items())), connects=kinds['open'], connection_errors=error_reasons['eventsource_error'],
+        error_reasons=dict(sorted(error_reasons.items())),
+        other_errors=sum(value for key, value in error_reasons.items() if key not in ('eventsource_error', 'snapshot_error')),
         api_states=dict(sorted(states.items())), api_reasons=dict(sorted(api_reasons.items())),
         api_instances=sorted(instances), resync_envelopes=resyncs, skipped_updates=skipped_total,
         duplicate_producer_envelopes=duplicates, producer_run_count=len(runs), runs=per_run,
         unique_exact_anchor_stamps=len(anchors), conflicting_anchor_stamps=sum(len(v['values']) > 1 for v in anchors.values()),
         anchor_observations_after_drain_ignored=outside_anchors,
         snapshots=dict(status_counts=dict(sorted(snapshots.items())), full_response_ms=distribution(durations),
-                       first_elapsed_ms=first_snapshot, last_elapsed_ms=last_snapshot),
+                       first_elapsed_ms=first_snapshot, last_elapsed_ms=last_snapshot,
+                       completed_http_responses=sum(snapshots.values()), error_count=error_reasons['snapshot_error'],
+                       aborted_request_count=snapshot_aborts, explicit_timeout_error_count=snapshot_timeouts,
+                       error_timing='Failed GET records have no request-start clock; no duration is reconstructed. '
+                                    'AbortError identifies abortion; a timeout cause requires the capture instrument evidence.'),
+        api_delivery=_delivery_metrics(delivery_envelopes, duplicate_delivery),
         all_admissions=_panel(rows, anchors, Decimal(0), Decimal(observation_ms)),
         post_warmup=_panel(rows, anchors, Decimal(warmup_ms), Decimal(observation_ms)),
         quantiles='Linear interpolation at (n-1)*p, Decimal precision 80; no financial float conversion.',
@@ -469,10 +519,15 @@ def _report(summary):
     lines = ['# Browser delivery canary', '',
         'Complete capture: ' + str(summary['record_count']) + ' records, ' + summary['capture_elapsed_ms'] + ' ms.', '',
         'Browser lead is handler receipt of the exact target minus handler receipt of its forecast. '
-        'It is separate from collector receipt and Redis acknowledgement.', '']
-    for key, label in (('all_admissions', 'All admissions'), ('post_warmup', 'After 65-second warmup')):
-        if key == 'post_warmup':
-            label = 'After ' + str(summary['warmup_ms']) + ' ms warmup'
+        'It is separate from collector receipt and Redis acknowledgement.', '',
+        'SSE connection errors: ' + str(summary['connection_errors']) + '. Failed GETs: '
+        + str(summary['snapshots']['error_count']) + ' (' + str(summary['snapshots']['aborted_request_count']) + ' AbortError records).', '',
+        'API timing uses ' + str(summary['api_delivery']['valid_metadata_envelopes']) + ' unique envelopes with valid clocks; '
+        + str(summary['api_delivery']['invalid_metadata_envelopes']) + ' have missing or invalid timing metadata. '
+        'Median read→fanout: ' + str(summary['api_delivery']['read_to_fanout_ms']['median']) + ' ms; '
+        'median fanout→send: ' + str(summary['api_delivery']['fanout_to_send_ms']['median']) + ' ms.', '']
+    cutoff_label = 'After the first ' + str(summary['warmup_ms']) + ' ms of browser capture'
+    for key, label in (('all_admissions', 'All admissions'), ('post_warmup', cutoff_label)):
         lines += ['## ' + label, '', '| Horizon | Admitted | Matched | Censored | Median lead ms | Median absolute error USD |',
                   '|---:|---:|---:|---:|---:|---:|']
         for row in summary[key]:
@@ -484,7 +539,7 @@ def _report(summary):
         lines += ['## Browser probe coverage', '',
                   'Usability includes unknown and missing planned slots in its denominator. '
                   'These are recorded point observations, not continuous-availability measurements.', '',
-                  '| Horizon | Post-warmup usable | Unknown | Planned | Usable fraction |',
+                  '| Horizon | Usable after the initial browser cutoff | Unknown | Planned | Usable fraction |',
                   '|---:|---:|---:|---:|---:|']
         for row in summary['probes']['post_warmup']['by_horizon']:
             lines.append('| ' + ' | '.join(str(row[key]) for key in (

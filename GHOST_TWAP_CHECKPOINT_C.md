@@ -1,8 +1,10 @@
 # Checkpoint C: Redis-only ghost delivery
 
-Status: implemented and locally verified; live validation is pending. The full
+Status: deployed at `5bc676c` and the bounded browser observation is complete.
+The producer is disabled again; the read-only API remains enabled. The full local
 suite passed 1,517 tests with 10 opt-in datastore skips. The collector remains the
-only forecast producer. No new live result is claimed by this document yet.
+only forecast producer. [Completed observations, limitations and export status](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
+are recorded separately; this short run does not approve ongoing forecast production.
 
 ## Delivery contract
 
@@ -54,16 +56,32 @@ to the earliest possible browser deadline. Invalidate that calibration on wall
 clock discontinuity or an incompatible later bracket. Browser delivery lead is
 measured independently with `performance.now()` and needs no wall-clock offset.
 
-## Predeclared live verification
+## Completed bounded verification
 
-After deterministic tests and deployment with the producer disabled, run a
-**15-minute** browser forecast cohort with a fresh state directory, followed by
-120 seconds of continued anchor collection. The producer runs for at most
-17 minutes before operator shutdown; the existing one-hour hard cap remains
-unchanged. Forecasts admitted during the final two minutes remain audited but
-are outside the browser accuracy/lead cohort. Shutdown explicitly marks any
-remaining unmatched tail targets, without pretending they were observed.
-No old campaign directory, stop latch or audit record is reset or removed.
+After deterministic tests and deployment with the producer disabled, the run
+used a **15-minute** browser forecast cohort with a fresh state directory,
+followed by 120 seconds of continued anchor collection. Operator shutdown was
+scheduled after about 17 minutes; the runtime's one-hour hard cap was unchanged.
+Actual observation and stop clocks are retained in the findings. Forecasts
+admitted during follow-through remain audited outside the browser cohort. No old
+campaign directory, stop latch or audit record was reset or removed.
+
+The early stop exposed a shutdown-budget limitation. `_OptionalGhostSink.close`
+allows five seconds for `GhostRuntime.close`, which first joins its workers and
+then allows up to another five seconds for its own audit drain. The outer budget
+can expire before that work finishes. The journal recorded
+`ghost_optional_shutdown_incomplete`; 64 audit rows remained nonterminal and 65
+outbox files remained, including one already-terminal record. SIGTERM did invoke
+cleanup, but it did not complete the drain.
+
+A bounded, publication-free recovery pass has now reconciled that tail using the
+existing recovery path, after locking and archiving the exact campaign outbox.
+It preserved frozen inputs, existing target matches and acknowledged publication
+evidence; unresolved targets were marked `restart_unmatched`, not filled from
+later data. The producer stayed disabled and no Redis publication or new forecast
+was issued. Disabled collector startup does not run this recovery automatically.
+External export status remains recorded with the findings. Ongoing forecast production
+requires a shutdown-budget fix and a reviewed capacity/retention policy.
 
 Use the owner's browser through the SSH tunnel. Instrument EventSource on the
 forwarded API origin, without adding frontend assets or broad CORS on the
@@ -74,14 +92,15 @@ browser. Unobserved, already-received or conflicted anchors are censored, not
 substituted by a later target. Report matched/censored denominators and
 median/p90/p99 browser lead by horizon, separately from collector/Redis lead.
 
-Record API reconnects, skipped updates, expiry/availability, snapshot timing and
-payload hashes. Exercise one bounded concurrent GET load and second slow client
-without fault-injecting production Redis or the collector. The isolated tests
-cover reconnect/run replacement/send stalls. Preserve audit output and verify
-its external export, then disable the producer, check the empty outbox and fresh
-official source feeds. This short observation does not establish permanent
-operation or prove the reconnect-retention path unless a qualifying disconnect
-actually occurs.
+The capture records API reconnects, skipped updates, expiry/availability,
+snapshot timing and payload hashes. It included a bounded concurrent GET load
+and a second unread stream, without fault-injecting production Redis or the
+collector. Isolated tests cover reconnect/run replacement/send stalls; an unread
+browser stream alone does not prove server send backpressure occurred. Stop
+admissions and reconcile any retained tail before final export, then verify the
+external export, empty outbox and fresh official source feeds. This short
+observation does not establish permanent operation or prove reconnect retention
+unless a qualifying disconnect actually occurs.
 
 Publication profiling remains a separate checkpoint. This delivery change does
 not relax durable-before-publication ordering or claim the 10 ms producer target

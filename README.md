@@ -902,14 +902,18 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-Both one-hour live canaries are complete; ghost is disabled again. The latest
-[combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) show post-warm-up sampled
+Both one-hour live canaries and the bounded C browser observation are complete.
+The producer is disabled again; the Redis-only API remains enabled at deployment
+`5bc676c`. The [C findings](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
+record browser delivery, limitations and the audit/export status.
+
+The historical [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) show post-warm-up sampled
 key coverage of 99.632%, five-second forecast usability of 98.003%, and 314
 partial batches retained by the new publication rule. Median publication latency
 was 38.22 ms, still above the 10 ms objective. A spot reconnect required history
-rebuilding. The [first run](GHOST_TWAP_CANARY_RESULTS.md) retains separate evidence;
-The [Checkpoint C report](GHOST_TWAP_CHECKPOINT_C.md) tracks the optional
-Redis-only API/SSE implementation and its separate browser validation.
+rebuilding. The [first run](GHOST_TWAP_CANARY_RESULTS.md) retains separate evidence.
+The [Checkpoint C report](GHOST_TWAP_CHECKPOINT_C.md) describes the implemented
+Redis-only API/SSE contract and completed bounded browser validation.
 
 The [reconnect recovery checkpoint](GHOST_TWAP_RECONNECT_CHECKPOINT.md) adds
 runtime `ghost-canary-v6` / contract 4. A short spot connection end can retain
@@ -920,8 +924,9 @@ queue loss and other integrity failures keep the clear-and-rebuild behavior.
 Every explicit gap fences older pending publications before their Redis attempt.
 This revision was pushed and installed with ghost disabled on September 15 UTC;
 see the [deployment verification](results/spot_twap_response/2026-09-15-reconnect-deployment/README.md).
-A new live recovery measurement has not been run. Both completed canaries retain
-their original versioned evidence.
+C used this deployed revision; a live recovery claim still requires an observed
+qualifying disconnect. The completed B canaries retain their original versioned
+evidence.
 
 `price_collector/ghost_twap.py` provides an optional pure Decimal engine for
 1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
@@ -942,8 +947,17 @@ a bounded fsynced disk outbox, and one PostgreSQL `ghost_twap_audit` table.
 It publishes only `btc:live:ghost_chainlink_twap_60s` and its dedicated update
 channel. The existing source keys and official TWAP remain unchanged. Full
 frozen slot evidence precedes any possible publication; results and publication
-acknowledgements are audited separately. Restart reconciles unfinished audit
-records and warms from new live inputs.
+acknowledgements are audited separately. An enabled-worker startup reconciles
+unfinished audit records and warms from new live inputs; a disabled startup does
+not run ghost recovery.
+
+C's early operator stop exposed nested five-second shutdown budgets. Cleanup was
+invoked but its outer deadline expired, leaving 64 nonterminal audit rows and 65
+outbox files, including one terminal record. A reviewed, publication-free
+recovery pass resolved that tail while preserving frozen inputs and observed
+target/publication evidence. The producer remained disabled. Ongoing forecast production
+requires a shutdown-budget fix and a reviewed capacity/retention policy; a
+successful service restart alone is not evidence of a drained outbox.
 
 The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
 adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after
@@ -958,7 +972,8 @@ the combined policy's cache coverage. Its bounded operational observer,
 never imported or started by a collector. It samples at 100 ms for one fixed
 hour, retaining exact payload bytes and explicit missing observations. Offline
 research scoring verifies attempted membership and joins those bytes to the
-campaign audit. These are local cache measurements; browser delivery remains C.
+campaign audit. These are local cache measurements; C records separate browser
+delivery measurements.
 
 The first canary requires an explicit fixed start time and stops new decisions
 after at most one hour, at 1.5 GiB of audit relations, at 600,000 decisions, or
@@ -969,8 +984,10 @@ complete longer validation. Verified external export is required before
 [operating procedure](OPERATIONS.md#ghost-twap-checkpoint-b).
 
 Checkpoint C adds `GET /forecasts/chainlink-twap/live` and
-`GET /forecasts/chainlink-twap/stream` behind `GHOST_TWAP_API_ENABLED=false` in the
-API environment. The snapshot performs one Redis GET and returns the original
+`GET /forecasts/chainlink-twap/stream` behind the API flag
+`GHOST_TWAP_API_ENABLED`, which defaults to false. The deployed API is currently
+enabled and reports unavailable while the producer is off. The snapshot performs
+one Redis GET and returns the original
 JSON bytes with request-time clock headers. The SSE stream shares one subscriber,
 resyncs current state after reconnect, expires stale values, and isolates slow
 clients with bounded queues and send deadlines. It carries delivery metadata in
@@ -981,7 +998,7 @@ and use `no-store, no-transform`. Existing source routes retain their behavior.
 Use the API only through an SSH tunnel; no frontend assets are installed on the
 droplet. Browser clients must enforce expiry independently when a tunnel stalls,
 using a conservative clock bracket rather than assuming server and browser wall
-clocks match. See [the delivery contract and validation plan](GHOST_TWAP_CHECKPOINT_C.md)
+clocks match. See [the delivery contract and completed observation](GHOST_TWAP_CHECKPOINT_C.md)
 and [deployment instructions](OPERATIONS.md#ghost-twap-checkpoint-c).
 Ghost values are forecasts, not official settlement prices or demonstrated
 trading signals. Enabling the API does not enable the bounded producer campaign.
