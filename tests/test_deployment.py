@@ -56,7 +56,7 @@ def test_collector_env_example_contains_writer_credentials_only():
         "wss://fstream.binance.com/market/ws/btcusdt@forceOrder"
         in lines
     )
-    assert "BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30" in lines
+    assert "BINANCE_MICROSTRUCTURE_RETENTION_DAYS=10" in lines
     assert "BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=600" in lines
     assert "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096" in lines
     assert "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144" in lines
@@ -140,6 +140,7 @@ def test_deployment_contains_only_active_runtime_units():
 
     assert unit_names == {
         "price-api.service",
+        "price-collector-retention.service",
         "price-collector.service",
         "price-collector-binance-futures.service",
         "price-collector-polymarket-chainlink.service",

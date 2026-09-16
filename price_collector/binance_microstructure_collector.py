@@ -39,6 +39,7 @@ from price_collector.collector import (
 from price_collector.db import epoch_ms_to_utc_datetime
 from price_collector.live_cache import MICROSTRUCTURE_LIVE_KEY
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.retention_policy import HISTORY_RETENTION_DAYS
 
 
 LOGGER = logging.getLogger("price_collector.binance_microstructure_collector")
@@ -538,7 +539,8 @@ async def delete_expired_microstructure_rows(
     now_ms: int,
     retention_days: int,
 ) -> Any:
-    cutoff_ms = now_ms - retention_days * MILLISECONDS_PER_DAY
+    effective_retention_days = min(retention_days, HISTORY_RETENTION_DAYS)
+    cutoff_ms = now_ms - effective_retention_days * MILLISECONDS_PER_DAY
     async with pool.acquire() as connection:
         return await connection.execute(
             """
@@ -701,6 +703,9 @@ async def microstructure_persistence_loop(
     last_retention_day: Optional[int] = None
     last_retention_attempt_minute: Optional[int] = None
     last_size_check_minute: Optional[int] = None
+    retention_days = min(
+        settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS, HISTORY_RETENTION_DAYS
+    )
 
     while True:
         finalized = await persistence_rows.get()
@@ -712,18 +717,19 @@ async def microstructure_persistence_loop(
             utc_day = maintenance_ms // MILLISECONDS_PER_DAY
             utc_minute = maintenance_ms // 60_000
             if (
-                utc_day != last_retention_day
+                retention_days < HISTORY_RETENTION_DAYS
+                and utc_day != last_retention_day
                 and utc_minute != last_retention_attempt_minute
             ):
+                # The separate bounded worker owns the ten-day policy. Only
+                # explicitly shorter local retention runs in this collector.
                 last_retention_attempt_minute = utc_minute
                 try:
                     result = await delete_expired_microstructure_rows(
                         pool,
                         symbol=settings.BINANCE_FUTURES_SYMBOL,
                         now_ms=maintenance_ms,
-                        retention_days=(
-                            settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS
-                        ),
+                        retention_days=retention_days,
                     )
                     LOGGER.info(
                         "binance_microstructure_retention_completed",
@@ -732,9 +738,7 @@ async def microstructure_persistence_loop(
                                 "binance_microstructure_retention_completed"
                             ),
                             "result": result,
-                            "retention_days": (
-                                settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS
-                            ),
+                            "retention_days": retention_days,
                         },
                     )
                     last_retention_day = utc_day

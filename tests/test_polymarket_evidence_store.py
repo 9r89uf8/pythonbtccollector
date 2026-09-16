@@ -106,8 +106,8 @@ class MemoryPool:
         self.statements.append(sql)
         if "WITH candidates AS" in sql:
             connections = sorted({row[0] for row in self.quotes.values()})
-            if args:
-                connections = [connection_id for connection_id in connections if connection_id > args[0]]
+            if len(args) > 1:
+                connections = [connection_id for connection_id in connections if connection_id > args[1]]
             scanned = []
             for connection_id in connections[:128]:
                 latest = max((row for row in self.quotes.values() if row[0] == connection_id),

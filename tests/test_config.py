@@ -343,7 +343,7 @@ def test_settings_include_binance_futures_defaults(monkeypatch):
     assert settings.BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS == 100_000
     assert settings.BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS == 600
     assert settings.BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS == 250
-    assert settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS == 30
+    assert settings.BINANCE_MICROSTRUCTURE_RETENTION_DAYS == 10
     assert settings.BINANCE_MICROSTRUCTURE_WARN_RELATION_MB == 4_096
     assert settings.BINANCE_MICROSTRUCTURE_MAX_RELATION_MB == 6_144
 

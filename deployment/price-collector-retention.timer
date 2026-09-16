@@ -1,0 +1,11 @@
+[Unit]
+Description=Run bounded collector history retention after boot and each minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=1s
+Unit=price-collector-retention.service
+
+[Install]
+WantedBy=timers.target

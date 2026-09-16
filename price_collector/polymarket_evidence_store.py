@@ -3,7 +3,7 @@
 The metadata and sampled-quote writers are independent of each other and of
 the collector's socket reader.  Bounded queues never evict accepted records.
 When new records cannot be accepted, bounded loss summaries make that coverage
-gap explicit.  There is deliberately no automatic deletion of study evidence.
+gap explicit.  The independent history-retention worker expires old evidence.
 An in-memory queue is not a crash-safe spool: unfinished durable sessions are
 recovered as unclean gaps on the next start.
 """
@@ -24,6 +24,7 @@ from typing import Any, Mapping, Optional, Sequence
 from uuid import UUID, uuid4, uuid5
 
 from price_collector.market import MARKET_MS, market_for_sample_second
+from price_collector.retention_policy import retained_market_floor_ms
 
 
 LOGGER = logging.getLogger("price_collector.polymarket_evidence_store")
@@ -261,6 +262,7 @@ LEFT JOIN LATERAL (
     ORDER BY observed_wall_ns DESC LIMIT 1
 ) latest ON TRUE
 WHERE opened.kind = 'session_start'
+  AND opened.market_id >= $1::bigint
   AND NOT EXISTS (
     SELECT 1 FROM polymarket_market_observations ended
     WHERE ended.connection_id = opened.connection_id AND ended.kind = 'session_end'
@@ -284,6 +286,7 @@ JOIN LATERAL (
     SELECT market_id, observed_wall_ns, received_wall_ns, receive_sequence
     FROM polymarket_quote_observations quote
     WHERE quote.connection_id = candidate.connection_id
+      AND quote.market_id >= $1::bigint
     ORDER BY observed_wall_ns DESC LIMIT 1
 ) latest ON TRUE
 ORDER BY candidate.connection_id
@@ -291,13 +294,14 @@ ORDER BY candidate.connection_id
 _ORPHAN_SCAN_FIRST_SQL = """
 WITH candidates AS (
     SELECT DISTINCT connection_id FROM polymarket_quote_observations
+    WHERE market_id >= $1::bigint
     ORDER BY connection_id LIMIT 128
 )
 """ + _ORPHAN_SCAN_RESULT_SQL
 _ORPHAN_SCAN_NEXT_SQL = """
 WITH candidates AS (
     SELECT DISTINCT connection_id FROM polymarket_quote_observations
-    WHERE connection_id > $1::uuid
+    WHERE market_id >= $1::bigint AND connection_id > $2::uuid
     ORDER BY connection_id LIMIT 128
 )
 """ + _ORPHAN_SCAN_RESULT_SQL
@@ -543,9 +547,10 @@ class EvidenceWriter:
                 await asyncio.sleep(min(0.25 * (2 ** min(attempt - 1, 6)), 10.0))
 
     async def _recover_sessions(self) -> None:
+        retained_market_id = retained_market_floor_ms(time.time_ns() // 1_000_000) // MARKET_MS
         while True:
             async def fetch(connection: Any) -> Any:
-                return await connection.fetch(_RECOVERY_SQL)
+                return await connection.fetch(_RECOVERY_SQL, retained_market_id)
             rows = await self._transaction(fetch)
             if not rows:
                 break
@@ -557,8 +562,8 @@ class EvidenceWriter:
         while True:
             async def scan(connection: Any) -> Any:
                 if cursor is None:
-                    return await connection.fetch(_ORPHAN_SCAN_FIRST_SQL)
-                return await connection.fetch(_ORPHAN_SCAN_NEXT_SQL, cursor)
+                    return await connection.fetch(_ORPHAN_SCAN_FIRST_SQL, retained_market_id)
+                return await connection.fetch(_ORPHAN_SCAN_NEXT_SQL, retained_market_id, cursor)
             rows = await self._transaction(scan)
             if not rows:
                 return

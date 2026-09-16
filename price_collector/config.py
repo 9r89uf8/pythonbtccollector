@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from price_collector.market import MARKET_MS
+from price_collector.retention_policy import HISTORY_RETENTION_DAYS
 
 
 TWAP_60S_CUTOVER_MS = 1_786_665_600_000
@@ -114,7 +115,9 @@ class Settings(BaseSettings):
         gt=0,
         le=250,
     )
-    BINANCE_MICROSTRUCTURE_RETENTION_DAYS: int = Field(default=30, ge=1)
+    BINANCE_MICROSTRUCTURE_RETENTION_DAYS: int = Field(
+        default=HISTORY_RETENTION_DAYS, ge=1
+    )
     BINANCE_MICROSTRUCTURE_WARN_RELATION_MB: int = Field(default=4_096, gt=0)
     BINANCE_MICROSTRUCTURE_MAX_RELATION_MB: int = Field(default=6_144, gt=0)
 

@@ -28,6 +28,8 @@ Production paths and identities:
 - Environment files: `/etc/price-collector`
 - State directory: `/var/lib/price-collector`
 - Service user and group: `pricecollector:pricecollector`
+- Retention maintenance user and group: `postgres:postgres`, using only local
+  Unix-socket peer authentication; no collector/API environment file
 
 ## Implementation Rules
 
@@ -81,6 +83,8 @@ Use these exact service names in deployment and handoff commands:
 - Polymarket probabilities: `price-collector-polymarket-probabilities`
 - Read-only API: `price-api`
 - Live cache: `redis-server`
+- Historical cleanup: `price-collector-retention.service`, scheduled by
+  `price-collector-retention.timer`
 
 The corresponding Python entry points are:
 
@@ -89,6 +93,37 @@ The corresponding Python entry points are:
 - `python -m price_collector.binance_futures_collector`
 - `python -m price_collector.polymarket_probability_collector`
 - `uvicorn price_collector.api:app --host 127.0.0.1 --port 9000 --workers 1`
+- `python -m price_collector.retention --apply --max-seconds 45`
+
+## Collector History Retention
+
+- Keep non-ghost collector history for at most ten days. Expire whole market
+  groups using the ten-day cutoff rounded up to the next five-minute boundary;
+  this may delete up to five minutes early. Initial backlog and interrupted jobs
+  require multiple bounded passes, so monitor progress rather than assuming a
+  timer activation instantly enforces the limit.
+- Run cleanup in the separate `price-collector-retention` oneshot/timer, never
+  on feed or API request paths. Use bounded transactions, statement/lock limits,
+  and a fixed allowlist of current and explicitly supported retired tables.
+  Do not restore retired pipelines or execute research code to prune data.
+- Keep all ghost tables outside this cleanup. Continuous ghost individual and
+  accuracy retention remain seven and ninety days respectively; legacy ghost
+  export safeguards remain unchanged. Repository research/results archives are
+  outside collector-database retention and must not be removed by it.
+- Preserve stricter existing raw-capture retention, normally 72 hours. The
+  independent cleanup also enforces the ten-day ceiling when raw capture is
+  disabled; it must not create partitions or enable raw collection. Microstructure
+  retention is capped at ten days even if an older environment requests thirty.
+- Delete children before parents. Keep required market metadata, sessions and
+  shared evidence payloads while retained/current rows reference them. Prevent
+  metadata backfill and reconciliation from recreating expired market history.
+  Instrument/provider identities are configuration, not expiring observations.
+- The maintenance service runs as local `postgres` with peer authentication to
+  `/var/run/postgresql`, database `price_collector`. It receives no environment
+  credentials and must not touch Redis or change live values.
+- Use ordinary autovacuum/VACUUM for reusable space. Do not promise that row
+  deletion shrinks allocated relations or filesystem use, and do not add
+  `VACUUM FULL`, table rewrites or budget increases as part of routine retention.
 
 ## Collector Rules
 
@@ -498,8 +533,9 @@ python -m pytest
 - Measure evidence tables, indexes and TOAST. Warn at the configured relation
   budget and pause only new high-rate quotes at the cap. Keep metadata and core
   probability collection active, expose losses as gaps, and drain already
-  accepted writes. Do not automatically delete data or enable unrelated raw
-  futures/Chainlink capture. A quote cap is not a total-disk cap.
+  accepted writes. The separate authorized history-retention timer expires old
+  evidence; the collector's size guard itself must not delete data or enable
+  unrelated raw futures/Chainlink capture. A quote cap is not a total-disk cap.
 - Collection does not establish H3 profitability or execution readiness. Any
   later study must declare sampled-data, missing-depth and execution-delay
   limits and choose fresh evaluation settings without inheriting retired work.

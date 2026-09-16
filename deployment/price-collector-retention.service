@@ -1,0 +1,17 @@
+[Unit]
+Description=Bounded ten-day collector history retention
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+WorkingDirectory=/opt/price-collector
+ExecStart=/opt/price-collector/.venv/bin/python -m price_collector.retention --apply --max-seconds 45
+TimeoutStartSec=55s
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true

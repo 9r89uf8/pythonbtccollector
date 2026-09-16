@@ -1165,8 +1165,8 @@ CREATE INDEX IF NOT EXISTS polymarket_probability_samples_market_idx
 CREATE INDEX IF NOT EXISTS polymarket_probability_samples_latest_idx
     ON polymarket_probability_samples (sample_second_ms DESC);
 
--- Compact prospective study evidence. These relations have no automatic
--- retention/deletion policy and are independent of optional raw_capture.
+-- Compact prospective study evidence. Operator-owned history maintenance
+-- expires these after ten days independently of optional raw_capture.
 CREATE TABLE IF NOT EXISTS polymarket_evidence_payloads (
     payload_hash TEXT PRIMARY KEY,
     payload JSONB NOT NULL,
@@ -1214,6 +1214,12 @@ CREATE TABLE IF NOT EXISTS polymarket_market_observations (
 
 CREATE INDEX IF NOT EXISTS polymarket_market_observations_market_time_idx
     ON polymarket_market_observations (market_id, received_wall_ns);
+
+-- Used by bounded orphan cleanup and the FK check when expiring payloads.
+CREATE INDEX IF NOT EXISTS polymarket_market_observations_payload_idx
+    ON polymarket_market_observations (payload_hash);
+CREATE INDEX IF NOT EXISTS polymarket_evidence_payloads_retention_idx
+    ON polymarket_evidence_payloads (created_at);
 
 CREATE INDEX IF NOT EXISTS polymarket_market_observations_connection_idx
     ON polymarket_market_observations (connection_id, received_wall_ns)
@@ -1746,6 +1752,23 @@ CREATE TABLE IF NOT EXISTS raw_capture.feed_sessions (
 
 ALTER TABLE raw_capture.feed_sessions
     OWNER TO price_writer;
+
+-- Preserve session metadata while any retained raw sample still references it.
+CREATE INDEX IF NOT EXISTS raw_futures_retention_connection_idx
+    ON raw_capture.binance_futures_price_trace_100ms (connection_id);
+CREATE INDEX IF NOT EXISTS raw_chainlink_retention_connection_idx
+    ON raw_capture.chainlink_price_events (connection_id);
+
+-- Existing installations may still contain this retired table. Index only
+-- when already present, for expiry/FK checks; never restore the old pipeline.
+DO $$
+BEGIN
+    IF to_regclass('public.chainlink_twap_shadow_predictions') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS chainlink_twap_shadow_retention_market_idx
+            ON public.chainlink_twap_shadow_predictions (market_id);
+    END IF;
+END
+$$;
 
 -- Seed the receive-time partition covering deployment and the following one.
 -- Runtime maintenance refreshes this pair before later boundaries.

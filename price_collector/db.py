@@ -9,6 +9,10 @@ from uuid import UUID
 import asyncpg
 
 from price_collector.market import MarketWindow, market_for_sample_second
+from price_collector.retention_policy import (
+    HISTORY_RETENTION_DAYS,
+    retained_market_floor_ms,
+)
 
 
 LOGGER = logging.getLogger("price_collector.db")
@@ -330,6 +334,7 @@ async def maintain_raw_capture_partitions(
         raise ValueError("retention_hours must be at least six")
     if max_relation_mb <= 0:
         raise ValueError("max_relation_mb must be positive")
+    retention_hours = min(retention_hours, HISTORY_RETENTION_DAYS * 24)
 
     async with pool.acquire(timeout=RAW_CAPTURE_DATABASE_TIMEOUT_SECONDS) as connection:
         async with connection.transaction():
@@ -1251,6 +1256,7 @@ async def fetch_due_polymarket_resolutions(
             LEFT JOIN polymarket_btc_5m_resolutions resolution
               ON resolution.market_id = pm.market_id
             WHERE mw.market_end_ms <= $1
+              AND mw.market_start_ms >= $3
               AND (
                 resolution.market_id IS NULL
                 OR resolution.resolution_status = 'pending'
@@ -1273,6 +1279,7 @@ async def fetch_due_polymarket_resolutions(
             """,
             now_ms,
             max(1, int(limit)),
+            retained_market_floor_ms(now_ms),
         )
 
     return [dict(row) for row in rows]
@@ -1292,6 +1299,9 @@ async def fetch_missing_polymarket_market_windows(
         raise ValueError(
             "first_market_start_ms must be a non-negative five-minute boundary"
         )
+    first_market_start_ms = max(
+        first_market_start_ms, retained_market_floor_ms(now_ms)
+    )
     last_complete_start_ms = (now_ms // 300_000) * 300_000 - 300_000
     if last_complete_start_ms < first_market_start_ms:
         return []

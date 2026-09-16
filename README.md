@@ -24,7 +24,8 @@ DigitalOcean droplet
 │   ├── price-collector-polymarket-chainlink.service
 │   ├── price-collector-binance-futures.service
 │   ├── price-collector-polymarket-probabilities.service
-│   └── price-api.service
+│   ├── price-api.service
+│   └── price-collector-retention.timer → price-collector-retention.service
 ├── /opt/price-collector              Git checkout and Python virtualenv
 ├── /etc/price-collector              Root-owned environment files
 ├── /var/lib/price-collector          Collector state
@@ -36,6 +37,21 @@ DigitalOcean droplet
 The API uses a read-only PostgreSQL role. Collectors use a separate writer role.
 All prices remain `Decimal` values in Python, are stored in PostgreSQL numeric
 columns, and are serialized as strings by the API.
+
+Non-ghost collector history has a ten-day maximum retention policy. A separate
+bounded maintenance timer removes expired database history, including optional
+evidence and microstructure, without changing live Redis values or the read-only
+API. Whole market groups use a cutoff rounded up to a five-minute boundary, so
+up to five minutes may expire early. Existing older data can require multiple
+passes to catch up. Required parents and shared payloads remain while retained
+rows need them. Active raw capture keeps its stricter 72-hour policy; the timer
+also enforces the ten-day ceiling when raw collection is disabled.
+
+Ghost tables are excluded: their seven-day individual and ninety-day accuracy
+policies remain separate, as do legacy ghost safeguards. Research/result files
+outside PostgreSQL are unchanged. The maintenance oneshot runs as local
+`postgres` through a Unix socket with no environment credentials. See
+[history retention operations](OPERATIONS.md#ten-day-collector-history-retention).
 
 ## Collectors
 
@@ -519,7 +535,7 @@ BINANCE_MICROSTRUCTURE_FUTURES_LIQUIDATION_WS_URL=wss://fstream.binance.com/mark
 BINANCE_MICROSTRUCTURE_QUEUE_MAX_EVENTS=100000
 BINANCE_MICROSTRUCTURE_PERSIST_QUEUE_MAX_ROWS=600
 BINANCE_MICROSTRUCTURE_FLUSH_DELAY_MS=250
-BINANCE_MICROSTRUCTURE_RETENTION_DAYS=30
+BINANCE_MICROSTRUCTURE_RETENTION_DAYS=10
 BINANCE_MICROSTRUCTURE_WARN_RELATION_MB=4096
 BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
 ```
@@ -527,7 +543,9 @@ BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
 It defaults off so applying a schema/code update does not silently begin a new
 high-rate dataset. Enable it only after applying `schema.sql` and adding the
 single production override manually. Once per UTC day, the collector considers
-and deletes rows older than the configured retention. The collector checks the
+and deletes rows older than the configured retention, capped at ten days. The
+independent retention timer also cleans this table when optional capture is off.
+The collector checks the
 table plus indexes once per minute, warns at the lower relation threshold, and
 pauses only new
 microstructure writes at the upper threshold; the critical futures live,
@@ -537,9 +555,10 @@ strictly below the warning threshold. Retention `DELETE` removes logical rows
 but normally does not shrink the physical PostgreSQL relation, so it must not
 be expected to resume a size-paused writer by itself. Resumption requires an
 operator-controlled compaction/rebuild or another real physical shrink, plus a
-confirmed measurement below the warning threshold. The 30-day starting
-retention is a PostgreSQL canary policy, not the DuckDB starter's 400-day
-estimate. Measure real PostgreSQL growth before raising it.
+confirmed measurement below the warning threshold. The ten-day maximum
+supersedes the initial PostgreSQL canary's thirty-day policy and the DuckDB
+starter's 400-day estimate. Measure real PostgreSQL growth before changing
+capacity settings.
 
 For the Phase 2 accelerated three-hour production canary, manually set only
 `RAW_FUTURES_TRACE_ENABLED=true`, keep
@@ -737,15 +756,22 @@ sudo cp /opt/price-collector/deployment/price-collector-polymarket-chainlink.ser
 sudo cp /opt/price-collector/deployment/price-collector-binance-futures.service /etc/systemd/system/price-collector-binance-futures.service
 sudo cp /opt/price-collector/deployment/price-collector-polymarket-probabilities.service /etc/systemd/system/price-collector-polymarket-probabilities.service
 sudo cp /opt/price-collector/deployment/price-api.service /etc/systemd/system/price-api.service
+sudo cp /opt/price-collector/deployment/price-collector-retention.service /etc/systemd/system/price-collector-retention.service
+sudo cp /opt/price-collector/deployment/price-collector-retention.timer /etc/systemd/system/price-collector-retention.timer
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
+sudo systemctl enable --now price-collector-retention.timer
 ```
+
+Apply the schema before enabling retention. Existing installations should use
+the [bounded cleanup rollout](OPERATIONS.md#ten-day-collector-history-retention),
+including its backlog and datastore checks.
 
 ### Verify the Deployment
 
 ```bash
-systemctl status redis-server price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api --no-pager
+systemctl status redis-server price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api price-collector-retention.timer --no-pager
 curl http://127.0.0.1:9000/healthz
 curl http://127.0.0.1:9000/prices/latest
 curl "http://127.0.0.1:9000/prices/latest?provider=polymarket_chainlink_rtds&symbol=BTCUSD"
@@ -836,9 +862,13 @@ sudo systemctl daemon-reload
   `SELECT pg_size_pretty(pg_database_size('price_collector'));`.
 - `RAW_CAPTURE_MAX_RELATION_MB` does not replace either check; PostgreSQL WAL
   and non-capture relations remain outside that budget.
-- No automatic pruning is included for the long-term historical tables. The
-  raw-capture partition-maintenance task runs only in a collector whose capture
-  flag is enabled.
+- `price-collector-retention.timer` runs bounded ten-day history cleanup even
+  when optional collectors are off. Check its service journal and backlog after
+  installation; one successful pass does not mean all old rows are gone.
+- Enabled raw capture keeps its stricter partition-maintenance policy. The
+  independent timer also removes raw history beyond the ten-day ceiling when
+  capture is disabled. Ordinary vacuum reuses freed space; deletion alone does
+  not promise a smaller database file.
 
 ## Compact Polymarket evidence for H3
 
@@ -888,8 +918,10 @@ The size guard measures these relations including indexes and TOAST. Its
 default warning/cap settings are 4096/6144 MiB. Reaching the cap pauses new
 quote capture, records gaps, and leaves metadata and core collection running;
 already accepted writes can still drain. It is not a hard disk limit and does
-not automatically delete evidence. Measure actual growth with the operations
-queries before choosing a retention policy. Do not enable unrelated
+not itself delete evidence. The separate ten-day history timer removes expired
+evidence and unreferenced shared payloads. Measure actual growth with the
+operations queries; age retention does not replace the relation-size guard.
+Do not enable unrelated
 `RAW_FUTURES_TRACE_ENABLED` or `RAW_CHAINLINK_EVENTS_ENABLED` flags for this path.
 
 Store CLOB `fd` fee-curve parameters and `itode` independently of legacy base

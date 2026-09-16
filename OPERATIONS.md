@@ -4,7 +4,8 @@ This runbook covers the current Python collectors on the single-user Ubuntu
 24.04 droplet. Code and its virtual environment live at `/opt/price-collector`,
 root-owned environment files at `/etc/price-collector`, and writable service
 state at `/var/lib/price-collector`. Services run as
-`pricecollector:pricecollector`. PostgreSQL database `price_collector` is the
+`pricecollector:pricecollector`, except the bounded retention oneshot, which uses
+local `postgres:postgres` peer authentication. PostgreSQL database `price_collector` is the
 historical record; Redis is a live cache only.
 
 Keep PostgreSQL, Redis (`127.0.0.1:6379`, protected mode) and the read-only API
@@ -28,6 +29,97 @@ sudo journalctl -u price-collector-polymarket-probabilities -n 100 --no-pager
 Review receive ages as well as service status. An active socket or process
 does not establish fresh accepted events. Ports 9000, 5432 and 6379 must not
 listen on public interfaces. Current/live API checks must remain read-only.
+
+## Ten-day collector history retention
+
+`price-collector-retention.timer` schedules the independent
+`price-collector-retention.service` oneshot one minute after boot and one minute
+after its previous run finishes. Each run has a 45-second work budget and a
+55-second systemd deadline, short database transactions and bounded deletion
+batches. The timer does not overlap itself. It runs as `postgres:postgres`,
+connects to database `price_collector` through `/var/run/postgresql` using local
+peer authentication, and receives no environment file or password.
+
+The policy covers non-ghost collector history: prices, probability samples,
+futures/flow/book/open-interest history, microstructure, durable TWAP evidence,
+and compact Polymarket observations/payloads. Cleanup uses a fixed allowlist;
+supported retired database tables are handled only if present. It does not
+restore any retired pipeline. Whole market groups expire at the ten-day cutoff
+rounded **up** to a five-minute start boundary, so some rows may expire up to
+five minutes early. Children are removed before parents; metadata, sessions and
+shared payloads remain while retained/current rows need them. Backfill and due
+reconciliation use the same floor to avoid recreating expired markets.
+
+All ghost tables are excluded. Seven-day continuous ghost records, ninety-day
+accuracy summaries and legacy ghost export safeguards are unchanged. Existing
+raw capture retains its stricter 72-hour policy while enabled. The timer also
+enforces the ten-day ceiling on old raw history when capture is disabled, without
+creating partitions or enabling a feed. Research/results files outside the
+collector database are untouched. The API remains read-only and live Redis
+values are not deleted or rewritten.
+
+Run the following **after the change is pushed to GitHub**. Apply the schema and
+retention indexes before enabling the timer. Shared `config.py`/`db.py` changes
+require reloading all four collectors and the API; the probability backfill and
+microstructure retention behavior change in this checkpoint:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u postgres psql -X -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/deployment/collector-retention-indexes.sql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+sudoedit /etc/price-collector/collector.env
+sudo cp /opt/price-collector/deployment/price-collector-retention.service /etc/systemd/system/price-collector-retention.service
+sudo cp /opt/price-collector/deployment/price-collector-retention.timer /etc/systemd/system/price-collector-retention.timer
+sudo systemctl daemon-reload
+sudo systemctl restart price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api
+sudo systemctl enable --now price-collector-retention.timer
+sudo systemctl start price-collector-retention.service
+sudo systemctl status price-collector price-collector-polymarket-chainlink price-collector-binance-futures price-collector-polymarket-probabilities price-api price-collector-retention.timer --no-pager
+sudo systemctl list-timers price-collector-retention.timer --all --no-pager
+sudo journalctl -u price-collector-retention.service -n 100 --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/markets/current/live
+```
+
+The index prebuild is for an existing installation and runs outside a transaction;
+it uses concurrent builds for the populated evidence tables. Do not add
+`--single-transaction` to that command. If a build fails, stop the rollout and
+inspect/repair its index validity before retrying or enabling the timer;
+`IF NOT EXISTS` alone does not repair an invalid concurrent-build artifact.
+
+In `collector.env`, manually review `BINANCE_MICROSTRUCTURE_RETENTION_DAYS=10`;
+the runtime also caps older values such as 30 at ten days. Preserve shorter
+settings, existing raw-retention settings and every credential. Never replace
+the environment with its example, enable optional captures, or change ghost
+flags as part of this installation. No new environment keys are required by
+the maintenance service, and Redis does not need a restart.
+
+Initial catch-up can take several passes because each pass is bounded. Read the
+retention journal for deleted counts, remaining eligible work and timeouts rather
+than treating timer activation as proof that all old data has gone. Diagnose
+repeated errors before changing batch limits. Check filesystem and relation
+sizes separately: ordinary autovacuum/VACUUM makes deleted space reusable, but
+does not promise immediate filesystem shrinkage. Routine cleanup does not run
+`VACUUM FULL`, rebuild tables or increase any storage budget.
+
+To inspect eligibility without deleting rows:
+
+```bash
+cd /opt/price-collector
+sudo -u postgres .venv/bin/python -m price_collector.retention
+```
+
+To stop cleanup temporarily without stopping collection:
+
+```bash
+sudo systemctl stop price-collector-retention.timer
+sudo systemctl stop price-collector-retention.service
+```
+
+Restarting/enabling the timer resumes the same policy; it does not restore
+deleted history. Ongoing cleanup requires the timer to remain enabled.
 
 ## Continuous ghost retention and accuracy
 
@@ -651,13 +743,15 @@ pending queues are in memory, so unclean session recovery marks possible loss
 rather than reconstructing unwritten observations. The
 default guard warns at 4096 MiB and pauses new quote capture at 6144 MiB;
 metadata/control observations continue and accepted writes may drain, so this
-is not a strict maximum size. There is no automatic evidence deletion. Choose
-an explicit export/retention procedure before the budget is exhausted.
+is not a strict maximum size. The separate ten-day history-retention timer
+removes expired evidence; the size guard itself does not delete it. Export any
+evidence needed beyond that retention window before it expires.
 
 To disable optional capture, manually set `POLYMARKET_EVIDENCE_ENABLED=false`
 in `/etc/price-collector/collector.env`, restart only
 `price-collector-polymarket-probabilities`, and repeat its status, bounded log
-and local health checks above. Preserve the collected tables for review.
+and local health checks above. Existing data remains subject to ten-day history
+retention even while optional collection is off.
 
 ## Other runtime changes
 

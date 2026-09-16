@@ -836,7 +836,6 @@ def test_persistence_worker_pauses_at_cap_then_resumes(monkeypatch):
             await task
 
         assert calls == [
-            ("retention", 10 * runtime.MILLISECONDS_PER_DAY),
             ("size", 150),
             ("size", 99),
             ("postgres", 2_000, 3_250),
