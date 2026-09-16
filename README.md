@@ -549,7 +549,7 @@ only for a configured retention shorter than ten days. At ten days, or with an
 older longer setting such as thirty days, the independent bounded ten-day timer
 owns cleanup; it also runs when optional capture is off. The current deployed
 microstructure warning/cap overrides are 3072/4096 MiB, as recorded in the
-[September 16 shared-capacity review and activation](results/ghost_continuous/2026-09-16/README.md).
+[September 16 shared-capacity review and activation](GHOST_TWAP_REFERENCE.md#storage-safeguards-and-maintenance).
 The collector checks the
 table plus indexes once per minute, warns at the lower relation threshold, and
 pauses only new
@@ -922,7 +922,7 @@ observations.
 The size guard measures these relations including indexes and TOAST. Its
 default warning/cap settings are 4096/6144 MiB; the current deployed evidence
 overrides are 3072/4096 MiB following the
-[September 16 shared-capacity review](results/ghost_continuous/2026-09-16/README.md).
+[September 16 shared-capacity review](GHOST_TWAP_REFERENCE.md#storage-safeguards-and-maintenance).
 Reaching the cap pauses new
 quote capture, records gaps, and leaves metadata and core collection running;
 already accepted writes can still drain. It is not a hard disk limit and does
@@ -942,183 +942,48 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-`GET /forecasts/chainlink-twap/comparison` provides a Redis-cached, finalized
-15-minute comparison of frozen 3/5/10/30-second forecasts and actual TWAP.
-It selects the first acknowledged eligible publication per target/horizon
-before outcome exclusions, with ghost and held-TWAP MAE from the same early,
-valid pairs. The continuous monitor refreshes it once a minute from bounded
-compact-record reads; the API never queries PostgreSQL for this route.
-Matching and persistence put the chart roughly two minutes behind live time.
-See [the chart contract and operating procedure](GHOST_TWAP_COMPARISON.md).
+The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
+verified research, measured 3.1-second inclusion delay, live-canary findings,
+forecast formula, API behavior, chart metrics, retention and limitations. Dated
+plans and generated reports have been consolidated there; historical artifacts
+remain available at the Git revision recorded in that guide.
 
-Continuous Ghost TWAP forecasting was activated on **September 16, 2026 at
-15:59:27 UTC**, on deployed commit `6c6f5bf`, with run ID
-`4f55736e031f4184be501c538f7a61d2`. The initial live check reported
-`capacity_ok=true`, no stop or suspensions, working compaction and a populated
-accuracy cache. See the [activation and capacity record](results/ghost_continuous/2026-09-16/README.md).
-This is a running deployment, not a completed seven-day validation or a mature
-accuracy baseline. The earlier one-hour live canaries and bounded C browser
-observation remain separate completed studies.
-The [retention correction](GHOST_TWAP_RETENTION_FIXES.md)
-records its targeted fixes, validation and the storage constraint at that time.
-The [initial retention deployment record](results/spot_twap_response/2026-09-16-continuous-deployment/README.md)
-records the earlier schema installation with the producer still disabled.
-The [C findings](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
-record browser delivery, limitations and the audit/export status.
+The optional worker inside `price-collector-polymarket-chainlink` forecasts
+1-, 2-, 3-, 5-, 10- and 30-second future TWAP source stamps using causal Chainlink
+spot history and flat continuation of unseen inputs. It keeps official TWAP
+and source Redis values untouched. Prices use Decimal and full frozen evidence
+is durable before publication. Source age is bounded at 5,000 ms and receipt
+age at 3,000 ms; unavailable/stale forecasts are never relabelled fresh.
 
-Continuous retention and monitoring remain disabled by default in code. The
-deployed overrides `GHOST_TWAP_ENABLED=true` and `GHOST_TWAP_CONTINUOUS=true`
-select this mode; `GHOST_TWAP_CANARY_START_MS=0` is ignored here. The run uses
-`/var/lib/price-collector/ghost-continuous`, created separately from every old
-canary directory. Its original start, stop state and durable outbox survive
-restarts. Activation changed environment settings and restarted the affected
-collectors without a code or schema change. See the
-[continuous operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
+Continuous forecasting was activated September 16, 2026 at 15:59:27 UTC.
+`GHOST_TWAP_ENABLED=true` and `GHOST_TWAP_CONTINUOUS=true` select this deployed
+mode; both remain off by default in code. State persists in
+`/var/lib/price-collector/ghost-continuous` and must be reused across restarts.
+Individual continuous forecasts/results expire after seven days; hourly
+accuracy/feed-health summaries expire after 90 days. These are retention rules,
+not a guarantee that a shared-disk guard can never pause new forecasts.
 
-The historical [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) show post-warm-up sampled
-key coverage of 99.632%, five-second forecast usability of 98.003%, and 314
-partial batches retained by the new publication rule. Median publication latency
-was 38.22 ms, still above the 10 ms objective. A spot reconnect required history
-rebuilding. The [first run](GHOST_TWAP_CANARY_RESULTS.md) retains separate evidence.
-The [Checkpoint C report](GHOST_TWAP_CHECKPOINT_C.md) describes the implemented
-Redis-only API/SSE contract and completed bounded browser validation.
-The subsequent [one-hour reliability canary](GHOST_TWAP_RELIABILITY_CANARY.md)
-tests the revised shutdown with recent targets still pending. Its automatic
-stop uses a versioned root-only operator CLI and an exact campaign identity;
-it does not alter the producer's existing one-hour cap or authorize continuous
-operation. Run-specific clocks and status belong to its launch/results files.
+Four read-only routes under `/forecasts/chainlink-twap` use Redis only:
 
-The [reconnect recovery checkpoint](GHOST_TWAP_RECONNECT_CHECKPOINT.md) adds
-runtime `ghost-canary-v6` / contract 4. A short spot connection end can retain
-observed history, while current availability stays off until a fresh advancing
-spot arrives. Source and both receipt gaps must fit the bounded 10-second
-allowance; intervening prices are still carried estimates. Invalid/long gaps,
-queue loss and other integrity failures keep the clear-and-rebuild behavior.
-Every explicit gap fences older pending publications before their Redis attempt.
-This revision was pushed and installed with ghost disabled on September 15 UTC;
-see the [deployment verification](results/spot_twap_response/2026-09-15-reconnect-deployment/README.md).
-C used this deployed revision; a live recovery claim still requires an observed
-qualifying disconnect. The completed B canaries retain their original versioned
-evidence.
+- `/live`: latest serialized prediction snapshot, with expiry validation.
+- `/stream`: immediate updates over SSE, with resync and client expiry.
+- `/accuracy`: minute-refreshed 1-hour, 24-hour and 7-day accuracy panels.
+- `/comparison`: finalized 15-minute frozen prediction/actual pairs for the
+  3/5/10/30-second charts, refreshed every minute and at least 125 seconds behind
+  live time. It freezes the first eligible acknowledged publication per target
+  before outcome checks, and compares ghost error with actual TWAP movement on
+  identical pairs.
 
-`price_collector/ghost_twap.py` provides an optional pure Decimal engine for
-1, 2, 3, 5, 10 and 30-second source-stamp forecasts. It defaults to disabled
-through `GhostPolicy` and has no I/O. Checkpoint B adds an optional worker inside
-the Chainlink collector; `GHOST_TWAP_ENABLED=false` keeps that integration inactive.
-The [freshness/expiry checkpoint](GHOST_TWAP_FRESHNESS_CHECKPOINT.md) adds payload
-contract 3: separate source age (default 5,000 ms) and wall/monotonic receipt age
-(default 3,000 ms), with expiry at the earliest deadline for either feed.
-`GHOST_TWAP_SOURCE_MAX_AGE_MS` and `GHOST_TWAP_RECEIPT_MAX_AGE_MS` can tighten those
-limits. The existing pending/carried distinction, Decimal calculation and
-10,000 ms historical carry limit remain unchanged. The historical recorded-hour
-replay still matches all 21,600 forecasts under explicit original 3s/3s limits;
-its frozen fixture bytes remain unchanged. See the [Checkpoint A evidence](GHOST_TWAP_CHECKPOINT_A.md)
-and [live implementation plan](GHOST_TWAP_LIVE_PLAN.md).
+The local dashboard is a separate project in `dist/ghost-frontend`, outside this
+backend checkout. It reaches the loopback API only through the SSH tunnel; no
+frontend assets or dashboard service are installed on the droplet. Browser or
+laptop availability does not determine whether the producer runs. Ghost prices
+are forecasts, not official settlement values or validated trading signals.
+See [continuous operations](OPERATIONS.md#continuous-ghost-retention-and-accuracy)
+for settings, guards, installation and verification commands.
 
-The B worker uses accepted canonical inputs, an independent Redis connection,
-a bounded fsynced disk outbox, and one PostgreSQL `ghost_twap_audit` table.
-It publishes only `btc:live:ghost_chainlink_twap_60s` and its dedicated update
-channel. The existing source keys and official TWAP remain unchanged. Full
-frozen slot evidence precedes any possible publication; results and publication
-acknowledgements are audited separately. An enabled-worker startup reconciles
-unfinished audit records and warms from new live inputs; a disabled startup does
-not run ghost recovery.
-
-C's early operator stop exposed nested five-second shutdown budgets. Cleanup was
-invoked but its outer deadline expired, leaving 64 nonterminal audit rows and 65
-outbox files, including one terminal record. A reviewed, publication-free
-recovery pass resolved that tail while preserving frozen inputs and observed
-target/publication evidence. The producer remained disabled. The
-[reliability checkpoint](GHOST_TWAP_RELIABILITY_CHECKPOINT.md) fixes the nested
-shutdown budgets and distinguishes completed drainage from retained evidence.
-A successful service restart alone is not evidence of a drained outbox.
-The [archive foundation](GHOST_TWAP_STORAGE_CHECKPOINT.md) supports bounded
-terminal-row batches and full external readback before exact-version
-acknowledgement. No archive service is enabled. The new continuous retention
-path is separate from the legacy external-export prerequisite.
-The owner's [new retention and monitoring direction](GHOST_TWAP_RETENTION_MONITORING_PLAN.md)
-is seven days of individual forecasts with ongoing accuracy summaries; external
-archiving is optional for that design. The
-[compact-storage experiment](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
-passed its integrity and reuse checks, but its two layouts project to 4.38 and
-5.52 GiB/week at the observed rate. Neither fits the old 2 GiB canary budget.
-The new continuous policy budgets 6 GiB across ghost tables, indexes and TOAST,
-warns at 5 GiB, pauses new forecasts at 5.5 GiB or 1,500,000 retained decisions,
-and preserves a 10 GiB database-filesystem reserve. These bounds do not reserve
-shared disk exclusively for ghost or guarantee seven days at every event rate.
-
-After a continuous decision is terminal and its 120-second matching window has
-elapsed, bounded maintenance commits its compact record and hourly contribution
-atomically before retiring the verbose audit. Compact records retain exact
-Decimal forecast/target prices, original evidence hashes and result/timing
-status for seven days; hourly accuracy and accepted-feed health remain for 90
-days. Full slot arithmetic cannot be replayed after verbose inputs are retired.
-Maintenance leaves historical canary rows under their original export rules.
-Its worker runs independently every five seconds in batches of at most 100,
-including while forecast admission is paused on storage. Failures defer work and
-surface as unavailable health; they do not interrupt the official feeds.
-
-`GET /forecasts/chainlink-twap/accuracy` reads only the cached accuracy JSON at
-`btc:live:ghost_chainlink_twap_60s:accuracy`. The monitor refreshes this key every
-minute with a 180-second TTL; the endpoint never queries PostgreSQL or computes
-metrics. Completed 1-hour, 24-hour and 7-day panels retain explicit issued,
-published, early, missing and conflicted denominators. Confirmed Redis lead is
-not browser receipt lead. Each calculation/policy/horizon/cohort group establishes
-a persisted, frozen baseline from the first available qualifying three full UTC
-days in the bounded monitoring snapshot. After a long outage this is not a claim
-about the earliest qualifying window in all history.
-The status stays `collecting_baseline` until coverage qualifies. Three hourly
-checks are required for deterioration or recovery; the declared thresholds are
-engineering alerts, not statistical significance claims. Separate `worker_health`
-and runtime/store health expose maintenance, persistence and cache failures.
-
-The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
-adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after
-the durable write. An arrived horizon becomes unavailable in the live payload;
-still-eligible siblings keep their original prices. All six entries and the
-original calculation audit remain present. Attempted payloads record the exact
-selection, and confirmed lead requires that horizon's actual attempted price.
-Freshness, expiry and the disabled default are unchanged. The run under the
-[combined canary protocol](GHOST_TWAP_COMBINED_CANARY.md) completed and measured
-the combined policy's cache coverage. Its bounded operational observer,
-`python -m price_collector.ghost_twap_observer`, reads only local Redis and is
-never imported or started by a collector. It samples at 100 ms for one fixed
-hour, retaining exact payload bytes and explicit missing observations. Offline
-research scoring verifies attempted membership and joins those bytes to the
-campaign audit. These are local cache measurements; C records separate browser
-delivery measurements.
-
-The first canary requires an explicit fixed start time and stops new decisions
-after at most one hour, at 1.5 GiB of audit relations, at 600,000 decisions, or
-below 10 GiB free database-filesystem space. Temporary audit/guard failures pause
-new forecasts until recovery. This first run measures capacity and does not
-complete longer validation. Verified external export is required before
-96-hour whole-row expiry. See the [B report](GHOST_TWAP_CHECKPOINT_B.md) and
-[operating procedure](OPERATIONS.md#ghost-twap-checkpoint-b).
-
-Checkpoint C adds `GET /forecasts/chainlink-twap/live` and
-`GET /forecasts/chainlink-twap/stream` behind the API flag
-`GHOST_TWAP_API_ENABLED`, which defaults to false. The deployed API is enabled
-alongside the continuous producer; missing or expired publications still report
-unavailable. The snapshot performs
-one Redis GET and returns the original
-JSON bytes with request-time clock headers. The SSE stream shares one subscriber,
-resyncs current state after reconnect, expires stale values, and isolates slow
-clients with bounded queues and send deadlines. It carries delivery metadata in
-`api` and the producer object in `ghost`; unavailable state has `ghost: null`.
-Neither route queries PostgreSQL or calculates forecasts. Both bypass compression
-and use `no-store, no-transform`. Existing source routes retain their behavior.
-Redis library resubscriptions invalidate the stream immediately and trigger a
-fresh authoritative cache read, even if no further publication arrives. Invalid
-optional ghost settings disable only the ghost routes with `invalid_settings`;
-ordinary API startup and source routes remain available.
-
-Use the API only through an SSH tunnel. The chart dashboard is a separate local
-project in the owner's workspace (`dist/ghost-frontend`), outside this backend
-checkout; no frontend assets or service are installed on the droplet. Browser
-clients must enforce expiry independently when a tunnel stalls,
-using a conservative clock bracket rather than assuming server and browser wall
-clocks match. See [the delivery contract and completed observation](GHOST_TWAP_CHECKPOINT_C.md)
-and [deployment instructions](OPERATIONS.md#ghost-twap-checkpoint-c).
-Ghost values are forecasts, not official settlement prices or demonstrated
-trading signals. Enabling the API does not enable the bounded producer campaign.
+`GET /markets/current/dashboard` is a separate bounded PostgreSQL-backed view
+for restoring the local Recent movement chart and current five-minute market
+context after opening or resuming the page. It returns saved spot/TWAP history,
+server time, boundaries and an observed official Price to Beat when available.
+This does not add database queries to the live Redis/SSE request path.

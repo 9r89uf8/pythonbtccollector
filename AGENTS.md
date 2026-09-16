@@ -205,7 +205,7 @@ The corresponding Python entry points are:
   eligibility. No automatic unverified deletion or indefinite summary tier.
 - Keep A's any-interior-carry quality rule in this B version; pending and future
   slots remain assumptions. B exposes no ghost API routes; those belong to C
-  after prospective review. See `GHOST_TWAP_CHECKPOINT_B.md` and `OPERATIONS.md`.
+  after prospective review. See `GHOST_TWAP_REFERENCE.md` and `OPERATIONS.md`.
 - The bounded `ghost_twap_observer` operational CLI may read the local ghost
   Redis key for an explicitly authorized canary. Run it separately from the
   collector, without database credentials or feed connections. Preserve its

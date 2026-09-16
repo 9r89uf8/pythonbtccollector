@@ -1,0 +1,424 @@
+# Ghost TWAP: findings, calculation and operations
+
+This is the canonical reference for the spot-to-TWAP research and the live ghost
+endpoint. It replaces the dated ghost plans, checkpoint reports and canary
+narratives in the working tree. It records evidence obtained through September
+16, 2026; historical measurements below are not claims about today's accuracy.
+Current installation commands remain in [OPERATIONS.md](OPERATIONS.md).
+
+## What was established
+
+The received Chainlink spot history closely reconstructs the official
+60-second TWAP with a three-second source-stamp alignment. Using that history
+and holding unobserved future spot constant predicts short-horizon TWAP much
+better than holding the last TWAP constant in the measured cohorts. Independent
+historical replays and subsequent live canaries support that finding.
+
+This is a forecast of a future official TWAP report. It is not itself the
+official settlement price, an exact identity at every second, a guaranteed
+error bound, or evidence of a profitable trading strategy. Settlement-side
+accuracy is a separate experiment. The original leader-risk study remains in
+[H3_TWAP_LEADER_RISK_FINAL_REPORT.md](H3_TWAP_LEADER_RISK_FINAL_REPORT.md).
+
+### Reconstruction and response
+
+With timestamps expressed in seconds, the supported reconstruction is:
+
+```text
+W_hat(u) = mean(S(u - 62), ..., S(u - 3))       # 60 one-second slots
+```
+
+`W(u)` is the official TWAP source stamp. `S` is retained Chainlink spot,
+carried forward through a missing source second. This is an empirical
+reconstruction of public retained inputs, not proof of the publisher's exact
+private constituent reports. A missing collector row does not prove unchanged
+upstream price.
+
+The original two-second alignment was corrected to **three seconds**. Shift
+profiles, a direct 60-constituent recomputation and daily tables support that
+correction. The all-history complete-window follow-up had 301,334 windows,
+median absolute residual rounded to 0.0000 bp, p99 0.1686 bp and maximum
+1.427 bp. That supplied all-history output was inspected, not independently
+rerun here; an independent September 11 extraction reproduced the alignment.
+Those days informed development and are not a held-out evaluation set.
+
+For the pilot week's 505,308 observed TWAP stamps with incomplete retained spot
+windows, carry-forward gave median/p99 residual **0.0032/0.2025 bp**, versus
+**0.0202/0.3339 bp** when averaging only retained rows. An independent local-day
+check reproduced the aggregate improvement. Neither method dominates on every
+timestamp, and observed-stamp coverage excludes seconds with no TWAP report.
+
+The retained spot receipt to the first TWAP report predicted to contain its
+slot was measured directly: pair spot stamp `s` with TWAP stamp `s + 3`, then
+subtract their local receipts. Across **550,393 pairs**, median delay was
+**3.088 seconds (about 3.1 seconds)**, p10/p90 **2.552/3.611 seconds**, and p99
+**4.042 seconds**. Of 576,404 retained spot seconds, 26,011 lacked that exact
+target report. Nine negative-delay pairs remain clock anomalies. The statistic
+uses retained same-second spot versions, so exact original first-arrival
+causality and the upstream calculation/publication split remain unmeasured.
+
+At that first included slot, a clean permanent step contributes **1/60 = 1.67%**
+of its size, not 5%. Three changed slots contribute 5%. With flat prehistory,
+unchanged new spot and constant delivery, that would be approximately 1.67% at
+3.1 seconds, 3.33% at 4.1 seconds and 5% at 5.1 seconds after the spot receipt.
+This is an ideal illustration, not a measured receipt-clock response curve.
+
+The saved exploratory event query selected **190** sustained moves of at least
+2 bp over two source seconds. It reported these mean normalized TWAP changes:
+
+| Seconds after detected move, provider clock | 5 | 10 | 30 | 60 |
+| --- | ---: | ---: | ---: | ---: |
+| Share of spot move appearing in TWAP | 5.0% | 13.1% | 49.5% | 103.6% |
+
+The query normalizes from `W(t-1)` by `S(t)-S(t-2)` and hindsight-selects
+persistent moves. It has no explicit cooldown or flat-prehistory filter.
+Leaving prices, prior trends and later spot movement affect this curve; values
+above 100% are possible. Its SQL was inspected, but the revised response
+protocol was not executed. Do not add the 3.088-second receipt delay to these
+source-clock horizons or call this table a causal isolated step response.
+
+### Historical forecast results
+
+The fixed September 1–8, 2026 development-week rolling ghost pilots sampled
+once a minute. Errors are absolute error relative to actual target price in
+basis points; **these are medians/p90, not MAE**. Missing exact target stamps
+were excluded and counted. The receipt replay used only retained values whose
+receipt was at or before the decision; overwritten same-second spot revisions
+still limit historical availability reconstruction.
+
+| Clock / horizon | Matched pairs | Ghost median / p90, bp | Held-TWAP median / p90, bp | Median target arrival after decision |
+| --- | ---: | ---: | ---: | ---: |
+| Source / 5 s | 9,199 | 0.006 / 0.058 | 0.155 / 0.561 | Not measured |
+| Source / 10 s | 9,172 | 0.031 / 0.180 | 0.307 / 1.093 | Not measured |
+| Source / 30 s | 9,135 | 0.311 / 1.274 | 0.868 / 3.083 | Not measured |
+| Receipt / 5 s | 9,503 | 0.005 / 0.060 | 0.157 / 0.572 | 4.614 s |
+| Receipt / 10 s | 9,609 | 0.027 / 0.154 | 0.310 / 1.110 | 9.571 s |
+| Receipt / 30 s | 9,548 | 0.292 / 1.243 | 0.879 / 3.110 | 29.611 s |
+
+The receipt replay's apparent 98% short-horizon side-change capture was mostly
+market-boundary artifacts involving a changed strike. Restricting to genuine
+within-market endpoint side changes gave 121/131 at 5 seconds, 225/245 at
+10 seconds and 497/692 at 30 seconds, with 4/12/91 false alarms. These are
+future-TWAP side comparisons, not necessarily settlement winners or trading
+signals. Error includes reconstruction and carry uncertainty as well as future
+spot movement; it is not only the latter.
+
+A separate settlement replay used a receipt-time cutoff and an opening stream
+reference available then, rather than substituting the reconciled opening price.
+Of 2,016 markets, **91 lacked a usable causal opening event**; 1,925 remained at
+every checkpoint:
+
+| Seconds before close | Projected settlement wrong | Current TWAP wrong | Current spot wrong |
+| ---: | ---: | ---: | ---: |
+| 60 | 156 | 240 | 156 |
+| 30 | 36 | 125 | 59 |
+| 15 | 12 | 62 | 77 |
+| 10 | 5 | 43 | 96 |
+| 5 | 2 | 23 | 112 |
+| 3 | 1 | 18 | 129 |
+
+At 30 seconds that is 98.13% correct versus 93.51% for current TWAP. This was
+the already studied week, with retained-input limitations and explicit carry;
+it is not untouched forward validation. A settlement target is the scheduled
+closing source stamp, whose distance from the current TWAP source stamp need
+not equal wall-clock seconds remaining.
+
+### Prospective live measurements
+
+The table keeps distinct runs and measurement clocks separate. Published
+accuracy pairs require the exact acknowledged eligible forecast and a clean
+first report at its exact target stamp; the unchanged-TWAP baseline uses the
+same pairs. Lead is confirmed only when acknowledgement strictly precedes
+target receipt. Dollars below are **median absolute error**, not chart MAE.
+
+| Run | Decisions | 5 / 10 / 30 s median dollar error | 5 / 10 / 30 s median lead |
+| --- | ---: | --- | --- |
+| September 14, 00:45:20–01:45:20 UTC | 7,292 | $0.057 / $0.352 / $3.239 | 4.785 / 9.771 / 29.772 s, Redis |
+| September 14, 22:34:04–23:34:04 UTC | 7,054 | about $0.026 / $0.173 / $2.04 | 4.662 / 9.658 / 29.657 s, Redis |
+| September 15, bounded browser observation | 1,983 audit decisions | $0.02716 / $0.20230 / $2.30141 | 4.717 / 9.726 / 29.732 s, browser |
+| September 15, 22:56:38–23:56:38 UTC | 7,082 | $0.0300 / $0.2684 / $2.9955 | 4.650 / 9.668 / 29.654 s, Redis |
+
+The first hour beat unchanged TWAP in 97.6%/93.4%/80.5% of its published pairs.
+Its original 3-second source-age bound excluded many late-feed moments. The
+next run used 5-second source age, 3-second receipt age and per-horizon
+publication masking. After 65 seconds, sampled key presence was **99.632%**,
+and usable 5/10/30-second coverage **98.003%/98.156%/98.727%**, across 35,350
+planned 100-ms observation bins. It preserved 314 partial batches. A reconnect
+cleared history and caused approximately 59 seconds of five-second forecast
+unavailability; bounded reconnect retention was implemented afterwards.
+
+The browser experiment admitted forecasts for 900 seconds and collected targets
+for another 120. Browser lead came from both messages' handler-entry
+`performance.now()` values in that browser, not audit timestamps or screen paint.
+It matched 1,574/1,581/1,617 targets at 5/10/30 seconds. Its 93.62%–95.59%
+usable fractions included producer startup because the browser began 22 seconds
+earlier. Eleven aborted snapshot requests were observed; a keep-alive timing
+explanation was plausible, not established. The stream had no observed error.
+Shutdown exposed a nested drain timeout; reviewed recovery preserved frozen
+inputs, acknowledged publications and observed targets, leaving unknown tails
+unmatched. The shutdown budgets were fixed afterwards.
+
+The final reliability hour used a complete 36,000-bin server observer. After
+65 seconds its usable cache coverage was **99.567%** at all three horizons.
+The accuracy comparison above excludes decisions in the final 120 seconds to
+give them a complete matching window; it has 6,650/6,658/6,695 pairs. The new
+shutdown drained **223 tail records in 6.829 seconds** without intervention.
+The owner's laptop slept and missed approximately 49 minutes of browser data:
+full-hour browser reliability was **not measured**. Short server cache gaps
+aligned with received-feed pauses and expiry; missing browser observations
+cannot be filled with server observations.
+
+All four campaigns' **23,411** audit records were terminal and externally
+verified after the final run. The final export SHA-256 was
+`f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954`.
+Receipt-to-Redis publication remained approximately **38–39 ms median**, with
+about 106–113 ms p99: the under-10-ms objective was not met. Full evidence is
+durable before publication; stage medians cannot identify fsync's sole cost.
+Accuracy and coverage vary with market conditions and input delivery. These
+short runs do not establish uninterrupted long-term availability or trading edge.
+
+## How the current producer works
+
+The pure engine is [ghost_twap.py](price_collector/ghost_twap.py). The optional
+worker in the existing Chainlink collector uses the accepted canonical spot and
+60-second TWAP feeds; it adds no feed connection and changes no official price.
+Continuous production was activated **September 16 at 15:59:27 UTC**, run
+`4f55736e031f4184be501c538f7a61d2`, initially at commit `6c6f5bf`. Current code
+retains calculation contract 4 and runtime `ghost-continuous-v1`.
+
+At decision D, let the latest received official TWAP have source stamp w. For
+each horizon **1, 2, 3, 5, 10 or 30 seconds**, target U is w+h, and the engine
+averages the 60 slots U−62 through U−3. Historical slots select the latest
+admissible received predecessor at or before the slot; a later source revision
+not received by D cannot enter. Future slots use current received Chainlink spot.
+The official TWAP is the comparison baseline and target-stamp anchor; the
+forecast is the direct slot average, not the official value plus an increment.
+
+With ideal instantaneous observations through w, horizons 5/10/30 have 2/7/27
+future assumed slots. Live pending/carry counts can differ. Each snapshot records
+60 slots partitioned into **observed, carried, pending, future and missing**:
+
+- Observed: an exact admissible received source stamp.
+- Carried: a nonexact interior historical stamp, within the received source range.
+- Pending: a nonexact historical stamp beyond the newest admissible received
+  source stamp, but no later than D. It retains historical predecessor selection.
+- Future: a stamp after D, filled with current spot.
+- Missing: no permitted input or carry; the forecast is unavailable.
+
+Historical carry is bounded at 10 seconds. Any interior carry makes an available
+forecast `degraded`; pending/future assumptions remain separately visible.
+Healthy does not mean certain or assumption-free. Available 3-second forecasts
+have no future-stamped slots, but may have pending/carried inputs and residuals;
+that chart is an alignment check, not an identical copy of the future TWAP.
+
+Current spot and TWAP must meet inclusive source age ≤5,000 ms and receipt age
+≤3,000 ms on both wall and monotonic clocks. Future-stamped/invalid inputs fail
+closed. The earliest of all six input deadlines controls expiry. Re-snapshotting
+unchanged inputs cannot renew their lifetime. Decimal precision is 80 digits,
+with final 18-place half-even rounding and decimal-string serialization.
+
+Every received update can refine a future target. Full frozen inputs and intent
+are fsynced to the bounded outbox before Redis publication. Eligibility is checked
+again after that write: a horizon whose target has already arrived is masked,
+while eligible siblings keep their calculated prices. Audit evidence records the
+actual attempted bytes and acknowledgement. Uncertain crash outcomes remain
+unconfirmed. No lead credit is assigned to acknowledgement ties or late arrivals.
+
+Estimated arrival is anchor receipt plus h; it is labelled an estimate and can
+be overdue. Horizon h advances a **source timestamp**, not a promise of h seconds
+remaining at the frontend. Source, publisher, local receipt, Redis acknowledgement
+and browser clocks must not be conflated.
+
+A clean spot connection end can preserve history if its last value was fresh
+and newest, and the first returning event is fresh, advances the stamp and
+bridges at most 10 seconds on source, wall and monotonic clocks. Availability
+pauses until that qualification; bridged slots remain carried. Other gaps,
+sequence loss, long silence or an invalid first event clear history and rewarm.
+Every gap fences pending publications. A silent socket noticed only at the idle
+deadline can still require a longer rebuild.
+
+## API and local dashboard
+
+The API binds only to `127.0.0.1:9000`, Redis to `127.0.0.1:6379`. The frontend
+is a separate local project, `dist/ghost-frontend`, served at
+`http://127.0.0.1:8765`; its proxy reaches the API through the SSH tunnel on
+local port 19000. No dashboard assets or browser service run on the droplet.
+Browser sleep or tunnel loss does not stop server forecasting.
+
+| Route under `/forecasts/chainlink-twap` | Behavior |
+| --- | --- |
+| `/live` | One Redis GET, validates expiry, returns original producer JSON bytes with clock headers |
+| `/stream` | SSE `event: ghost`; envelope has delivery metadata in `api` and current producer object in `ghost` |
+| `/accuracy` | One GET of minute-refreshed monitor JSON; 180-second cache TTL |
+| `/comparison` | One GET of finalized frozen chart pairs; minute refresh, 180-second TTL, 4 MiB payload cap |
+
+These requests do not query PostgreSQL or calculate forecasts/accuracy. The
+independent monitor performs bounded historical reads. API enablement is
+separate from producer enablement. Missing, expired or disabled state returns
+typed unavailability rather than inventing a price. Invalid optional ghost API
+settings disable the feature, not the ordinary source routes.
+
+SSE is current-state delivery, not an event replay log. One shared subscriber
+resyncs from Redis after reconnect, including transparent library resubscription;
+clients receive a fresh state even without another publication. Slow clients
+have bounded queues/send deadlines. Live snapshot/SSE are uncompressed with
+`no-store, no-transform`; historical comparison may be gzip-compressed. Browser
+clients expire stale values independently using a conservative clock bracket.
+They must not start a new full server `remaining_ns` lifetime upon receipt.
+
+The separate `GET /markets/current/dashboard` route restores **Recent movement**
+from a bounded 15-minute history of saved Chainlink spot and official TWAP.
+Missing source seconds stay missing; no interpolated samples are invented. It
+also returns server time, the current five-minute market boundaries and the
+observed official **Price to Beat** from existing validated pre-close Polymarket
+observations. A missing/conflicting reference remains null rather than being
+replaced with spot, a local average or a later market's value. This historical
+route uses two indexed database reads, separate from the Redis/SSE live path,
+with three-second SQL and four-second overall bounds. It adds no schema/settings.
+
+The local page fetches this snapshot on opening/resuming and every minute,
+retrying after ten seconds while the reference is unavailable. It shows the
+Price to Beat, signed distance of current official TWAP from that reference and
+time remaining using the server-clock anchor. Its horizontal reference line
+uses the same market identity. These are current-market context, not a forecast
+of which side will ultimately win.
+
+### Reading the charts and accuracy
+
+The saved comparison charts align **first acknowledged eligible forecasts** and
+actual TWAP at each target source second, separately for 3/5/10/30 seconds.
+Selection is frozen before outcome exclusions: a missing or bad first forecast
+is not replaced by a later better one. Clean pairs require exact first target
+matches, valid causality/clocks, no conflict and strictly early acknowledgement.
+The 15-minute window ends at least 125 seconds behind now, potentially farther
+during persistence recovery. Saved pairs survive browser sleep.
+
+**Ghost MAE** is mean absolute error in dollars on those plotted pairs.
+**Average TWAP move**, formerly **Held-TWAP MAE**, is mean absolute change from
+the official TWAP known at each selected decision to the same future target.
+It measures the error of assuming no change. For example, if the TWAP moves
+$5.37 on average while ghost misses by $1.04, ghost has roughly 81% less error
+than assuming no change: `100 × (1 − Ghost MAE / baseline MAE)`. A zero baseline
+does not support a percentage improvement calculation. Dollar values are exact
+Decimal strings; rendering alone uses normalized display coordinates.
+
+All cards share time/price scales and a symmetric signed-dollar-error scale.
+Frozen means no later revision overwrites the chosen historical prediction; the
+live cards can continue refining forecasts as new spot arrives. Missing prints,
+conflicts and late acknowledgements remain visible counts. "No matched print"
+means none was matched in the recorded window, not that no print ever existed.
+
+The accuracy endpoint scores every eligible published decision, including
+refinements, so its MAE need not equal the first-publication chart MAE. It has
+completed 1-hour, 24-hour and 7-day panels with explicit issued/published/early/
+missing/conflicted denominators. Hourly Decimal sums yield means; merged
+histograms yield quantile brackets, not averages of hourly medians. Confirmed
+Redis lead and issue coverage are not independently measured browser uptime.
+
+A frozen policy/horizon/cohort baseline needs three qualifying full UTC days
+and at least 3,000 scored pairs. Current 24-hour evaluation needs at least 1,000
+pairs and coverage. Deterioration requires MAE >125% of baseline and paired
+excess MAE >baseline+0.01 bp for three hourly evaluations. Recovery needs
+MAE ≤110% or excess ≤baseline+0.005 bp for three evaluations. These are
+operational heuristics, not statistical significance. Until qualification, the
+status remains `collecting_baseline`. Feed health separately records receipt
+gaps, source holes, connection ends and worker errors.
+
+## Storage, safeguards and maintenance
+
+Continuous terminal decisions compact only after their 120-second matching
+window. Compact evidence and hourly contributions commit atomically before full
+slot detail is removed; failed rows retain evidence and block the completeness
+watermark rather than pretending their hour is complete. Maintenance is bounded
+to at most 100 rows and a cooperative three-second compaction budget per cycle,
+with statement/lock limits and retry/cursor handling so one bad row cannot
+permanently prevent all later maintenance. Runtime-owned rows are excluded.
+
+| Data | Retention |
+| --- | --- |
+| Continuous compact forecast/result records | 7 days after issuance |
+| Hourly ghost accuracy and accepted-feed health | 90 days |
+| Non-ghost collector history | Maximum 10 days, bounded separate timer |
+| Existing stricter raw capture policy | Normally 72 hours |
+| Legacy canary full audit | Existing terminal + externally verified + ≥96-hour expiry rule |
+
+Compact rows preserve forecast/target prices, clocks, attempted membership and
+hashes; they cannot reproduce discarded full slot inputs. Late/conflicting target
+annotations adjust compact records and hourly contributions atomically.
+Old outboxes cannot resurrect expired records. Repository cleanup is separate
+from production database retention and never deletes active state or credentials.
+
+Continuous ghost relations warn at **5 GiB**, pause admissions at **5.5 GiB**,
+and have a **6 GiB** total budget, a **1,500,000 retained-decision** cap and a
+**10 GiB database-filesystem free-space** reserve. Maintenance continues during a
+capacity pause. At activation optional evidence and microstructure caps were each
+4 GiB with 3 GiB warnings; these are overrides, not example defaults. A measured
+one-hour compact layout extrapolated to 4.38 GiB per new week, not seven observed
+days. Shared disk, core data, WAL and logs still consume capacity. Logical budgets
+do not create disk space; deleting rows/vacuuming can permit reuse without reducing
+allocated relation size. Seven-day retention does not guarantee seven-day uptime.
+
+The current state directory is `/var/lib/price-collector/ghost-continuous`.
+Preserve its original start, stop latch and durable outbox across restarts.
+Do not reset state or raise caps to bypass a fault. Freshness/cache expiry,
+rebuilding, capacity pause and worker failure are different unavailable states.
+Intermittent maintenance timeouts were observed before and after the comparison
+deployment and recovered; the deployment did not establish zero failures.
+
+## Evidence, reproducibility and cleanup provenance
+
+Historical reports and generated logs are recoverable in Git at the complete
+pre-consolidation snapshot **`0a1f9983f8bdcc9c3ec8cb834c30c20d46703380`**. For
+example, `git show 0a1f998:SPOT_TWAP_RESPONSE_STUDY.md` retrieves the full study,
+and `git show 0a1f998:results/spot_twap_response/2026-09-15-reliability-canary/FINDINGS.md`
+retrieves the final canary report. This is access to the ghost study's provenance,
+not permission to restore the separately retired research pipeline.
+
+Key release/evidence identities:
+
+| Milestone | Commit / location at that snapshot |
+| --- | --- |
+| Historical identity, delay and projection | `SPOT_TWAP_RESPONSE_STUDY.md`; `research/spot_twap_response/`; saved pilot outputs under `results/spot_twap_response/2026-09-13-pilot/` |
+| First live hour | `aa78346b2c8c2898a0a522798be3105552aaec7d`; September 14 live-canary results |
+| Freshness + partial batches | `770df37cc0f0dbdea1138141ee67746356e9563a`; September 14 combined-canary results |
+| Initial browser delivery | `5bc676cda3a0817bfac6b9ce288b3e9f694cc435`; September 15 checkpoint-c results |
+| Reliability report before attribution addendum | `7c31c2a`; September 15 reliability-canary results and September 16 peer-review corrections |
+| Continuous activation | `6c6f5bf`; `results/ghost_continuous/2026-09-16/` |
+| Saved comparison endpoint | `512a4f1`; deployment recorded at `0a1f998` |
+
+Large raw exports were outside Git and some inputs expire by design. Source
+code/provenance alone cannot regenerate deleted original observations. Do not
+claim a newly run study when reading archived outputs. The preserved recorded
+hour under [tests/fixtures/ghost_twap](tests/fixtures/ghost_twap/README.md) tests
+21,600 exact Decimal forecasts with independent expected values, original
+3s/3s policy and synthetic replay ordering; it is not a full original-message
+capture. Its generators, manifests and test-imported analysis helpers remain.
+Runtime, schema, deployment units, automated tests and replay fixtures are not
+obsolete reports and are retained. The unrelated read-only `results/lockflip-2026`
+archive and original leader-risk study remain untouched.
+
+The historical local dashboard checks used real tunnel-delivered responses,
+desktop 1440-pixel and mobile 390-pixel views, and bounded browser checks rather
+than another producer canary. Startup/reconnect restored SSE, expired values
+cleared after tunnel loss, and the page's start button recreated only its managed
+local tunnel while preserving the server. Foreign-origin/missing-action-header
+start requests were rejected. Frozen comparison values, counts and windows
+matched their exact API response. Expand/collapse, 1x/2x/4x zoom, horizontal
+scrolling and keyboard/pointer inspection worked without mobile page overflow.
+The average-move explanation handles equal errors and a zero baseline. Synthetic
+chart fixtures were removed after isolated checks and were not accuracy evidence.
+These functional UI checks establish neither indefinite browser reliability nor
+a trading advantage; their old screenshots/logs are disposable local artifacts.
+
+At the owner's cleanup request, superseded local canary-export/scratch copies
+can be removed after this consolidation; they are not inputs to the preserved
+recorded-hour regression fixtures. Their original hashes and report provenance
+remain in the historical Git snapshot. Deleting raw observations reduces future
+reanalysis possibilities; the consolidated findings are not a replacement raw
+message ledger. Cleanup does not remove active state, production audit tables,
+credentials, supported operator code or unrelated research.
+
+No broad new test campaign is needed merely to consolidate documentation.
+Implementation changes still receive focused checks appropriate to the changed
+behavior. For current operations and exact service commands, use
+[OPERATIONS.md](OPERATIONS.md#continuous-ghost-retention-and-accuracy).

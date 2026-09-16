@@ -1,3 +1,0 @@
-=== 14. Chainlink spot stamped s -> TWAP event stamped s+3 s: receipt-clock delay in ms, week; spot receipt = price_samples.received_ms, TWAP receipt = earliest received_wall_ns for that stamp ===
-n_pairs|p10_ms|p50_ms|p90_ms|p99_ms|min_ms|max_ms|negative_pairs
-550393|2552|3088|3611|4042|-32829|10241|9

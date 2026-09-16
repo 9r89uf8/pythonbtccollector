@@ -1,8 +1,0 @@
-{
-  "purpose": "Lossless compressed browser capture support; no production change",
-  "tests_passed": 43,
-  "source_sha256": {
-    "research/spot_twap_response/checkpoint_c/analyze_browser.py": "625b4f3fb849c0a0e7aaa437bce4d7061067d8a09e1aa0f4a75a23688d524e79",
-    "tests/test_ghost_browser_analysis.py": "dec6c72b2b2648577fa862fb064d7b267bcfab981d38433fee06e39fbcd319a6"
-  }
-}

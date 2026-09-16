@@ -1,8 +1,0 @@
-{
-  "phase": "tests",
-  "release_commit": "d404312dadd1748f38c91cf4911c74b5c47206ea",
-  "exit_code": 0,
-  "completed_at_utc": "2026-09-15T22:26:03.626860+00:00",
-  "remote_script_sha256": "d4b87cc06926e186a274ff63a362a28015439295795a2ad542dc242a3d17f16b",
-  "output_sha256": "21663cf169cf8970cdecc9e5ae235ef0357791aaa85246b2bddf71ed480ec656"
-}

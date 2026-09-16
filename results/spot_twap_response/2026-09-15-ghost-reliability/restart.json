@@ -1,8 +1,0 @@
-{
-  "phase": "restart",
-  "release_commit": "d404312dadd1748f38c91cf4911c74b5c47206ea",
-  "exit_code": 0,
-  "completed_at_utc": "2026-09-15T22:26:30.174775+00:00",
-  "remote_script_sha256": "4cbcbb6aab2561345363a07787c95e7cbb959bae4fec7e4a1e32140b126f4c70",
-  "output_sha256": "4129b42f2fc78c67a23a372821c15a023eeccf468b587ba5aa76bdbfd8bd67a7"
-}

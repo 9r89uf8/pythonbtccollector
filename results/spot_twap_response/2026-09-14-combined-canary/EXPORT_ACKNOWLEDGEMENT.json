@@ -1,9 +1,0 @@
-{
-  "sha256": "2353132cbc689a02d6eaf3009d93c6550f9693205ee6978c70c77a3faf51fdc3",
-  "bytes": 656591966,
-  "row_count": 14346,
-  "verified": 14346,
-  "stale_or_ineligible": 0,
-  "external_path": "C:/Users/alexa/PycharmProjects/polycollector/dist/ghost-combined-canary-2026-09-14/audit.jsonl",
-  "source": "Successful ghost_twap_admin download completion output; both verification passes completed before the database acknowledgement."
-}

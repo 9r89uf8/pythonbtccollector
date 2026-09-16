@@ -1,5 +1,0 @@
-{
-  "returncode": 0,
-  "stdout": "{\"writer_initial_state\": {\"row_count\": 0, \"earliest_created_ms\": null, \"latest_created_ms\": null, \"incomplete_count\": 0}, \"measurement\": {\"relation_bytes\": 49152, \"row_count\": null, \"tablespaces\": [\"pg_default\"], \"db_data_directory\": null}, \"service_user_state_write_fsync\": true, \"canary_ms\": 3600000}\n\n{\"database_directory\": \"/var/lib/postgresql/16/main\", \"same_database_filesystem\": true, \"available_bytes\": 26336092160, \"state_directory\": \"/var/lib/price-collector/ghost-twap\"}\n",
-  "stderr": ""
-}

@@ -1,7 +1,0 @@
-H3_AUDIT_META|1789322427270|on|repeatable read|20s
-H3_COVERAGE_META|[{"h": 5, "candidate_anchors": 10081, "end_boundary_anchor": 1, "missing_exact_twap_now": 461, "missing_exact_twap_future": 462, "missing_target_opening_price": 0, "target_resolution_not_resolved": 0, "missing_target_resolution_record": 0, "exact_targets_with_resolved_market": 9199}, {"h": 10, "candidate_anchors": 10081, "end_boundary_anchor": 1, "missing_exact_twap_now": 461, "missing_exact_twap_future": 468, "missing_target_opening_price": 0, "target_resolution_not_resolved": 0, "missing_target_resolution_record": 0, "exact_targets_with_resolved_market": 9172}, {"h": 30, "candidate_anchors": 10081, "end_boundary_anchor": 1, "missing_exact_twap_now": 461, "missing_exact_twap_future": 507, "missing_target_opening_price": 0, "target_resolution_not_resolved": 0, "missing_target_resolution_record": 0, "exact_targets_with_resolved_market": 9135}]
-=== 18. Rolling ghost TWAP at horizon h from the latest TWAP stamp w (week, provider clock, every 60 s) ===
-h_s|n_instants|ghost_err_p50_bps|ghost_err_p90_bps|ghost_err_p99_bps|persistence_err_p50_bps|persistence_err_p90_bps|side_changes|ghost_shows_new_side|ghost_false_alarms|ghost_side_wrong_total
-5|9199|0.006|0.058|0.194|0.155|0.561|1052|1021|24|55
-10|9172|0.031|0.180|0.448|0.307|1.093|1158|1071|74|161
-30|9135|0.311|1.274|3.095|0.868|3.083|1564|1239|225|550

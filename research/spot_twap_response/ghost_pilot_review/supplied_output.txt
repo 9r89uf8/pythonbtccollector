@@ -1,8 +1,0 @@
-BEGIN
-SET
-=== 18. Rolling ghost TWAP at horizon h from the latest TWAP stamp w (week, provider clock, every 60 s) ===
-h_s|n_instants|ghost_err_p50_bps|ghost_err_p90_bps|ghost_err_p99_bps|persistence_err_p50_bps|persistence_err_p90_bps|side_changes|ghost_shows_new_side|ghost_false_alarms|ghost_side_wrong_total
-5|9199|0.006|0.058|0.194|0.155|0.561|1052|1021|24|55
-10|9172|0.031|0.180|0.448|0.307|1.093|1158|1071|74|161
-30|9135|0.311|1.274|3.095|0.868|3.083|1564|1239|225|550
-COMMIT
