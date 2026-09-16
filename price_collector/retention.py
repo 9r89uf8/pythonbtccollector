@@ -196,7 +196,8 @@ async def _run(args):
         now_ms = await connection.fetchval(
             "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint")
         if args.apply:
-            result = await expire_history(connection, now_ms, max_seconds=args.max_seconds)
+            result = await expire_history(connection, now_ms, max_seconds=args.max_seconds,
+                                          batch_size=args.batch_size)
         else:
             result = await inspect_history(connection, now_ms)
         print(json.dumps(result, sort_keys=True), flush=True)
@@ -209,6 +210,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="delete history older than the fixed 10-day policy")
     parser.add_argument("--max-seconds", type=int, default=45)
+    parser.add_argument("--batch-size", type=int, default=2000,
+                        help="rows per transaction (maximum 10000); default 2000")
     parser.add_argument("--database", default="price_collector")
     parser.add_argument("--host", default="/var/run/postgresql")
     parser.add_argument("--user", default="postgres")
