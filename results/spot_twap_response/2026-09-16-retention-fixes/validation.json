@@ -21,6 +21,19 @@
     "index_check": "New watermark index eligible with transaction-local enable_seqscan=off on the tiny disposable dataset; not a performance benchmark",
     "cleanup": "Disposable database, Git worktree and temporary test files removed; database absence and active production services verified"
   },
+  "deployment": {
+    "release_commit": "35a8b69",
+    "chainlink_restart_utc": "2026-09-16T14:48:28Z",
+    "schema_committed_before_restart": true,
+    "audit_rows_before_and_after": 23411,
+    "incomplete_rows": 0,
+    "all_six_services_active": true,
+    "api_health_ok": true,
+    "ghost_enabled": false,
+    "ghost_continuous": false,
+    "normal_production_query_plan": "Index Only Scan using ghost_twap_audit_continuous_watermark_idx; no JSON filter",
+    "backup_and_logs": "/var/lib/price-collector/deployments/ghost-retention-fixes-20260916T144750Z"
+  },
   "capacity": {
     "observed_at_utc": "2026-09-16T14:35:07.289178+00:00",
     "free_bytes": 23556210688,

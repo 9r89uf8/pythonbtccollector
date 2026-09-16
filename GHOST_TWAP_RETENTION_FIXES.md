@@ -68,7 +68,7 @@ by this maintenance fix.
 
 ## Verification and release status
 
-The focused maintenance/index fixtures passed: **4 tests in 0.81 seconds**.
+The focused deployment/factory/shutdown fixtures passed: **4 tests in 0.81 seconds**.
 The separately authorized isolated PostgreSQL case passed in **1.86 seconds**
 against source `9f03f40`. It applied the actual schema and exercised writer-role
 compaction, late annotation, expiry, progress past a deliberately failing row,
@@ -82,11 +82,16 @@ These retained records are validation fixtures, not production forecast data.
 records the exact run and cleanup evidence. This was not a live canary, sustained
 capacity run, seven-day retention observation or browser test.
 
-The producer-disabled corrective deployment is authorized and pending final
-deployment evidence; no activation is claimed. After the reviewed
-release is pushed, apply `schema.sql` with its own transaction wrapper before
-restarting affected services; preserve disabled producer flags and existing
-state. Use the [operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
+The corrective release `35a8b69` (runtime `9f03f40`) was installed on September
+16 at 14:48:28 UTC with both producer flags false. Schema committed before
+restarting only `price-collector-polymarket-chainlink`; all six services were
+active, API health was `ok`, and all 23,411 audit rows remained terminal and
+unchanged in count. The production planner now chooses an index-only scan on
+`ghost_twap_audit_continuous_watermark_idx` with no JSON filter. Production compact,
+hourly and feed tables remain empty: no activation is claimed. Backup/logs are
+under `/var/lib/price-collector/deployments/ghost-retention-fixes-20260916T144750Z`.
+For later installations, apply schema before restarting the affected service.
+Use the [operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
 The [retention contract](GHOST_TWAP_RETENTION_MONITORING_PLAN.md) and historical
 [compact-storage findings](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
 retain their distinct scopes.

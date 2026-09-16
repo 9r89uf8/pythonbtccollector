@@ -904,7 +904,9 @@ fills or a frozen fee schedule for future markets.
 
 Both one-hour live canaries and the bounded C browser observation are complete.
 The producer is disabled again; the Redis-only API remains enabled at deployment
-runtime release `4529b5a`. The [deployment record](results/spot_twap_response/2026-09-16-continuous-deployment/README.md)
+runtime release `9f03f40`. The [retention correction](GHOST_TWAP_RETENTION_FIXES.md)
+records the targeted fixes, validation and current storage constraint.
+The [initial retention deployment record](results/spot_twap_response/2026-09-16-continuous-deployment/README.md)
 confirms the retention schema is installed with the producer disabled.
 The [C findings](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
 record browser delivery, limitations and the audit/export status.
