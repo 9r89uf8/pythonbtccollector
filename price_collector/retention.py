@@ -56,6 +56,12 @@ class Expiry:
     cutoff: int
 
     def exists_sql(self):
+        if self.table.startswith("public.") and self.predicate == f"{self.order} < $1":
+            # These public time/market columns have leading B-tree indexes.
+            # Reading the minimum stays cheap immediately after bulk expiry,
+            # before ANALYZE has corrected the old selectivity estimates.
+            return (f"SELECT COALESCE((SELECT {self.order} FROM {self.table} t "
+                    f"ORDER BY {self.order} LIMIT 1) < $1, FALSE)")
         return f"SELECT EXISTS(SELECT 1 FROM {self.table} t WHERE {self.predicate})"
 
     def delete_sql(self):
