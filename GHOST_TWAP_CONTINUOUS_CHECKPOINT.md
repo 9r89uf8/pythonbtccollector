@@ -71,7 +71,10 @@ schema transaction. No further full test suite, live canary or database migratio
 was run for this checkpoint, as requested. New runtime/database integration is
 therefore implemented but has not been demonstrated against PostgreSQL here.
 
-The droplet and production flags are unchanged. After release through GitHub,
+At implementation completion the droplet and production flags were unchanged.
+The subsequent [deployment record](results/spot_twap_response/2026-09-16-continuous-deployment/README.md)
+confirms installation and schema migration with the producer still disabled.
+For future installations after release through GitHub,
 apply `schema.sql` before restarting `price-collector-polymarket-chainlink` and
 `price-api`; install with the producer disabled. See the exact environment keys,
 capacity limits and commands in
