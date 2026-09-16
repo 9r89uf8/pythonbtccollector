@@ -78,6 +78,32 @@ After those checks, repeat the one-hour browser measurement on the owner's
 computer with sleep disabled for that run and a maintained SSH tunnel. A browser
 on the droplet would bypass the delivery path being measured.
 
+## Validation
+
+Implementation commit: `fa23166adc6491526b1d86d1883300ff8ebdecb1`, pushed to
+`codex/ghost-audit-storage`. The subsequent validation record changes no runtime.
+
+- Windows/Python 3.9 full suite: **1,619 passed, 15 skipped**, with two existing
+  websockets deprecation warnings. Skips are 13 opt-in datastore cases and two
+  platform-specific cases.
+- New archive tests locally: **41 passed, 3 PostgreSQL cases skipped**. These
+  include corruption/truncation, create-only retries, uncertain acknowledgements,
+  concurrent result updates, exact Decimal text, resource limits, cancellation
+  and closing the remote body before returning to the worker.
+- Python 3.12 on the droplet, using a separate checkout and disposable database:
+  **145 passed** across the new archive tests, real PostgreSQL selection/CAS and
+  existing store/expiry/privilege/export tests. The database was explicitly named
+  `ghost_checkpoint_b_validation_archive_fa23166`; it and its test checkout were
+  removed afterwards. The production database/schema were not changed.
+- Production checkout remains `5d6083c5f8eab4fdf6603f157b2dce20af18f3ea`.
+  Chainlink and API services remain active, and the ghost Redis key is absent.
+  No service was restarted and no canary was enabled.
+
+The [validation record](results/spot_twap_response/2026-09-16-audit-storage/VALIDATION.json)
+contains the exact commands, code hashes and limits of this evidence. A real
+external backend, unattended scheduling, automatic expiry and sustained storage
+reuse have not been tested or enabled by this checkpoint.
+
 ## Deployment ordering
 
 This foundation is not an archive-service deployment. After the reviewed change
