@@ -62,6 +62,40 @@ decoding and composing the bodies. A separate 1,800-row sample averaged 7,580
 bytes per compact body (maximum 7,659), comfortably within the read budget.
 No full suite or new forecast canary was required for this read-only view.
 
+### Live deployment — September 16, 2026
+
+The owner approved deployment of `512a4f1`. It was pushed to GitHub main and
+installed by fast-forward pull with dependencies checked. Chainlink restarted
+at 18:58:36 UTC and the API at 18:58:58 UTC; production flags, state, schema,
+credentials and retention settings were preserved. The local-only frontend
+proxy was restarted separately. No frontend files were installed on the droplet.
+
+Health, source prices, live ghosts, accuracy and comparison routes returned 200.
+The comparison export was about 1.84 MB uncompressed, with a finalized-window
+lag around 130 seconds, and continued refreshing. Browser verification confirmed
+all four window/MAE/pair-count values matched the exact API response; the browser
+console had no errors or warnings. The live 5/10/30-second cards also resumed.
+
+One recorded export, generated at 18:58:39 UTC and spanning target stamps
+18:41:34–18:56:34 UTC, showed the following first-publication cohort. These are
+window-specific observations, not a new study or long-run accuracy guarantee.
+
+| Horizon | Paired targets | Ghost MAE, USD | Held-TWAP MAE, USD | No matched print |
+| --- | ---: | ---: | ---: | ---: |
+| 3 s | 867 | 0.4675 | 4.2629 | 16 |
+| 5 s | 865 | 0.6732 | 6.9948 | 18 |
+| 10 s | 865 | 2.1398 | 13.7965 | 18 |
+| 30 s | 863 | 15.5717 | 39.8629 | 20 |
+
+Two operational observations remain explicit. The old API exceeded its systemd
+stop budget and was SIGKILLed during restart; the replacement was healthy.
+Intermittent accuracy-maintenance `TimeoutError` episodes also occurred and
+recovered. Bounded journal review found the same issue before deployment at
+18:40–18:51, with a postdeployment recovery at 19:01:34. Comparison cache errors
+were absent and caches continued refreshing; the continuous producer reported
+no stop/suspension and healthy capacity. This is not a claim that every worker
+failure counter was zero. No unrelated runtime fix was included in this release.
+
 ## Droplet update
 
 Run after this change is pushed to GitHub. This is code-only: preserve the
