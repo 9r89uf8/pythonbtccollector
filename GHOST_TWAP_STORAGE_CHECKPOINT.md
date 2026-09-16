@@ -1,5 +1,12 @@
 # Ghost audit storage — archive foundation
 
+**Owner direction updated:** the next production design retains individual
+forecasts for seven days and monitors accuracy, then expires individual records.
+See the [retention and monitoring plan](GHOST_TWAP_RETENTION_MONITORING_PLAN.md).
+External archival is optional for that design. The implementation and validation
+below remain the historical archive-foundation checkpoint, not its replacement
+retention policy or a currently enabled worker.
+
 This checkpoint implements the destination-independent archive transaction.
 It does **not** enable continuous production, shorten retention, delete rows,
 start an archive service, or complete the interrupted browser canary. The

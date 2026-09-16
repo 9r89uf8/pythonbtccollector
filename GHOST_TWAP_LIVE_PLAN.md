@@ -8,9 +8,11 @@ record a clean automatic stop and a complete Redis observation hour, alongside
 an incomplete browser capture with about 49 minutes of missing samples during
 confirmed laptop sleep.
 Full-hour frontend reliability and continuous-operation storage remain open.
-The [storage checkpoint](GHOST_TWAP_STORAGE_CHECKPOINT.md) adds a bounded archive
-transaction; an external destination and the continuous retention policy remain
-unconfigured. It does not start a worker or relax the canary limits.
+The owner now wants individual forecasts deleted after seven days with ongoing
+accuracy tracking. The [retention and monitoring plan](GHOST_TWAP_RETENTION_MONITORING_PLAN.md)
+supersedes the requirement for an external archive in the continuous-production
+path. The [archive foundation](GHOST_TWAP_STORAGE_CHECKPOINT.md) remains optional;
+neither policy nor monitoring is enabled yet.
 [Original C findings and audit/export status](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
 remain separate from the historical B results.
 The [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) support the calculation

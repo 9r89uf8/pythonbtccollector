@@ -968,6 +968,10 @@ successful service restart alone is not evidence of a drained outbox.
 The [archive foundation](GHOST_TWAP_STORAGE_CHECKPOINT.md) supports bounded
 terminal-row batches and full external readback before exact-version
 acknowledgement. No archive service or automatic expiry is enabled yet.
+The owner's [new retention and monitoring direction](GHOST_TWAP_RETENTION_MONITORING_PLAN.md)
+is seven days of individual forecasts with ongoing accuracy summaries; external
+archiving is optional for that design. Implementation and capacity validation
+remain to be done before continuous production.
 
 The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
 adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after
