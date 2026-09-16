@@ -22,6 +22,7 @@ from price_collector.ghost_twap_stream import GhostStreamClosed, GhostStreamHub,
 
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 ACCURACY_KEY = 'btc:live:ghost_chainlink_twap_60s:accuracy'
+COMPARISON_KEY = 'btc:live:ghost_chainlink_twap_60s:comparison'
 STREAM_PATH = '/forecasts/chainlink-twap/stream'
 HEADERS = {'Cache-Control': 'no-store, no-transform', 'X-Accel-Buffering': 'no'}
 router = APIRouter(prefix='/forecasts/chainlink-twap', tags=['ghost forecasts'])
@@ -90,16 +91,22 @@ class GhostApiService:
 
     async def get_accuracy(self) -> tuple[bytes, int]:
         """One cached read; no database, price arithmetic or aggregation."""
+        return await self._cached_summary(ACCURACY_KEY, 512 * 1024, 'accuracy_summary')
+
+    async def get_comparison(self) -> tuple[bytes, int]:
+        return await self._cached_summary(COMPARISON_KEY, 4 * 1024 * 1024, 'comparison_snapshot')
+
+    async def _cached_summary(self, key: str, maximum_bytes: int, label: str) -> tuple[bytes, int]:
         try:
-            raw = await asyncio.wait_for(self.reader.get(ACCURACY_KEY),
+            raw = await asyncio.wait_for(self.reader.get(key),
                                         timeout=self.settings.read_timeout_ms / 1000)
         except (RedisError, OSError, asyncio.TimeoutError) as exc:
             raise GhostUnavailable('redis_unavailable') from exc
         if raw is None:
-            raise GhostUnavailable('no_accuracy_summary')
+            raise GhostUnavailable('no_' + label)
         try:
-            if not isinstance(raw, bytes) or len(raw) > 512 * 1024:
-                raise ValueError('accuracy byte budget')
+            if not isinstance(raw, bytes) or len(raw) > maximum_bytes:
+                raise ValueError('summary byte budget')
             body = json.loads(raw)
             now = self.wall_ns() // 1_000_000
             generated, attempted, expiry = (body[key] for key in
@@ -110,9 +117,9 @@ class GhostApiService:
                     or expiry - attempted != 180_000
                     or now - generated > 180_000
                     or body.get('status') not in ('available', 'unavailable')):
-                raise ValueError('accuracy metadata')
+                raise ValueError('summary metadata')
         except (ValueError, KeyError, TypeError, UnicodeError) as exc:
-            raise GhostUnavailable('invalid_or_expired_accuracy_summary') from exc
+            raise GhostUnavailable('invalid_or_expired_' + label) from exc
         return raw, 200 if body['status'] == 'available' else 503
 
 
@@ -176,6 +183,19 @@ async def ghost_accuracy(request: Request) -> Response:
     except GhostUnavailable as exc:
         return unavailable(exc.reason)
     return Response(content=raw, status_code=status, media_type='application/json', headers=HEADERS)
+
+
+@router.get('/comparison', response_class=Response)
+async def ghost_comparison(request: Request) -> Response:
+    service = _service(request)
+    if service is None:
+        return _disabled_response(request)
+    try:
+        raw, status = await service.get_comparison()
+    except GhostUnavailable as exc:
+        return unavailable(exc.reason)
+    headers = {**HEADERS, 'X-Ghost-API-Time-Ms': str(service.wall_ns() // 1_000_000)}
+    return Response(content=raw, status_code=status, media_type='application/json', headers=headers)
 
 
 def stream_frame(update: Any, *, skipped_updates: int, resync: bool,

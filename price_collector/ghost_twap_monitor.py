@@ -17,9 +17,12 @@ import time
 from typing import Any, Callable
 
 from price_collector.ghost_twap_accuracy import compose_status
+from price_collector.ghost_twap_chart import compose_comparison
 
 LOGGER = logging.getLogger(__name__)
 ACCURACY_KEY = 'btc:live:ghost_chainlink_twap_60s:accuracy'
+COMPARISON_KEY = 'btc:live:ghost_chainlink_twap_60s:comparison'
+MAX_COMPARISON_BYTES = 4 * 1024 * 1024
 MAINTENANCE_SECONDS = 5
 PUBLICATION_SECONDS = 60
 CACHE_TTL_SECONDS = 180
@@ -62,6 +65,8 @@ class GhostMonitor:
         self._close_complete = False
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ghost-accuracy')
         self._executor_closed = False
+        self._comparison_error: str | None = None
+        self._comparison_ack_ms: int | None = None
 
     def snapshot_health(self) -> dict:
         return dict(status='unavailable' if self._errors else
@@ -74,7 +79,9 @@ class GhostMonitor:
                     maintenance_runs=self._maintenance_runs,
                     publications=self._publications, failures=self._failures,
                     errors=dict(self._errors),
-                    maintenance=deepcopy(self._maintenance_result))
+                    maintenance=deepcopy(self._maintenance_result),
+                    comparison=dict(last_cache_ack_ms=self._comparison_ack_ms,
+                                    error=self._comparison_error))
 
     def _failure(self, operation: str, exc: BaseException) -> None:
         kind = type(exc).__name__
@@ -264,6 +271,48 @@ class GhostMonitor:
         except Exception as exc:
             self._failure('cache', exc)
 
+    async def _publish_comparison(self) -> None:
+        """Finalized chart pairs are optional; their failure cannot mute accuracy."""
+        now_ms = self.wall_ns() // 1_000_000
+        try:
+            runtime = self._runtime_snapshot()
+            if 'persistence_watermark_ms' not in runtime:
+                raise ValueError('Comparison needs the live persistence watermark')
+            snapshot = await asyncio.wait_for(self.store.comparison_snapshot(
+                now_ms, runtime_watermark_ms=runtime['persistence_watermark_ms']),
+                timeout=STORE_TIMEOUT_SECONDS)
+            status = await self._cpu(compose_comparison, snapshot, now_ms)
+            self._comparison_error = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            kind = type(exc).__name__
+            if self._comparison_error != kind:
+                LOGGER.warning('ghost_comparison_unavailable error_type=%s', kind)
+            self._comparison_error = kind
+            status = dict(schema_version=1, generated_at_ms=now_ms,
+                          status='unavailable', reason='comparison_snapshot_unavailable')
+        try:
+            attempted = self.wall_ns() // 1_000_000
+            status.update(cache_publish_attempt_ms=attempted,
+                          valid_until_ms=attempted + CACHE_TTL_SECONDS * 1000)
+            payload = await self._cpu(_json_bytes, status)
+            if len(payload) > MAX_COMPARISON_BYTES:
+                raise ValueError('Comparison exceeds cache byte budget')
+            if not now_ms <= attempted <= self.wall_ns() // 1_000_000 < status['valid_until_ms']:
+                raise ValueError('Comparison cache clock regression or expiry')
+            if not await asyncio.wait_for(self.redis.set(COMPARISON_KEY, payload,
+                    ex=CACHE_TTL_SECONDS), timeout=REDIS_TIMEOUT_SECONDS):
+                raise RuntimeError('Redis did not acknowledge comparison write')
+            self._comparison_ack_ms = self.wall_ns() // 1_000_000
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            kind = type(exc).__name__
+            if self._comparison_error != kind:
+                LOGGER.warning('ghost_comparison_cache_failed error_type=%s', kind)
+            self._comparison_error = kind
+
     async def run(self) -> None:
         try:
             await self._run()
@@ -282,6 +331,8 @@ class GhostMonitor:
                     break
                 if self.monotonic_ns() >= next_publication:
                     await self._publish()
+                    if not self._closing:
+                        await self._publish_comparison()
                     next_publication = self.monotonic_ns() + PUBLICATION_SECONDS * 1_000_000_000
                 # Skip elapsed intervals. Never fabricate catch-up cycles or
                 # launch another maintenance call while one is in progress.

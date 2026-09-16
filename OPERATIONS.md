@@ -167,8 +167,10 @@ It did not install new code or apply a schema migration. Keep these current
 overrides when reviewing future upgrades; the example defaults are not the
 deployed configuration.
 
-For a future code/schema installation, after the change is pushed to GitHub,
-install it with the producer disabled.
+For an initial continuous-mode code/schema installation, after the change is
+pushed to GitHub, install it with the producer disabled. Later code-only chart
+updates preserve the running mode and existing state; use the tailored
+[comparison update commands](GHOST_TWAP_COMPARISON.md#droplet-update).
 Apply the schema transaction before restarting either affected service:
 
 ```bash

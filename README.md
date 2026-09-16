@@ -942,6 +942,15 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
+`GET /forecasts/chainlink-twap/comparison` provides a Redis-cached, finalized
+15-minute comparison of frozen 3/5/10/30-second forecasts and actual TWAP.
+It selects the first acknowledged eligible publication per target/horizon
+before outcome exclusions, with ghost and held-TWAP MAE from the same early,
+valid pairs. The continuous monitor refreshes it once a minute from bounded
+compact-record reads; the API never queries PostgreSQL for this route.
+Matching and persistence put the chart roughly two minutes behind live time.
+See [the chart contract and operating procedure](GHOST_TWAP_COMPARISON.md).
+
 Continuous Ghost TWAP forecasting was activated on **September 16, 2026 at
 15:59:27 UTC**, on deployed commit `6c6f5bf`, with run ID
 `4f55736e031f4184be501c538f7a61d2`. The initial live check reported

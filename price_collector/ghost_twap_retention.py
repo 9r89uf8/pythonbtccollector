@@ -367,6 +367,60 @@ class GhostRetentionStore(GhostAuditStore):
                 "accuracy_baseline":None if state["baseline_json"] is None else json.loads(state["baseline_json"]),
                 "accuracy_warning_state":None if state["warning_json"] is None else json.loads(state["warning_json"])}
 
+    async def comparison_snapshot(self, now_ms: int, *, runtime_watermark_ms: int | None) -> dict:
+        """One bounded database snapshot for the first-publication chart.
+
+        Both watermarks fence not-yet-compacted decisions before selecting any
+        target. A five-second source-age allowance covers decisions issued
+        after their target source stamp. The single SQL statement ensures the
+        watermark and compact rows share a PostgreSQL MVCC snapshot.
+        """
+        from .ghost_twap_chart import (MATCHING_AGE_MS, MAX_BODY_BYTES, MAX_ROWS,
+                                      SOURCE_AGE_ALLOWANCE_MS, WINDOW_MS)
+        _integer(now_ms, 'now_ms')
+        if runtime_watermark_ms is not None:
+            _integer(runtime_watermark_ms, 'runtime_watermark_ms')
+        async with self._connection() as connection:
+            rows = await connection.fetch(f"""
+                WITH watermark AS (
+                  SELECT min(created_ms) AS persistence_watermark_ms FROM {TABLE}
+                  WHERE (frozen_json::jsonb #> '{{runtime_policy,continuous}}')='true'::jsonb
+                ), bounds AS (
+                  SELECT persistence_watermark_ms,
+                    greatest(0, (least($1::bigint-$3::bigint,
+                      coalesce(persistence_watermark_ms,$1::bigint),
+                      coalesce($2::bigint,$1::bigint))-$4::bigint)/1000*1000) AS window_end_ms
+                  FROM watermark
+                ), chart_window AS (
+                  SELECT *,greatest(0,window_end_ms-$5::bigint) AS window_start_ms FROM bounds
+                ), candidates AS MATERIALIZED (
+                  SELECT c.run_id,c.decision_id,c.created_ms,c.body_json,c.body_sha256
+                  FROM {COMPACT} c CROSS JOIN chart_window w
+                  WHERE c.created_ms>=greatest(0,w.window_start_ms-30000)
+                    AND c.created_ms<w.window_end_ms+$4::bigint
+                  ORDER BY c.created_ms,c.run_id,c.decision_id LIMIT $6
+                ), sizes AS (
+                  SELECT count(*)::bigint AS row_count,
+                    coalesce(sum(octet_length(body_json)),0)::bigint AS body_bytes FROM candidates
+                )
+                SELECT w.*,s.row_count,s.body_bytes,c.run_id,c.decision_id,c.created_ms,c.body_sha256,
+                  CASE WHEN s.row_count<$6 AND s.body_bytes<=$7 THEN c.body_json ELSE NULL END AS body_json
+                FROM chart_window w CROSS JOIN sizes s LEFT JOIN candidates c ON true
+                ORDER BY c.created_ms,c.run_id,c.decision_id
+                """, now_ms, runtime_watermark_ms, MATCHING_AGE_MS,
+                SOURCE_AGE_ALLOWANCE_MS, WINDOW_MS, MAX_ROWS+1, MAX_BODY_BYTES)
+        if not rows:
+            raise RuntimeError('comparison snapshot metadata missing')
+        metadata = rows[0]
+        if metadata['row_count'] > MAX_ROWS or metadata['body_bytes'] > MAX_BODY_BYTES:
+            raise RuntimeError('comparison snapshot exceeds bounded row/body budget')
+        raw_rows = [{key: row[key] for key in ('run_id','decision_id','created_ms','body_json','body_sha256')}
+                    for row in rows if row['run_id'] is not None]
+        return dict(raw_rows=raw_rows, row_count=metadata['row_count'], body_bytes=metadata['body_bytes'],
+            window_start_ms=metadata['window_start_ms'], window_end_ms=metadata['window_end_ms'],
+            persistence_watermark_ms=metadata['persistence_watermark_ms'],
+            runtime_watermark_ms=runtime_watermark_ms)
+
     async def load_baseline(self) -> dict | None:
         async with self._connection() as connection:
             body = await connection.fetchval(f"SELECT baseline_json FROM {STATE} WHERE singleton")
