@@ -1,6 +1,9 @@
 -- Research-only LOGGED tables, never included by production schema.sql.
 -- The runner must first verify a disposable ghost_compact_storage_validation_*
 -- database identity. This file never creates/drops a database or runtime table.
+-- Only these disposable tables/TOAST tables disable background autovacuum.
+-- The probe measures explicit ordinary VACUUM/ANALYZE phases; this setting is
+-- laboratory isolation, not a production tuning or autovacuum validation.
 CREATE SCHEMA IF NOT EXISTS ghost_compact_probe;
 
 CREATE TABLE ghost_compact_probe.compact_json (
@@ -14,7 +17,7 @@ CREATE TABLE ghost_compact_probe.compact_json (
     summarized_revision INTEGER CHECK (summarized_revision >= 0),
     record_json TEXT NOT NULL,
     PRIMARY KEY (copy_id, run_id, decision_id)
-);
+) WITH (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 CREATE INDEX compact_json_retention_idx ON ghost_compact_probe.compact_json
     (retention_created_ms, copy_id, run_id, decision_id);
 -- Same target-lookup capability as the typed child B-tree, different physical
@@ -87,7 +90,7 @@ CREATE TABLE ghost_compact_probe.decision (
     current_twap_event_id TEXT,
     current_twap_window_s SMALLINT,
     PRIMARY KEY (copy_id, run_id, decision_id)
-);
+) WITH (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 CREATE INDEX decision_retention_idx ON ghost_compact_probe.decision
     (retention_created_ms, copy_id, run_id, decision_id);
 
@@ -144,6 +147,6 @@ CREATE TABLE ghost_compact_probe.horizon (
     FOREIGN KEY (copy_id, run_id, decision_id)
         REFERENCES ghost_compact_probe.decision (copy_id, run_id, decision_id) ON DELETE CASCADE,
     CHECK (count_observed + count_carried + count_pending + count_future + count_missing = 60)
-);
+) WITH (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 CREATE INDEX horizon_target_idx ON ghost_compact_probe.horizon
     (target_source_timestamp_ms, copy_id, run_id, decision_id, horizon_s);

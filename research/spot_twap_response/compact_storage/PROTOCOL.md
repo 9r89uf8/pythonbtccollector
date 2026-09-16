@@ -39,6 +39,12 @@ to the current full audit.
   use or cleanup. Never apply experiment DDL/DML to `price_collector`.
 - Use ordinary **LOGGED** relations and the actual proposed keys/indexes in
   both layouts. Do not claim savings from unlogged tables or missing indexes.
+- Disable autovacuum/auto-analyze only on the three disposable experiment tables
+  and their TOAST relations. Prescribed manual vacuum phases provide repeatable
+  maintenance; this does not establish unattended production autovacuum behavior.
+  The first run at `0c4f9f2` hit its one-second lock timeout while an autovacuum
+  ANALYZE held the table's `ShareUpdateExclusiveLock`. Its failed report is
+  retained. The fresh corrected run keeps the same resource/time limits.
 - Run layouts and mutation phases sequentially. The aggregate allocation of
   **every experimental relation across both layouts**, including heap, TOAST,
   indexes and auxiliary relations, must remain below **2 GiB**. The runner uses

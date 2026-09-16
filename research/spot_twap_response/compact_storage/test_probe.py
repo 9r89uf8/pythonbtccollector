@@ -21,6 +21,16 @@ def test_database_guard_allows_only_named_disposable_database():
     probe.check_database_name('ghost_compact_storage_validation_ab123456')
 
 
+def test_marker_batches_use_complete_verified_identity_inventory():
+    inventory = {('run',str(i)):'digest' for i in range(1203)}
+    experiment = probe.Experiment(None, None, inventory, {})
+    batches = list(experiment.id_batches())
+    assert [len(batch) for batch in batches] == [500,500,203]
+    assert [item for batch in batches for item in batch] == [key[1] for key in inventory]
+    with pytest.raises(ValueError,match='Ambiguous'):
+        probe.Experiment(None,None,{('a','id'):'x',('b','id'):'y'}, {})
+
+
 @pytest.mark.parametrize('size,free,message', [
     (probe.MAX_DB_BYTES-probe.WRITE_RESERVE_BYTES,probe.MIN_FREE_BYTES,'allocation'),
     (100,probe.MIN_FREE_BYTES-1,'Filesystem'),

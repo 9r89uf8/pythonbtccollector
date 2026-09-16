@@ -1,0 +1,285 @@
+{
+  "code_sha256": {
+    "compact.py": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "layout.py": "c3db9459d39725e76df066902141725cf4e8e80c70e4f6bb5f06759530666072",
+    "probe.py": "df65639c3dc8d5a992e88dbe16aa9a7896756b1757b72797a27d7639836a1137",
+    "schema.sql": "1cf0e6ffc56440ea6bbdab526183c08f8d33b5624445ace44fdc36899e9d3ef0"
+  },
+  "database": "ghost_compact_storage_validation_0c4f9f2",
+  "failure": "canceling statement due to lock timeout",
+  "failure_type": "LockNotAvailableError",
+  "finished_wall_ns": "1789527061917561624",
+  "initial_guard": {
+    "database_bytes": 7748631,
+    "filesystem_free_bytes": 24167047168
+  },
+  "limitations": [
+    "Seven replicated canary hours are a scaled cohort, not seven days of live traffic.",
+    "Ordinary manual vacuum here does not establish unattended autovacuum equilibrium.",
+    "Six whole-record revisions on one copy are a stress case; normal compact records are inserted after terminalization.",
+    "Retention summary markers and probe_revision are laboratory fields, not production monitoring/expiry implementation.",
+    "Allocated table totals include indexes and TOAST once; the TOAST breakdown must not be added again."
+  ],
+  "limits": {
+    "batch_decisions": 500,
+    "copies": 7,
+    "database_bytes": 2147483648,
+    "filesystem_free_bytes": 11811160064,
+    "seconds": 1200,
+    "turnovers": 3,
+    "write_reserve_bytes": 67108864
+  },
+  "measurements": [
+    {
+      "database_bytes": 7986199,
+      "elapsed_ms": 80,
+      "filesystem_free_bytes": 24166801408,
+      "format": "json",
+      "stage": "empty",
+      "tables": [
+        {
+          "base_indexes_bytes": 32768,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 0,
+          "heap_main_bytes": 0,
+          "mean_tuple_bytes": "None",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 0,
+          "table_including_toast_bytes": 8192,
+          "toast_total_bytes": 8192,
+          "total_bytes": 40960
+        }
+      ],
+      "total_relation_bytes": 40960
+    },
+    {
+      "database_bytes": 32480279,
+      "elapsed_ms": 23208,
+      "filesystem_free_bytes": 24142036992,
+      "format": "json",
+      "stage": "after_1_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 1990656,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 7000,
+          "heap_main_bytes": 1482752,
+          "mean_tuple_bytes": "2848.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 7082,
+          "table_including_toast_bytes": 22544384,
+          "toast_total_bytes": 21037056,
+          "total_bytes": 24535040
+        }
+      ],
+      "total_relation_bytes": 24535040
+    },
+    {
+      "database_bytes": 82443287,
+      "elapsed_ms": 93524,
+      "filesystem_free_bytes": 24074715136,
+      "format": "json",
+      "stage": "after_3_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 6995968,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 21164,
+          "heap_main_bytes": 4448256,
+          "mean_tuple_bytes": "2847.5561046785277229",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 21246,
+          "table_including_toast_bytes": 67493888,
+          "toast_total_bytes": 63012864,
+          "total_bytes": 74489856
+        }
+      ],
+      "total_relation_bytes": 74489856
+    },
+    {
+      "database_bytes": 176708631,
+      "elapsed_ms": 188014,
+      "filesystem_free_bytes": 23879045120,
+      "format": "json",
+      "stage": "after_7_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 11362304,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 49492,
+          "heap_main_bytes": 10379264,
+          "mean_tuple_bytes": "2848.3180094404324848",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 157368320,
+          "toast_total_bytes": 146956288,
+          "total_bytes": 168730624
+        }
+      ],
+      "total_relation_bytes": 168730624
+    },
+    {
+      "database_bytes": 188054551,
+      "elapsed_ms": 300676,
+      "filesystem_free_bytes": 23790907392,
+      "format": "json",
+      "stage": "insert_only_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 17801216,
+          "estimated_dead_tuples": 1550,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 15261696,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 162250752,
+          "toast_total_bytes": 146956288,
+          "total_bytes": 180051968
+        }
+      ],
+      "total_relation_bytes": 180051968
+    },
+    {
+      "database_bytes": 318929943,
+      "elapsed_ms": 352929,
+      "filesystem_free_bytes": 23474995200,
+      "format": "json",
+      "stage": "after_six_rewrites_one_copy",
+      "tables": [
+        {
+          "base_indexes_bytes": 19349504,
+          "estimated_dead_tuples": 42261,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 18546688,
+          "mean_tuple_bytes": "2845.9250816960503490",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 291577856,
+          "toast_total_bytes": 272998400,
+          "total_bytes": 310927360
+        }
+      ],
+      "total_relation_bytes": 310927360
+    }
+  ],
+  "parity_checks": [
+    {
+      "copy_id": 0,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 1,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 2,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 3,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 4,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 5,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 6,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 0,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    }
+  ],
+  "retention_checks": [],
+  "server_settings": [
+    {
+      "name": "autovacuum",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "block_size",
+      "setting": "8192",
+      "unit": null
+    },
+    {
+      "name": "default_toast_compression",
+      "setting": "pglz",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "maintenance_work_mem",
+      "setting": "65536",
+      "unit": "kB"
+    },
+    {
+      "name": "server_version",
+      "setting": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+      "unit": null
+    },
+    {
+      "name": "wal_level",
+      "setting": "replica",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "source_manifest": {
+    "code_sha256": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "compact_jsonl_sha256": "65bae3a78b1caf91e056ce3de43a940855cb3a5f6a9f5b703beb15abeb505e4c",
+    "decisions": 7082,
+    "finalized_as_of_wall_ns": 1789516718428617010,
+    "horizon_records": 42492,
+    "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl",
+    "input_rows": 23411,
+    "input_sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+    "limitations": [
+      "No full slot/payload replay after original bytes expire.",
+      "This encoder does not reconstruct complete feed-gap metrics from selected snapshots.",
+      "Logical JSON bytes are not PostgreSQL allocated bytes."
+    ],
+    "logical_bytes": 53216127,
+    "maximum_line_bytes": 7642,
+    "minimum_line_bytes": 5614,
+    "publication_statuses": {
+      "acknowledged": 7075,
+      "expired_or_target_received": 7
+    },
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+    "schema_version": 1
+  },
+  "started_wall_ns": "1789526680403671950",
+  "status": "failed"
+}

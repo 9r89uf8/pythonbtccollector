@@ -90,8 +90,16 @@ class Experiment:
     def __init__(self, connection, source, expected, report):
         self.c = connection
         self.source, self.expected, self.report = source, expected, report
+        self.decision_ids = tuple(key[1] for key in expected)
+        require(len(set(self.decision_ids)) == len(self.decision_ids), 'Ambiguous canary decision IDs')
         self.started = time.monotonic_ns()
         self.directory = None
+
+    def id_batches(self):
+        # IDs come from the already hash-verified input inventory. Marker-only
+        # updates need no repeated decoding of financial records.
+        for offset in range(0, len(self.decision_ids), BATCH):
+            yield self.decision_ids[offset:offset+BATCH]
 
     async def guard(self):
         require(time.monotonic_ns()-self.started < MAX_SECONDS*1000000000, 'Experiment time cap')
@@ -162,9 +170,8 @@ class Experiment:
     async def summarize(self, copy_id, format_name):
         # This is a laboratory summary-commit marker, not an implementation of
         # production rollups. It is set only after full reconstruction parity.
-        for batch in batches(self.source):
+        for ids in self.id_batches():
             await self.guard()
-            ids = [record['decision']['decision_id'] for record in batch]
             async with self.c.transaction():
                 await self.c.execute('UPDATE '+layout.PARENT_TABLES[format_name]+
                     ' SET summarized_revision=probe_revision WHERE copy_id=$1 AND decision_id=ANY($2::text[])',
@@ -193,9 +200,8 @@ class Experiment:
 
     async def stress(self, copy_id, format_name):
         for revision in range(1, 7):
-            for batch in batches(self.source):
+            for ids in self.id_batches():
                 await self.guard()
-                ids = [record['decision']['decision_id'] for record in batch]
                 async with self.c.transaction():
                     await layout.stress_batch(self.c, copy_id, ids, revision, format_name)
                 await asyncio.sleep(0.02)

@@ -88,7 +88,7 @@ def test_research_ddl_covers_typed_fields_and_both_lookup_workloads():
     parent, children = layout.flatten(encode(fixture()), 1, 0)
     ddl = layout.SCHEMA_PATH.read_text()
     for table, row in [('decision', parent), ('horizon', children[0])]:
-        body = ddl.split('CREATE TABLE ghost_compact_probe.'+table+' (', 1)[1].split('\n);', 1)[0]
+        body = ddl.split('CREATE TABLE ghost_compact_probe.'+table+' (', 1)[1].split('\n) WITH ', 1)[0]
         columns = set(re.findall(r'^    ([a-z_0-9]+) (?:INTEGER|SMALLINT|BIGINT|TEXT|BOOLEAN|NUMERIC|BYTEA)', body, re.M))
         assert set(row).issubset(columns)
         assert 'probe_revision' in columns
@@ -98,6 +98,17 @@ def test_research_ddl_covers_typed_fields_and_both_lookup_workloads():
     assert ddl.count('summarized_revision INTEGER') == 2
     assert 'UNLOGGED' not in ddl and 'DROP ' not in ddl and 'CREATE DATABASE' not in ddl
     assert 'JSONB' not in ddl  # Every current encoder field has a real typed home.
+
+
+def test_manual_vacuum_isolation_is_limited_to_three_disposable_tables_and_toast():
+    ddl = layout.SCHEMA_PATH.read_text()
+    options = 'autovacuum_enabled = false, toast.autovacuum_enabled = false'
+    names = re.findall(r'CREATE TABLE ghost_compact_probe\.([a-z_]+) \([\s\S]*?\n\) WITH \('
+                       + re.escape(options) + r'\);', ddl)
+    assert names == ['compact_json', 'decision', 'horizon']
+    assert ddl.count(') WITH ('+options+');') == 3
+    assert 'ALTER SYSTEM' not in ddl and 'ALTER DATABASE' not in ddl
+    assert 'CREATE TABLE public.' not in ddl and 'ALTER TABLE public.' not in ddl
 
 
 class CaptureConnection:
