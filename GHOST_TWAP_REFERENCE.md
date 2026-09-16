@@ -186,6 +186,19 @@ net-profitability test or an incremental-information test against market prices.
 The optional forward validation plan was never run and is now a historical
 design, not an active instruction.
 
+An earlier proposal, previously stored under the misleading root filename
+`MICROSTRUCTURE_API.md`, reserved three development days, seven untouched
+evaluation days and a fixed 24-hour outcome-reporting cutoff. It proposed
+freezing at most three T/X/Y conditions (one per checkpoint), evaluating every
+qualifying market separately for each condition, and keeping first qualification
+as a separate secondary summary. Descriptive losses were L/(N−U); support for a
+1% risk target would use L+U possible losses out of N with one-sided exact
+Clopper–Pearson bounds and error allowance 0.05/m for m frozen claims. The
+zero-loss benchmarks of 299 observations for one claim or 408 for three relied
+on independent, comparable markets. The later archived plan narrowed to one
+condition. Neither design was executed; these proposed settings were not the
+validation procedure for the retrospective results below.
+
 The requested market-start interval was **August 16, 2026 00:00 UTC through
 September 12 21:15 UTC, end exclusive**, for the validated 60-second TWAP
 five-minute instrument. There were **8,014 markets / 64,112 checkpoint rows**,
