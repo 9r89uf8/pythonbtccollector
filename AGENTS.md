@@ -205,7 +205,8 @@ The corresponding Python entry points are:
   eligibility. No automatic unverified deletion or indefinite summary tier.
 - Keep A's any-interior-carry quality rule in this B version; pending and future
   slots remain assumptions. B exposes no ghost API routes; those belong to C
-  after prospective review. See `GHOST_TWAP_REFERENCE.md` and `OPERATIONS.md`.
+  after prospective review. See `GHOST_TWAP_REFERENCE.md` and the production
+  operations section of `README.md`.
 - The bounded `ghost_twap_observer` operational CLI may read the local ghost
   Redis key for an explicitly authorized canary. Run it separately from the
   collector, without database credentials or feed connections. Preserve its
@@ -410,8 +411,8 @@ The handoff must:
    in this file. Do not leave placeholders in the final commands.
 5. Include `systemctl status`, a relevant local API or datastore check, and a
    bounded `journalctl` command when logs help verification.
-6. Base the sequence on `OPERATIONS.md`, adjusting it to the actual files and
-   services changed.
+6. Base the sequence on the production operations section of `README.md`,
+   adjusting it to the actual files and services changed.
 7. State any required ordering, especially schema before service restart.
 
 For a normal code-only collector update, tailor this template to the affected
@@ -491,9 +492,9 @@ python -m pytest
 
 - Keep `README.md` aligned with the current architecture, settings, service
   names, and API routes.
-- When adding a collector or service, update the README, operations guide,
-  environment examples, service map in this file, and deployment tests in the
-  same checkpoint.
+- When adding a collector or service, update the README (including production
+  operations), environment examples, service map in this file, and deployment
+  tests in the same checkpoint.
 
 ## Compact Polymarket Evidence Rules
 

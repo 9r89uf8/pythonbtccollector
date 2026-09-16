@@ -6,8 +6,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_ghost_install_applies_schema_before_chainlink_restart():
-    operations = (ROOT / 'OPERATIONS.md').read_text()
-    section = operations.split('## Ghost TWAP checkpoint B', 1)[1].split('\n## ', 1)[0]
+    document = (ROOT / 'README.md').read_text(encoding='utf-8')
+    operations = re.split(r'(?m)^#{1,6} Production operations[ \t]*$', document, maxsplit=1)[1]
+    heading = re.search(r'(?m)^(#{1,6}) Continuous ghost retention and accuracy[ \t]*$', operations)
+    assert heading is not None, 'Missing continuous ghost operations section'
+    section = re.split(r'(?m)^#{1,' + str(len(heading.group(1))) + r'} ',
+                       operations[heading.end():], maxsplit=1)[0]
     blocks = re.findall(r'```bash\n(.*?)\n```', section, re.DOTALL)
     block = next(value for value in blocks if 'git pull --ff-only' in value)
     required = [
@@ -16,13 +20,14 @@ def test_ghost_install_applies_schema_before_chainlink_restart():
         'sudo -u pricecollector .venv/bin/pip install -r requirements.txt',
         'sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql',
         'sudoedit /etc/price-collector/collector.env',
-        'sudo systemctl restart price-collector-polymarket-chainlink',
-        'sudo systemctl status price-collector-polymarket-chainlink --no-pager',
+        'sudo systemctl restart price-collector-polymarket-chainlink price-api',
+        'sudo systemctl status price-collector-polymarket-chainlink price-api --no-pager',
     ]
     positions = [block.index(command) for command in required]
     assert positions == sorted(positions)
-    assert 'restart price-api' not in block
-    assert 'restart redis-server' not in block
+    restart_lines = [line for line in block.splitlines() if line.startswith('sudo systemctl restart ')]
+    assert restart_lines == ['sudo systemctl restart price-collector-polymarket-chainlink price-api']
+    assert 'redis-server' not in block
     schema = (ROOT / 'schema.sql').read_text().strip()
     assert schema.startswith('BEGIN;') and schema.endswith('COMMIT;')
     assert re.findall(r'^(?:BEGIN|COMMIT);$', schema, re.MULTILINE) == ['BEGIN;', 'COMMIT;']

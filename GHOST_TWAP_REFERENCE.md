@@ -4,7 +4,7 @@ This is the canonical reference for the leader-risk and spot-to-TWAP research
 and the live ghost endpoint. It replaces dated H3/ghost plans, checkpoint reports
 and canary narratives in the working tree. It records evidence through September
 16, 2026; historical measurements below are not claims about today's accuracy.
-Current installation commands remain in [OPERATIONS.md](OPERATIONS.md).
+Current installation commands remain in the [production operations guide](README.md#production-operations).
 
 ## What was established
 
@@ -584,4 +584,4 @@ test fixtures remain required; `dist` is not wholly disposable build output.
 No broad new test campaign is needed merely to consolidate documentation.
 Implementation changes still receive focused checks appropriate to the changed
 behavior. For current operations and exact service commands, use
-[OPERATIONS.md](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
+[README production operations](README.md#continuous-ghost-retention-and-accuracy).

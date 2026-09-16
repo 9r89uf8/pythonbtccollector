@@ -5,6 +5,15 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _operations_section(title: str) -> str:
+    document = (ROOT / "README.md").read_text(encoding="utf-8")
+    operations = re.split(r"(?m)^#{1,6} Production operations[ \t]*$", document, maxsplit=1)[1]
+    heading = re.search(r"(?m)^(#{1,6}) " + re.escape(title) + r"[ \t]*$", operations)
+    assert heading is not None, f"Missing operations section: {title}"
+    rest = operations[heading.end():]
+    return re.split(r"(?m)^#{1," + str(len(heading.group(1))) + r"} ", rest, maxsplit=1)[0]
+
+
 def _environment_values(path: Path) -> dict[str, str]:
     return dict(
         line.split("=", 1)
@@ -44,7 +53,7 @@ def test_evidence_settings_stay_out_of_reader_and_local_tunnel_environments():
 
 
 def test_evidence_rollout_applies_schema_before_probability_restart():
-    operations = (ROOT / "OPERATIONS.md").read_text()
+    operations = _operations_section("Deploy compact Polymarket evidence")
     blocks = re.findall(r"```bash\n(.*?)\n```", operations, flags=re.DOTALL)
     rollout = next(block for block in blocks if "git pull --ff-only" in block
                    and "sudo systemctl restart price-collector-polymarket-probabilities" in block)
@@ -65,7 +74,7 @@ def test_evidence_rollout_applies_schema_before_probability_restart():
 
 
 def test_evidence_runbook_checks_linked_receipt_time_and_total_relation_size():
-    operations = (ROOT / "OPERATIONS.md").read_text()
+    operations = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "JOIN polymarket_evidence_payloads p USING (payload_hash)" in operations
     assert "p.payload->>'price_to_beat'" in operations
     assert "o.response_date, o.response_age_seconds" in operations
