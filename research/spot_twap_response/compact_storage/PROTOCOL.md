@@ -45,6 +45,11 @@ to the current full audit.
   The first run at `0c4f9f2` hit its one-second lock timeout while an autovacuum
   ANALYZE held the table's `ShareUpdateExclusiveLock`. Its failed report is
   retained. The fresh corrected run keeps the same resource/time limits.
+- Marker/revision updates use all components of the existing primary-key prefix:
+  copy, run and decision IDs. A second run at `c86bd00` was stopped cleanly
+  during typed stress when omitting the run-ID predicate caused expensive repeated
+  scans. Its partial report is retained; no timeout/space cap was raised and no
+  extra index was added to improve the final measurement.
 - Run layouts and mutation phases sequentially. The aggregate allocation of
   **every experimental relation across both layouts**, including heap, TOAST,
   indexes and auxiliary relations, must remain below **2 GiB**. The runner uses

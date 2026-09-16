@@ -1,0 +1,21 @@
+{
+  "failed_commit": "0c4f9f2c9ecaba51ca0b4e94f97a27cceef8867b",
+  "database": "ghost_compact_storage_validation_0c4f9f2",
+  "failure": "asyncpg.exceptions.LockNotAvailableError: canceling statement due to lock timeout",
+  "failed_phase": "manual VACUUM after six JSON rewrites and exact readback",
+  "observed_after_failure": {
+    "backend_type": "autovacuum worker",
+    "state": "active",
+    "query": "autovacuum: ANALYZE ghost_compact_probe.compact_json",
+    "table_lock": "ShareUpdateExclusiveLock",
+    "lock_granted": true,
+    "database_bytes": 318970903
+  },
+  "diagnostic_sql": [
+    "SELECT backend_type,state,wait_event_type,wait_event,query FROM pg_stat_activity WHERE datname='ghost_compact_storage_validation_0c4f9f2' AND pid<>pg_backend_pid()",
+    "SELECT l.mode,l.granted,a.backend_type,c.relname FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid LEFT JOIN pg_class c ON c.oid=l.relation WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()"
+  ],
+  "report_sha256_verified_local_and_remote": "51476ca27739ac815976f531c5ed2f54bdc47fb49237e188945c27f501f08273",
+  "disposable_database_dropped_after_report_copy": true,
+  "remedy": "New disposable database; autovacuum disabled only on its three test tables and their TOAST. Existing time, space and batch limits retained. No production maintenance settings changed."
+}

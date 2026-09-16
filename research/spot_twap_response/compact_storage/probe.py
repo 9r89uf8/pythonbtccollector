@@ -92,6 +92,9 @@ class Experiment:
         self.source, self.expected, self.report = source, expected, report
         self.decision_ids = tuple(key[1] for key in expected)
         require(len(set(self.decision_ids)) == len(self.decision_ids), 'Ambiguous canary decision IDs')
+        run_ids = {key[0] for key in expected}
+        require(len(run_ids) <= 1, 'Experiment requires a single canary run')
+        self.run_id = next(iter(run_ids), None)
         self.started = time.monotonic_ns()
         self.directory = None
 
@@ -174,8 +177,8 @@ class Experiment:
             await self.guard()
             async with self.c.transaction():
                 await self.c.execute('UPDATE '+layout.PARENT_TABLES[format_name]+
-                    ' SET summarized_revision=probe_revision WHERE copy_id=$1 AND decision_id=ANY($2::text[])',
-                    copy_id, ids)
+                    ' SET summarized_revision=probe_revision WHERE copy_id=$1 AND run_id=$3 AND decision_id=ANY($2::text[])',
+                    copy_id, ids, self.run_id)
 
     async def expire(self, copy_id, as_of_ms, format_name, limit=BATCH):
         require(type(limit) is int and 1 <= limit <= BATCH, 'Invalid expiry batch')
@@ -203,7 +206,7 @@ class Experiment:
             for ids in self.id_batches():
                 await self.guard()
                 async with self.c.transaction():
-                    await layout.stress_batch(self.c, copy_id, ids, revision, format_name)
+                    await layout.stress_batch(self.c, copy_id, ids, revision, format_name, run_id=self.run_id)
                 await asyncio.sleep(0.02)
             progress('stress_revision', format=format_name, copy_id=copy_id, revision=revision)
 

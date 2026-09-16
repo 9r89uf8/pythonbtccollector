@@ -266,7 +266,7 @@ async def read_records(conn, format_name, copy_id, *, after=None, limit=1000):
     return [reconstruct(parent, grouped[parent['run_id'],parent['decision_id']]) for parent in parents]
 
 
-async def stress_batch(conn, copy_id, decision_ids, revision, format_name):
+async def stress_batch(conn, copy_id, decision_ids, revision, format_name, *, run_id):
     """Explicit whole-record versus typed MVCC stress, never financial edits.
 
     JSON receives only trailing JSON whitespace, forcing a changed TEXT value.
@@ -275,6 +275,7 @@ async def stress_batch(conn, copy_id, decision_ids, revision, format_name):
     A prior lab summary marker is invalidated until the runner verifies parity.
     """
     require(format_name in TABLES, 'Unknown layout format')
+    require(isinstance(run_id, str) and 0 < len(run_id) <= 128, 'Invalid stress run identity')
     storage_value(copy_id, 'integer', False)
     decision_ids = list(islice(iter(decision_ids), MAX_BATCH+1))
     require(0 < len(decision_ids) <= MAX_BATCH and all(isinstance(x,str) for x in decision_ids)
@@ -285,13 +286,13 @@ async def stress_batch(conn, copy_id, decision_ids, revision, format_name):
         parent = PARENT_TABLES[format_name]
         rewrite = ",record_json=rtrim(record_json,chr(10))||repeat(chr(10),$3)" if format_name=='json' else ''
         rows = await conn.fetch(f'UPDATE {parent} SET probe_revision=$3,summarized_revision=NULL{rewrite} '
-            'WHERE copy_id=$1 AND decision_id=ANY($2::text[]) RETURNING run_id,decision_id',
-            copy_id, decision_ids, revision)
+            'WHERE copy_id=$1 AND run_id=$4 AND decision_id=ANY($2::text[]) RETURNING run_id,decision_id',
+            copy_id, decision_ids, revision, run_id)
         counts['parent_rows'] = len(rows)
         counts['horizon_rows'] = 0
         if format_name == 'typed':
             children = await conn.fetch(f'UPDATE {HORIZON_TABLE} SET probe_revision=$3 '
-                'WHERE copy_id=$1 AND decision_id=ANY($2::text[]) RETURNING horizon_s',
-                copy_id, decision_ids, revision)
+                'WHERE copy_id=$1 AND run_id=$4 AND decision_id=ANY($2::text[]) RETURNING horizon_s',
+                copy_id, decision_ids, revision, run_id)
             counts['horizon_rows'] = len(children)
     return counts

@@ -142,11 +142,33 @@ def test_json_target_lookup_keys_and_canonical_body_come_from_same_record():
 
 def test_stress_forces_json_rewrite_and_invalidates_parent_summary_only_in_fixed_tables():
     conn = CaptureConnection()
-    asyncio.run(layout.stress_batch(conn, 3, ['1'], 6, 'json'))
+    asyncio.run(layout.stress_batch(conn, 3, ['1'], 6, 'json', run_id='run'))
     sql, arguments = conn.statements[0]
     assert 'rtrim(record_json,chr(10))||repeat(chr(10),$3)' in sql
     assert 'summarized_revision=NULL' in sql
-    assert arguments == (3, ['1'], 6)
+    assert arguments == (3, ['1'], 6, 'run')
     with pytest.raises(ValueError, match='Unknown layout'):
-        asyncio.run(layout.stress_batch(conn, 3, ['1'], 6, 'public.ghost_twap_audit'))
+        asyncio.run(layout.stress_batch(conn, 3, ['1'], 6, 'public.ghost_twap_audit', run_id='run'))
     assert len(conn.statements) == 1
+
+
+@pytest.mark.parametrize('format_name,statement_count', [('json',1),('typed',2)])
+def test_stress_updates_use_parameterized_full_parent_identity(format_name, statement_count):
+    conn = CaptureConnection()
+    run_id = "run-with-quote'and-SQL-looking-text"
+    asyncio.run(layout.stress_batch(conn, 8, ['42','43'], 2, format_name, run_id=run_id))
+    assert len(conn.statements) == statement_count
+    for sql, arguments in conn.statements:
+        assert 'WHERE copy_id=$1 AND run_id=$4 AND decision_id=ANY($2::text[])' in sql
+        assert arguments == (8, ['42','43'], 2, run_id)
+        assert run_id not in sql
+    if format_name == 'typed':
+        assert conn.statements[1][0].startswith('UPDATE '+layout.HORIZON_TABLE+' ')
+
+
+@pytest.mark.parametrize('run_id', [None, '', 1, True])
+def test_stress_requires_explicit_valid_run_identity_before_sql(run_id):
+    conn = CaptureConnection()
+    with pytest.raises(ValueError, match='run identity'):
+        asyncio.run(layout.stress_batch(conn, 0, ['1'], 1, 'typed', run_id=run_id))
+    assert conn.statements == []

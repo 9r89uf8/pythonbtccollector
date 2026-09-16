@@ -29,6 +29,25 @@ def test_marker_batches_use_complete_verified_identity_inventory():
     assert [item for batch in batches for item in batch] == [key[1] for key in inventory]
     with pytest.raises(ValueError,match='Ambiguous'):
         probe.Experiment(None,None,{('a','id'):'x',('b','id'):'y'}, {})
+    with pytest.raises(ValueError,match='single canary'):
+        probe.Experiment(None,None,{('a','one'):'x',('b','two'):'y'}, {})
+
+
+def test_summary_update_uses_full_verified_primary_key():
+    calls = []
+    class Transaction:
+        async def __aenter__(self): pass
+        async def __aexit__(self,*args): pass
+    class Connection:
+        def transaction(self): return Transaction()
+        async def execute(self,sql,*args): calls.append((sql,args))
+    experiment = probe.Experiment(Connection(),None,{('the-run','the-id'):'hash'}, {})
+    async def guard(): return {}
+    experiment.guard = guard
+    asyncio.run(experiment.summarize(7,'typed'))
+    sql,args = calls[0]
+    assert 'copy_id=$1 AND run_id=$3 AND decision_id=ANY($2::text[])' in sql
+    assert args == (7,('the-id',),'the-run')
 
 
 @pytest.mark.parametrize('size,free,message', [

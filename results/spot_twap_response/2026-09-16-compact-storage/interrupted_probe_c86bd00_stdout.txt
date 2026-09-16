@@ -1,0 +1,77 @@
+{"format": "json", "phase": "empty", "relation_bytes": 40960, "rows": [0]}
+{"format": "json", "phase": "after_1_copies", "relation_bytes": 24535040, "rows": [7082]}
+{"format": "json", "phase": "after_3_copies", "relation_bytes": 76455936, "rows": [21246]}
+{"format": "json", "phase": "after_7_copies", "relation_bytes": 172302336, "rows": [49574]}
+{"format": "json", "phase": "insert_only_vacuumed", "relation_bytes": 186146816, "rows": [49574]}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 1}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 2}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 3}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 4}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 5}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 6}
+{"format": "json", "phase": "after_six_rewrites_one_copy", "relation_bytes": 312983552, "rows": [49574]}
+{"format": "json", "phase": "rewrites_vacuumed", "relation_bytes": 312991744, "rows": [49574]}
+{"format": "json", "phase": "turnover_1_deleted", "relation_bytes": 312991744, "rows": [42492]}
+{"format": "json", "phase": "turnover_1_vacuumed", "relation_bytes": 188882944, "rows": [42492]}
+{"format": "json", "phase": "turnover_1_refilled", "relation_bytes": 192659456, "rows": [49574]}
+{"format": "json", "phase": "turnover_2_deleted", "relation_bytes": 192659456, "rows": [42492]}
+{"format": "json", "phase": "turnover_2_vacuumed", "relation_bytes": 192659456, "rows": [42492]}
+{"format": "json", "phase": "turnover_2_refilled", "relation_bytes": 194371584, "rows": [49574]}
+{"format": "json", "phase": "turnover_3_deleted", "relation_bytes": 194371584, "rows": [42492]}
+{"format": "json", "phase": "turnover_3_vacuumed", "relation_bytes": 194371584, "rows": [42492]}
+{"format": "json", "phase": "turnover_3_refilled", "relation_bytes": 196091904, "rows": [49574]}
+{"format": "typed", "phase": "empty", "relation_bytes": 49152, "rows": [0, 0]}
+{"format": "typed", "phase": "after_1_copies", "relation_bytes": 29065216, "rows": [7082, 42492]}
+{"format": "typed", "phase": "after_3_copies", "relation_bytes": 89366528, "rows": [21246, 127476]}
+{"format": "typed", "phase": "after_7_copies", "relation_bytes": 201719808, "rows": [49574, 297444]}
+{"format": "typed", "phase": "insert_only_vacuumed", "relation_bytes": 238665728, "rows": [49574, 297444]}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 1}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 2}
+{"output": "/tmp/ghost-compact-storage-c86bd00-results.json", "phase": "finished", "status": "failed"}
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/tmp/ghost-compact-storage-c86bd00/research/spot_twap_response/compact_storage/probe.py", line 283, in run
+    await experiment.stress(0, format_name)
+  File "/tmp/ghost-compact-storage-c86bd00/research/spot_twap_response/compact_storage/probe.py", line 206, in stress
+    await layout.stress_batch(self.c, copy_id, ids, revision, format_name)
+  File "/tmp/ghost-compact-storage-c86bd00/research/spot_twap_response/compact_storage/layout.py", line 293, in stress_batch
+    children = await conn.fetch(f'UPDATE {HORIZON_TABLE} SET probe_revision=$3 '
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/price-collector/.venv/lib/python3.12/site-packages/asyncpg/connection.py", line 694, in fetch
+    return await self._execute(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/price-collector/.venv/lib/python3.12/site-packages/asyncpg/connection.py", line 1873, in _execute
+    result, _ = await self.__execute(
+                ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/price-collector/.venv/lib/python3.12/site-packages/asyncpg/connection.py", line 1970, in __execute
+    result, stmt = await self._do_execute(
+                   ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/price-collector/.venv/lib/python3.12/site-packages/asyncpg/connection.py", line 2036, in _do_execute
+    result = await executor(stmt, timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "asyncpg/protocol/protocol.pyx", line 205, in bind_execute
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/ghost-compact-storage-c86bd00/research/spot_twap_response/compact_storage/probe.py", line 344, in <module>
+    main()
+  File "/tmp/ghost-compact-storage-c86bd00/research/spot_twap_response/compact_storage/probe.py", line 330, in main
+    asyncio.run(asyncio.wait_for(run(args.dsn, args.input, manifest, report), timeout=MAX_SECONDS))
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
