@@ -1,4 +1,4 @@
--- Runnable extraction skeleton for H3_TWAP_LEADER_RISK_STUDY.md.
+-- Historical extraction skeleton; findings are in GHOST_TWAP_REFERENCE.md.
 -- sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -d price_collector \
 --   -v start_utc=2026-08-16T00:00:00Z -v end_utc=2026-09-12T00:25:00Z \
 --   -f extract.sql > observations.csv

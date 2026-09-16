@@ -1,9 +1,0 @@
-t_sec,invalid_market_rule,boundary_missing_or_late,boundary_conflict,twap_no_recent_receipt,spot_no_recent_receipt,twap_bad_source_age,spot_bad_source_age,nonpositive_price
-120,0,414,0,35,30,68,53,0
-90,0,414,0,33,30,89,64,0
-60,0,414,0,41,34,68,46,0
-30,0,414,0,34,32,94,75,0
-15,0,414,0,34,33,72,49,0
-10,0,414,0,35,34,83,58,0
-5,0,414,0,33,31,71,53,0
-3,0,414,0,34,32,67,52,0

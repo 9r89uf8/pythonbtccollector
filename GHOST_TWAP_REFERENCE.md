@@ -1,8 +1,8 @@
 # Ghost TWAP: findings, calculation and operations
 
-This is the canonical reference for the spot-to-TWAP research and the live ghost
-endpoint. It replaces the dated ghost plans, checkpoint reports and canary
-narratives in the working tree. It records evidence obtained through September
+This is the canonical reference for the leader-risk and spot-to-TWAP research
+and the live ghost endpoint. It replaces dated H3/ghost plans, checkpoint reports
+and canary narratives in the working tree. It records evidence through September
 16, 2026; historical measurements below are not claims about today's accuracy.
 Current installation commands remain in [OPERATIONS.md](OPERATIONS.md).
 
@@ -17,8 +17,8 @@ historical replays and subsequent live canaries support that finding.
 This is a forecast of a future official TWAP report. It is not itself the
 official settlement price, an exact identity at every second, a guaranteed
 error bound, or evidence of a profitable trading strategy. Settlement-side
-accuracy is a separate experiment. The original leader-risk study remains in
-[H3_TWAP_LEADER_RISK_FINAL_REPORT.md](H3_TWAP_LEADER_RISK_FINAL_REPORT.md).
+accuracy is a separate experiment. The earlier leader-risk study is consolidated
+in [Historical leader-risk findings](#historical-leader-risk-findings) below.
 
 ### Reconstruction and response
 
@@ -176,6 +176,122 @@ about 106–113 ms p99: the under-10-ms objective was not met. Full evidence is
 durable before publication; stage medians cannot identify fsync's sole cost.
 Accuracy and coverage vary with market conditions and input delivery. These
 short runs do not establish uninterrupted long-term availability or trading edge.
+
+## Historical leader-risk findings
+
+The H3 study completed a descriptive settlement-risk analysis, a quote-price
+comparison and an independently verified gross payout-minus-ask audit. It did
+**not** complete prospective risk validation, an execution simulation, a
+net-profitability test or an incremental-information test against market prices.
+The optional forward validation plan was never run and is now a historical
+design, not an active instruction.
+
+The requested market-start interval was **August 16, 2026 00:00 UTC through
+September 12 21:15 UTC, end exclusive**, for the validated 60-second TWAP
+five-minute instrument. There were **8,014 markets / 64,112 checkpoint rows**,
+of which **59,885** had eligible settlement inputs and **4,227** did not; no
+available-input TWAP ties occurred. Seventeen initial calendar slots lacked
+stored market metadata. The outcome snapshot was September 12 at
+22:17:21.776 UTC; quote extraction was September 13 at 00:40:38.993 UTC.
+Later resolved outcomes were not silently substituted into the frozen cohort.
+
+At market end minus T seconds, K was the exact opening TWAP event received by
+then, W the latest received official TWAP, and S retained Chainlink spot.
+Source and local receipt ages for W/S were each within **[0,3,000] ms**.
+The leader was Up for W>K and Down for W<K. Missing/late/conflicting opening
+events were excluded; this stream-derived opening reference was not a backfilled
+website quote. For leader direction d=+1/-1:
+
+```text
+X = 10,000 * d * (W - K) / K       # TWAP lead, basis points
+Y = 10,000 * d * (S - W) / K       # spot confirmation, same denominator
+```
+
+Confirming spot means Y≥0. Negative Y does not necessarily put spot across K.
+Fixed X bins were [0,1), [1,2), [2,4), [4,8), [8,infinity); Y bins were
+below −2, [−2,0), [0,2), at least 2 bp. Unknown official outcomes were counted
+separately and never treated as wins. Prices and calculations remained Decimal.
+
+| Seconds remaining | Known losses / resolved eligible | Loss rate | Unknown outcomes |
+| ---: | ---: | ---: | ---: |
+| 120 | 1,568 / 7,471 | 20.99% | 27 |
+| 90 | 1,266 / 7,447 | 17.00% | 26 |
+| 60 | 904 / 7,460 | 12.12% | 27 |
+| 30 | 478 / 7,444 | 6.42% | 27 |
+| 15 | 282 / 7,462 | 3.78% | 27 |
+| 10 | 194 / 7,451 | 2.60% | 26 |
+| 5 | 110 / 7,466 | 1.47% | 27 |
+| 3 | 84 / 7,471 | 1.12% | 26 |
+
+Time, lead and spot alignment separated substantially different historical risks.
+At T=60 and X=[2,4), loss rates were **63.53%, 10.73%, 4.28% and 0.93%** across
+the four Y bins. At T=30 with X≥2 and Y≥0 there were **0/3,119** known losses
+and 13 unknowns; this overlapping, retrospectively summarized region is not a
+zero-risk rule. At T=3, **81 of 84** losses had X<1 bp, all 84 had X<2, and
+spot trailed TWAP in 79. The X<1,Y<−2 cell lost **32/74 (43.24%)**. The same
+markets appear at eight checkpoints, so these are not independent trade samples.
+Direction and date comparisons were descriptive, not held-out validation.
+
+The quote companion retained **53,361/59,885 (89.11%)** checkpoint observations.
+It selected the latest retained row causally, then required correct tokens,
+leader bid/ask in [0,1], no crossing, and ≤3-second sample, row and independent
+component ages. An invalid newer row was not replaced by an older fresh row.
+Boundary asks of $0/$1 were retained observations, not demonstrated fills.
+
+In the X≥2,Y≥0 region, the T=30 quotes were **$1 for 2,946 of 2,961 observations**;
+only **three** asks were below $0.98, all resolved winners. At T=60 the matched
+region lost **34/2,816**, but the asks below $0.98 lost **24/265 (9.06%)**.
+A cheap subset cannot inherit the full region's lower loss rate.
+
+For resolved matched observations, the audit calculated hypothetical gross
+one-share payout minus recorded ask, `1{leader won} - ask`. It is neither future
+expected value nor a measured trade return. Pooled checkpoint means ranged from
+**−0.5977 to +0.0277 cents/share**, but not every price band was near zero:
+T=30 asks in (0,0.90), n=532, averaged **−2.3664 cents/share**; T=90 asks in
+[0.90,0.95), n=705, averaged **−1.5901 cents/share**. Across **133** cell/band
+groups with ≥100 resolved observations, **16** gross means were positive and
+**one** transformed Wilson diagnostic was positive. That selected cell averaged
++7.7806 cents/share at T=60,X=[0,1),Y=[0,2),ask in (0,0.90), n=196. A Wilson
+bound for a binomial loss proportion minus a sampled mean ask is not itself a
+validated bound for future paired returns; dependence and multiple selection
+were not resolved. Neither an edge nor "necessarily chance" was established.
+
+Quote matching also selected a different risk population:
+
+| Seconds remaining | Quote-matched loss rate | Quote-excluded loss rate |
+| ---: | ---: | ---: |
+| 60 | 633/6,250 = 10.13% | 271/1,210 = 22.40% |
+| 30 | 359/6,758 = 5.31% | 119/686 = 17.35% |
+| 10 | 142/6,980 = 2.03% | 52/471 = 11.04% |
+| 3 | 61/7,074 = 0.86% | 23/397 = 5.79% |
+
+These exclusions are within settlement-input-eligible checkpoints, not the
+entire calendar population. The large stale-bid buckets also had stale asks:
+there were **zero fresh-ask/unusable-bid cases at T=60 or T=30**, and one in the
+whole dataset. This is a quote-availability association, not evidence of an
+isolated stale-bid predictor or proof no executable offer existed.
+
+Independent arithmetic reproduced all 8 checkpoint totals, 48 checkpoint bands,
+960 cell bands and exclusion/status counts. The historical software checks were
+881 full-suite and 41 focused audit passes; those are accounting checks, not
+prospective validation. Full grids, exact manifests and the original report are
+available in Git at `0a1f998:H3_TWAP_LEADER_RISK_FINAL_REPORT.md` and
+`0a1f998:results/leader_risk/`. Frozen input SHA-256 values were
+`8f2141b4e09a415e47375782ddefafcfd41b64d8062b96e7e11ebc35eba0fc77`
+(settlement observations) and
+`ef9999ce3ca2d4f0ec1dd73adc2cae9f6d35c906e83879d541429cd7b6dac964`
+(quote observations). Original raw inputs were local, not in Git; after requested
+cleanup, a new date-filtered query cannot recreate their old outcome snapshot.
+The five source files under `research/leader_risk/` remain because active tests
+import/read them; they are not production service imports.
+
+The September 10 readiness work added timestamped pre-close official opening
+references, fee/rule snapshots, session gaps and 100-ms paired quotes in the
+last 120 seconds. It did not reconstruct older missing evidence or measure order
+fills. Depth/quantities were excluded by owner choice. A profitable leader-buying
+strategy remains **unestablished**; these findings do not prove universal market
+efficiency, no incremental X/Y/T value, or that speed is the only possible edge.
+Net returns require applicable historical fees and declared execution assumptions.
 
 ## How the current producer works
 
@@ -419,7 +535,9 @@ hour under [tests/fixtures/ghost_twap](tests/fixtures/ghost_twap/README.md) test
 capture. Its generators, manifests and test-imported analysis helpers remain.
 Runtime, schema, deployment units, automated tests and replay fixtures are not
 obsolete reports and are retained. The unrelated read-only `results/lockflip-2026`
-archive and original leader-risk study remain untouched.
+archive remains untouched. At the owner's subsequent cleanup request, the H3
+reports and generated leader-risk results were also consolidated above; their
+test-imported source files remain, and Git preserves the detailed old reports.
 
 The historical local dashboard checks used real tunnel-delivered responses,
 desktop 1440-pixel and mobile 390-pixel views, and bounded browser checks rather
@@ -441,6 +559,14 @@ remain in the historical Git snapshot. Deleting raw observations reduces future
 reanalysis possibilities; the consolidated findings are not a replacement raw
 message ledger. Cleanup does not remove active state, production audit tables,
 credentials, supported operator code or unrelated research.
+
+The September 16 local cleanup also removed the redundant H3 worktree, old
+pilot copies, canary exports, deployment scratch scripts, browser captures and
+retired research plans: 2,203 files totaling 2,349,687,766 bytes. The workspace's
+`dist` folder now contains only the active collector checkout
+(`ghost-checkpoint-a-release`) and local dashboard (`ghost-frontend`). Those
+directories, the dashboard's live state and interpreter, and the recorded-hour
+test fixtures remain required; `dist` is not wholly disposable build output.
 
 No broad new test campaign is needed merely to consolidate documentation.
 Implementation changes still receive focused checks appropriate to the changed

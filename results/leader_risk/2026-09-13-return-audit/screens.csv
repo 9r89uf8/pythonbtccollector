@@ -1,5 +1,0 @@
-grouping,minimum_basis,minimum_count,groups_considered,groups_meeting_minimum,positive_gross_mean_groups,positive_fixed_mean_ask_wilson_screen_groups
-checkpoint_bands,n,100,48,26,6,0
-checkpoint_bands,N,100,48,26,6,0
-cell_bands,n,100,960,133,16,1
-cell_bands,N,100,960,134,17,1

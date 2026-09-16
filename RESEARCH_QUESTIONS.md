@@ -2,6 +2,11 @@
 
 These questions concern five-minute BTC Up/Down markets. They preserve the research objectives without carrying forward a study design, model, or threshold. The **settlement leader** is the side indicated by the settlement TWAP relative to the Price to Beat. The **market favorite** is the side favored by quoted market prices.
 
+Completed leader-risk and spot/TWAP findings are consolidated in
+[GHOST_TWAP_REFERENCE.md](GHOST_TWAP_REFERENCE.md). It distinguishes historical
+results from the questions below that remain open; retired plans are not active
+instructions to run another study.
+
 ## Q1 — When is Up or Down locked?
 
 - When can the current settlement leader be considered locked, and what chance remains that it loses officially?
