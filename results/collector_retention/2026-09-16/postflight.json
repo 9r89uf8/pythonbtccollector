@@ -1,0 +1,125 @@
+{
+  "runtime_commit": "789792b4875510f176da90decd10ee1ee0d96cb4",
+  "before": {
+    "captured_at": "2026-09-16T15:19:19.61027+00:00",
+    "database_bytes": 13815069719,
+    "ghost_audit_rows": 23411,
+    "ghost_versions": 245639,
+    "ghost_latest_update": "2026-09-15T23:56:44.919922+00:00",
+    "ghost_compact_rows": 0,
+    "ghost_hourly_rows": 0,
+    "oldest_market_ms": 1786843200000
+  },
+  "after": {
+    "captured_at": "2026-09-16T15:37:31.04747+00:00",
+    "database_bytes": 13320199191,
+    "ghost_audit_rows": 23411,
+    "ghost_versions": 245639,
+    "ghost_latest_update": "2026-09-15T23:56:44.919922+00:00",
+    "ghost_compact_rows": 0,
+    "ghost_hourly_rows": 0,
+    "oldest_market_ms": 1788709200000
+  },
+  "eligibility": {
+    "cutoff_ms": 1788708955667,
+    "market_floor_ms": 1788709200000,
+    "remaining": {
+      "public.binance_book_1s": false,
+      "public.binance_flow_1s": false,
+      "public.binance_futures_oi_5m_summaries": false,
+      "public.binance_futures_snapshots": false,
+      "public.binance_microstructure_1s": false,
+      "public.binance_microstructure_1s_flip_archive": false,
+      "public.chainlink_twap_shadow_predictions": false,
+      "public.market_windows": false,
+      "public.polymarket_btc_5m_flip_cutoffs": false,
+      "public.polymarket_btc_5m_flip_evaluations": false,
+      "public.polymarket_btc_5m_flip_events": false,
+      "public.polymarket_btc_5m_markets": false,
+      "public.polymarket_btc_5m_resolutions": false,
+      "public.polymarket_evidence_payloads": false,
+      "public.polymarket_market_observations": false,
+      "public.polymarket_probability_samples": false,
+      "public.polymarket_quote_observations": false,
+      "public.polymarket_twap_events": false,
+      "public.polymarket_twap_gaps": false,
+      "public.polymarket_twap_sessions": false,
+      "public.price_samples": false,
+      "raw_capture.binance_futures_price_trace_100ms": false,
+      "raw_capture.chainlink_price_events": false,
+      "raw_capture.feed_sessions": false
+    }
+  },
+  "services": {
+    "price-collector": "active",
+    "price-collector-polymarket-chainlink": "active",
+    "price-collector-binance-futures": "active",
+    "price-collector-polymarket-probabilities": "active",
+    "price-api": "active",
+    "price-collector-retention.timer": "active"
+  },
+  "timer_enabled": "enabled",
+  "last_retention_result": "success",
+  "settings": {
+    "RAW_FUTURES_TRACE_ENABLED": "false",
+    "RAW_CHAINLINK_EVENTS_ENABLED": "false",
+    "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": "10",
+    "GHOST_TWAP_ENABLED": "false",
+    "GHOST_TWAP_CONTINUOUS": "false"
+  },
+  "health": {
+    "ok": true,
+    "database": "ok",
+    "service": "price-api"
+  },
+  "live": {
+    "server_time_ms": 1789573051383,
+    "market_id": 5965243,
+    "market_start_ms": 1789572900000,
+    "market_end_ms": 1789573200000,
+    "prices": {
+      "binance_spot": {
+        "value": "75778.54000000",
+        "source_timestamp_ms": 1789573051016,
+        "received_ms": 1789573051049,
+        "source_age_ms": 367,
+        "received_age_ms": 334,
+        "provider_event_ms": 1789573051016
+      },
+      "chainlink": {
+        "value": "75727.39860704592",
+        "source_timestamp_ms": 1789573049000,
+        "received_ms": 1789573050561,
+        "source_age_ms": 2383,
+        "received_age_ms": 822,
+        "provider_event_ms": 1789573049000
+      },
+      "twap": {
+        "value": "75705.950102817374994432",
+        "source_timestamp_ms": 1789573049000,
+        "received_ms": 1789573050449,
+        "source_age_ms": 2383,
+        "received_age_ms": 934,
+        "provider_event_ms": 1789573049000
+      }
+    },
+    "futures": {
+      "last": {
+        "value": "75741.10",
+        "source_timestamp_ms": 1789573051100,
+        "received_ms": 1789573051284,
+        "source_age_ms": 283,
+        "received_age_ms": 99,
+        "time_ms": 1789573051100
+      }
+    }
+  },
+  "disk_free_bytes": 23232217088,
+  "ghost_totals_unchanged": true,
+  "validation": {
+    "local_targeted_passed": 163,
+    "disposable_postgres_cases_passed": 3,
+    "disposable_postgres_runtime_commit": "895c897",
+    "disposable_postgres_seconds": "3.30"
+  }
+}
