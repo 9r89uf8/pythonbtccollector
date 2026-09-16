@@ -49,6 +49,9 @@ rounded **up** to a five-minute start boundary, so some rows may expire up to
 five minutes early. Children are removed before parents; metadata, sessions and
 shared payloads remain while retained/current rows need them. Backfill and due
 reconciliation use the same floor to avoid recreating expired markets.
+Expired historical 30-second TWAP events may be deleted under this policy.
+Every surviving row keeps its original 30- or 60-second topic, instrument,
+window and settlement-rule identity; age cleanup never relabels old evidence.
 
 All ghost tables are excluded. Seven-day continuous ghost records, ninety-day
 accuracy summaries and legacy ghost export safeguards are unchanged. Existing
@@ -90,7 +93,9 @@ inspect/repair its index validity before retrying or enabling the timer;
 `IF NOT EXISTS` alone does not repair an invalid concurrent-build artifact.
 
 In `collector.env`, manually review `BINANCE_MICROSTRUCTURE_RETENTION_DAYS=10`;
-the runtime also caps older values such as 30 at ten days. Preserve shorter
+the runtime also caps older values such as 30 at ten days. Collector-local daily
+cleanup runs only for a setting shorter than ten days; ten days and older longer
+settings delegate to the independent bounded timer. Preserve shorter
 settings, existing raw-retention settings and every credential. Never replace
 the environment with its example, enable optional captures, or change ghost
 flags as part of this installation. No new environment keys are required by
@@ -131,7 +136,39 @@ in this mode. Use `/var/lib/price-collector/ghost-continuous`, separate from eve
 old canary directory. Its first-start clock is recorded automatically; subsequent
 restarts reuse that state and reconcile its outbox before new admission.
 
-After this change is pushed to GitHub, install it with the producer disabled.
+**Current deployment:** continuous forecasting started on September 16, 2026 at
+15:59:27 UTC on commit `6c6f5bf`, run
+`4f55736e031f4184be501c538f7a61d2`. Initial checks found `capacity_ok=true`, no
+stop or suspensions, successful compaction and a working accuracy cache. The
+[activation record](results/ghost_continuous/2026-09-16/README.md) includes the
+shared-capacity calculation and its limits. Seven-day operation and baseline
+formation are still ongoing.
+
+The current collector environment overrides are:
+
+| Key | Deployed value |
+| --- | --- |
+| `GHOST_TWAP_ENABLED` | `true` |
+| `GHOST_TWAP_CONTINUOUS` | `true` |
+| `GHOST_TWAP_CANARY_START_MS` | `0` |
+| `GHOST_TWAP_STATE_DIRECTORY` | `/var/lib/price-collector/ghost-continuous` |
+| `GHOST_TWAP_DATABASE_FILESYSTEM_PATH` | `/var/lib/postgresql` |
+| `GHOST_TWAP_SOURCE_MAX_AGE_MS` | `5000` |
+| `GHOST_TWAP_RECEIPT_MAX_AGE_MS` | `3000` |
+| `POLYMARKET_EVIDENCE_WARN_RELATION_MB` | `3072` |
+| `POLYMARKET_EVIDENCE_MAX_RELATION_MB` | `4096` |
+| `BINANCE_MICROSTRUCTURE_WARN_RELATION_MB` | `3072` |
+| `BINANCE_MICROSTRUCTURE_MAX_RELATION_MB` | `4096` |
+
+This activation changed environment settings only. It restarted
+`price-collector-binance-futures`, `price-collector-polymarket-probabilities`
+and `price-collector-polymarket-chainlink` to load their respective changes.
+It did not install new code or apply a schema migration. Keep these current
+overrides when reviewing future upgrades; the example defaults are not the
+deployed configuration.
+
+For a future code/schema installation, after the change is pushed to GitHub,
+install it with the producer disabled.
 Apply the schema transaction before restarting either affected service:
 
 ```bash
@@ -165,6 +202,7 @@ the 5,000 ms source-age and 3,000 ms receipt-age bounds. Restart only
 `price-collector-polymarket-chainlink` for that collector-only environment change.
 Never change paths or remove a stop marker to bypass a capacity or integrity
 guard. A restart reuses the original continuous state directory.
+The existing activated directory must not be recreated or replaced.
 
 The continuous limits are 6 GiB total allocated ghost relation budget, warning
 at 5 GiB, admission pause at 5.5 GiB, 1,500,000 retained decisions, and at least
@@ -172,6 +210,13 @@ at 5 GiB, admission pause at 5.5 GiB, 1,500,000 retained decisions, and at least
 all count. This is shared-disk protection, not a guarantee that seven days always
 fit. Normal expiry/vacuum may leave allocated space reusable without shrinking
 the relation; do not infer free capacity from deleted row counts alone.
+At activation, the two optional evidence/microstructure caps were each reduced
+to 4 GiB, with 3 GiB warnings. After their remaining growth allowances, the full
+6 GiB total ghost allowance and the 10 GiB filesystem reserve, the recorded
+conditional balance was 894,377,984 bytes. The measured-rate seven-day new-compact
+projection instead left 2,312,806,400 bytes. Neither balance reserves future core
+history, WAL, logs, outbox or maintenance space; use fresh measurements before
+changing any allowance.
 
 The independent monitor compacts at most 100 eligible continuous decisions per
 maintenance cycle, about every five seconds. Terminal status and the 120-second
@@ -211,6 +256,12 @@ restarts. Receipt-gap durations belong to the hour containing their ending
 receipt; incomplete coverage and dropped health hours remain visible. Feed-health
 summaries describe accepted observations, not all upstream messages or browser
 delivery. No monitor failure may stop the official Chainlink feeds.
+
+The chart dashboard runs in the separate local `ghost-frontend` project and
+reaches the API through an SSH tunnel. It is outside the backend checkout and
+is not installed on the droplet. A browser or tunnel disconnect does not stop
+the server-side continuous worker; cached HTTP/SSE delivery remains subject to
+the freshness and expiry contract.
 
 ## Ghost TWAP checkpoint B
 
@@ -633,6 +684,13 @@ the production file with an example. This update needs no unit copy,
 | `POLYMARKET_EVIDENCE_WARN_RELATION_MB` | `4096` |
 | `POLYMARKET_EVIDENCE_MAX_RELATION_MB` | `6144` |
 
+These are example/code defaults. The deployed September 16 overrides are
+`POLYMARKET_EVIDENCE_WARN_RELATION_MB=3072` and
+`POLYMARKET_EVIDENCE_MAX_RELATION_MB=4096`; preserve them unless the shared
+capacity allocation is deliberately revised. Microstructure uses the same
+3072/4096 MiB warning/cap pair. See the
+[current activation record](results/ghost_continuous/2026-09-16/README.md).
+
 Do not enable `RAW_FUTURES_TRACE_ENABLED` or `RAW_CHAINLINK_EVENTS_ENABLED` for
 this feature. It reuses the probability CLOB state without collecting depth or
 quantities. HTTP metadata polling and bounded database writers run separately
@@ -741,8 +799,9 @@ Repeat measurements over actual collection days and compare against available
 disk space. Queue overflow or write failure must surface as gaps/logs. The
 pending queues are in memory, so unclean session recovery marks possible loss
 rather than reconstructing unwritten observations. The
-default guard warns at 4096 MiB and pauses new quote capture at 6144 MiB;
-metadata/control observations continue and accepted writes may drain, so this
+default guard warns at 4096 MiB and pauses new quote capture at 6144 MiB; the
+current production overrides warn at 3072 MiB and pause at 4096 MiB.
+Metadata/control observations continue and accepted writes may drain, so this
 is not a strict maximum size. The separate ten-day history-retention timer
 removes expired evidence; the size guard itself does not delete it. Export any
 evidence needed beyond that retention window before it expires.

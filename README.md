@@ -99,8 +99,10 @@ the market starting exactly at the boundary and all later markets use the
 `BTCUSD_TWAP_60S` / `crypto_prices_twap_sixty` / 60-second identity. Gamma rule
 versions and source URLs likewise remain `btc-5m-twap-30` /
 `btc-usd-twap-30s-streams` before the cutover and `btc-5m-twap-60` /
-`btc-usd-twap-60s-streams` from the cutover onward. Historical rows are not
-renamed or recomputed.
+`btc-usd-twap-60s-streams` from the cutover onward. Retained historical rows are
+not renamed or recomputed. The ten-day history policy may delete expired
+30-second events and their unneeded parents; preserving settlement identity
+does not exempt those records from age retention.
 
 ### Binance USD-M Futures
 
@@ -542,9 +544,12 @@ BINANCE_MICROSTRUCTURE_MAX_RELATION_MB=6144
 
 It defaults off so applying a schema/code update does not silently begin a new
 high-rate dataset. Enable it only after applying `schema.sql` and adding the
-single production override manually. Once per UTC day, the collector considers
-and deletes rows older than the configured retention, capped at ten days. The
-independent retention timer also cleans this table when optional capture is off.
+production overrides manually. The collector performs its own daily cleanup
+only for a configured retention shorter than ten days. At ten days, or with an
+older longer setting such as thirty days, the independent bounded ten-day timer
+owns cleanup; it also runs when optional capture is off. The current deployed
+microstructure warning/cap overrides are 3072/4096 MiB, as recorded in the
+[September 16 shared-capacity review and activation](results/ghost_continuous/2026-09-16/README.md).
 The collector checks the
 table plus indexes once per minute, warns at the lower relation threshold, and
 pauses only new
@@ -915,7 +920,10 @@ an interrupted session exposes possible data loss and cannot replay unwritten
 observations.
 
 The size guard measures these relations including indexes and TOAST. Its
-default warning/cap settings are 4096/6144 MiB. Reaching the cap pauses new
+default warning/cap settings are 4096/6144 MiB; the current deployed evidence
+overrides are 3072/4096 MiB following the
+[September 16 shared-capacity review](results/ghost_continuous/2026-09-16/README.md).
+Reaching the cap pauses new
 quote capture, records gaps, and leaves metadata and core collection running;
 already accepted writes can still drain. It is not a hard disk limit and does
 not itself delete evidence. The separate ten-day history timer removes expired
@@ -934,21 +942,28 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-Both one-hour live canaries and the bounded C browser observation are complete.
-The producer is disabled again; the Redis-only API remains enabled at deployment
-runtime release `9f03f40`. The [retention correction](GHOST_TWAP_RETENTION_FIXES.md)
-records the targeted fixes, validation and current storage constraint.
+Continuous Ghost TWAP forecasting was activated on **September 16, 2026 at
+15:59:27 UTC**, on deployed commit `6c6f5bf`, with run ID
+`4f55736e031f4184be501c538f7a61d2`. The initial live check reported
+`capacity_ok=true`, no stop or suspensions, working compaction and a populated
+accuracy cache. See the [activation and capacity record](results/ghost_continuous/2026-09-16/README.md).
+This is a running deployment, not a completed seven-day validation or a mature
+accuracy baseline. The earlier one-hour live canaries and bounded C browser
+observation remain separate completed studies.
+The [retention correction](GHOST_TWAP_RETENTION_FIXES.md)
+records its targeted fixes, validation and the storage constraint at that time.
 The [initial retention deployment record](results/spot_twap_response/2026-09-16-continuous-deployment/README.md)
-confirms the retention schema is installed with the producer disabled.
+records the earlier schema installation with the producer still disabled.
 The [C findings](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
 record browser delivery, limitations and the audit/export status.
 
-Continuous retention and monitoring are now implemented as a separate, disabled
-mode. `GHOST_TWAP_ENABLED=true` together with `GHOST_TWAP_CONTINUOUS=true` selects
-it; `GHOST_TWAP_CANARY_START_MS` is ignored in this mode. Use a separate
-`/var/lib/price-collector/ghost-continuous` state directory: its original start,
-stop state and durable outbox survive restarts. These code changes do not enable
-the deployed producer or reset any earlier canary. See the
+Continuous retention and monitoring remain disabled by default in code. The
+deployed overrides `GHOST_TWAP_ENABLED=true` and `GHOST_TWAP_CONTINUOUS=true`
+select this mode; `GHOST_TWAP_CANARY_START_MS=0` is ignored here. The run uses
+`/var/lib/price-collector/ghost-continuous`, created separately from every old
+canary directory. Its original start, stop state and durable outbox survive
+restarts. Activation changed environment settings and restarted the affected
+collectors without a code or schema change. See the
 [continuous operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
 
 The historical [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) show post-warm-up sampled
@@ -1074,8 +1089,9 @@ complete longer validation. Verified external export is required before
 
 Checkpoint C adds `GET /forecasts/chainlink-twap/live` and
 `GET /forecasts/chainlink-twap/stream` behind the API flag
-`GHOST_TWAP_API_ENABLED`, which defaults to false. The deployed API is currently
-enabled and reports unavailable while the producer is off. The snapshot performs
+`GHOST_TWAP_API_ENABLED`, which defaults to false. The deployed API is enabled
+alongside the continuous producer; missing or expired publications still report
+unavailable. The snapshot performs
 one Redis GET and returns the original
 JSON bytes with request-time clock headers. The SSE stream shares one subscriber,
 resyncs current state after reconnect, expires stale values, and isolates slow
@@ -1088,8 +1104,10 @@ fresh authoritative cache read, even if no further publication arrives. Invalid
 optional ghost settings disable only the ghost routes with `invalid_settings`;
 ordinary API startup and source routes remain available.
 
-Use the API only through an SSH tunnel; no frontend assets are installed on the
-droplet. Browser clients must enforce expiry independently when a tunnel stalls,
+Use the API only through an SSH tunnel. The chart dashboard is a separate local
+project in the owner's workspace (`dist/ghost-frontend`), outside this backend
+checkout; no frontend assets or service are installed on the droplet. Browser
+clients must enforce expiry independently when a tunnel stalls,
 using a conservative clock bracket rather than assuming server and browser wall
 clocks match. See [the delivery contract and completed observation](GHOST_TWAP_CHECKPOINT_C.md)
 and [deployment instructions](OPERATIONS.md#ghost-twap-checkpoint-c).

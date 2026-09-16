@@ -1,0 +1,17 @@
+{
+  "ghost_bytes": 318406656,
+  "evidence_bytes": 957276160,
+  "microstructure_bytes": 2138005504,
+  "incomplete_rows": 0,
+  "continuous_rows": 0,
+  "captured_at": "2026-09-16T15:59:27.715165+00:00",
+  "data_directory": "/var/lib/postgresql/16/main",
+  "disk_free_bytes": 23250493440,
+  "disk_reserve_bytes": 10737418240,
+  "optional_cap_bytes_each": 4294967296,
+  "other_growth_reserved_bytes": 5494652928,
+  "additional_ghost_headroom_bytes": 7018422272,
+  "projected_new_ghost_week_bytes": 4705615872,
+  "margin_after_projected_week_bytes": 2312806400,
+  "full_ghost_budget_margin_bytes": 894377984
+}
