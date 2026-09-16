@@ -283,6 +283,30 @@ time remaining using the server-clock anchor. Its horizontal reference line
 uses the same market identity. These are current-market context, not a forecast
 of which side will ultimately win.
 
+### September 16 dashboard deployment verification
+
+The owner-approved release `6a4db1f` (dashboard endpoint code `c75ee84`) was
+pushed to GitHub and installed by fast-forward pull. Only `price-api` restarted,
+at **21:46:24 UTC**; it shut down cleanly and remained bound to loopback. All
+collectors stayed active. No schema, environment or collector-state changes
+were made. The separate local frontend is at `e8f4643`.
+
+The deployed endpoint returned 886 saved TWAP points and 887 spot points in one
+15-minute snapshot, plus an official pre-close opening reference. Browser
+navigation away/back restored history immediately; a simulated visibility
+pause/resume triggered a fresh historical read. Physical laptop sleep was not
+repeated. The current-market panel advanced from the 21:45–21:50 market to
+21:50–21:55, with its new reference, signed distance and countdown. Desktop and
+390-pixel mobile layouts passed visual checks. The endpoint/API checks passed
+56 tests before deployment; no broad new test campaign was run.
+
+The first browser pass saw three transient 503 responses on existing live and
+comparison reads, which recovered. The final browser session had no console
+errors or warnings; this is a bounded check, not a continuous-uptime claim.
+Cleanup removed 408 superseded tracked artifacts (10.4 MB) and four local
+scratch-export directories (about 1.06 GB), plus superseded duplicate notes.
+Runtime code, active state, tests and the immutable replay fixtures were kept.
+
 ### Reading the charts and accuracy
 
 The saved comparison charts align **first acknowledged eligible forecasts** and
