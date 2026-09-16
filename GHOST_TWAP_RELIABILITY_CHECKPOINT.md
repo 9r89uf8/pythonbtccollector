@@ -10,7 +10,16 @@ The producer remains bounded and default-off.
 Status: pushed to GitHub `main` and deployed as runtime commit `d404312` on
 September 15 at 22:26 UTC. The Chainlink collector and API were restarted; the
 installed Chainlink stop timeout is 120 seconds. The API is enabled, and the
-ghost producer remains disabled. No new campaign was started.
+ghost producer was disabled at that deployment.
+
+The subsequent [one-hour reliability canary](GHOST_TWAP_RELIABILITY_CANARY.md)
+completed on September 15 at 23:56:38 UTC. Its shutdown drained all 223 tail
+records in 6.829 seconds with no retained outbox rows or recovery helper; all
+7,082 new audit rows are terminal and externally verified. Production cache
+observation covered the full hour, but the browser capture missed about 49
+minutes and does not establish full-hour frontend delivery. The producer is
+disabled again. No Redis or source reconnect was observed in this campaign;
+the deliberate Redis-drop regression evidence remains the local TCP tests.
 
 Validation: the full development suite passes **1,554 tests**, with 10 opt-in
 datastore tests skipped and two existing dependency warnings. The real-client

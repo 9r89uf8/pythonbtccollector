@@ -7,13 +7,16 @@ records the exact campaign start, deadline, directories, commit and transient
 units once started. Previous campaigns, state files and audit evidence remain
 untouched.
 
-Status: the run started on **September 15, 2026 at 22:56:38 UTC**, with automatic
-stop at **23:56:38 UTC** (5:56:38–6:56:38 PM CDT). Launch commit is `81ee6f1`;
-the production stop-helper tests passed all 26 cases. The early check confirmed
-all six healthy forecasts, a calibrated browser stream and no recorded browser
-errors. [Launch record](results/spot_twap_response/2026-09-15-reliability-canary/LAUNCH.json)
-and [completion handoff](results/spot_twap_response/2026-09-15-reliability-canary/COMPLETION_HANDOFF.md)
-track the active run. No final accuracy or shutdown result is claimed yet.
+Status: **completed September 15, 2026, 22:56:38–23:56:38 UTC**
+(5:56:38–6:56:38 PM CDT). The automatic stop drained all 223 tail records in
+6.829 seconds; all 7,082 campaign decisions are terminal and externally verified.
+The full-hour Redis observer completed all 36,000 bins. The local browser
+capture missed about 49 minutes of scheduled observations and cannot establish
+full-hour frontend reliability. Its missing intervals remain unknown.
+The producer is disabled and the read-only API remains enabled.
+[Official findings](results/spot_twap_response/2026-09-15-reliability-canary/FINDINGS.md)
+separate production, browser and shutdown results. The protocol below remains
+the original bounded scope; this run does not authorize continuous operation.
 
 ## Fixed scope and timing
 

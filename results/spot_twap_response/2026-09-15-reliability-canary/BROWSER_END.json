@@ -1,0 +1,46 @@
+{
+  "done": true,
+  "records": 9214,
+  "bytes": 11686040,
+  "end": {
+    "kind": "end",
+    "browser_ms": 4714718.5,
+    "wall_ms": 1789516686884,
+    "reason": "completed",
+    "complete": true,
+    "campaign": {
+      "start_ms": 1789512998000,
+      "end_ms": 1789516598000,
+      "run_id": "fe2dd06da5754c50b696cb9419ca7251"
+    },
+    "first_campaign_object": {
+      "browser_ms": 1030235.6000000238,
+      "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+      "decision_id": "2",
+      "qualification": "provisional_until_audit_join"
+    },
+    "campaign_metadata_records": 1,
+    "records_before_end": 9213,
+    "bytes_before_end": 11685585
+  },
+  "campaign_metadata": [
+    {
+      "kind": "campaign",
+      "browser_ms": 1172352.900000006,
+      "start_ms": 1789512998000,
+      "end_ms": 1789516598000,
+      "run_id": "fe2dd06da5754c50b696cb9419ca7251"
+    }
+  ],
+  "campaign": {
+    "start_ms": 1789512998000,
+    "end_ms": 1789516598000,
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251"
+  },
+  "first_campaign_object": {
+    "browser_ms": 1030235.6000000238,
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+    "decision_id": "2",
+    "qualification": "provisional_until_audit_join"
+  }
+}

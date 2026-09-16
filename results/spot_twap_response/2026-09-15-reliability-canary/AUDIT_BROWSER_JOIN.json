@@ -1,0 +1,356 @@
+{
+  "audit": {
+    "bytes": 1078545445,
+    "frozen_and_state_text_hashes_checked": 46822,
+    "manifest_expected_sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+    "manifest_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl.manifest.json",
+    "manifest_sha256": "fb6288349119f174a568aae9c9cb9ae008fafdb5c79af077460d6ff44202e8a8",
+    "old_or_other_run_rows": 16329,
+    "path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl",
+    "sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+    "total_rows": 23411
+  },
+  "browser": {
+    "admission_matched_eligible_horizons": {
+      "1": 1003,
+      "10": 1081,
+      "2": 1061,
+      "3": 1066,
+      "30": 1120,
+      "5": 1070
+    },
+    "admission_matched_publication_statuses": {
+      "acknowledged": 1184
+    },
+    "admission_unique_payloads": 1184,
+    "byte_mismatch_examples": [],
+    "bytes": 11686040,
+    "duplicate_run_payloads": 60,
+    "exact_attempted_byte_matches": 1184,
+    "matched_audited_publication_statuses": {
+      "acknowledged": 1184
+    },
+    "matched_eligible_horizons": {
+      "1": 1003,
+      "10": 1081,
+      "2": 1061,
+      "3": 1066,
+      "30": 1120,
+      "5": 1070
+    },
+    "missing_audit_decision_ids": [],
+    "other_run_envelopes": 0,
+    "path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\output\\playwright\\reliability-canary\\browser.jsonl",
+    "records": 9214,
+    "sha256": "cf7c58705a29b30d9148ebeb376839d51423ec4fef583cb8f22d7684aa893be8",
+    "unique_run_payloads": 1184
+  },
+  "code_sha256": "1b05af2228e87c37b5dd9ecc6c3dd442ca34e2052439b15ef6fae5ff360129be",
+  "errors": {},
+  "limitations": [
+    "Browser byte equality proves the delivered object matches recorded attempted bytes. It does not time or prove a Redis acknowledgement.",
+    "Publication status and target flags are summarized as recorded; this check does not independently recompute forecast prices or confirmed lead.",
+    "restart_unmatched denotes unobserved target tails after shutdown/recovery, not forecast losses.",
+    "Frozen counters are snapshots, commonly one decision behind; maxima do not replace final process counters or logs.",
+    "Absent gap/reconnect records in these snapshots do not establish complete feed history.",
+    "The offline export checksum/row verification does not establish completion of external database export acknowledgements."
+  ],
+  "run": {
+    "campaign_start_ms": [
+      1789512998000
+    ],
+    "contract_versions": [
+      4
+    ],
+    "decision_ids_contiguous": true,
+    "distinct_last_gaps": [],
+    "distinct_operational_gaps": [],
+    "distinct_runtime_suspensions": [],
+    "first_created_ms": 1789513002230,
+    "first_decision_id": 1,
+    "frozen_global_reason_counts": {
+      "missing_spot": 1,
+      "stale_spot": 1,
+      "stale_twap": 6
+    },
+    "frozen_runtime_counter_maxima": {
+      "audit_reserve_high_water": 244,
+      "decisions_issued": 7081,
+      "input_queue_high_water": 2,
+      "publication_horizons_withheld": 324,
+      "publication_partial_batches": 324,
+      "redis_acknowledged": 7074
+    },
+    "frozen_spot_reconnect_state_counts": {
+      "none": 7082
+    },
+    "last_created_ms": 1789516597249,
+    "last_decision_id": 7082,
+    "latest_frozen": {
+      "created_ms": 1789516597249,
+      "decision_id": 7082,
+      "horizon_recovery": {
+        "1": {
+          "last_recovery_ns": "4820767435",
+          "recovered_at_ns": "6051566829264361"
+        },
+        "10": {
+          "last_recovery_ns": "4820767435",
+          "recovered_at_ns": "6051566829264361"
+        },
+        "2": {
+          "last_recovery_ns": "4820767435",
+          "recovered_at_ns": "6051566829264361"
+        },
+        "3": {
+          "last_recovery_ns": "4820767435",
+          "recovered_at_ns": "6051566829264361"
+        },
+        "30": {
+          "last_recovery_ns": "4820767435",
+          "recovered_at_ns": "6051566829264361"
+        },
+        "5": {
+          "last_recovery_ns": "4820767435",
+          "recovered_at_ns": "6051566829264361"
+        }
+      },
+      "runtime_counters": {
+        "audit_reserve_high_water": 244,
+        "decisions_issued": 7081,
+        "input_queue_high_water": 2,
+        "publication_horizons_withheld": 324,
+        "publication_partial_batches": 324,
+        "redis_acknowledged": 7074
+      }
+    },
+    "maximum_gap_count": 0,
+    "persistence_versions": {
+      "10": 435,
+      "11": 6363,
+      "12": 111,
+      "3": 5,
+      "4": 2,
+      "5": 75,
+      "6": 31,
+      "7": 13,
+      "8": 11,
+      "9": 36
+    },
+    "publication_statuses": {
+      "acknowledged": 7075,
+      "expired_or_target_received": 7
+    },
+    "restart_reconciled_decision_ids": [],
+    "restart_reconciled_rows": 0,
+    "restart_unmatched_decision_ids": [
+      6903,
+      6904,
+      6905,
+      6906,
+      6907,
+      6908,
+      6909,
+      6910,
+      6911,
+      6912,
+      6913,
+      6914,
+      6915,
+      6916,
+      6941,
+      6942,
+      6943,
+      6944,
+      6945,
+      6946,
+      6947,
+      6948,
+      6949,
+      6950,
+      6951,
+      6952,
+      6953,
+      6954,
+      6955,
+      6956,
+      6957,
+      6958,
+      6959,
+      6960,
+      6961,
+      6962,
+      6969,
+      6970,
+      6975,
+      6976,
+      6979,
+      6983,
+      6984,
+      6985,
+      6986,
+      6987,
+      7008,
+      7009,
+      7010,
+      7012,
+      7013,
+      7022,
+      7023,
+      7026,
+      7027,
+      7028,
+      7029,
+      7030,
+      7031,
+      7032,
+      7033,
+      7034,
+      7035,
+      7036,
+      7037,
+      7038,
+      7039,
+      7040,
+      7041,
+      7042,
+      7043,
+      7044,
+      7045,
+      7046,
+      7047,
+      7048,
+      7049,
+      7050,
+      7051,
+      7052,
+      7053,
+      7054,
+      7055,
+      7056,
+      7057,
+      7058,
+      7059,
+      7060,
+      7061,
+      7062,
+      7063,
+      7064,
+      7065,
+      7066,
+      7067,
+      7068,
+      7069,
+      7070,
+      7071,
+      7072,
+      7073,
+      7074,
+      7075,
+      7076,
+      7077,
+      7078,
+      7079,
+      7080,
+      7081,
+      7082
+    ],
+    "rows": 7082,
+    "rows_with_nonzero_gap_count": 0,
+    "rows_with_restart_unmatched_targets": 110,
+    "runtime_versions": [
+      "ghost-canary-v6"
+    ],
+    "shutdown_markers": {
+      "unobserved_after_shutdown": 223
+    },
+    "target_flags": {
+      "1": {
+        "causality_invalid": 0,
+        "clock_anomaly": 0,
+        "conflicted": 0,
+        "first_event_present": 6871,
+        "recorded_confirmed_redis_lead_present": 6537
+      },
+      "10": {
+        "causality_invalid": 0,
+        "clock_anomaly": 0,
+        "conflicted": 0,
+        "first_event_present": 6843,
+        "recorded_confirmed_redis_lead_present": 6843
+      },
+      "2": {
+        "causality_invalid": 0,
+        "clock_anomaly": 0,
+        "conflicted": 0,
+        "first_event_present": 6873,
+        "recorded_confirmed_redis_lead_present": 6864
+      },
+      "3": {
+        "causality_invalid": 0,
+        "clock_anomaly": 0,
+        "conflicted": 0,
+        "first_event_present": 6867,
+        "recorded_confirmed_redis_lead_present": 6867
+      },
+      "30": {
+        "causality_invalid": 0,
+        "clock_anomaly": 0,
+        "conflicted": 0,
+        "first_event_present": 6840,
+        "recorded_confirmed_redis_lead_present": 6840
+      },
+      "5": {
+        "causality_invalid": 0,
+        "clock_anomaly": 0,
+        "conflicted": 0,
+        "first_event_present": 6849,
+        "recorded_confirmed_redis_lead_present": 6849
+      }
+    },
+    "target_statuses": {
+      "1": {
+        "matched": 6871,
+        "missing": 75,
+        "not_forecast": 128,
+        "restart_unmatched": 8
+      },
+      "10": {
+        "matched": 6843,
+        "missing": 93,
+        "not_forecast": 110,
+        "restart_unmatched": 36
+      },
+      "2": {
+        "matched": 6873,
+        "missing": 70,
+        "not_forecast": 127,
+        "restart_unmatched": 12
+      },
+      "3": {
+        "matched": 6867,
+        "missing": 75,
+        "not_forecast": 125,
+        "restart_unmatched": 15
+      },
+      "30": {
+        "matched": 6840,
+        "missing": 95,
+        "not_forecast": 71,
+        "restart_unmatched": 76
+      },
+      "5": {
+        "matched": 6849,
+        "missing": 90,
+        "not_forecast": 121,
+        "restart_unmatched": 22
+      }
+    },
+    "terminal_counts": {
+      "true": 7082
+    }
+  },
+  "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+  "status": "passed",
+  "version": "checkpoint-c-audit-check-v1"
+}

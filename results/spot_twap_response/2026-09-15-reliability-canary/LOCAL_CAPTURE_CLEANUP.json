@@ -1,0 +1,18 @@
+{
+  "recorded_utc": "2026-09-16T00:21:40.299701+00:00",
+  "browser_session": "ghost-reliability-canary",
+  "browser_export": "output/playwright/reliability-canary/browser.jsonl",
+  "browser_closed_after_export": true,
+  "close_command_exit_code": 0,
+  "close_command_output": "Browser 'ghost-reliability-canary' closed",
+  "known_tunnel_pid": 7852,
+  "known_tunnel_process_exists_at_check": false,
+  "port_19016_listening_at_check": false,
+  "replacement_tunnel_created": false,
+  "capture_reloaded": false,
+  "notes": [
+    "The original tunnel exited with an untimestamped connection reset. No process was killed by PID after it exited.",
+    "Other browser sessions and tunnels were not closed.",
+    "This records observed tool results; recorded_utc is the record creation time, not an exact browser-close timestamp."
+  ]
+}

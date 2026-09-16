@@ -1,0 +1,810 @@
+{
+  "admission_interval": "[start, start + observation_ms)",
+  "all_admissions": [
+    {
+      "absolute_error_bps": {
+        "maximum": "0.16037737471854884632362621664128690421241203556399276520099698632371481406720350",
+        "median": "0.00095957375724930348263886802900226603886943170979630312005417155792251060356847095",
+        "n": 988,
+        "p90": "0.060087957108765037808120630281060624747485292721663293570810953764049734501328771",
+        "p99": "0.14514933253950416675416099828474121060711178718523630395370939515089168748948962"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.213024734328688160",
+        "median": "0.0072629609948839250",
+        "n": 988,
+        "p90": "0.4547724596985086510",
+        "p99": "1.09802997185177639500"
+      },
+      "admitted": 1003,
+      "admitted_quality": {
+        "degraded": 487,
+        "healthy": 516
+      },
+      "browser_lead_ms": {
+        "maximum": "2230.8000000120",
+        "median": "663.95000000295",
+        "n": 988,
+        "p90": "1356.11000000236",
+        "p99": "1752.235000000000"
+      },
+      "candidate_N": 1184,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 15,
+        "target_already_observed": 0
+      },
+      "censored": 15,
+      "excluded": 181,
+      "horizon_s": 1,
+      "matched": 988,
+      "nonconflicting_observed_targets": 988,
+      "overlapping_exclusion_reasons": {
+        "missing_slots": 121,
+        "target_received_before_publication": 60
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.16037737471854884632362621664128690421241203556399276520099698632371481406720350",
+        "median": "0.00095961378597741753113170425044602752064438092248038712999596486079018472127972481",
+        "n": 1044,
+        "p90": "0.060087957108765037808120630281060624747485292721663293570810953764049734501328771",
+        "p99": "0.14736393799795649186940215287784126415541797164054360905961850225300126146207826"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.213024734328688160",
+        "median": "0.0072629610027000430",
+        "n": 1044,
+        "p90": "0.4547724596985086510",
+        "p99": "1.11485105054169060300"
+      },
+      "admitted": 1061,
+      "admitted_quality": {
+        "degraded": 517,
+        "healthy": 544
+      },
+      "browser_lead_ms": {
+        "maximum": "3194.0999999941",
+        "median": "1729.79999999705",
+        "n": 1044,
+        "p90": "2336.46999999587",
+        "p99": "2890.457000001723"
+      },
+      "candidate_N": 1184,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 17,
+        "target_already_observed": 0
+      },
+      "censored": 17,
+      "excluded": 123,
+      "horizon_s": 2,
+      "matched": 1044,
+      "nonconflicting_observed_targets": 1044,
+      "overlapping_exclusion_reasons": {
+        "missing_slots": 120,
+        "target_received_before_publication": 3
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.16140814198119287656305510856910533298305694720987732530662627090023520490154265",
+        "median": "0.00095966026558138900815260467699992334376906651395099624591693176437972295873135803",
+        "n": 1045,
+        "p90": "0.060755094317873057839160192134085720198439376641112601977799864655656293230785206",
+        "p99": "0.14578210321269378352517920772277919051570665378608995534156032826147470195655942"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.220821009751688160",
+        "median": "0.0072629610147277970",
+        "n": 1045,
+        "p90": "0.4597450651726269886",
+        "p99": "1.10284408824440772428"
+      },
+      "admitted": 1066,
+      "admitted_quality": {
+        "degraded": 509,
+        "healthy": 557
+      },
+      "browser_lead_ms": {
+        "maximum": "4265.5999999941",
+        "median": "2714.69999998800",
+        "n": 1045,
+        "p90": "3367.50000001780",
+        "p99": "3824.776000002596"
+      },
+      "candidate_N": 1184,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 21,
+        "target_already_observed": 0
+      },
+      "censored": 21,
+      "excluded": 118,
+      "horizon_s": 3,
+      "matched": 1045,
+      "nonconflicting_observed_targets": 1045,
+      "overlapping_exclusion_reasons": {
+        "missing_slots": 118
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.21259806277634175857030755265176001032576642603729787331029708914820505545586791",
+        "median": "0.0087035800945003465368475574543666726030287467275954335834741900371603388020844158",
+        "n": 1039,
+        "p90": "0.065325960609556991165539080112118528713861832965649748985639584404075556467843188",
+        "p99": "0.15208674315720917459351270150393834423573329584503453630234407646337446173865709"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.609661143744345131",
+        "median": "0.0658806279189695360",
+        "n": 1039,
+        "p90": "0.4942946213906546710",
+        "p99": "1.15068874638726509440"
+      },
+      "admitted": 1070,
+      "admitted_quality": {
+        "degraded": 496,
+        "healthy": 574
+      },
+      "browser_lead_ms": {
+        "maximum": "6464.5000000000",
+        "median": "4703.50000000000",
+        "n": 1039,
+        "p90": "5369.61999998096",
+        "p99": "5847.667999991858"
+      },
+      "candidate_N": 1184,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 31,
+        "target_already_observed": 0
+      },
+      "censored": 31,
+      "excluded": 114,
+      "horizon_s": 5,
+      "matched": 1039,
+      "nonconflicting_observed_targets": 1039,
+      "overlapping_exclusion_reasons": {
+        "missing_slots": 114
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.50383753788946336864808005352590823125468195540557579790553049512759066990658960",
+        "median": "0.045394490135710898776458580999213947562399470193256695730575448220891644247767492",
+        "n": 1038,
+        "p90": "0.17861680483128546157577666215042669855301536134555651645790061517683085726221023",
+        "p99": "0.34133236777372249720216088041185054901766024216419249402563077922816629289411461"
+      },
+      "absolute_error_usd": {
+        "maximum": "3.813185311308639467",
+        "median": "0.3434310858701076640",
+        "n": 1038,
+        "p90": "1.3508940046033812588",
+        "p99": "2.58297604954463191881"
+      },
+      "admitted": 1081,
+      "admitted_quality": {
+        "degraded": 455,
+        "healthy": 626
+      },
+      "browser_lead_ms": {
+        "maximum": "11202.0999999941",
+        "median": "9733.50000000000",
+        "n": 1038,
+        "p90": "10415.79999999400",
+        "p99": "10950.083999983634"
+      },
+      "candidate_N": 1184,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 43,
+        "target_already_observed": 0
+      },
+      "censored": 43,
+      "excluded": 103,
+      "horizon_s": 10,
+      "matched": 1038,
+      "nonconflicting_observed_targets": 1038,
+      "overlapping_exclusion_reasons": {
+        "missing_slots": 103
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "2.8859703480226895977966088032029468675987672073048730761075297643764076503810289",
+        "median": "0.53911858426903190722089467601048287954473808831852896538245796084052790876240571",
+        "n": 1035,
+        "p90": "1.2802672881638561014937547568882775410280011856380729711503888747431544620575039",
+        "p99": "2.1315699833314606021786222672811848218684976868254037038104810941342127268197106"
+      },
+      "absolute_error_usd": {
+        "maximum": "21.841659036766581632",
+        "median": "4.0812427175332817920",
+        "n": 1035,
+        "p90": "9.6888449754674262570",
+        "p99": "16.12836195620850982176"
+      },
+      "admitted": 1120,
+      "admitted_quality": {
+        "degraded": 294,
+        "healthy": 826
+      },
+      "browser_lead_ms": {
+        "maximum": "31313.4000000059",
+        "median": "29704.09999999400",
+        "n": 1035,
+        "p90": "30457.05999999646",
+        "p99": "30965.094000009960"
+      },
+      "candidate_N": 1184,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 85,
+        "target_already_observed": 0
+      },
+      "censored": 85,
+      "excluded": 64,
+      "horizon_s": 30,
+      "matched": 1035,
+      "nonconflicting_observed_targets": 1035,
+      "overlapping_exclusion_reasons": {
+        "missing_slots": 64
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    }
+  ],
+  "anchor_interval": "[start, start + observation_ms + drain_ms]",
+  "anchor_observations_after_drain_ignored": 0,
+  "api_delivery": {
+    "clock_domain": "Read, fanout, and send monotonic timestamps from the same API instance only; no producer or browser clock subtraction.",
+    "duplicate_fresh_envelopes": 0,
+    "fanout_to_send_ms": {
+      "maximum": "5.219607",
+      "median": "0.0575170",
+      "n": 1244,
+      "p90": "0.1494503",
+      "p99": "3.11040445"
+    },
+    "invalid_metadata_envelopes": 0,
+    "invalid_metadata_reasons": {},
+    "read_to_fanout_ms": {
+      "maximum": "1462.200738",
+      "median": "0.7167755",
+      "n": 1244,
+      "p90": "3.9484643",
+      "p99": "555.16930522"
+    },
+    "sample_unit": "First browser receipt of each non-null envelope per (API instance_id, sequence), across the complete capture.",
+    "unique_fresh_envelopes": 1244,
+    "valid_metadata_envelopes": 1244
+  },
+  "api_instances": [
+    "517b6bf9b1ed4a44ac2c389f9f02f39f"
+  ],
+  "api_reasons": {
+    "absent": 4,
+    "expired": 1,
+    "fresh": 1176,
+    "no_eligible_horizons": 68,
+    "resyncing": 1
+  },
+  "api_states": {
+    "snapshot": 1244,
+    "unavailable": 6
+  },
+  "capture_elapsed_ms": "3720001.6999999881",
+  "capture_end_browser_ms": "4714718.5",
+  "capture_start_browser_ms": "994716.8000000119",
+  "conflicting_anchor_stamps": 0,
+  "connection_errors": 28,
+  "connects": 1,
+  "drain_ms": 120000,
+  "duplicate_producer_envelopes": 60,
+  "error_bps_denominator": "Exact observed target TWAP value",
+  "error_reasons": {
+    "eventsource_error": 28,
+    "snapshot_error": 28
+  },
+  "limitations": [
+    "Lead measures browser handler entry, not rendering or collector/Redis acknowledgement.",
+    "Targets are exact anchors delivered over this SSE stream; skipped or absent targets are censored.",
+    "Admitted/excluded denominators cover unique delivered producer decisions; null envelopes do not reveal omitted forecasts.",
+    "Server remaining lifetime is not a new TTL at browser receipt; this analysis does not certify browser display freshness.",
+    "Positive lead among matched pairs is guaranteed by excluding targets already observed at forecast receipt.",
+    "GET snapshots are timing diagnostics only and never substitute for SSE target anchors.",
+    "The post_warmup panel begins at warmup_ms after browser capture start; it does not certify that producer history has warmed up.",
+    "Accuracy is conditional on observed, nonconflicting, later targets; it is not a trading or settlement result.",
+    "Probe usability is the browser classifier recorded at actual handler times; this analyzer does not independently reconstruct clock-bracket or selected-payload eligibility. Multiple probes in one slot are combined conservatively, and point samples do not prove continuous availability."
+  ],
+  "observation_ms": 3600000,
+  "other_errors": 0,
+  "post_warmup": [
+    {
+      "absolute_error_bps": {
+        "maximum": "0.16037737471854884632362621664128690421241203556399276520099698632371481406720350",
+        "median": "0.00095957422374668199025032739935414179063639742530891615705858821498777360301014734",
+        "n": 980,
+        "p90": "0.060087957108765037808120630281060624747485292721663293570810953764049734501328771",
+        "p99": "0.14514933253950416675416099828474121060711178718523630395370939515089168748948962"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.213024734328688160",
+        "median": "0.0072629609968083095",
+        "n": 980,
+        "p90": "0.4547724596985086510",
+        "p99": "1.09802997185177639500"
+      },
+      "admitted": 995,
+      "admitted_quality": {
+        "degraded": 487,
+        "healthy": 508
+      },
+      "browser_lead_ms": {
+        "maximum": "2230.8000000120",
+        "median": "663.24999999995",
+        "n": 980,
+        "p90": "1355.97000000472",
+        "p99": "1745.311999985859"
+      },
+      "candidate_N": 1055,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 15,
+        "target_already_observed": 0
+      },
+      "censored": 15,
+      "excluded": 60,
+      "horizon_s": 1,
+      "matched": 980,
+      "nonconflicting_observed_targets": 980,
+      "overlapping_exclusion_reasons": {
+        "target_received_before_publication": 60
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.16037737471854884632362621664128690421241203556399276520099698632371481406720350",
+        "median": "0.00095961378597741753113170425044602752064438092248038712999596486079018472127972481",
+        "n": 1035,
+        "p90": "0.059585641125195375256751657035955614704548388176716987582053567913646912573411995",
+        "p99": "0.14753519976023384674539374229535011286174971882873489838427775982816996831101994"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.213024734328688160",
+        "median": "0.0072629610027000430",
+        "n": 1035,
+        "p90": "0.4509894080569481554",
+        "p99": "1.11614964669029604300"
+      },
+      "admitted": 1052,
+      "admitted_quality": {
+        "degraded": 517,
+        "healthy": 535
+      },
+      "browser_lead_ms": {
+        "maximum": "3194.0999999941",
+        "median": "1728.20000001790",
+        "n": 1035,
+        "p90": "2334.41999999882",
+        "p99": "2836.044000003960"
+      },
+      "candidate_N": 1055,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 17,
+        "target_already_observed": 0
+      },
+      "censored": 17,
+      "excluded": 3,
+      "horizon_s": 2,
+      "matched": 1035,
+      "nonconflicting_observed_targets": 1035,
+      "overlapping_exclusion_reasons": {
+        "target_received_before_publication": 3
+      },
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.16140814198119287656305510856910533298305694720987732530662627090023520490154265",
+        "median": "0.00095966134173205353299220959141533867398138471799749436728862255068550196346584728",
+        "n": 1034,
+        "p90": "0.060035368852667628771106911500783848118605160266243595548720723399043320810683677",
+        "p99": "0.14590639745207031539091492743382236514060921686840049400703104726533922265544813"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.220821009751688160",
+        "median": "0.0072629610151745225",
+        "n": 1034,
+        "p90": "0.4543603041352326572",
+        "p99": "1.10378971825010316396"
+      },
+      "admitted": 1055,
+      "admitted_quality": {
+        "degraded": 509,
+        "healthy": 546
+      },
+      "browser_lead_ms": {
+        "maximum": "4265.5999999941",
+        "median": "2712.15000000595",
+        "n": 1034,
+        "p90": "3361.03000002203",
+        "p99": "3793.799999986001"
+      },
+      "candidate_N": 1055,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 21,
+        "target_already_observed": 0
+      },
+      "censored": 21,
+      "excluded": 0,
+      "horizon_s": 3,
+      "matched": 1034,
+      "nonconflicting_observed_targets": 1034,
+      "overlapping_exclusion_reasons": {},
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.21259806277634175857030755265176001032576642603729787331029708914820505545586791",
+        "median": "0.0086572635218813592776683799526614728165501655499709511639423345889384046582489705",
+        "n": 1024,
+        "p90": "0.057994152387812192536093916794937208197390062144142197341911527825743557576229874",
+        "p99": "0.15225201315361986978205280939688911120379653980924982055709082739257013510911156"
+      },
+      "absolute_error_usd": {
+        "maximum": "1.609661143744345131",
+        "median": "0.0654949003489937975",
+        "n": 1024,
+        "p90": "0.4388205230809698702",
+        "p99": "1.15196994415095274240"
+      },
+      "admitted": 1055,
+      "admitted_quality": {
+        "degraded": 496,
+        "healthy": 559
+      },
+      "browser_lead_ms": {
+        "maximum": "6464.5000000000",
+        "median": "4696.15000000595",
+        "n": 1024,
+        "p90": "5359.63000001613",
+        "p99": "5841.836999989534"
+      },
+      "candidate_N": 1055,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 31,
+        "target_already_observed": 0
+      },
+      "censored": 31,
+      "excluded": 0,
+      "horizon_s": 5,
+      "matched": 1024,
+      "nonconflicting_observed_targets": 1024,
+      "overlapping_exclusion_reasons": {},
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "0.50383753788946336864808005352590823125468195540557579790553049512759066990658960",
+        "median": "0.043163280145659275725150804388690348058648691012481911502426042983640872052433092",
+        "n": 1012,
+        "p90": "0.17595116640914735821241090069873087339211695298616879034468961509948474299502061",
+        "p99": "0.34278702600194133836531839034064672649379417917311799547004591208341751109271016"
+      },
+      "absolute_error_usd": {
+        "maximum": "3.813185311308639467",
+        "median": "0.3266441298849710080",
+        "n": 1012,
+        "p90": "1.3307064939245961109",
+        "p99": "2.59375847609167819943"
+      },
+      "admitted": 1055,
+      "admitted_quality": {
+        "degraded": 455,
+        "healthy": 600
+      },
+      "browser_lead_ms": {
+        "maximum": "11144.9000000060",
+        "median": "9726.99999998515",
+        "n": 1012,
+        "p90": "10394.05999999639",
+        "p99": "10878.020000000000"
+      },
+      "candidate_N": 1055,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 43,
+        "target_already_observed": 0
+      },
+      "censored": 43,
+      "excluded": 0,
+      "horizon_s": 10,
+      "matched": 1012,
+      "nonconflicting_observed_targets": 1012,
+      "overlapping_exclusion_reasons": {},
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    },
+    {
+      "absolute_error_bps": {
+        "maximum": "2.8859703480226895977966088032029468675987672073048730761075297643764076503810289",
+        "median": "0.52509731493781925376909840820117228699911448215824502936788895869956879192613791",
+        "n": 984,
+        "p90": "1.3134013081383531541043723121610749806266988244744153654966948093834272608473043",
+        "p99": "2.1444966241948765757085465072593746095099587090668572522012681413396343940398811"
+      },
+      "absolute_error_usd": {
+        "maximum": "21.841659036766581632",
+        "median": "3.9751477795470311625",
+        "n": 984,
+        "p90": "9.9327687534584666898",
+        "p99": "16.22972268494745144719"
+      },
+      "admitted": 1055,
+      "admitted_quality": {
+        "degraded": 294,
+        "healthy": 761
+      },
+      "browser_lead_ms": {
+        "maximum": "31313.4000000059",
+        "median": "29694.84999999410",
+        "n": 984,
+        "p90": "30457.06999999587",
+        "p99": "30956.903999991143"
+      },
+      "candidate_N": 1055,
+      "censor_reasons": {
+        "conflicting_target_values": 0,
+        "missing_exact_target": 71,
+        "target_already_observed": 0
+      },
+      "censored": 71,
+      "excluded": 0,
+      "horizon_s": 30,
+      "matched": 984,
+      "nonconflicting_observed_targets": 984,
+      "overlapping_exclusion_reasons": {},
+      "positive_fraction_of_matched": "1",
+      "positive_fraction_of_nonconflicting_observed_targets": "1",
+      "resync_admitted": 0,
+      "resync_matched": 0
+    }
+  ],
+  "probes": {
+    "actual_probe_records": 7777,
+    "all_admissions": {
+      "actual_probe_records": 6578,
+      "by_horizon": [
+        {
+          "horizon_s": 1,
+          "not_usable_slots": 641,
+          "planned_slots": 36000,
+          "unknown_slots": 30135,
+          "usable_fraction_of_planned": "0.14511111111111111111111111111111111111111111111111111111111111111111111111111111",
+          "usable_slots": 5224
+        },
+        {
+          "horizon_s": 2,
+          "not_usable_slots": 489,
+          "planned_slots": 36000,
+          "unknown_slots": 30135,
+          "usable_fraction_of_planned": "0.14933333333333333333333333333333333333333333333333333333333333333333333333333333",
+          "usable_slots": 5376
+        },
+        {
+          "horizon_s": 3,
+          "not_usable_slots": 475,
+          "planned_slots": 36000,
+          "unknown_slots": 30135,
+          "usable_fraction_of_planned": "0.14972222222222222222222222222222222222222222222222222222222222222222222222222222",
+          "usable_slots": 5390
+        },
+        {
+          "horizon_s": 5,
+          "not_usable_slots": 449,
+          "planned_slots": 36000,
+          "unknown_slots": 30135,
+          "usable_fraction_of_planned": "0.15044444444444444444444444444444444444444444444444444444444444444444444444444444",
+          "usable_slots": 5416
+        },
+        {
+          "horizon_s": 10,
+          "not_usable_slots": 403,
+          "planned_slots": 36000,
+          "unknown_slots": 30135,
+          "usable_fraction_of_planned": "0.15172222222222222222222222222222222222222222222222222222222222222222222222222222",
+          "usable_slots": 5462
+        },
+        {
+          "horizon_s": 30,
+          "not_usable_slots": 240,
+          "planned_slots": 36000,
+          "unknown_slots": 30135,
+          "usable_fraction_of_planned": "0.15625",
+          "usable_slots": 5625
+        }
+      ],
+      "calibrated_observed_slots": 5865,
+      "interprobe_ms": {
+        "maximum": "2942064.5999999940",
+        "median": "99.89999997620",
+        "n": 6577,
+        "p90": "105.40000000600",
+        "p99": "112.523999998560"
+      },
+      "missing_slots": 29422,
+      "multiple_probe_slots": 0,
+      "observed_fraction_of_planned": "0.18272222222222222222222222222222222222222222222222222222222222222222222222222222",
+      "observed_slots": 6578,
+      "planned_slots": 36000,
+      "uncalibrated_observed_slots": 713
+    },
+    "grid_ms": 100,
+    "method": "Actual times map to floor(elapsed_ms/100). No delayed observation fills earlier slots. A slot is usable only when every observation in it is calibrated and lists that horizon. Absent or uncalibrated slots are unknown; all planned slots remain in the denominator.",
+    "post_warmup": {
+      "actual_probe_records": 5574,
+      "by_horizon": [
+        {
+          "horizon_s": 1,
+          "not_usable_slots": 391,
+          "planned_slots": 34994,
+          "unknown_slots": 29420,
+          "usable_fraction_of_planned": "0.14811110476081613990969880550951591701434531633994399039835400354346459393038807",
+          "usable_slots": 5183
+        },
+        {
+          "horizon_s": 2,
+          "not_usable_slots": 248,
+          "planned_slots": 34994,
+          "unknown_slots": 29420,
+          "usable_fraction_of_planned": "0.15219751957478424872835343201691718580328056238212264959707378407727038920957878",
+          "usable_slots": 5326
+        },
+        {
+          "horizon_s": 3,
+          "not_usable_slots": 240,
+          "planned_slots": 34994,
+          "unknown_slots": 29420,
+          "usable_fraction_of_planned": "0.15242613019374749957135508944390466937189232439846830885294621935188889523918386",
+          "usable_slots": 5334
+        },
+        {
+          "horizon_s": 5,
+          "not_usable_slots": 240,
+          "planned_slots": 34994,
+          "unknown_slots": 29420,
+          "usable_fraction_of_planned": "0.15242613019374749957135508944390466937189232439846830885294621935188889523918386",
+          "usable_slots": 5334
+        },
+        {
+          "horizon_s": 10,
+          "not_usable_slots": 240,
+          "planned_slots": 34994,
+          "unknown_slots": 29420,
+          "usable_fraction_of_planned": "0.15242613019374749957135508944390466937189232439846830885294621935188889523918386",
+          "usable_slots": 5334
+        },
+        {
+          "horizon_s": 30,
+          "not_usable_slots": 240,
+          "planned_slots": 34994,
+          "unknown_slots": 29420,
+          "usable_fraction_of_planned": "0.15242613019374749957135508944390466937189232439846830885294621935188889523918386",
+          "usable_slots": 5334
+        }
+      ],
+      "calibrated_observed_slots": 5574,
+      "interprobe_ms": {
+        "maximum": "2942064.5999999940",
+        "median": "99.89999997620",
+        "n": 5573,
+        "p90": "105.70000001186",
+        "p99": "112.699999988128"
+      },
+      "missing_slots": 29420,
+      "multiple_probe_slots": 0,
+      "observed_fraction_of_planned": "0.15928444876264502486140481225352917643024518488883808652911927759044407612733611",
+      "observed_slots": 5574,
+      "planned_slots": 34994,
+      "uncalibrated_observed_slots": 0
+    },
+    "records_after_admission_ignored": 1199,
+    "state_counts": {
+      "awaiting_connection": 6,
+      "snapshot": 7367,
+      "unavailable": 404
+    }
+  },
+  "producer_run_count": 1,
+  "quantiles": "Linear interpolation at (n-1)*p, Decimal precision 80; no financial float conversion.",
+  "record_count": 9214,
+  "record_counts": {
+    "end": 1,
+    "error": 56,
+    "ghost": 1250,
+    "open": 1,
+    "probe": 7777,
+    "snapshot": 128,
+    "start": 1
+  },
+  "resync_envelopes": 3,
+  "runs": {
+    "fe2dd06da5754c50b696cb9419ca7251": {
+      "admission_decisions": 1184,
+      "unique_delivered_decisions": 1184
+    }
+  },
+  "skipped_updates": 0,
+  "snapshots": {
+    "aborted_request_count": 0,
+    "completed_http_responses": 128,
+    "error_count": 28,
+    "error_timing": "Failed GET records have no request-start clock; no duration is reconstructed. AbortError identifies abortion; a timeout cause requires the capture instrument evidence.",
+    "explicit_timeout_error_count": 0,
+    "first_elapsed_ms": "577.5999999941",
+    "full_response_ms": {
+      "maximum": "2586.400000006",
+      "median": "446.30000001190",
+      "n": 128,
+      "p90": "1389.03999999463",
+      "p99": "1643.286999992453"
+    },
+    "last_elapsed_ms": "635302.0000000001",
+    "status_counts": {
+      "200": 113,
+      "503": 15
+    }
+  },
+  "source_bytes": 11686040,
+  "source_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\output\\playwright\\reliability-canary\\browser.jsonl",
+  "source_sha256": "cf7c58705a29b30d9148ebeb376839d51423ec4fef583cb8f22d7684aa893be8",
+  "status": "accepted_complete_capture",
+  "unique_exact_anchor_stamps": 593,
+  "version": "ghost-browser-analysis-v1",
+  "warmup_ms": 100519
+}

@@ -1,9 +1,14 @@
 # Live ghost TWAP — implementation plan
 
-**Status: both one-hour B canaries and the bounded C browser observation are complete.**
-The producer is disabled again; the read-only API remains enabled at deployment
-`5bc676c`. [C findings and audit/export status](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
-are separate from the historical B results.
+**Status: the bounded API is implemented; the latest reliability canary is complete.**
+The producer is disabled again; the read-only API remains enabled. Runtime
+reliability fixes are deployed at `d404312`, with the bounded stop helper at
+`81ee6f1`. The [latest official findings](results/spot_twap_response/2026-09-15-reliability-canary/FINDINGS.md)
+record a clean automatic stop and a complete Redis observation hour, alongside
+an incomplete browser capture with about 49 minutes of missing samples.
+Full-hour frontend reliability and continuous-operation storage remain open.
+[Original C findings and audit/export status](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
+remain separate from the historical B results.
 The [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) support the calculation
 and bounded live operation. Median receipt-to-Redis publication was 38.22 ms,
 missing the under-10-ms optimization objective. The combined campaign's 7,054
@@ -12,7 +17,8 @@ measured a 15-minute browser cohort plus anchor follow-through. Its early stop
 required publication-free recovery of 64 incomplete audit rows and 65 retained
 outbox files because nested five-second shutdown budgets expired. Frozen and
 observed evidence was preserved. This cleanup does not fix the shutdown budget;
-ongoing forecast production still requires that fix and a capacity/retention review.
+the subsequent reliability fix and canary closed that observed drain failure.
+Ongoing forecast production still requires a capacity/retention review.
 [A contract](GHOST_TWAP_CHECKPOINT_A.md),
 [B implementation](GHOST_TWAP_CHECKPOINT_B.md), [review corrections](GHOST_TWAP_CHECKPOINT_B_REVIEW.md).
 
@@ -68,7 +74,7 @@ estimated_remaining_at_D = h seconds − (D − anchor_TWAP_receipt)
 
 This assumes the target has the same source-to-receipt delay as its anchor. It is an estimate, not a scheduled publication time. The observed median h−0.4 seconds came from the minute-grid replay's anchor age; it is not a universal correction.
 
-Retain the anchor receipt, estimate method/version and signed remaining time. If the estimate has passed but the target remains unreceived, mark the estimate overdue rather than pushing it into the future. Publish an uncertainty interval only after calibrating target-minus-estimated arrival errors on the prospective run, including gaps; do not hard-code “half a second of jitter.” API client receipt time remains unmeasured.
+Retain the anchor receipt, estimate method/version and signed remaining time. If the estimate has passed but the target remains unreceived, mark the estimate overdue rather than pushing it into the future. Publish an uncertainty interval only after calibrating target-minus-estimated arrival errors on the prospective run, including gaps; do not hard-code “half a second of jitter.” Server timestamps alone do not measure API client receipt; the separate bounded browser instrumentation records that clock, with its capture gaps kept explicit.
 
 ## Worker and quality policy
 
