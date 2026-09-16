@@ -1,0 +1,188 @@
+{
+  "all_disposable_resources_removed": true,
+  "artifacts": {
+    "GHOST_TWAP_RETENTION_MONITORING_PLAN.md": {
+      "bytes": 12498,
+      "sha256": "4e07650dfdfa5e45fd1e24dea106acd94fa37dbf5e9578d8f0f5d9cc0733a100"
+    },
+    "README.md": {
+      "bytes": 48906,
+      "sha256": "a5ccc9c53aed9613ed7e0786dc249a6a9327c833a35f6b8e2b9af267a54f6c86"
+    },
+    "research/spot_twap_response/compact_storage/PROTOCOL.md": {
+      "bytes": 9993,
+      "sha256": "43ce906afc6a0946c12db9b693c0dc291b197c6e381420cc6b745832b077a4f5"
+    },
+    "research/spot_twap_response/compact_storage/analyze.py": {
+      "bytes": 15986,
+      "sha256": "61fac896ad65d6b183f9e9f29d85ab497149f93d0a3a2d89cf5748c4271fd3dc"
+    },
+    "research/spot_twap_response/compact_storage/compact.py": {
+      "bytes": 19856,
+      "sha256": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f"
+    },
+    "research/spot_twap_response/compact_storage/layout.py": {
+      "bytes": 15829,
+      "sha256": "88659641c59160f1b5c04af87baf92ba0a0c347c3ee35f7d8ae12ae56141a4e6"
+    },
+    "research/spot_twap_response/compact_storage/physical_schema.sql": {
+      "bytes": 726,
+      "sha256": "1486893970663a6bc51c7549de3c648baf338074e30cefd3134a41b9dca5839d"
+    },
+    "research/spot_twap_response/compact_storage/probe.py": {
+      "bytes": 18415,
+      "sha256": "e866b876a206b894eb909b720231578c37560d10499eeac3976bddf217f0f6dc"
+    },
+    "research/spot_twap_response/compact_storage/schema.sql": {
+      "bytes": 7260,
+      "sha256": "e02997daeaadb3b1c32741588bfd4e81bedef3f30ffe20fccbbaa058f658aa7a"
+    },
+    "research/spot_twap_response/compact_storage/test_compact.py": {
+      "bytes": 13457,
+      "sha256": "a2a2e943d78d348c5503cd9212e61031233841c15d23380d07636fbc83ed2503"
+    },
+    "research/spot_twap_response/compact_storage/test_layout.py": {
+      "bytes": 8194,
+      "sha256": "4233a04f13718db35625b8e635cf98cb0ce948c39cea26d5f777f742cc47258a"
+    },
+    "research/spot_twap_response/compact_storage/test_probe.py": {
+      "bytes": 4094,
+      "sha256": "028bee9cea0ee97d6c5d23635ececdf781a0bb4db84538228de1c2ce16a5d7cb"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md": {
+      "bytes": 9736,
+      "sha256": "6476ba802de329ba8c89ff52b73d87212133a26d2f2b934c490d1754ac017e00"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/VALIDATION.md": {
+      "bytes": 2179,
+      "sha256": "92e65f133ca17f7f287ac0720e93760d70e5df03da4cfc172f5261081afd5aeb"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/analysis.json": {
+      "bytes": 61896,
+      "sha256": "4fc7ad38eacedbf9c54b0b9874141351e9de7497ecbe85c40610d1f0f8427e1e"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/capacity_postflight.json": {
+      "bytes": 2257,
+      "sha256": "ccee31e2f4d48bda1f8c178808fe1cbc8a963af1bfc71a6f47a91f54350dfbdf"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/compact_input_manifest.json": {
+      "bytes": 1057,
+      "sha256": "680acc3e1a9a791629144d2809719d5618c5a3d6bb2bc65f2fef4b9664424b15"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/failed_probe_0c4f9f2.json": {
+      "bytes": 8299,
+      "sha256": "51476ca27739ac815976f531c5ed2f54bdc47fb49237e188945c27f501f08273"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/failed_probe_0c4f9f2_diagnosis.json": {
+      "bytes": 1353,
+      "sha256": "f99c2544d94c5e17e5818423f2607376119d63cfcacfeef1e76787472c87d951"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/failed_probe_0c4f9f2_stdout.txt": {
+      "bytes": 2983,
+      "sha256": "d1ad241fde1237e2831b61bc02c9e978aebe9135e766df28ad3b09912f091377"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/interrupted_probe_c86bd00.json": {
+      "bytes": 22582,
+      "sha256": "68fbe85a5718c7aa691229a6885a4d82b8b4fed06ac069fc7a319c59973cb8b2"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/interrupted_probe_c86bd00_diagnosis.json": {
+      "bytes": 1071,
+      "sha256": "f28b16b8d5fd8604592621cb917cd4586ac12894c0565e491d91b6aed9bf9970"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/interrupted_probe_c86bd00_stdout.txt": {
+      "bytes": 5524,
+      "sha256": "c83c88e117b93bad543589a3e0770e3884ee7a7fcce974c99e2394d1a31148ac"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/physical_schema.json": {
+      "bytes": 1928,
+      "sha256": "6ef7a9502bbbaf12938276dd10cb649783ecd3ff7b41893d9d893cc45b5c311d"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/postflight.json": {
+      "bytes": 28900,
+      "sha256": "337a51b440c746f441a1d8354c19b9f3197faf7a8f104bad8d9212a72a569142"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/preflight.json": {
+      "bytes": 27340,
+      "sha256": "d31430b2ce963ccc25260e9b04a1cb72c38595aae1a5278f5a4cf0fee2259762"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/probe_results.json": {
+      "bytes": 36304,
+      "sha256": "9880234883b57675d2108ac0d29e5cc2bc0c98c7bcb69e716ffdf4185b874306"
+    },
+    "results/spot_twap_response/2026-09-16-compact-storage/probe_stdout.txt": {
+      "bytes": 4236,
+      "sha256": "f9a2fee400d2b93e2ea801a18e4059a3b1fd9a492d42f9c29ef74560860e1e3c"
+    }
+  },
+  "created_utc": "2026-09-16T03:39:18.080740+00:00",
+  "earlier_runs": [
+    {
+      "commit": "0c4f9f2",
+      "outcome": "lock_timeout_preserved"
+    },
+    {
+      "commit": "c86bd00",
+      "outcome": "operator_interrupted_for_query_correction_preserved"
+    }
+  ],
+  "elapsed_ns": 874085653942,
+  "exact_readback_checks": 22,
+  "exact_record_comparisons": 155804,
+  "maximum_observed_database_bytes": 531250199,
+  "measurement_checkpoints": 32,
+  "minimum_observed_filesystem_free_bytes": 22710419456,
+  "postflight_passed": true,
+  "probe_code_sha256": {
+    "compact.py": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "layout.py": "88659641c59160f1b5c04af87baf92ba0a0c347c3ee35f7d8ae12ae56141a4e6",
+    "probe.py": "e866b876a206b894eb909b720231578c37560d10499eeac3976bddf217f0f6dc",
+    "schema.sql": "e02997daeaadb3b1c32741588bfd4e81bedef3f30ffe20fccbbaa058f658aa7a"
+  },
+  "producer_enabled": false,
+  "production_code_schema_env_services_changed": false,
+  "production_commit": "5d6083c5f8eab4fdf6603f157b2dce20af18f3ea",
+  "service_processes_unchanged": {
+    "price-api": true,
+    "price-collector": true,
+    "price-collector-binance-futures": true,
+    "price-collector-polymarket-chainlink": true,
+    "price-collector-polymarket-probabilities": true,
+    "redis-server": true
+  },
+  "source_manifest": {
+    "code_sha256": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "compact_jsonl_sha256": "65bae3a78b1caf91e056ce3de43a940855cb3a5f6a9f5b703beb15abeb505e4c",
+    "decisions": 7082,
+    "finalized_as_of_wall_ns": 1789516718428617010,
+    "horizon_records": 42492,
+    "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl",
+    "input_rows": 23411,
+    "input_sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+    "limitations": [
+      "No full slot/payload replay after original bytes expire.",
+      "This encoder does not reconstruct complete feed-gap metrics from selected snapshots.",
+      "Logical JSON bytes are not PostgreSQL allocated bytes."
+    ],
+    "logical_bytes": 53216127,
+    "maximum_line_bytes": 7642,
+    "minimum_line_bytes": 5614,
+    "publication_statuses": {
+      "acknowledged": 7075,
+      "expired_or_target_received": 7
+    },
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+    "schema_version": 1
+  },
+  "status": "measurement_complete_not_continuous_production_approval",
+  "successful_experiment_commit": "e8d0dd0",
+  "successful_report_remote_sha256_verified": "9880234883b57675d2108ac0d29e5cc2bc0c98c7bcb69e716ffdf4185b874306",
+  "tests": {
+    "distinct_passed": 51,
+    "frozen_encoder_full_canary_passed": 14,
+    "local_focused_opt_in_skipped": 1,
+    "local_focused_passed": 50,
+    "overlap_with_focused_tests": 13,
+    "python312_focused_passed": 50,
+    "python312_opt_in_skipped": 1
+  }
+}

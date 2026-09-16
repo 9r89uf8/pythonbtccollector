@@ -1,0 +1,49 @@
+{
+  "basis": "Postflight after all disposable databases and paths were removed",
+  "capacity": {
+    "available_above_reserve_bytes": 12496879616,
+    "conditional_residual_bytes": 2586304512,
+    "conditional_residual_gib": "2.40868377685546875",
+    "existing_ghost_allocated_bytes": 317726720,
+    "limits": [
+      "Point-in-time available filesystem bytes already subtract all currently allocated data.",
+      "Subtract only remaining growth to the two configured relation thresholds, not their full thresholds again.",
+      "Evidence threshold pauses high-rate quotes; metadata can continue. These thresholds are not total disk guarantees.",
+      "Core histories, WAL, temporary/maintenance files, outbox and other future growth remain unbudgeted.",
+      "Existing legacy ghost storage remains allocated; no assumed deletion or filesystem reclamation is credited.",
+      "This residual is conditional headroom, not a recommended ghost storage budget."
+    ],
+    "no_existing_allocation_subtracted_twice": true,
+    "no_legacy_reclamation_credit": true,
+    "other_relation_groups": [
+      {
+        "allocated_bytes": 870088704,
+        "configured_threshold_bytes": 6442450944,
+        "configured_threshold_source": "running_process_override",
+        "enabled_at_preflight": true,
+        "name": "evidence",
+        "relations": [
+          "polymarket_evidence_payloads",
+          "polymarket_market_observations",
+          "polymarket_quote_observations"
+        ],
+        "remaining_growth_to_threshold_bytes": 5572362240
+      },
+      {
+        "allocated_bytes": 2104238080,
+        "configured_threshold_bytes": 6442450944,
+        "configured_threshold_source": "running_process_override",
+        "enabled_at_preflight": true,
+        "name": "microstructure",
+        "relations": [
+          "binance_microstructure_1s"
+        ],
+        "remaining_growth_to_threshold_bytes": 4338212864
+      }
+    ],
+    "preflight_available_filesystem_bytes": 23234297856,
+    "preserved_disk_reserve_bytes": 10737418240,
+    "reserved_remaining_growth_to_other_thresholds_bytes": 9910575104
+  },
+  "postflight_sha256": "337a51b440c746f441a1d8354c19b9f3197faf7a8f104bad8d9212a72a569142"
+}

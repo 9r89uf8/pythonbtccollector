@@ -970,8 +970,12 @@ terminal-row batches and full external readback before exact-version
 acknowledgement. No archive service or automatic expiry is enabled yet.
 The owner's [new retention and monitoring direction](GHOST_TWAP_RETENTION_MONITORING_PLAN.md)
 is seven days of individual forecasts with ongoing accuracy summaries; external
-archiving is optional for that design. Implementation and capacity validation
-remain to be done before continuous production.
+archiving is optional for that design. The
+[compact-storage experiment](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
+passed its integrity and reuse checks, but its two layouts project to 4.38 and
+5.52 GiB/week at the observed rate. Neither fits the current shared budget with
+a useful margin. A leaner measured format or reviewed capacity policy is needed
+before implementing and enabling continuous retention and monitoring.
 
 The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
 adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after

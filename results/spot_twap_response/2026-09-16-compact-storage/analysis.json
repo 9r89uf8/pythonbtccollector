@@ -1,0 +1,1354 @@
+{
+  "conditional_shared_capacity": {
+    "available_above_reserve_bytes": 13514444800,
+    "conditional_residual_bytes": 3594219520,
+    "conditional_residual_gib": "3.347377777099609375",
+    "existing_ghost_allocated_bytes": 317726720,
+    "limits": [
+      "Point-in-time available filesystem bytes already subtract all currently allocated data.",
+      "Subtract only remaining growth to the two configured relation thresholds, not their full thresholds again.",
+      "Evidence threshold pauses high-rate quotes; metadata can continue. These thresholds are not total disk guarantees.",
+      "Core histories, WAL, temporary/maintenance files, outbox and other future growth remain unbudgeted.",
+      "Existing legacy ghost storage remains allocated; no assumed deletion or filesystem reclamation is credited.",
+      "This residual is conditional headroom, not a recommended ghost storage budget."
+    ],
+    "no_existing_allocation_subtracted_twice": true,
+    "no_legacy_reclamation_credit": true,
+    "other_relation_groups": [
+      {
+        "allocated_bytes": 863518720,
+        "configured_threshold_bytes": 6442450944,
+        "configured_threshold_source": "running_process_override",
+        "enabled_at_preflight": true,
+        "name": "evidence",
+        "relations": [
+          "polymarket_evidence_payloads",
+          "polymarket_market_observations",
+          "polymarket_quote_observations"
+        ],
+        "remaining_growth_to_threshold_bytes": 5578932224
+      },
+      {
+        "allocated_bytes": 2101157888,
+        "configured_threshold_bytes": 6442450944,
+        "configured_threshold_source": "running_process_override",
+        "enabled_at_preflight": true,
+        "name": "microstructure",
+        "relations": [
+          "binance_microstructure_1s"
+        ],
+        "remaining_growth_to_threshold_bytes": 4341293056
+      }
+    ],
+    "preflight_available_filesystem_bytes": 24251863040,
+    "preserved_disk_reserve_bytes": 10737418240,
+    "reserved_remaining_growth_to_other_thresholds_bytes": 9920225280
+  },
+  "horizons_per_decision": 6,
+  "layouts": {
+    "json": {
+      "conditional_headroom_after_largest_proportional_week_bytes": "-3916992512",
+      "largest_full_population_allocation_bytes": 312967168,
+      "largest_full_population_proportional_week_allocation_bytes": "7511212032",
+      "largest_full_population_proportional_week_allocation_gib": "6.995361328125",
+      "largest_full_population_stage": "rewrites_vacuumed",
+      "measured_empty_allocation_bytes": 40960,
+      "stages": [
+        {
+          "allocation_bytes": 40960,
+          "allocation_gib": "0.00003814697265625",
+          "decisions": 0,
+          "disposable_database_bytes": 7986199,
+          "filesystem_free_bytes": 23541981184,
+          "stage": "empty",
+          "tables": [
+            {
+              "base_indexes_bytes": 32768,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 0,
+              "heap_main_bytes": 0,
+              "mean_tuple_bytes": "None",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 0,
+              "table_including_toast_bytes": 8192,
+              "toast_total_bytes": 8192,
+              "total_bytes": 40960
+            }
+          ]
+        },
+        {
+          "allocated_bytes_per_live_decision": "3464.4224795255577520474442247952555775204744422479525557752047444224795255577520",
+          "allocation_bytes": 24535040,
+          "allocation_gib": "0.02285003662109375",
+          "conditional_headroom_after_proportional_week_bytes": "-527667200",
+          "decisions": 7082,
+          "disposable_database_bytes": 32480279,
+          "filesystem_free_bytes": 23518982144,
+          "fixed_empty_baseline_week_allocation_bytes": "4115046400",
+          "fixed_empty_baseline_week_allocation_gib": "3.83243560791015625",
+          "proportional_week_allocation_bytes": "4121886720",
+          "proportional_week_allocation_gib": "3.83880615234375",
+          "stage": "after_1_copies",
+          "tables": [
+            {
+              "base_indexes_bytes": 1990656,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 7000,
+              "heap_main_bytes": 1482752,
+              "mean_tuple_bytes": "2848.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 7082,
+              "table_including_toast_bytes": 22544384,
+              "toast_total_bytes": 21037056,
+              "total_bytes": 24535040
+            }
+          ],
+          "week_population_multiplier": "168"
+        },
+        {
+          "allocated_bytes_per_live_decision": "3598.2182057799115127553421820577991151275534218205779911512755342182057799115128",
+          "allocation_bytes": 76447744,
+          "allocation_gib": "0.071197509765625",
+          "conditional_headroom_after_proportional_week_bytes": "-686854144",
+          "decisions": 21246,
+          "disposable_database_bytes": 84392983,
+          "filesystem_free_bytes": 23466602496,
+          "fixed_empty_baseline_week_allocation_bytes": "4278820864",
+          "fixed_empty_baseline_week_allocation_gib": "3.98496246337890625",
+          "proportional_week_allocation_bytes": "4281073664",
+          "proportional_week_allocation_gib": "3.987060546875",
+          "stage": "after_3_copies",
+          "tables": [
+            {
+              "base_indexes_bytes": 7569408,
+              "estimated_dead_tuples": 6987,
+              "estimated_live_tuples": 21164,
+              "heap_main_bytes": 5849088,
+              "mean_tuple_bytes": "2847.5561046785277229",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 21246,
+              "table_including_toast_bytes": 68878336,
+              "toast_total_bytes": 63004672,
+              "total_bytes": 76447744
+            }
+          ],
+          "week_population_multiplier": "56"
+        },
+        {
+          "allocated_bytes_per_live_decision": "3475.3288417315528301125590027030298140154113043127445838544398273288417315528301",
+          "allocation_bytes": 172285952,
+          "allocation_gib": "0.16045379638671875",
+          "conditional_headroom_after_proportional_week_bytes": "-540643328",
+          "decisions": 49574,
+          "disposable_database_bytes": 180231191,
+          "filesystem_free_bytes": 23364587520,
+          "fixed_empty_baseline_week_allocation_bytes": "4133920768",
+          "fixed_empty_baseline_week_allocation_gib": "3.85001373291015625",
+          "proportional_week_allocation_bytes": "4134862848",
+          "proportional_week_allocation_gib": "3.85089111328125",
+          "stage": "after_7_copies",
+          "tables": [
+            {
+              "base_indexes_bytes": 13549568,
+              "estimated_dead_tuples": 6986,
+              "estimated_live_tuples": 49492,
+              "heap_main_bytes": 11755520,
+              "mean_tuple_bytes": "2848.3180094404324848",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 158736384,
+              "toast_total_bytes": 146956288,
+              "total_bytes": 172285952
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "3754.5978133699116472344374067051276879009158026384798483075805865978133699116472",
+          "allocation_bytes": 186130432,
+          "allocation_gib": "0.17334747314453125",
+          "conditional_headroom_after_proportional_week_bytes": "-872910848",
+          "decisions": 49574,
+          "disposable_database_bytes": 194083863,
+          "filesystem_free_bytes": 23349514240,
+          "fixed_empty_baseline_week_allocation_bytes": "4466188288",
+          "fixed_empty_baseline_week_allocation_gib": "4.15946197509765625",
+          "proportional_week_allocation_bytes": "4467130368",
+          "proportional_week_allocation_gib": "4.16033935546875",
+          "stage": "insert_only_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 18980864,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 167149568,
+              "toast_total_bytes": 146964480,
+              "total_bytes": 186130432
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "6312.9659902368176866906039456166538911526203251704522531972404889659902368176867",
+          "allocation_bytes": 312958976,
+          "allocation_gib": "0.29146575927734375",
+          "conditional_headroom_after_proportional_week_bytes": "-3916795904",
+          "decisions": 49574,
+          "disposable_database_bytes": 320912407,
+          "filesystem_free_bytes": 23222480896,
+          "fixed_empty_baseline_week_allocation_bytes": "7510073344",
+          "fixed_empty_baseline_week_allocation_gib": "6.99430084228515625",
+          "proportional_week_allocation_bytes": "7511015424",
+          "proportional_week_allocation_gib": "6.99517822265625",
+          "stage": "after_six_rewrites_one_copy",
+          "tables": [
+            {
+              "base_indexes_bytes": 19783680,
+              "estimated_dead_tuples": 40747,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2845.9250816960503490",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 293175296,
+              "toast_total_bytes": 272990208,
+              "total_bytes": 312958976
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "6313.1312381490297333279541695243474401904223988381006172590470811312381490297333",
+          "allocation_bytes": 312967168,
+          "allocation_gib": "0.291473388671875",
+          "conditional_headroom_after_proportional_week_bytes": "-3916992512",
+          "decisions": 49574,
+          "disposable_database_bytes": 320936983,
+          "filesystem_free_bytes": 23222300672,
+          "fixed_empty_baseline_week_allocation_bytes": "7510269952",
+          "fixed_empty_baseline_week_allocation_gib": "6.99448394775390625",
+          "proportional_week_allocation_bytes": "7511212032",
+          "proportional_week_allocation_gib": "6.995361328125",
+          "stage": "rewrites_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 19783680,
+              "estimated_dead_tuples": 6939,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2845.3536531246217775",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 293183488,
+              "toast_total_bytes": 272998400,
+              "total_bytes": 312967168
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "7365.3197778405346888826131977784053468888261319777840534688882613197778405346889",
+          "allocation_bytes": 312967168,
+          "allocation_gib": "0.291473388671875",
+          "conditional_headroom_after_proportional_week_bytes": "-5168861184",
+          "decisions": 42492,
+          "disposable_database_bytes": 320936983,
+          "filesystem_free_bytes": 23222284288,
+          "fixed_empty_baseline_week_allocation_bytes": "8761974784",
+          "fixed_empty_baseline_week_allocation_gib": "8.16022491455078125",
+          "proportional_week_allocation_bytes": "8763080704",
+          "proportional_week_allocation_gib": "8.1612548828125",
+          "stage": "turnover_1_deleted",
+          "tables": [
+            {
+              "base_indexes_bytes": 19783680,
+              "estimated_dead_tuples": 10939,
+              "estimated_live_tuples": 45574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 42492,
+              "table_including_toast_bytes": 293183488,
+              "toast_total_bytes": 272998400,
+              "total_bytes": 312967168
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4445.1412971853525369481314129718535253694813141297185352536948131412971853525369",
+          "allocation_bytes": 188882944,
+          "allocation_gib": "0.17591094970703125",
+          "conditional_headroom_after_proportional_week_bytes": "-1694502912",
+          "decisions": 42492,
+          "disposable_database_bytes": 196860951,
+          "filesystem_free_bytes": 23346356224,
+          "fixed_empty_baseline_week_allocation_bytes": "5287616512",
+          "fixed_empty_baseline_week_allocation_gib": "4.92447662353515625",
+          "proportional_week_allocation_bytes": "5288722432",
+          "proportional_week_allocation_gib": "4.925506591796875",
+          "stage": "turnover_1_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 19808256,
+              "estimated_dead_tuples": 3082,
+              "estimated_live_tuples": 39410,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 42492,
+              "table_including_toast_bytes": 169074688,
+              "toast_total_bytes": 148889600,
+              "total_bytes": 188882944
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "3866.9663936741033606325896639367410336063258966393674103360632589663936741033606",
+          "allocation_bytes": 191700992,
+          "allocation_gib": "0.17853546142578125",
+          "conditional_headroom_after_proportional_week_bytes": "-1006604288",
+          "decisions": 49574,
+          "disposable_database_bytes": 199687191,
+          "filesystem_free_bytes": 23343230976,
+          "fixed_empty_baseline_week_allocation_bytes": "4599881728",
+          "fixed_empty_baseline_week_allocation_gib": "4.28397369384765625",
+          "proportional_week_allocation_bytes": "4600823808",
+          "proportional_week_allocation_gib": "4.28485107421875",
+          "stage": "turnover_1_refilled",
+          "tables": [
+            {
+              "base_indexes_bytes": 20914176,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 170786816,
+              "toast_total_bytes": 150601728,
+              "total_bytes": 191700992
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4511.4607926197872540713546079261978725407135460792619787254071354607926197872541",
+          "allocation_bytes": 191700992,
+          "allocation_gib": "0.17853546142578125",
+          "conditional_headroom_after_proportional_week_bytes": "-1773408256",
+          "decisions": 42492,
+          "disposable_database_bytes": 199687191,
+          "filesystem_free_bytes": 23343226880,
+          "fixed_empty_baseline_week_allocation_bytes": "5366521856",
+          "fixed_empty_baseline_week_allocation_gib": "4.99796295166015625",
+          "proportional_week_allocation_bytes": "5367627776",
+          "proportional_week_allocation_gib": "4.998992919921875",
+          "stage": "turnover_2_deleted",
+          "tables": [
+            {
+              "base_indexes_bytes": 20914176,
+              "estimated_dead_tuples": 6582,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 42492,
+              "table_including_toast_bytes": 170786816,
+              "toast_total_bytes": 150601728,
+              "total_bytes": 191700992
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4511.4607926197872540713546079261978725407135460792619787254071354607926197872541",
+          "allocation_bytes": 191700992,
+          "allocation_gib": "0.17853546142578125",
+          "conditional_headroom_after_proportional_week_bytes": "-1773408256",
+          "decisions": 42492,
+          "disposable_database_bytes": 199703575,
+          "filesystem_free_bytes": 23343198208,
+          "fixed_empty_baseline_week_allocation_bytes": "5366521856",
+          "fixed_empty_baseline_week_allocation_gib": "4.99796295166015625",
+          "proportional_week_allocation_bytes": "5367627776",
+          "proportional_week_allocation_gib": "4.998992919921875",
+          "stage": "turnover_2_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 20914176,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 42492,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 42492,
+              "table_including_toast_bytes": 170786816,
+              "toast_total_bytes": 150601728,
+              "total_bytes": 191700992
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "3916.7060152499293984750070601524992939847500706015249929398475007060152499293985",
+          "allocation_bytes": 194166784,
+          "allocation_gib": "0.1808319091796875",
+          "conditional_headroom_after_proportional_week_bytes": "-1065783296",
+          "decisions": 49574,
+          "disposable_database_bytes": 202177559,
+          "filesystem_free_bytes": 23340453888,
+          "fixed_empty_baseline_week_allocation_bytes": "4659060736",
+          "fixed_empty_baseline_week_allocation_gib": "4.33908843994140625",
+          "proportional_week_allocation_bytes": "4660002816",
+          "proportional_week_allocation_gib": "4.3399658203125",
+          "stage": "turnover_2_refilled",
+          "tables": [
+            {
+              "base_indexes_bytes": 21684224,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 172482560,
+              "toast_total_bytes": 152297472,
+              "total_bytes": 194166784
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4569.4903511249176315541749035112491763155417490351124917631554174903511249176316",
+          "allocation_bytes": 194166784,
+          "allocation_gib": "0.1808319091796875",
+          "conditional_headroom_after_proportional_week_bytes": "-1842450432",
+          "decisions": 42492,
+          "disposable_database_bytes": 202177559,
+          "filesystem_free_bytes": 23340441600,
+          "fixed_empty_baseline_week_allocation_bytes": "5435564032",
+          "fixed_empty_baseline_week_allocation_gib": "5.06226348876953125",
+          "proportional_week_allocation_bytes": "5436669952",
+          "proportional_week_allocation_gib": "5.06329345703125",
+          "stage": "turnover_3_deleted",
+          "tables": [
+            {
+              "base_indexes_bytes": 21684224,
+              "estimated_dead_tuples": 2510,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 42492,
+              "table_including_toast_bytes": 172482560,
+              "toast_total_bytes": 152297472,
+              "total_bytes": 194166784
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4569.4903511249176315541749035112491763155417490351124917631554174903511249176316",
+          "allocation_bytes": 194166784,
+          "allocation_gib": "0.1808319091796875",
+          "conditional_headroom_after_proportional_week_bytes": "-1842450432",
+          "decisions": 42492,
+          "disposable_database_bytes": 202185751,
+          "filesystem_free_bytes": 23340412928,
+          "fixed_empty_baseline_week_allocation_bytes": "5435564032",
+          "fixed_empty_baseline_week_allocation_gib": "5.06226348876953125",
+          "proportional_week_allocation_bytes": "5436669952",
+          "proportional_week_allocation_gib": "5.06329345703125",
+          "stage": "turnover_3_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 21684224,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 42492,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 42492,
+              "table_including_toast_bytes": 172482560,
+              "toast_total_bytes": 152297472,
+              "total_bytes": 194166784
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "3955.0435308831242183402590067374026707548311614959454552789768830435308831242183",
+          "allocation_bytes": 196067328,
+          "allocation_gib": "0.1826019287109375",
+          "conditional_headroom_after_proportional_week_bytes": "-1111396352",
+          "decisions": 49574,
+          "disposable_database_bytes": 204102679,
+          "filesystem_free_bytes": 23342592000,
+          "fixed_empty_baseline_week_allocation_bytes": "4704673792",
+          "fixed_empty_baseline_week_allocation_gib": "4.38156890869140625",
+          "proportional_week_allocation_bytes": "4705615872",
+          "proportional_week_allocation_gib": "4.3824462890625",
+          "stage": "turnover_3_refilled",
+          "tables": [
+            {
+              "base_indexes_bytes": 21905408,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 20152320,
+              "mean_tuple_bytes": "2844.8894380118610562",
+              "name": "ghost_compact_probe.compact_json",
+              "rows": 49574,
+              "table_including_toast_bytes": 174161920,
+              "toast_total_bytes": 153976832,
+              "total_bytes": 196067328
+            }
+          ],
+          "week_population_multiplier": "24"
+        }
+      ],
+      "turnover_refilled_allocation_bytes": [
+        191700992,
+        194166784,
+        196067328
+      ],
+      "turnover_refilled_deltas_bytes": [
+        2465792,
+        1900544
+      ]
+    },
+    "typed": {
+      "conditional_headroom_after_largest_proportional_week_bytes": "-4254568448",
+      "largest_full_population_allocation_bytes": 327032832,
+      "largest_full_population_proportional_week_allocation_bytes": "7848787968",
+      "largest_full_population_proportional_week_allocation_gib": "7.30975341796875",
+      "largest_full_population_stage": "after_six_rewrites_one_copy",
+      "measured_empty_allocation_bytes": 49152,
+      "stages": [
+        {
+          "allocation_bytes": 49152,
+          "allocation_gib": "0.0000457763671875",
+          "decisions": 0,
+          "disposable_database_bytes": 204102679,
+          "filesystem_free_bytes": 23342583808,
+          "stage": "empty",
+          "tables": [
+            {
+              "base_indexes_bytes": 16384,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 0,
+              "heap_main_bytes": 0,
+              "mean_tuple_bytes": "None",
+              "name": "ghost_compact_probe.decision",
+              "rows": 0,
+              "table_including_toast_bytes": 8192,
+              "toast_total_bytes": 8192,
+              "total_bytes": 24576
+            },
+            {
+              "base_indexes_bytes": 16384,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 0,
+              "heap_main_bytes": 0,
+              "mean_tuple_bytes": "None",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 0,
+              "table_including_toast_bytes": 8192,
+              "toast_total_bytes": 8192,
+              "total_bytes": 24576
+            }
+          ]
+        },
+        {
+          "allocated_bytes_per_live_decision": "4104.0971476983902852301609714769839028523016097147698390285230160971476983902852",
+          "allocation_bytes": 29065216,
+          "allocation_gib": "0.027069091796875",
+          "conditional_headroom_after_proportional_week_bytes": "-1288736768",
+          "decisions": 7082,
+          "disposable_database_bytes": 233118743,
+          "filesystem_free_bytes": 23313391616,
+          "fixed_empty_baseline_week_allocation_bytes": "4874747904",
+          "fixed_empty_baseline_week_allocation_gib": "4.5399627685546875",
+          "proportional_week_allocation_bytes": "4882956288",
+          "proportional_week_allocation_gib": "4.547607421875",
+          "stage": "after_1_copies",
+          "tables": [
+            {
+              "base_indexes_bytes": 1114112,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 7000,
+              "heap_main_bytes": 5259264,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 7082,
+              "table_including_toast_bytes": 5292032,
+              "toast_total_bytes": 8192,
+              "total_bytes": 6406144
+            },
+            {
+              "base_indexes_bytes": 8192000,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 42000,
+              "heap_main_bytes": 14434304,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 42492,
+              "table_including_toast_bytes": 14467072,
+              "toast_total_bytes": 8192,
+              "total_bytes": 22659072
+            }
+          ],
+          "week_population_multiplier": "168"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4206.2754400828391226583827544008283912265838275440082839122658382754400828391227",
+          "allocation_bytes": 89366528,
+          "allocation_gib": "0.08322906494140625",
+          "conditional_headroom_after_proportional_week_bytes": "-1410306048",
+          "decisions": 21246,
+          "disposable_database_bytes": 293420055,
+          "filesystem_free_bytes": 23235698688,
+          "fixed_empty_baseline_week_allocation_bytes": "5001822208",
+          "fixed_empty_baseline_week_allocation_gib": "4.6583099365234375",
+          "proportional_week_allocation_bytes": "5004525568",
+          "proportional_week_allocation_gib": "4.66082763671875",
+          "stage": "after_3_copies",
+          "tables": [
+            {
+              "base_indexes_bytes": 4218880,
+              "estimated_dead_tuples": 7063,
+              "estimated_live_tuples": 21164,
+              "heap_main_bytes": 20987904,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 21246,
+              "table_including_toast_bytes": 21020672,
+              "toast_total_bytes": 8192,
+              "total_bytes": 25239552
+            },
+            {
+              "base_indexes_bytes": 20783104,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 126984,
+              "heap_main_bytes": 43302912,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 127476,
+              "table_including_toast_bytes": 43343872,
+              "toast_total_bytes": 8192,
+              "total_bytes": 64126976
+            }
+          ],
+          "week_population_multiplier": "56"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4069.0645903094363981119135030459515068382619921733166579255254770645903094363981",
+          "allocation_bytes": 201719808,
+          "allocation_gib": "0.1878662109375",
+          "conditional_headroom_after_proportional_week_bytes": "-1247055872",
+          "decisions": 49574,
+          "disposable_database_bytes": 405773335,
+          "filesystem_free_bytes": 23122231296,
+          "fixed_empty_baseline_week_allocation_bytes": "4840144896",
+          "fixed_empty_baseline_week_allocation_gib": "4.5077362060546875",
+          "proportional_week_allocation_bytes": "4841275392",
+          "proportional_week_allocation_gib": "4.5087890625",
+          "stage": "after_7_copies",
+          "tables": [
+            {
+              "base_indexes_bytes": 8560640,
+              "estimated_dead_tuples": 7063,
+              "estimated_live_tuples": 49492,
+              "heap_main_bytes": 42024960,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 42065920,
+              "toast_total_bytes": 8192,
+              "total_bytes": 50626560
+            },
+            {
+              "base_indexes_bytes": 49995776,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 296952,
+              "heap_main_bytes": 101040128,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 101097472,
+              "toast_total_bytes": 8192,
+              "total_bytes": 151093248
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4814.3326743857667325614233267438576673256142332674385766732561423326743857667326",
+          "allocation_bytes": 238665728,
+          "allocation_gib": "0.2222747802734375",
+          "conditional_headroom_after_proportional_week_bytes": "-2133757952",
+          "decisions": 49574,
+          "disposable_database_bytes": 442792983,
+          "filesystem_free_bytes": 23050878976,
+          "fixed_empty_baseline_week_allocation_bytes": "5726846976",
+          "fixed_empty_baseline_week_allocation_gib": "5.3335418701171875",
+          "proportional_week_allocation_bytes": "5727977472",
+          "proportional_week_allocation_gib": "5.3345947265625",
+          "stage": "insert_only_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 14237696,
+              "estimated_dead_tuples": 1077,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 87564288
+            },
+            {
+              "base_indexes_bytes": 49995776,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 297444,
+              "heap_main_bytes": 101040128,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 101105664,
+              "toast_total_bytes": 8192,
+              "total_bytes": 151101440
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "6596.8619034171138096582886190341711380965828861903417113809658288619034171138097",
+          "allocation_bytes": 327032832,
+          "allocation_gib": "0.30457305908203125",
+          "conditional_headroom_after_proportional_week_bytes": "-4254568448",
+          "decisions": 49574,
+          "disposable_database_bytes": 531160087,
+          "filesystem_free_bytes": 22727475200,
+          "fixed_empty_baseline_week_allocation_bytes": "7847657472",
+          "fixed_empty_baseline_week_allocation_gib": "7.3087005615234375",
+          "proportional_week_allocation_bytes": "7848787968",
+          "proportional_week_allocation_gib": "7.30975341796875",
+          "stage": "after_six_rewrites_one_copy",
+          "tables": [
+            {
+              "base_indexes_bytes": 14254080,
+              "estimated_dead_tuples": 41919,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 87580672
+            },
+            {
+              "base_indexes_bytes": 53215232,
+              "estimated_dead_tuples": 247406,
+              "estimated_live_tuples": 297444,
+              "heap_main_bytes": 186155008,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 186236928,
+              "toast_total_bytes": 8192,
+              "total_bytes": 239452160
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "6596.8619034171138096582886190341711380965828861903417113809658288619034171138097",
+          "allocation_bytes": 327032832,
+          "allocation_gib": "0.30457305908203125",
+          "conditional_headroom_after_proportional_week_bytes": "-4254568448",
+          "decisions": 49574,
+          "disposable_database_bytes": 531250199,
+          "filesystem_free_bytes": 22727213056,
+          "fixed_empty_baseline_week_allocation_bytes": "7847657472",
+          "fixed_empty_baseline_week_allocation_gib": "7.3087005615234375",
+          "proportional_week_allocation_bytes": "7848787968",
+          "proportional_week_allocation_gib": "7.30975341796875",
+          "stage": "rewrites_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 14254080,
+              "estimated_dead_tuples": 5968,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 87580672
+            },
+            {
+              "base_indexes_bytes": 53215232,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 297444,
+              "heap_main_bytes": 186155008,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 186236928,
+              "toast_total_bytes": 8192,
+              "total_bytes": 239452160
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "7696.3388873199661112680033888731996611126800338887319966111268003388873199661113",
+          "allocation_bytes": 327032832,
+          "allocation_gib": "0.30457305908203125",
+          "conditional_headroom_after_proportional_week_bytes": "-5562699776",
+          "decisions": 42492,
+          "disposable_database_bytes": 531250199,
+          "filesystem_free_bytes": 22710419456,
+          "fixed_empty_baseline_week_allocation_bytes": "9155592192",
+          "fixed_empty_baseline_week_allocation_gib": "8.5268096923828125",
+          "proportional_week_allocation_bytes": "9156919296",
+          "proportional_week_allocation_gib": "8.528045654296875",
+          "stage": "turnover_1_deleted",
+          "tables": [
+            {
+              "base_indexes_bytes": 14254080,
+              "estimated_dead_tuples": 6968,
+              "estimated_live_tuples": 48574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 42492,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 87580672
+            },
+            {
+              "base_indexes_bytes": 53215232,
+              "estimated_dead_tuples": 6000,
+              "estimated_live_tuples": 291444,
+              "heap_main_bytes": 186155008,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 254952,
+              "table_including_toast_bytes": 186236928,
+              "toast_total_bytes": 8192,
+              "total_bytes": 239452160
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "5692.8731996611126800338887319966111268003388873199661112680033888731996611126800",
+          "allocation_bytes": 241901568,
+          "allocation_gib": "0.22528839111328125",
+          "conditional_headroom_after_proportional_week_bytes": "-3179024384",
+          "decisions": 42492,
+          "disposable_database_bytes": 446022159,
+          "filesystem_free_bytes": 22795669504,
+          "fixed_empty_baseline_week_allocation_bytes": "6771916800",
+          "fixed_empty_baseline_week_allocation_gib": "6.3068389892578125",
+          "proportional_week_allocation_bytes": "6773243904",
+          "proportional_week_allocation_gib": "6.308074951171875",
+          "stage": "turnover_1_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 14254080,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 42492,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 42492,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 87580672
+            },
+            {
+              "base_indexes_bytes": 53215232,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 254952,
+              "heap_main_bytes": 101040128,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 254952,
+              "table_including_toast_bytes": 101105664,
+              "toast_total_bytes": 8192,
+              "total_bytes": 154320896
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4981.3983136321458829224996974220357445435107112599346431597208213983136321458829",
+          "allocation_bytes": 246947840,
+          "allocation_gib": "0.22998809814453125",
+          "conditional_headroom_after_proportional_week_bytes": "-2332528640",
+          "decisions": 49574,
+          "disposable_database_bytes": 451230743,
+          "filesystem_free_bytes": 22756483072,
+          "fixed_empty_baseline_week_allocation_bytes": "5925617664",
+          "fixed_empty_baseline_week_allocation_gib": "5.5186614990234375",
+          "proportional_week_allocation_bytes": "5926748160",
+          "proportional_week_allocation_gib": "5.51971435546875",
+          "stage": "turnover_1_refilled",
+          "tables": [
+            {
+              "base_indexes_bytes": 16326656,
+              "estimated_dead_tuples": 7048,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89653248
+            },
+            {
+              "base_indexes_bytes": 56180736,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 297444,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157294592
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "5811.6313659041701967429163136590417019674291631365904170196742916313659041701967",
+          "allocation_bytes": 246947840,
+          "allocation_gib": "0.22998809814453125",
+          "conditional_headroom_after_proportional_week_bytes": "-3320320000",
+          "decisions": 42492,
+          "disposable_database_bytes": 451230743,
+          "filesystem_free_bytes": 22739701760,
+          "fixed_empty_baseline_week_allocation_bytes": "6913212416",
+          "fixed_empty_baseline_week_allocation_gib": "6.4384307861328125",
+          "proportional_week_allocation_bytes": "6914539520",
+          "proportional_week_allocation_gib": "6.439666748046875",
+          "stage": "turnover_2_deleted",
+          "tables": [
+            {
+              "base_indexes_bytes": 16326656,
+              "estimated_dead_tuples": 9548,
+              "estimated_live_tuples": 47074,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 42492,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89653248
+            },
+            {
+              "base_indexes_bytes": 56180736,
+              "estimated_dead_tuples": 15000,
+              "estimated_live_tuples": 282444,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 254952,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157294592
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "5811.6313659041701967429163136590417019674291631365904170196742916313659041701967",
+          "allocation_bytes": 246947840,
+          "allocation_gib": "0.22998809814453125",
+          "conditional_headroom_after_proportional_week_bytes": "-3320320000",
+          "decisions": 42492,
+          "disposable_database_bytes": 451238935,
+          "filesystem_free_bytes": 22739648512,
+          "fixed_empty_baseline_week_allocation_bytes": "6913212416",
+          "fixed_empty_baseline_week_allocation_gib": "6.4384307861328125",
+          "proportional_week_allocation_bytes": "6914539520",
+          "proportional_week_allocation_gib": "6.439666748046875",
+          "stage": "turnover_2_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 16326656,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 42492,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 42492,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89653248
+            },
+            {
+              "base_indexes_bytes": 56180736,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 254952,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 254952,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157294592
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4982.2245531932061161092508169605034897325210795981764634687537822245531932061161",
+          "allocation_bytes": 246988800,
+          "allocation_gib": "0.2300262451171875",
+          "conditional_headroom_after_proportional_week_bytes": "-2333511680",
+          "decisions": 49574,
+          "disposable_database_bytes": 451320855,
+          "filesystem_free_bytes": 22722342912,
+          "fixed_empty_baseline_week_allocation_bytes": "5926600704",
+          "fixed_empty_baseline_week_allocation_gib": "5.5195770263671875",
+          "proportional_week_allocation_bytes": "5927731200",
+          "proportional_week_allocation_gib": "5.5206298828125",
+          "stage": "turnover_2_refilled",
+          "tables": [
+            {
+              "base_indexes_bytes": 16343040,
+              "estimated_dead_tuples": 7046,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89669632
+            },
+            {
+              "base_indexes_bytes": 56205312,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 297444,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157319168
+            }
+          ],
+          "week_population_multiplier": "24"
+        },
+        {
+          "allocated_bytes_per_live_decision": "5812.5953120587404687941259531205874046879412595312058740468794125953120587404688",
+          "allocation_bytes": 246988800,
+          "allocation_gib": "0.2300262451171875",
+          "conditional_headroom_after_proportional_week_bytes": "-3321466880",
+          "decisions": 42492,
+          "disposable_database_bytes": 451320855,
+          "filesystem_free_bytes": 22722330624,
+          "fixed_empty_baseline_week_allocation_bytes": "6914359296",
+          "fixed_empty_baseline_week_allocation_gib": "6.4394989013671875",
+          "proportional_week_allocation_bytes": "6915686400",
+          "proportional_week_allocation_gib": "6.44073486328125",
+          "stage": "turnover_3_deleted",
+          "tables": [
+            {
+              "base_indexes_bytes": 16343040,
+              "estimated_dead_tuples": 8546,
+              "estimated_live_tuples": 48074,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 42492,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89669632
+            },
+            {
+              "base_indexes_bytes": 56205312,
+              "estimated_dead_tuples": 9000,
+              "estimated_live_tuples": 288444,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 254952,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157319168
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "5812.5953120587404687941259531205874046879412595312058740468794125953120587404688",
+          "allocation_bytes": 246988800,
+          "allocation_gib": "0.2300262451171875",
+          "conditional_headroom_after_proportional_week_bytes": "-3321466880",
+          "decisions": 42492,
+          "disposable_database_bytes": 451361815,
+          "filesystem_free_bytes": 22722248704,
+          "fixed_empty_baseline_week_allocation_bytes": "6914359296",
+          "fixed_empty_baseline_week_allocation_gib": "6.4394989013671875",
+          "proportional_week_allocation_bytes": "6915686400",
+          "proportional_week_allocation_gib": "6.44073486328125",
+          "stage": "turnover_3_vacuumed",
+          "tables": [
+            {
+              "base_indexes_bytes": 16343040,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 42492,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 42492,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89669632
+            },
+            {
+              "base_indexes_bytes": 56205312,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 254952,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 254952,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157319168
+            }
+          ],
+          "week_population_multiplier": "28"
+        },
+        {
+          "allocated_bytes_per_live_decision": "4983.2160406664783959333521604066647839593335216040666478395933352160406664783959",
+          "allocation_bytes": 247037952,
+          "allocation_gib": "0.230072021484375",
+          "conditional_headroom_after_proportional_week_bytes": "-2334691328",
+          "decisions": 49574,
+          "disposable_database_bytes": 451361815,
+          "filesystem_free_bytes": 22721716224,
+          "fixed_empty_baseline_week_allocation_bytes": "5927780352",
+          "fixed_empty_baseline_week_allocation_gib": "5.5206756591796875",
+          "proportional_week_allocation_bytes": "5928910848",
+          "proportional_week_allocation_gib": "5.521728515625",
+          "stage": "turnover_3_refilled",
+          "tables": [
+            {
+              "base_indexes_bytes": 16343040,
+              "estimated_dead_tuples": 7042,
+              "estimated_live_tuples": 49574,
+              "heap_main_bytes": 73269248,
+              "mean_tuple_bytes": "676.2233832250776617",
+              "name": "ghost_compact_probe.decision",
+              "rows": 49574,
+              "table_including_toast_bytes": 73326592,
+              "toast_total_bytes": 8192,
+              "total_bytes": 89669632
+            },
+            {
+              "base_indexes_bytes": 56254464,
+              "estimated_dead_tuples": 0,
+              "estimated_live_tuples": 297444,
+              "heap_main_bytes": 101048320,
+              "mean_tuple_bytes": "326.6363550786030312",
+              "name": "ghost_compact_probe.horizon",
+              "rows": 297444,
+              "table_including_toast_bytes": 101113856,
+              "toast_total_bytes": 8192,
+              "total_bytes": 157368320
+            }
+          ],
+          "week_population_multiplier": "24"
+        }
+      ],
+      "turnover_refilled_allocation_bytes": [
+        246947840,
+        246988800,
+        247037952
+      ],
+      "turnover_refilled_deltas_bytes": [
+        40960,
+        49152
+      ]
+    }
+  },
+  "method_limits": [
+    "pg_total_relation_size totals include base indexes and TOAST once. Breakdown columns are not added again.",
+    "Proportional projections scale the actual allocated total by target/live population; the optional fixed-empty-baseline projection retains initial table overhead once.",
+    "Neither projection is a fitted or validated seven-day capacity model; replicated hours are not independent/live seven-day observations.",
+    "Deleted stages have fewer live decisions but can retain dead allocation; their per-live-decision projections must not be mistaken for insert-only costs.",
+    "Six lab revision changes affect one of seven copies. JSON is physically rewritten with trailing whitespace; typed marker updates are not equivalent real financial-field updates.",
+    "Summary markers add measured MVCC overhead; they are not a production rollup implementation.",
+    "Ordinary manual vacuum and three turnover cycles do not establish unattended autovacuum equilibrium or a sustained allocation plateau.",
+    "Seven-day eligibility tests use simulated retention clocks and a maintenance query, not seven elapsed days or installed production deletion protection.",
+    "Hashes preserve lineage and exact compact roundtrip; compact records do not permit deleted slot or exact-payload-byte replay.",
+    "Keep allocated-byte and actual filesystem guards. No live enablement, guard increase or guaranteed storage budget follows from these results."
+  ],
+  "probe_code_sha256": {
+    "compact.py": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "layout.py": "88659641c59160f1b5c04af87baf92ba0a0c347c3ee35f7d8ae12ae56141a4e6",
+    "probe.py": "e866b876a206b894eb909b720231578c37560d10499eeac3976bddf217f0f6dc",
+    "schema.sql": "e02997daeaadb3b1c32741588bfd4e81bedef3f30ffe20fccbbaa058f658aa7a"
+  },
+  "probe_status": "passed",
+  "projected_week_decisions": 1189776,
+  "provenance": {
+    "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\research\\spot_twap_response\\compact_storage\\analyze.py": {
+      "bytes": 15986,
+      "sha256": "61fac896ad65d6b183f9e9f29d85ab497149f93d0a3a2d89cf5748c4271fd3dc"
+    },
+    "results\\spot_twap_response\\2026-09-16-compact-storage\\preflight.json": {
+      "bytes": 27340,
+      "sha256": "d31430b2ce963ccc25260e9b04a1cb72c38595aae1a5278f5a4cf0fee2259762"
+    },
+    "results\\spot_twap_response\\2026-09-16-compact-storage\\probe_results.json": {
+      "bytes": 36304,
+      "sha256": "9880234883b57675d2108ac0d29e5cc2bc0c98c7bcb69e716ffdf4185b874306"
+    }
+  },
+  "rate_assumption": "7082 decisions/hour repeated for168hours; descriptive assumption from one observed hour",
+  "replicated_full_population": 49574,
+  "same_stage_comparison": {
+    "after_1_copies": {
+      "json_bytes": 24535040,
+      "typed_bytes": 29065216,
+      "typed_divided_by_json": "1.1846410684474123539232053422370617696160267111853088480801335559265442404006678",
+      "typed_minus_json_bytes": 4530176
+    },
+    "after_3_copies": {
+      "json_bytes": 76447744,
+      "typed_bytes": 89366528,
+      "typed_divided_by_json": "1.1689884269181311615945135019288469781397342477496785255036433776253750535790827",
+      "typed_minus_json_bytes": 12918784
+    },
+    "after_7_copies": {
+      "json_bytes": 172285952,
+      "typed_bytes": 201719808,
+      "typed_divided_by_json": "1.1708430412248585421520612429271076030621463553801531073177690076553658884503828",
+      "typed_minus_json_bytes": 29433856
+    },
+    "after_six_rewrites_one_copy": {
+      "json_bytes": 312958976,
+      "typed_bytes": 327032832,
+      "typed_divided_by_json": "1.0449702902913383765672852917310158888045441457477161479464963484543098709525430",
+      "typed_minus_json_bytes": 14073856
+    },
+    "empty": {
+      "json_bytes": 40960,
+      "typed_bytes": 49152,
+      "typed_divided_by_json": "1.2",
+      "typed_minus_json_bytes": 8192
+    },
+    "insert_only_vacuumed": {
+      "json_bytes": 186130432,
+      "typed_bytes": 238665728,
+      "typed_divided_by_json": "1.2822499009726684564939923418863606355354077725452224814048677434972052286431055",
+      "typed_minus_json_bytes": 52535296
+    },
+    "rewrites_vacuumed": {
+      "json_bytes": 312967168,
+      "typed_bytes": 327032832,
+      "typed_divided_by_json": "1.0449429379122604962831117160506753219558161449062925348131085750183226887236939",
+      "typed_minus_json_bytes": 14065664
+    },
+    "turnover_1_deleted": {
+      "json_bytes": 312967168,
+      "typed_bytes": 327032832,
+      "typed_divided_by_json": "1.0449429379122604962831117160506753219558161449062925348131085750183226887236939",
+      "typed_minus_json_bytes": 14065664
+    },
+    "turnover_1_refilled": {
+      "json_bytes": 191700992,
+      "typed_bytes": 246947840,
+      "typed_divided_by_json": "1.2881928122729797871885816845433955813854108798769283363958805179265843340028204",
+      "typed_minus_json_bytes": 55246848
+    },
+    "turnover_1_vacuumed": {
+      "json_bytes": 188882944,
+      "typed_bytes": 241901568,
+      "typed_divided_by_json": "1.2806956672594006158650301426898555753133538621676714229951858437784620722557141",
+      "typed_minus_json_bytes": 53018624
+    },
+    "turnover_2_deleted": {
+      "json_bytes": 191700992,
+      "typed_bytes": 246947840,
+      "typed_divided_by_json": "1.2881928122729797871885816845433955813854108798769283363958805179265843340028204",
+      "typed_minus_json_bytes": 55246848
+    },
+    "turnover_2_refilled": {
+      "json_bytes": 194166784,
+      "typed_bytes": 246988800,
+      "typed_divided_by_json": "1.2720445532022614125390262425111804910977976542063960847185891485950552695975023",
+      "typed_minus_json_bytes": 52822016
+    },
+    "turnover_2_vacuumed": {
+      "json_bytes": 191700992,
+      "typed_bytes": 246947840,
+      "typed_divided_by_json": "1.2881928122729797871885816845433955813854108798769283363958805179265843340028204",
+      "typed_minus_json_bytes": 55246848
+    },
+    "turnover_3_deleted": {
+      "json_bytes": 194166784,
+      "typed_bytes": 246988800,
+      "typed_divided_by_json": "1.2720445532022614125390262425111804910977976542063960847185891485950552695975023",
+      "typed_minus_json_bytes": 52822016
+    },
+    "turnover_3_refilled": {
+      "json_bytes": 196067328,
+      "typed_bytes": 247037952,
+      "typed_divided_by_json": "1.2599649034845826021559288042115818500877412885434946101779894710453747806467786",
+      "typed_minus_json_bytes": 50970624
+    },
+    "turnover_3_vacuumed": {
+      "json_bytes": 194166784,
+      "typed_bytes": 246988800,
+      "typed_divided_by_json": "1.2720445532022614125390262425111804910977976542063960847185891485950552695975023",
+      "typed_minus_json_bytes": 52822016
+    }
+  },
+  "source_decisions": 7082,
+  "source_manifest": {
+    "code_sha256": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "compact_jsonl_sha256": "65bae3a78b1caf91e056ce3de43a940855cb3a5f6a9f5b703beb15abeb505e4c",
+    "decisions": 7082,
+    "finalized_as_of_wall_ns": 1789516718428617010,
+    "horizon_records": 42492,
+    "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl",
+    "input_rows": 23411,
+    "input_sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+    "limitations": [
+      "No full slot/payload replay after original bytes expire.",
+      "This encoder does not reconstruct complete feed-gap metrics from selected snapshots.",
+      "Logical JSON bytes are not PostgreSQL allocated bytes."
+    ],
+    "logical_bytes": 53216127,
+    "maximum_line_bytes": 7642,
+    "minimum_line_bytes": 5614,
+    "publication_statuses": {
+      "acknowledged": 7075,
+      "expired_or_target_received": 7
+    },
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+    "schema_version": 1
+  },
+  "status": "accepted"
+}

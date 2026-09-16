@@ -6,6 +6,12 @@ over time. External permanent archival is no longer a prerequisite for this
 production path. The archive foundation remains optional, tested code.
 The [peer-review verification](results/spot_twap_response/2026-09-16-retention-plan-review/REVIEW.md)
 records reproduced canary metrics and the changes incorporated below.
+The [completed compact-storage experiment](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
+now measures allocation and reuse. Both compact layouts preserve the tested
+accuracy evidence, but neither supports approval of continuous seven-day
+operation under the current budgets. The next checkpoint is a leaner measured
+representation or an explicitly reviewed capacity policy, before runtime expiry
+and monitoring implementation.
 
 This is the next implementation contract to refine and validate. It changes no
 running service, SQL deletion guard, one-hour producer deadline or stored data.
@@ -48,12 +54,22 @@ exports remain historical evidence; this plan concerns ongoing production data.
   changing an expiry constant to seven days cannot make continuous operation fit.
   Four days of the same format would still imply about 8.11 GiB and 679,872 rows.
   Compaction, measured allocation and guard changes are needed for either period;
-  seven days remains the owner's requested target. A peer's compact JSON size
-  and assumed overhead multiplier are estimates pending a reproducible encoder
-  and actual PostgreSQL insertion/update/expiry measurements. Do not assume typed
-  columns deliver a specific reduction until measured with indexes and TOAST.
-- Capacity is shared with other collectors. The canary preflight had 12.84 GiB
-  above the 10 GiB filesystem reserve, not space reserved exclusively for ghost.
+  seven days remains the owner's requested target. The reproducible measurements
+  below supersede earlier compact-JSON size and overhead estimates. They measure
+  two explicit formats with indexes and TOAST, not all possible compact designs.
+- That measurement is now complete for two explicit layouts. At the final refill,
+  compact JSON allocated 196,067,328 bytes for 49,574 decisions; typed tables
+  allocated 247,037,952 bytes including all six child horizons. At the observed
+  rate those project to 4.38 and 5.52 GiB/week, respectively. These are scaled
+  replicas, not observed seven-day capacity. Three turnover cycles demonstrated
+  reuse but did not prove an allocation plateau. The post-cleanup conditional
+  shared-disk remainder was 2.409 GiB before other future growth. Neither layout
+  justifies merely raising the current caps and enabling continuous operation.
+  Test avoiding repeated metadata and identical target observations next;
+  savings from that additional normalization have not been established.
+- Capacity is shared with other collectors. The latest experiment's postflight
+  had 11.64 GiB above the 10 GiB filesystem reserve before allowing for other
+  collectors' remaining growth, not space reserved exclusively for ghost.
   Recheck current free space and other relations' remaining growth allowances;
   their existing allocations are already included in filesystem usage. Budget
   the measured steady-state allocated relation plus in-flight writes and safety
@@ -152,8 +168,9 @@ scans or calculations. A sleeping laptop must not interrupt server-side scoring;
 it still interrupts browser/tunnel measurement. This plan does not create a
 Codex reminder or notification automation, or imply any monitoring is running.
 
-Next checkpoint: implement compact records and seven-day expiry, deterministic
-scoring/summary aggregation and monitoring health with focused tests; prove
-restart/late-result handling, expiry, cap behavior and space reuse in a disposable
-database. Then perform a reviewed bounded live run and repeat the awake-laptop
-browser check before enabling continuous production.
+Next checkpoint: measure a leaner compact representation or explicitly review
+additional capacity and shared budgets. Once capacity is justified, implement
+seven-day expiry, deterministic scoring/summary aggregation and monitoring health
+with focused tests; prove restart/late-result handling, expiry, cap behavior and
+space reuse in a disposable database. Then perform a reviewed bounded live run
+and repeat the awake-laptop browser check before enabling continuous production.

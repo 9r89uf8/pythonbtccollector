@@ -1,0 +1,595 @@
+{
+  "all_services_active": true,
+  "code_default_whitelist": {
+    "BINANCE_MICROSTRUCTURE_ENABLED": {
+      "source": "config.py",
+      "value": false
+    },
+    "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB": {
+      "source": "config.py",
+      "value": 6144
+    },
+    "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": {
+      "source": "config.py",
+      "value": 30
+    },
+    "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB": {
+      "source": "config.py",
+      "value": 4096
+    },
+    "POLYMARKET_EVIDENCE_ENABLED": {
+      "source": "polymarket_evidence.py",
+      "value": false
+    },
+    "POLYMARKET_EVIDENCE_MAX_RELATION_MB": {
+      "source": "polymarket_evidence.py",
+      "value": 6144
+    },
+    "POLYMARKET_EVIDENCE_WARN_RELATION_MB": {
+      "source": "polymarket_evidence.py",
+      "value": 4096
+    },
+    "RAW_CAPTURE_MAX_RELATION_MB": {
+      "source": "config.py",
+      "value": 2048
+    },
+    "RAW_CAPTURE_RETENTION_HOURS": {
+      "source": "config.py",
+      "value": 72
+    },
+    "RAW_CHAINLINK_EVENTS_ENABLED": {
+      "source": "config.py",
+      "value": false
+    },
+    "RAW_FUTURES_TRACE_ENABLED": {
+      "source": "config.py",
+      "value": false
+    }
+  },
+  "completed_wall_ns": "1789529488640843093",
+  "configured_env_whitelist": {
+    "collector.env": {
+      "duplicate_keys": [],
+      "values": {
+        "BINANCE_MICROSTRUCTURE_ENABLED": "true",
+        "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB": "6144",
+        "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": "30",
+        "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB": "4096",
+        "GHOST_TWAP_CANARY_START_MS": "1789512998000",
+        "GHOST_TWAP_DATABASE_FILESYSTEM_PATH": "/var/lib/postgresql",
+        "GHOST_TWAP_ENABLED": "false",
+        "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-reliability-20260915T225638Z",
+        "POLYMARKET_EVIDENCE_ENABLED": "true",
+        "POLYMARKET_EVIDENCE_MAX_RELATION_MB": "6144",
+        "POLYMARKET_EVIDENCE_WARN_RELATION_MB": "4096",
+        "RAW_CAPTURE_MAX_RELATION_MB": "2048",
+        "RAW_CAPTURE_RETENTION_HOURS": "72",
+        "RAW_CHAINLINK_EVENTS_ENABLED": "false",
+        "RAW_FUTURES_TRACE_ENABLED": "false"
+      }
+    }
+  },
+  "database": {
+    "data_directory": "/var/lib/postgresql/16/main",
+    "database": "price_collector",
+    "database_bytes": 13567245335,
+    "lock_timeout": "1s",
+    "public_core_relation_bytes": 10264297472,
+    "raw_capture_relation_bytes": 16384,
+    "raw_capture_schema_exists": true,
+    "relations": [
+      {
+        "index_bytes": 629194752,
+        "relkind": "r",
+        "relname": "binance_book_1s",
+        "schema_name": "public",
+        "table_toast_bytes": 551116800,
+        "total_bytes": 1180311552
+      },
+      {
+        "index_bytes": 629383168,
+        "relkind": "r",
+        "relname": "binance_flow_1s",
+        "schema_name": "public",
+        "table_toast_bytes": 649609216,
+        "total_bytes": 1278992384
+      },
+      {
+        "index_bytes": 606208,
+        "relkind": "r",
+        "relname": "binance_futures_oi_5m_summaries",
+        "schema_name": "public",
+        "table_toast_bytes": 1196032,
+        "total_bytes": 1802240
+      },
+      {
+        "index_bytes": 320208896,
+        "relkind": "r",
+        "relname": "binance_futures_snapshots",
+        "schema_name": "public",
+        "table_toast_bytes": 549117952,
+        "total_bytes": 869326848
+      },
+      {
+        "index_bytes": 168976384,
+        "relkind": "r",
+        "relname": "binance_microstructure_1s",
+        "schema_name": "public",
+        "table_toast_bytes": 1935261696,
+        "total_bytes": 2104238080
+      },
+      {
+        "index_bytes": 24076288,
+        "relkind": "r",
+        "relname": "binance_microstructure_1s_flip_archive",
+        "schema_name": "public",
+        "table_toast_bytes": 255680512,
+        "total_bytes": 279756800
+      },
+      {
+        "index_bytes": 29573120,
+        "relkind": "r",
+        "relname": "chainlink_twap_shadow_predictions",
+        "schema_name": "public",
+        "table_toast_bytes": 226148352,
+        "total_bytes": 255721472
+      },
+      {
+        "index_bytes": 8445952,
+        "relkind": "r",
+        "relname": "ghost_twap_audit",
+        "schema_name": "public",
+        "table_toast_bytes": 309280768,
+        "total_bytes": 317726720
+      },
+      {
+        "index_bytes": 32768,
+        "relkind": "r",
+        "relname": "instruments",
+        "schema_name": "public",
+        "table_toast_bytes": 16384,
+        "total_bytes": 49152
+      },
+      {
+        "index_bytes": 442368,
+        "relkind": "r",
+        "relname": "market_windows",
+        "schema_name": "public",
+        "table_toast_bytes": 704512,
+        "total_bytes": 1146880
+      },
+      {
+        "index_bytes": 3080192,
+        "relkind": "r",
+        "relname": "polymarket_btc_5m_flip_cutoffs",
+        "schema_name": "public",
+        "table_toast_bytes": 36306944,
+        "total_bytes": 39387136
+      },
+      {
+        "index_bytes": 319488,
+        "relkind": "r",
+        "relname": "polymarket_btc_5m_flip_evaluations",
+        "schema_name": "public",
+        "table_toast_bytes": 598016,
+        "total_bytes": 917504
+      },
+      {
+        "index_bytes": 65536,
+        "relkind": "r",
+        "relname": "polymarket_btc_5m_flip_events",
+        "schema_name": "public",
+        "table_toast_bytes": 49152,
+        "total_bytes": 114688
+      },
+      {
+        "index_bytes": 3661824,
+        "relkind": "r",
+        "relname": "polymarket_btc_5m_markets",
+        "schema_name": "public",
+        "table_toast_bytes": 59351040,
+        "total_bytes": 63012864
+      },
+      {
+        "index_bytes": 385024,
+        "relkind": "r",
+        "relname": "polymarket_btc_5m_resolutions",
+        "schema_name": "public",
+        "table_toast_bytes": 57630720,
+        "total_bytes": 58015744
+      },
+      {
+        "index_bytes": 9519104,
+        "relkind": "r",
+        "relname": "polymarket_evidence_payloads",
+        "schema_name": "public",
+        "table_toast_bytes": 39518208,
+        "total_bytes": 49037312
+      },
+      {
+        "index_bytes": 35102720,
+        "relkind": "r",
+        "relname": "polymarket_market_observations",
+        "schema_name": "public",
+        "table_toast_bytes": 145989632,
+        "total_bytes": 181092352
+      },
+      {
+        "index_bytes": 313810944,
+        "relkind": "r",
+        "relname": "polymarket_probability_samples",
+        "schema_name": "public",
+        "table_toast_bytes": 2759598080,
+        "total_bytes": 3073409024
+      },
+      {
+        "index_bytes": 213262336,
+        "relkind": "r",
+        "relname": "polymarket_quote_observations",
+        "schema_name": "public",
+        "table_toast_bytes": 426696704,
+        "total_bytes": 639959040
+      },
+      {
+        "index_bytes": 392396800,
+        "relkind": "r",
+        "relname": "polymarket_twap_events",
+        "schema_name": "public",
+        "table_toast_bytes": 487383040,
+        "total_bytes": 879779840
+      },
+      {
+        "index_bytes": 98304,
+        "relkind": "r",
+        "relname": "polymarket_twap_gaps",
+        "schema_name": "public",
+        "table_toast_bytes": 122880,
+        "total_bytes": 221184
+      },
+      {
+        "index_bytes": 40960,
+        "relkind": "r",
+        "relname": "polymarket_twap_sessions",
+        "schema_name": "public",
+        "table_toast_bytes": 163840,
+        "total_bytes": 204800
+      },
+      {
+        "index_bytes": 1123721216,
+        "relkind": "r",
+        "relname": "price_samples",
+        "schema_name": "public",
+        "table_toast_bytes": 1158356992,
+        "total_bytes": 2282078208
+      },
+      {
+        "index_bytes": 32768,
+        "relkind": "r",
+        "relname": "providers",
+        "schema_name": "public",
+        "table_toast_bytes": 16384,
+        "total_bytes": 49152
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "p",
+        "relname": "binance_futures_price_trace_100ms",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1786838400000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1786860000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1787616000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1787637600000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1788998400000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1789020000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1789344000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "binance_futures_price_trace_100ms_p1789365600000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "p",
+        "relname": "chainlink_price_events",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1786838400000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1786860000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1787616000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1787637600000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1788998400000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1789020000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1789344000000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 0,
+        "relkind": "r",
+        "relname": "chainlink_price_events_p1789365600000",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 0,
+        "total_bytes": 0
+      },
+      {
+        "index_bytes": 8192,
+        "relkind": "r",
+        "relname": "feed_sessions",
+        "schema_name": "raw_capture",
+        "table_toast_bytes": 8192,
+        "total_bytes": 16384
+      }
+    ],
+    "server_version": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+    "statement_timeout": "5s",
+    "tablespaces": [
+      {
+        "location": "",
+        "name": "pg_default"
+      },
+      {
+        "location": "",
+        "name": "pg_global"
+      }
+    ],
+    "transaction_read_only": "on"
+  },
+  "disposable_paths_absent": {
+    "/tmp/ghost-compact-storage-0c4f9f2": true,
+    "/tmp/ghost-compact-storage-0c4f9f2-results.json": true,
+    "/tmp/ghost-compact-storage-c86bd00": true,
+    "/tmp/ghost-compact-storage-c86bd00-results.json": true,
+    "/tmp/ghost-compact-storage-e8d0dd0": true,
+    "/tmp/ghost-compact-storage-e8d0dd0-results.json": true
+  },
+  "experiment_limits": {
+    "aggregate_relation_bytes": 2147483648,
+    "batch_rows": 500,
+    "lock_timeout_seconds": 1,
+    "minimum_available_bytes": 11811160064,
+    "statement_timeout_seconds": 20,
+    "total_seconds": 1200
+  },
+  "filesystems": [
+    {
+      "available_bytes": 23234297856,
+      "device_id": 64769,
+      "free_bytes": 23251075072,
+      "path": "/var/lib/postgresql/16/main",
+      "total_bytes": 50884108288
+    }
+  ],
+  "ghost_fixed_code_caps": {
+    "BUDGET_BYTES": 2147483648,
+    "CANARY_MS": 3600000,
+    "MAX_ROWS": 600000,
+    "RESERVE_BYTES": 10737418240,
+    "STOP_BYTES": 1610612736,
+    "WARN_BYTES": 1073741824
+  },
+  "ghost_producer_disabled_checks": {
+    "collector_env_false": true,
+    "redis_key_absent": true,
+    "running_process_false": true
+  },
+  "git_status": "",
+  "head": "5d6083c5f8eab4fdf6603f157b2dce20af18f3ea",
+  "host": "152.42.247.86",
+  "initial_headroom_ok": true,
+  "metadata_only": true,
+  "notes": [
+    "Read-only production metadata after the isolated experiment and its cleanup.",
+    "No service restart, environment change, root schema migration or producer enablement was performed.",
+    "Live collectors continued; allocation/free space need not equal the earlier point check."
+  ],
+  "phase": "postflight_after_disposable_cleanup",
+  "production_commit_unchanged": true,
+  "read_only": true,
+  "remaining_disposable_databases": [],
+  "remote_probe_sha256": "16994e4dcd5b98173dee580dd2c9e8e8db5c460318be93660ef7c4c75874ec8f",
+  "remote_probe_source": "\nimport ast,json,os,pathlib,subprocess,time\nbase=pathlib.Path('/opt/price-collector')\ndef command(args,timeout=12):\n p=subprocess.run(args,capture_output=True,text=True,timeout=timeout)\n if p.returncode:raise RuntimeError('read-only command failed '+args[0]+' code '+str(p.returncode))\n return p.stdout.strip()\nsql=\"\"\"BEGIN READ ONLY; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s';\nWITH relations AS MATERIALIZED (\n SELECT n.nspname AS schema_name,c.relname,c.relkind,\n pg_total_relation_size(c.oid) AS total_bytes,pg_table_size(c.oid) AS table_toast_bytes,pg_indexes_size(c.oid) AS index_bytes\n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace\n WHERE n.nspname IN ('public','raw_capture') AND c.relkind IN ('r','m','p'))\nSELECT json_build_object('transaction_read_only',current_setting('transaction_read_only'),\n 'statement_timeout',current_setting('statement_timeout'),'lock_timeout',current_setting('lock_timeout'),\n 'database',current_database(),'database_bytes',pg_database_size(current_database()),\n 'data_directory',current_setting('data_directory'),'server_version',current_setting('server_version'),\n 'raw_capture_schema_exists',EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='raw_capture'),\n 'relations',COALESCE((SELECT json_agg(row_to_json(r) ORDER BY schema_name,relname) FROM relations r),'[]'::json),\n 'public_core_relation_bytes',COALESCE((SELECT sum(total_bytes) FROM relations WHERE schema_name='public'\n AND relname NOT IN ('ghost_twap_audit','polymarket_evidence_payloads','polymarket_market_observations','polymarket_quote_observations','binance_microstructure_1s')),0),\n 'raw_capture_relation_bytes',COALESCE((SELECT sum(total_bytes) FROM relations WHERE schema_name='raw_capture'),0),\n 'tablespaces',(SELECT json_agg(json_build_object('name',spcname,'location',pg_tablespace_location(oid))) FROM pg_tablespace)); COMMIT;\"\"\"\nr={'read_only':True,'started_wall_ns':str(time.time_ns()),'host':'152.42.247.86','sql':sql}\nr['database']=json.loads(command(['sudo','-u','postgres','psql','-X','-q','-A','-t','-v','ON_ERROR_STOP=1','-d','price_collector','-c',sql],15))\nr['head']=command(['sudo','-u','pricecollector','git','-C',str(base),'rev-parse','HEAD'])\nr['git_status']=command(['sudo','-u','pricecollector','git','-C',str(base),'status','--porcelain'])\nunits=['price-collector','price-collector-polymarket-chainlink','price-collector-binance-futures','price-collector-polymarket-probabilities','price-api','redis-server']\nr['services']={u:dict(line.split('=',1) for line in command(['systemctl','show',u,'-p','ActiveState','-p','SubState','-p','MainPID'],5).splitlines()) for u in units}\nkeys={'GHOST_TWAP_ENABLED','GHOST_TWAP_CANARY_START_MS','GHOST_TWAP_STATE_DIRECTORY','GHOST_TWAP_DATABASE_FILESYSTEM_PATH','GHOST_TWAP_AUDIT_MAX_RECORDS','GHOST_TWAP_RECORD_MAX_BYTES','POLYMARKET_EVIDENCE_ENABLED','POLYMARKET_EVIDENCE_WARN_RELATION_MB','POLYMARKET_EVIDENCE_MAX_RELATION_MB','BINANCE_MICROSTRUCTURE_ENABLED','BINANCE_MICROSTRUCTURE_RETENTION_DAYS','BINANCE_MICROSTRUCTURE_WARN_RELATION_MB','BINANCE_MICROSTRUCTURE_MAX_RELATION_MB','RAW_FUTURES_TRACE_ENABLED','RAW_CHAINLINK_EVENTS_ENABLED','RAW_CAPTURE_RETENTION_HOURS','RAW_CAPTURE_MAX_RELATION_MB'}\nr['configured_env_whitelist']={}\nfor name in ('collector.env','polymarket-chainlink.env','binance-futures.env','polymarket-probabilities.env'):\n path=pathlib.Path('/etc/price-collector')/name\n if not path.exists():continue\n values,duplicates={},[]\n for line in path.read_text().splitlines():\n  if '=' not in line or line.lstrip().startswith('#'):continue\n  key,value=line.split('=',1);key=key.strip()\n  if key in keys:\n   if key in values:duplicates.append(key)\n   values[key]=value.strip().strip(chr(34)).strip(chr(39))\n r['configured_env_whitelist'][name]={'values':values,'duplicate_keys':duplicates}\nr['running_process_env_whitelist']={}\nfor unit in units[:4]:\n values={};pid=int(r['services'][unit]['MainPID'])\n if pid:\n  for part in pathlib.Path('/proc/'+str(pid)+'/environ').read_bytes().split(b'\\0'):\n   if b'=' not in part:continue\n   key,value=part.split(b'=',1);key=key.decode(errors='replace')\n   if key in keys:values[key]=value.decode(errors='replace')\n r['running_process_env_whitelist'][unit]=values\nr['code_default_whitelist']={}\nfor name in ('config.py','polymarket_evidence.py'):\n for node in ast.walk(ast.parse((base/'price_collector'/name).read_text())):\n  if isinstance(node,ast.AnnAssign) and isinstance(node.target,ast.Name) and node.target.id in keys:\n   value=node.value\n   if isinstance(value,ast.Call):value=next((k.value for k in value.keywords if k.arg=='default'),None)\n   try:default=ast.literal_eval(value)\n   except (ValueError,TypeError):continue\n   r['code_default_whitelist'][node.target.id]={'value':default,'source':name}\ndef number(node):\n if isinstance(node,ast.Constant) and type(node.value) is int:return node.value\n if isinstance(node,ast.BinOp) and isinstance(node.op,(ast.Mult,ast.Pow)):\n  a,b=number(node.left),number(node.right);return a*b if isinstance(node.op,ast.Mult) else a**b\n raise ValueError('unsupported constant')\nr['ghost_fixed_code_caps']={}\nfor node in ast.parse((base/'price_collector'/'ghost_twap_runtime.py').read_text()).body:\n if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id in {'WARN_BYTES','STOP_BYTES','BUDGET_BYTES','MAX_ROWS','RESERVE_BYTES','CANARY_MS'}:\n  r['ghost_fixed_code_caps'][node.targets[0].id]=number(node.value)\npaths={r['database']['data_directory']}|{t['location'] for t in r['database']['tablespaces'] if t['location']}\nr['filesystems']=[]\nfor value in sorted(paths):\n path=pathlib.Path(value).resolve();s=os.statvfs(path)\n r['filesystems'].append({'path':str(path),'device_id':path.stat().st_dev,'total_bytes':s.f_blocks*s.f_frsize,'free_bytes':s.f_bfree*s.f_frsize,'available_bytes':s.f_bavail*s.f_frsize})\nprocess=r['running_process_env_whitelist']['price-collector-polymarket-chainlink']\nconfigured=r['configured_env_whitelist'].get('collector.env',{}).get('values',{})\nr['ghost_producer_disabled_checks']={'running_process_false':process.get('GHOST_TWAP_ENABLED','false').lower()=='false','collector_env_false':configured.get('GHOST_TWAP_ENABLED','false').lower()=='false','redis_key_absent':command(['redis-cli','EXISTS','btc:live:ghost_chainlink_twap_60s'])=='0'}\nr['experiment_limits']={'aggregate_relation_bytes':2*1024**3,'minimum_available_bytes':11*1024**3,'statement_timeout_seconds':20,'lock_timeout_seconds':1,'total_seconds':1200,'batch_rows':500}\nr['initial_headroom_ok']=all(f['available_bytes']>=11*1024**3 for f in r['filesystems'])\nr['all_services_active']=all(v['ActiveState']=='active' for v in r['services'].values())\nr['metadata_only']=True\nr['notes']=['Sizes are allocated heap/TOAST/index bytes, not row counts or payload bytes.','Database size includes catalog/free allocation and optional evidence; public_core_relation_bytes excludes the five named optional/ghost tables.','Live collectors continued; filesystem and service readings are subsequent point checks.','Only whitelisted environment values are emitted; missing overrides use source defaults, not zero capacity.','No rows read, written, deleted or vacuumed. An earlier metadata-only attempt stopped at the root git ownership check; this successful attempt runs git as pricecollector.']\nr['completed_wall_ns']=str(time.time_ns())\n\nr['phase']='postflight_after_disposable_cleanup'\nsql_cleanup=\"SELECT COALESCE(json_agg(datname),'[]'::json) FROM pg_database WHERE datname IN ('ghost_compact_storage_validation_0c4f9f2','ghost_compact_storage_validation_c86bd00','ghost_compact_storage_validation_e8d0dd0')\"\nr['remaining_disposable_databases']=json.loads(command(['sudo','-u','postgres','psql','-X','-q','-A','-t','-v','ON_ERROR_STOP=1','-d','postgres','-c',sql_cleanup]))\nlab_paths=['/tmp/ghost-compact-storage-0c4f9f2','/tmp/ghost-compact-storage-c86bd00','/tmp/ghost-compact-storage-e8d0dd0','/tmp/ghost-compact-storage-0c4f9f2-results.json','/tmp/ghost-compact-storage-c86bd00-results.json','/tmp/ghost-compact-storage-e8d0dd0-results.json']\nr['disposable_paths_absent']={p:not pathlib.Path(p).exists() for p in lab_paths}\nr['notes']=['Read-only production metadata after the isolated experiment and its cleanup.','No service restart, environment change, root schema migration or producer enablement was performed.','Live collectors continued; allocation/free space need not equal the earlier point check.']\nprint(json.dumps(r,sort_keys=True))\n\n",
+  "running_process_env_whitelist": {
+    "price-collector": {
+      "BINANCE_MICROSTRUCTURE_ENABLED": "true",
+      "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB": "6144",
+      "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": "30",
+      "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB": "4096",
+      "POLYMARKET_EVIDENCE_ENABLED": "true",
+      "POLYMARKET_EVIDENCE_MAX_RELATION_MB": "6144",
+      "POLYMARKET_EVIDENCE_WARN_RELATION_MB": "4096",
+      "RAW_CAPTURE_MAX_RELATION_MB": "2048",
+      "RAW_CAPTURE_RETENTION_HOURS": "72",
+      "RAW_CHAINLINK_EVENTS_ENABLED": "false",
+      "RAW_FUTURES_TRACE_ENABLED": "false"
+    },
+    "price-collector-binance-futures": {
+      "BINANCE_MICROSTRUCTURE_ENABLED": "true",
+      "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB": "6144",
+      "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": "30",
+      "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB": "4096",
+      "POLYMARKET_EVIDENCE_ENABLED": "true",
+      "POLYMARKET_EVIDENCE_MAX_RELATION_MB": "6144",
+      "POLYMARKET_EVIDENCE_WARN_RELATION_MB": "4096",
+      "RAW_CAPTURE_MAX_RELATION_MB": "2048",
+      "RAW_CAPTURE_RETENTION_HOURS": "72",
+      "RAW_CHAINLINK_EVENTS_ENABLED": "false",
+      "RAW_FUTURES_TRACE_ENABLED": "false"
+    },
+    "price-collector-polymarket-chainlink": {
+      "BINANCE_MICROSTRUCTURE_ENABLED": "true",
+      "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB": "6144",
+      "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": "30",
+      "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB": "4096",
+      "GHOST_TWAP_CANARY_START_MS": "1789512998000",
+      "GHOST_TWAP_DATABASE_FILESYSTEM_PATH": "/var/lib/postgresql",
+      "GHOST_TWAP_ENABLED": "false",
+      "GHOST_TWAP_STATE_DIRECTORY": "/var/lib/price-collector/ghost-reliability-20260915T225638Z",
+      "POLYMARKET_EVIDENCE_ENABLED": "true",
+      "POLYMARKET_EVIDENCE_MAX_RELATION_MB": "6144",
+      "POLYMARKET_EVIDENCE_WARN_RELATION_MB": "4096",
+      "RAW_CAPTURE_MAX_RELATION_MB": "2048",
+      "RAW_CAPTURE_RETENTION_HOURS": "72",
+      "RAW_CHAINLINK_EVENTS_ENABLED": "false",
+      "RAW_FUTURES_TRACE_ENABLED": "false"
+    },
+    "price-collector-polymarket-probabilities": {
+      "BINANCE_MICROSTRUCTURE_ENABLED": "true",
+      "BINANCE_MICROSTRUCTURE_MAX_RELATION_MB": "6144",
+      "BINANCE_MICROSTRUCTURE_RETENTION_DAYS": "30",
+      "BINANCE_MICROSTRUCTURE_WARN_RELATION_MB": "4096",
+      "POLYMARKET_EVIDENCE_ENABLED": "true",
+      "POLYMARKET_EVIDENCE_MAX_RELATION_MB": "6144",
+      "POLYMARKET_EVIDENCE_WARN_RELATION_MB": "4096",
+      "RAW_CAPTURE_MAX_RELATION_MB": "2048",
+      "RAW_CAPTURE_RETENTION_HOURS": "72",
+      "RAW_CHAINLINK_EVENTS_ENABLED": "false",
+      "RAW_FUTURES_TRACE_ENABLED": "false"
+    }
+  },
+  "service_processes_unchanged": {
+    "price-api": true,
+    "price-collector": true,
+    "price-collector-binance-futures": true,
+    "price-collector-polymarket-chainlink": true,
+    "price-collector-polymarket-probabilities": true,
+    "redis-server": true
+  },
+  "services": {
+    "price-api": {
+      "ActiveState": "active",
+      "MainPID": "1392712",
+      "SubState": "running"
+    },
+    "price-collector": {
+      "ActiveState": "active",
+      "MainPID": "1315559",
+      "SubState": "running"
+    },
+    "price-collector-binance-futures": {
+      "ActiveState": "active",
+      "MainPID": "1315571",
+      "SubState": "running"
+    },
+    "price-collector-polymarket-chainlink": {
+      "ActiveState": "active",
+      "MainPID": "1394220",
+      "SubState": "running"
+    },
+    "price-collector-polymarket-probabilities": {
+      "ActiveState": "active",
+      "MainPID": "1315593",
+      "SubState": "running"
+    },
+    "redis-server": {
+      "ActiveState": "active",
+      "MainPID": "1315203",
+      "SubState": "running"
+    }
+  },
+  "sql": "BEGIN READ ONLY; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s';\nWITH relations AS MATERIALIZED (\n SELECT n.nspname AS schema_name,c.relname,c.relkind,\n pg_total_relation_size(c.oid) AS total_bytes,pg_table_size(c.oid) AS table_toast_bytes,pg_indexes_size(c.oid) AS index_bytes\n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace\n WHERE n.nspname IN ('public','raw_capture') AND c.relkind IN ('r','m','p'))\nSELECT json_build_object('transaction_read_only',current_setting('transaction_read_only'),\n 'statement_timeout',current_setting('statement_timeout'),'lock_timeout',current_setting('lock_timeout'),\n 'database',current_database(),'database_bytes',pg_database_size(current_database()),\n 'data_directory',current_setting('data_directory'),'server_version',current_setting('server_version'),\n 'raw_capture_schema_exists',EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='raw_capture'),\n 'relations',COALESCE((SELECT json_agg(row_to_json(r) ORDER BY schema_name,relname) FROM relations r),'[]'::json),\n 'public_core_relation_bytes',COALESCE((SELECT sum(total_bytes) FROM relations WHERE schema_name='public'\n AND relname NOT IN ('ghost_twap_audit','polymarket_evidence_payloads','polymarket_market_observations','polymarket_quote_observations','binance_microstructure_1s')),0),\n 'raw_capture_relation_bytes',COALESCE((SELECT sum(total_bytes) FROM relations WHERE schema_name='raw_capture'),0),\n 'tablespaces',(SELECT json_agg(json_build_object('name',spcname,'location',pg_tablespace_location(oid))) FROM pg_tablespace)); COMMIT;",
+  "started_wall_ns": "1789529487841890055",
+  "validation_passed": true
+}

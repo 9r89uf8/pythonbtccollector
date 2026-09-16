@@ -1,0 +1,45 @@
+{"format": "json", "phase": "empty", "relation_bytes": 40960, "rows": [0]}
+{"format": "json", "phase": "after_1_copies", "relation_bytes": 24535040, "rows": [7082]}
+{"format": "json", "phase": "after_3_copies", "relation_bytes": 76447744, "rows": [21246]}
+{"format": "json", "phase": "after_7_copies", "relation_bytes": 172285952, "rows": [49574]}
+{"format": "json", "phase": "insert_only_vacuumed", "relation_bytes": 186130432, "rows": [49574]}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 1}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 2}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 3}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 4}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 5}
+{"copy_id": 0, "format": "json", "phase": "stress_revision", "revision": 6}
+{"format": "json", "phase": "after_six_rewrites_one_copy", "relation_bytes": 312958976, "rows": [49574]}
+{"format": "json", "phase": "rewrites_vacuumed", "relation_bytes": 312967168, "rows": [49574]}
+{"format": "json", "phase": "turnover_1_deleted", "relation_bytes": 312967168, "rows": [42492]}
+{"format": "json", "phase": "turnover_1_vacuumed", "relation_bytes": 188882944, "rows": [42492]}
+{"format": "json", "phase": "turnover_1_refilled", "relation_bytes": 191700992, "rows": [49574]}
+{"format": "json", "phase": "turnover_2_deleted", "relation_bytes": 191700992, "rows": [42492]}
+{"format": "json", "phase": "turnover_2_vacuumed", "relation_bytes": 191700992, "rows": [42492]}
+{"format": "json", "phase": "turnover_2_refilled", "relation_bytes": 194166784, "rows": [49574]}
+{"format": "json", "phase": "turnover_3_deleted", "relation_bytes": 194166784, "rows": [42492]}
+{"format": "json", "phase": "turnover_3_vacuumed", "relation_bytes": 194166784, "rows": [42492]}
+{"format": "json", "phase": "turnover_3_refilled", "relation_bytes": 196067328, "rows": [49574]}
+{"format": "typed", "phase": "empty", "relation_bytes": 49152, "rows": [0, 0]}
+{"format": "typed", "phase": "after_1_copies", "relation_bytes": 29065216, "rows": [7082, 42492]}
+{"format": "typed", "phase": "after_3_copies", "relation_bytes": 89366528, "rows": [21246, 127476]}
+{"format": "typed", "phase": "after_7_copies", "relation_bytes": 201719808, "rows": [49574, 297444]}
+{"format": "typed", "phase": "insert_only_vacuumed", "relation_bytes": 238665728, "rows": [49574, 297444]}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 1}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 2}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 3}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 4}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 5}
+{"copy_id": 0, "format": "typed", "phase": "stress_revision", "revision": 6}
+{"format": "typed", "phase": "after_six_rewrites_one_copy", "relation_bytes": 327032832, "rows": [49574, 297444]}
+{"format": "typed", "phase": "rewrites_vacuumed", "relation_bytes": 327032832, "rows": [49574, 297444]}
+{"format": "typed", "phase": "turnover_1_deleted", "relation_bytes": 327032832, "rows": [42492, 254952]}
+{"format": "typed", "phase": "turnover_1_vacuumed", "relation_bytes": 241901568, "rows": [42492, 254952]}
+{"format": "typed", "phase": "turnover_1_refilled", "relation_bytes": 246947840, "rows": [49574, 297444]}
+{"format": "typed", "phase": "turnover_2_deleted", "relation_bytes": 246947840, "rows": [42492, 254952]}
+{"format": "typed", "phase": "turnover_2_vacuumed", "relation_bytes": 246947840, "rows": [42492, 254952]}
+{"format": "typed", "phase": "turnover_2_refilled", "relation_bytes": 246988800, "rows": [49574, 297444]}
+{"format": "typed", "phase": "turnover_3_deleted", "relation_bytes": 246988800, "rows": [42492, 254952]}
+{"format": "typed", "phase": "turnover_3_vacuumed", "relation_bytes": 246988800, "rows": [42492, 254952]}
+{"format": "typed", "phase": "turnover_3_refilled", "relation_bytes": 247037952, "rows": [49574, 297444]}
+{"output": "/tmp/ghost-compact-storage-e8d0dd0-results.json", "phase": "finished", "status": "passed"}

@@ -1,0 +1,1220 @@
+{
+  "code_sha256": {
+    "compact.py": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "layout.py": "88659641c59160f1b5c04af87baf92ba0a0c347c3ee35f7d8ae12ae56141a4e6",
+    "probe.py": "e866b876a206b894eb909b720231578c37560d10499eeac3976bddf217f0f6dc",
+    "schema.sql": "e02997daeaadb3b1c32741588bfd4e81bedef3f30ffe20fccbbaa058f658aa7a"
+  },
+  "database": "ghost_compact_storage_validation_e8d0dd0",
+  "final_guard": {
+    "database_bytes": 451361815,
+    "filesystem_free_bytes": 22721699840
+  },
+  "finished_wall_ns": "1789529398069056496",
+  "initial_guard": {
+    "database_bytes": 7748631,
+    "filesystem_free_bytes": 23542226944
+  },
+  "limitations": [
+    "Seven replicated canary hours are a scaled cohort, not seven days of live traffic.",
+    "Ordinary manual vacuum here does not establish unattended autovacuum equilibrium.",
+    "Six whole-record revisions on one copy are a stress case; normal compact records are inserted after terminalization.",
+    "Retention summary markers and probe_revision are laboratory fields, not production monitoring/expiry implementation.",
+    "Allocated table totals include indexes and TOAST once; the TOAST breakdown must not be added again."
+  ],
+  "limits": {
+    "batch_decisions": 500,
+    "copies": 7,
+    "database_bytes": 2147483648,
+    "filesystem_free_bytes": 11811160064,
+    "seconds": 1200,
+    "turnovers": 3,
+    "write_reserve_bytes": 67108864
+  },
+  "measurements": [
+    {
+      "database_bytes": 7986199,
+      "elapsed_ms": 88,
+      "filesystem_free_bytes": 23541981184,
+      "format": "json",
+      "stage": "empty",
+      "tables": [
+        {
+          "base_indexes_bytes": 32768,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 0,
+          "heap_main_bytes": 0,
+          "mean_tuple_bytes": "None",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 0,
+          "table_including_toast_bytes": 8192,
+          "toast_total_bytes": 8192,
+          "total_bytes": 40960
+        }
+      ],
+      "total_relation_bytes": 40960
+    },
+    {
+      "database_bytes": 32480279,
+      "elapsed_ms": 26738,
+      "filesystem_free_bytes": 23518982144,
+      "format": "json",
+      "stage": "after_1_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 1990656,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 7000,
+          "heap_main_bytes": 1482752,
+          "mean_tuple_bytes": "2848.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 7082,
+          "table_including_toast_bytes": 22544384,
+          "toast_total_bytes": 21037056,
+          "total_bytes": 24535040
+        }
+      ],
+      "total_relation_bytes": 24535040
+    },
+    {
+      "database_bytes": 84392983,
+      "elapsed_ms": 89365,
+      "filesystem_free_bytes": 23466602496,
+      "format": "json",
+      "stage": "after_3_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 7569408,
+          "estimated_dead_tuples": 6987,
+          "estimated_live_tuples": 21164,
+          "heap_main_bytes": 5849088,
+          "mean_tuple_bytes": "2847.5561046785277229",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 21246,
+          "table_including_toast_bytes": 68878336,
+          "toast_total_bytes": 63004672,
+          "total_bytes": 76447744
+        }
+      ],
+      "total_relation_bytes": 76447744
+    },
+    {
+      "database_bytes": 180231191,
+      "elapsed_ms": 176446,
+      "filesystem_free_bytes": 23364587520,
+      "format": "json",
+      "stage": "after_7_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 13549568,
+          "estimated_dead_tuples": 6986,
+          "estimated_live_tuples": 49492,
+          "heap_main_bytes": 11755520,
+          "mean_tuple_bytes": "2848.3180094404324848",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 158736384,
+          "toast_total_bytes": 146956288,
+          "total_bytes": 172285952
+        }
+      ],
+      "total_relation_bytes": 172285952
+    },
+    {
+      "database_bytes": 194083863,
+      "elapsed_ms": 258794,
+      "filesystem_free_bytes": 23349514240,
+      "format": "json",
+      "stage": "insert_only_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 18980864,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 167149568,
+          "toast_total_bytes": 146964480,
+          "total_bytes": 186130432
+        }
+      ],
+      "total_relation_bytes": 186130432
+    },
+    {
+      "database_bytes": 320912407,
+      "elapsed_ms": 280522,
+      "filesystem_free_bytes": 23222480896,
+      "format": "json",
+      "stage": "after_six_rewrites_one_copy",
+      "tables": [
+        {
+          "base_indexes_bytes": 19783680,
+          "estimated_dead_tuples": 40747,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2845.9250816960503490",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 293175296,
+          "toast_total_bytes": 272990208,
+          "total_bytes": 312958976
+        }
+      ],
+      "total_relation_bytes": 312958976
+    },
+    {
+      "database_bytes": 320936983,
+      "elapsed_ms": 297428,
+      "filesystem_free_bytes": 23222300672,
+      "format": "json",
+      "stage": "rewrites_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 19783680,
+          "estimated_dead_tuples": 6939,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2845.3536531246217775",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 293183488,
+          "toast_total_bytes": 272998400,
+          "total_bytes": 312967168
+        }
+      ],
+      "total_relation_bytes": 312967168
+    },
+    {
+      "database_bytes": 320936983,
+      "elapsed_ms": 298699,
+      "filesystem_free_bytes": 23222284288,
+      "format": "json",
+      "stage": "turnover_1_deleted",
+      "tables": [
+        {
+          "base_indexes_bytes": 19783680,
+          "estimated_dead_tuples": 10939,
+          "estimated_live_tuples": 45574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 42492,
+          "table_including_toast_bytes": 293183488,
+          "toast_total_bytes": 272998400,
+          "total_bytes": 312967168
+        }
+      ],
+      "total_relation_bytes": 312967168
+    },
+    {
+      "database_bytes": 196860951,
+      "elapsed_ms": 300117,
+      "filesystem_free_bytes": 23346356224,
+      "format": "json",
+      "stage": "turnover_1_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 19808256,
+          "estimated_dead_tuples": 3082,
+          "estimated_live_tuples": 39410,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 42492,
+          "table_including_toast_bytes": 169074688,
+          "toast_total_bytes": 148889600,
+          "total_bytes": 188882944
+        }
+      ],
+      "total_relation_bytes": 188882944
+    },
+    {
+      "database_bytes": 199687191,
+      "elapsed_ms": 338010,
+      "filesystem_free_bytes": 23343230976,
+      "format": "json",
+      "stage": "turnover_1_refilled",
+      "tables": [
+        {
+          "base_indexes_bytes": 20914176,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 170786816,
+          "toast_total_bytes": 150601728,
+          "total_bytes": 191700992
+        }
+      ],
+      "total_relation_bytes": 191700992
+    },
+    {
+      "database_bytes": 199687191,
+      "elapsed_ms": 339116,
+      "filesystem_free_bytes": 23343226880,
+      "format": "json",
+      "stage": "turnover_2_deleted",
+      "tables": [
+        {
+          "base_indexes_bytes": 20914176,
+          "estimated_dead_tuples": 6582,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 42492,
+          "table_including_toast_bytes": 170786816,
+          "toast_total_bytes": 150601728,
+          "total_bytes": 191700992
+        }
+      ],
+      "total_relation_bytes": 191700992
+    },
+    {
+      "database_bytes": 199703575,
+      "elapsed_ms": 340224,
+      "filesystem_free_bytes": 23343198208,
+      "format": "json",
+      "stage": "turnover_2_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 20914176,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 42492,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 42492,
+          "table_including_toast_bytes": 170786816,
+          "toast_total_bytes": 150601728,
+          "total_bytes": 191700992
+        }
+      ],
+      "total_relation_bytes": 191700992
+    },
+    {
+      "database_bytes": 202177559,
+      "elapsed_ms": 373844,
+      "filesystem_free_bytes": 23340453888,
+      "format": "json",
+      "stage": "turnover_2_refilled",
+      "tables": [
+        {
+          "base_indexes_bytes": 21684224,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 172482560,
+          "toast_total_bytes": 152297472,
+          "total_bytes": 194166784
+        }
+      ],
+      "total_relation_bytes": 194166784
+    },
+    {
+      "database_bytes": 202177559,
+      "elapsed_ms": 374963,
+      "filesystem_free_bytes": 23340441600,
+      "format": "json",
+      "stage": "turnover_3_deleted",
+      "tables": [
+        {
+          "base_indexes_bytes": 21684224,
+          "estimated_dead_tuples": 2510,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 42492,
+          "table_including_toast_bytes": 172482560,
+          "toast_total_bytes": 152297472,
+          "total_bytes": 194166784
+        }
+      ],
+      "total_relation_bytes": 194166784
+    },
+    {
+      "database_bytes": 202185751,
+      "elapsed_ms": 375988,
+      "filesystem_free_bytes": 23340412928,
+      "format": "json",
+      "stage": "turnover_3_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 21684224,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 42492,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 42492,
+          "table_including_toast_bytes": 172482560,
+          "toast_total_bytes": 152297472,
+          "total_bytes": 194166784
+        }
+      ],
+      "total_relation_bytes": 194166784
+    },
+    {
+      "database_bytes": 204102679,
+      "elapsed_ms": 410838,
+      "filesystem_free_bytes": 23342592000,
+      "format": "json",
+      "stage": "turnover_3_refilled",
+      "tables": [
+        {
+          "base_indexes_bytes": 21905408,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 20152320,
+          "mean_tuple_bytes": "2844.8894380118610562",
+          "name": "ghost_compact_probe.compact_json",
+          "rows": 49574,
+          "table_including_toast_bytes": 174161920,
+          "toast_total_bytes": 153976832,
+          "total_bytes": 196067328
+        }
+      ],
+      "total_relation_bytes": 196067328
+    },
+    {
+      "database_bytes": 204102679,
+      "elapsed_ms": 411477,
+      "filesystem_free_bytes": 23342583808,
+      "format": "typed",
+      "stage": "empty",
+      "tables": [
+        {
+          "base_indexes_bytes": 16384,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 0,
+          "heap_main_bytes": 0,
+          "mean_tuple_bytes": "None",
+          "name": "ghost_compact_probe.decision",
+          "rows": 0,
+          "table_including_toast_bytes": 8192,
+          "toast_total_bytes": 8192,
+          "total_bytes": 24576
+        },
+        {
+          "base_indexes_bytes": 16384,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 0,
+          "heap_main_bytes": 0,
+          "mean_tuple_bytes": "None",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 0,
+          "table_including_toast_bytes": 8192,
+          "toast_total_bytes": 8192,
+          "total_bytes": 24576
+        }
+      ],
+      "total_relation_bytes": 49152
+    },
+    {
+      "database_bytes": 233118743,
+      "elapsed_ms": 434620,
+      "filesystem_free_bytes": 23313391616,
+      "format": "typed",
+      "stage": "after_1_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 1114112,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 7000,
+          "heap_main_bytes": 5259264,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 7082,
+          "table_including_toast_bytes": 5292032,
+          "toast_total_bytes": 8192,
+          "total_bytes": 6406144
+        },
+        {
+          "base_indexes_bytes": 8192000,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 42000,
+          "heap_main_bytes": 14434304,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 42492,
+          "table_including_toast_bytes": 14467072,
+          "toast_total_bytes": 8192,
+          "total_bytes": 22659072
+        }
+      ],
+      "total_relation_bytes": 29065216
+    },
+    {
+      "database_bytes": 293420055,
+      "elapsed_ms": 495845,
+      "filesystem_free_bytes": 23235698688,
+      "format": "typed",
+      "stage": "after_3_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 4218880,
+          "estimated_dead_tuples": 7063,
+          "estimated_live_tuples": 21164,
+          "heap_main_bytes": 20987904,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 21246,
+          "table_including_toast_bytes": 21020672,
+          "toast_total_bytes": 8192,
+          "total_bytes": 25239552
+        },
+        {
+          "base_indexes_bytes": 20783104,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 126984,
+          "heap_main_bytes": 43302912,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 127476,
+          "table_including_toast_bytes": 43343872,
+          "toast_total_bytes": 8192,
+          "total_bytes": 64126976
+        }
+      ],
+      "total_relation_bytes": 89366528
+    },
+    {
+      "database_bytes": 405773335,
+      "elapsed_ms": 595543,
+      "filesystem_free_bytes": 23122231296,
+      "format": "typed",
+      "stage": "after_7_copies",
+      "tables": [
+        {
+          "base_indexes_bytes": 8560640,
+          "estimated_dead_tuples": 7063,
+          "estimated_live_tuples": 49492,
+          "heap_main_bytes": 42024960,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 42065920,
+          "toast_total_bytes": 8192,
+          "total_bytes": 50626560
+        },
+        {
+          "base_indexes_bytes": 49995776,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 296952,
+          "heap_main_bytes": 101040128,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 101097472,
+          "toast_total_bytes": 8192,
+          "total_bytes": 151093248
+        }
+      ],
+      "total_relation_bytes": 201719808
+    },
+    {
+      "database_bytes": 442792983,
+      "elapsed_ms": 695236,
+      "filesystem_free_bytes": 23050878976,
+      "format": "typed",
+      "stage": "insert_only_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 14237696,
+          "estimated_dead_tuples": 1077,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 87564288
+        },
+        {
+          "base_indexes_bytes": 49995776,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 297444,
+          "heap_main_bytes": 101040128,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 101105664,
+          "toast_total_bytes": 8192,
+          "total_bytes": 151101440
+        }
+      ],
+      "total_relation_bytes": 238665728
+    },
+    {
+      "database_bytes": 531160087,
+      "elapsed_ms": 711602,
+      "filesystem_free_bytes": 22727475200,
+      "format": "typed",
+      "stage": "after_six_rewrites_one_copy",
+      "tables": [
+        {
+          "base_indexes_bytes": 14254080,
+          "estimated_dead_tuples": 41919,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 87580672
+        },
+        {
+          "base_indexes_bytes": 53215232,
+          "estimated_dead_tuples": 247406,
+          "estimated_live_tuples": 297444,
+          "heap_main_bytes": 186155008,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 186236928,
+          "toast_total_bytes": 8192,
+          "total_bytes": 239452160
+        }
+      ],
+      "total_relation_bytes": 327032832
+    },
+    {
+      "database_bytes": 531250199,
+      "elapsed_ms": 728302,
+      "filesystem_free_bytes": 22727213056,
+      "format": "typed",
+      "stage": "rewrites_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 14254080,
+          "estimated_dead_tuples": 5968,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 87580672
+        },
+        {
+          "base_indexes_bytes": 53215232,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 297444,
+          "heap_main_bytes": 186155008,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 186236928,
+          "toast_total_bytes": 8192,
+          "total_bytes": 239452160
+        }
+      ],
+      "total_relation_bytes": 327032832
+    },
+    {
+      "database_bytes": 531250199,
+      "elapsed_ms": 729777,
+      "filesystem_free_bytes": 22710419456,
+      "format": "typed",
+      "stage": "turnover_1_deleted",
+      "tables": [
+        {
+          "base_indexes_bytes": 14254080,
+          "estimated_dead_tuples": 6968,
+          "estimated_live_tuples": 48574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 42492,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 87580672
+        },
+        {
+          "base_indexes_bytes": 53215232,
+          "estimated_dead_tuples": 6000,
+          "estimated_live_tuples": 291444,
+          "heap_main_bytes": 186155008,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 254952,
+          "table_including_toast_bytes": 186236928,
+          "toast_total_bytes": 8192,
+          "total_bytes": 239452160
+        }
+      ],
+      "total_relation_bytes": 327032832
+    },
+    {
+      "database_bytes": 446022159,
+      "elapsed_ms": 733279,
+      "filesystem_free_bytes": 22795669504,
+      "format": "typed",
+      "stage": "turnover_1_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 14254080,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 42492,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 42492,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 87580672
+        },
+        {
+          "base_indexes_bytes": 53215232,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 254952,
+          "heap_main_bytes": 101040128,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 254952,
+          "table_including_toast_bytes": 101105664,
+          "toast_total_bytes": 8192,
+          "total_bytes": 154320896
+        }
+      ],
+      "total_relation_bytes": 241901568
+    },
+    {
+      "database_bytes": 451230743,
+      "elapsed_ms": 772909,
+      "filesystem_free_bytes": 22756483072,
+      "format": "typed",
+      "stage": "turnover_1_refilled",
+      "tables": [
+        {
+          "base_indexes_bytes": 16326656,
+          "estimated_dead_tuples": 7048,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89653248
+        },
+        {
+          "base_indexes_bytes": 56180736,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 297444,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157294592
+        }
+      ],
+      "total_relation_bytes": 246947840
+    },
+    {
+      "database_bytes": 451230743,
+      "elapsed_ms": 774402,
+      "filesystem_free_bytes": 22739701760,
+      "format": "typed",
+      "stage": "turnover_2_deleted",
+      "tables": [
+        {
+          "base_indexes_bytes": 16326656,
+          "estimated_dead_tuples": 9548,
+          "estimated_live_tuples": 47074,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 42492,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89653248
+        },
+        {
+          "base_indexes_bytes": 56180736,
+          "estimated_dead_tuples": 15000,
+          "estimated_live_tuples": 282444,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 254952,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157294592
+        }
+      ],
+      "total_relation_bytes": 246947840
+    },
+    {
+      "database_bytes": 451238935,
+      "elapsed_ms": 778417,
+      "filesystem_free_bytes": 22739648512,
+      "format": "typed",
+      "stage": "turnover_2_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 16326656,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 42492,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 42492,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89653248
+        },
+        {
+          "base_indexes_bytes": 56180736,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 254952,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 254952,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157294592
+        }
+      ],
+      "total_relation_bytes": 246947840
+    },
+    {
+      "database_bytes": 451320855,
+      "elapsed_ms": 817338,
+      "filesystem_free_bytes": 22722342912,
+      "format": "typed",
+      "stage": "turnover_2_refilled",
+      "tables": [
+        {
+          "base_indexes_bytes": 16343040,
+          "estimated_dead_tuples": 7046,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89669632
+        },
+        {
+          "base_indexes_bytes": 56205312,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 297444,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157319168
+        }
+      ],
+      "total_relation_bytes": 246988800
+    },
+    {
+      "database_bytes": 451320855,
+      "elapsed_ms": 818996,
+      "filesystem_free_bytes": 22722330624,
+      "format": "typed",
+      "stage": "turnover_3_deleted",
+      "tables": [
+        {
+          "base_indexes_bytes": 16343040,
+          "estimated_dead_tuples": 8546,
+          "estimated_live_tuples": 48074,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 42492,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89669632
+        },
+        {
+          "base_indexes_bytes": 56205312,
+          "estimated_dead_tuples": 9000,
+          "estimated_live_tuples": 288444,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 254952,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157319168
+        }
+      ],
+      "total_relation_bytes": 246988800
+    },
+    {
+      "database_bytes": 451361815,
+      "elapsed_ms": 822781,
+      "filesystem_free_bytes": 22722248704,
+      "format": "typed",
+      "stage": "turnover_3_vacuumed",
+      "tables": [
+        {
+          "base_indexes_bytes": 16343040,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 42492,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 42492,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89669632
+        },
+        {
+          "base_indexes_bytes": 56205312,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 254952,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 254952,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157319168
+        }
+      ],
+      "total_relation_bytes": 246988800
+    },
+    {
+      "database_bytes": 451361815,
+      "elapsed_ms": 865431,
+      "filesystem_free_bytes": 22721716224,
+      "format": "typed",
+      "stage": "turnover_3_refilled",
+      "tables": [
+        {
+          "base_indexes_bytes": 16343040,
+          "estimated_dead_tuples": 7042,
+          "estimated_live_tuples": 49574,
+          "heap_main_bytes": 73269248,
+          "mean_tuple_bytes": "676.2233832250776617",
+          "name": "ghost_compact_probe.decision",
+          "rows": 49574,
+          "table_including_toast_bytes": 73326592,
+          "toast_total_bytes": 8192,
+          "total_bytes": 89669632
+        },
+        {
+          "base_indexes_bytes": 56254464,
+          "estimated_dead_tuples": 0,
+          "estimated_live_tuples": 297444,
+          "heap_main_bytes": 101048320,
+          "mean_tuple_bytes": "326.6363550786030312",
+          "name": "ghost_compact_probe.horizon",
+          "rows": 297444,
+          "table_including_toast_bytes": 101113856,
+          "toast_total_bytes": 8192,
+          "total_bytes": 157368320
+        }
+      ],
+      "total_relation_bytes": 247037952
+    }
+  ],
+  "parity_checks": [
+    {
+      "copy_id": 0,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 1,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 2,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 3,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 4,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 5,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 6,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 0,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 7,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 8,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 9,
+      "exact": true,
+      "format": "json",
+      "rows": 7082
+    },
+    {
+      "copy_id": 0,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 1,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 2,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 3,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 4,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 5,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 6,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 0,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 7,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 8,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    },
+    {
+      "copy_id": 9,
+      "exact": true,
+      "format": "typed",
+      "rows": 7082
+    }
+  ],
+  "retention_checks": [
+    {
+      "cases": [
+        {
+          "copy_id": 9001,
+          "delta_ms": -1,
+          "expired": 1,
+          "summarized": true,
+          "terminal": true
+        },
+        {
+          "copy_id": 9002,
+          "delta_ms": 0,
+          "expired": 1,
+          "summarized": true,
+          "terminal": true
+        },
+        {
+          "copy_id": 9003,
+          "delta_ms": 1,
+          "expired": 0,
+          "summarized": true,
+          "terminal": true
+        },
+        {
+          "copy_id": 9004,
+          "delta_ms": -1,
+          "expired": 0,
+          "summarized": true,
+          "terminal": false
+        },
+        {
+          "copy_id": 9005,
+          "delta_ms": -1,
+          "expired": 0,
+          "summarized": false,
+          "terminal": true
+        }
+      ],
+      "failed_summary_prevents_delete": true,
+      "format": "json",
+      "repeated_summary_and_expiry_idempotent": true
+    },
+    {
+      "cases": [
+        {
+          "copy_id": 9001,
+          "delta_ms": -1,
+          "expired": 1,
+          "summarized": true,
+          "terminal": true
+        },
+        {
+          "copy_id": 9002,
+          "delta_ms": 0,
+          "expired": 1,
+          "summarized": true,
+          "terminal": true
+        },
+        {
+          "copy_id": 9003,
+          "delta_ms": 1,
+          "expired": 0,
+          "summarized": true,
+          "terminal": true
+        },
+        {
+          "copy_id": 9004,
+          "delta_ms": -1,
+          "expired": 0,
+          "summarized": true,
+          "terminal": false
+        },
+        {
+          "copy_id": 9005,
+          "delta_ms": -1,
+          "expired": 0,
+          "summarized": false,
+          "terminal": true
+        }
+      ],
+      "failed_summary_prevents_delete": true,
+      "format": "typed",
+      "repeated_summary_and_expiry_idempotent": true
+    }
+  ],
+  "server_settings": [
+    {
+      "name": "autovacuum",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "block_size",
+      "setting": "8192",
+      "unit": null
+    },
+    {
+      "name": "default_toast_compression",
+      "setting": "pglz",
+      "unit": null
+    },
+    {
+      "name": "full_page_writes",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "maintenance_work_mem",
+      "setting": "65536",
+      "unit": "kB"
+    },
+    {
+      "name": "server_version",
+      "setting": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+      "unit": null
+    },
+    {
+      "name": "wal_level",
+      "setting": "replica",
+      "unit": null
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB"
+    }
+  ],
+  "source_manifest": {
+    "code_sha256": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+    "compact_jsonl_sha256": "65bae3a78b1caf91e056ce3de43a940855cb3a5f6a9f5b703beb15abeb505e4c",
+    "decisions": 7082,
+    "finalized_as_of_wall_ns": 1789516718428617010,
+    "horizon_records": 42492,
+    "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl",
+    "input_rows": 23411,
+    "input_sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+    "limitations": [
+      "No full slot/payload replay after original bytes expire.",
+      "This encoder does not reconstruct complete feed-gap metrics from selected snapshots.",
+      "Logical JSON bytes are not PostgreSQL allocated bytes."
+    ],
+    "logical_bytes": 53216127,
+    "maximum_line_bytes": 7642,
+    "minimum_line_bytes": 5614,
+    "publication_statuses": {
+      "acknowledged": 7075,
+      "expired_or_target_received": 7
+    },
+    "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+    "schema_version": 1
+  },
+  "started_wall_ns": "1789528523983402554",
+  "status": "passed"
+}

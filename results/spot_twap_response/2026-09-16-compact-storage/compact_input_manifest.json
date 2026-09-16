@@ -1,0 +1,24 @@
+{
+  "code_sha256": "dc9fa3e5743627252294b36d5c183dc0a0d18de7e2567439e01a2cd713f86e9f",
+  "compact_jsonl_sha256": "65bae3a78b1caf91e056ce3de43a940855cb3a5f6a9f5b703beb15abeb505e4c",
+  "decisions": 7082,
+  "finalized_as_of_wall_ns": 1789516718428617010,
+  "horizon_records": 42492,
+  "input_path": "C:\\Users\\alexa\\PycharmProjects\\polycollector\\dist\\ghost-checkpoint-a-release\\dist\\ghost-reliability-canary\\audit.jsonl",
+  "input_rows": 23411,
+  "input_sha256": "f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954",
+  "limitations": [
+    "No full slot/payload replay after original bytes expire.",
+    "This encoder does not reconstruct complete feed-gap metrics from selected snapshots.",
+    "Logical JSON bytes are not PostgreSQL allocated bytes."
+  ],
+  "logical_bytes": 53216127,
+  "maximum_line_bytes": 7642,
+  "minimum_line_bytes": 5614,
+  "publication_statuses": {
+    "acknowledged": 7075,
+    "expired_or_target_received": 7
+  },
+  "run_id": "fe2dd06da5754c50b696cb9419ca7251",
+  "schema_version": 1
+}
