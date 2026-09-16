@@ -8,7 +8,7 @@ The [peer-review verification](results/spot_twap_response/2026-09-16-retention-p
 records reproduced canary metrics and the changes incorporated below.
 The [completed compact-storage experiment](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
 now measures allocation and reuse. The owner subsequently directed implementation
-without another study. Production now uses the compact JSON representation, a
+without another study. The installed code provides the compact JSON representation, a
 separate continuous-mode capacity policy, seven-day expiry and cached monitoring.
 The old canary budget cannot support this mode. The new limits are 6 GiB total
 allocated ghost storage, warning at 5 GiB, admission pause at 5.5 GiB or 1,500,000
@@ -21,6 +21,11 @@ the Chainlink/API restart; activation uses a separate continuous state directory
 The historical canary mode keeps its deadline and export rules. Completed
 study/canary reports and exports remain historical evidence. See
 [the operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
+The [retention fixes](GHOST_TWAP_RETENTION_FIXES.md) add isolated row retries and an
+index for the unchanged completeness watermark. Their authorized validation is
+a short maintenance/index fixture and isolated PostgreSQL cycle, not a live
+canary. The producer remains disabled; the retention duration and capacity caps
+are unchanged.
 
 ## Retention and capacity
 
@@ -42,6 +47,20 @@ study/canary reports and exports remain historical evidence. See
   measurements. Record missing targets separately rather than guessing prices.
   An abnormal nonterminal record past the age boundary needs an explicit recovery
   status and must count as a monitoring failure.
+- Run bounded expiry before compaction so one invalid verbose record cannot block
+  already eligible expiry. Compact each selected row in its own transaction;
+  a row validation failure rolls back that transaction and retains the original
+  evidence. A bounded scan cursor continues to later identities and wraps at the
+  end. A monotonic 60-second retry delay tracks at most 128 failed identities;
+  process restart clears retry scheduling, not durable records or completeness
+  requirements. Connection and schema failures remain global maintenance errors.
+  Runtime-owned identities remain excluded until their final write and outbox
+  removal finish. Failure counts and bounded error-class samples are visible;
+  monitor health stays unavailable while failed identities remain tracked.
+- Keep the earliest active continuous decision in the persistence watermark,
+  including pending and failed terminal rows. Deferring a row must not advance
+  accuracy completeness. The dedicated partial index covers all continuous rows;
+  it does not change this query to consider only terminal or retryable rows.
 - Preserve full durable inputs until the decision/result lifecycle has safely
   completed. The new compact format will not retain a complete 60-slot debug
   snapshot per forecast for a week. Existing immutable audit rows are not stripped
@@ -53,7 +72,7 @@ study/canary reports and exports remain historical evidence. See
   latest canary hour. A simple seven-day extrapolation is 15,239,282,688 bytes
   (about 14.19 GiB), and 7,082 decisions/hour implies 1,189,776 decisions/week.
   These are illustrations from one hour, not a sustained capacity guarantee.
-  Both exceed the current 1.5 GiB admission stop and 600,000-row cap. Merely
+  Both exceed the legacy canary's 1.5 GiB admission stop and 600,000-row cap. Merely
   changing an expiry constant to seven days cannot make continuous operation fit.
   Four days of the same format would still imply about 8.11 GiB and 679,872 rows.
   Compaction, measured allocation and guard changes are needed for either period;
@@ -71,10 +90,23 @@ study/canary reports and exports remain historical evidence. See
   measured JSON format with the separate limits above and pauses publication if
   allocated size or actual free disk reaches a guard. Additional normalization
   is not assumed in the capacity arithmetic.
+- The September 16, 2026 14:35:07 UTC capacity snapshot left 3,005,218,816 bytes
+  (2.798828125 GiB) of additional shared-disk growth after the 10 GiB reserve and
+  the evidence/microstructure collectors' remaining configured allowances. This
+  is before a safety margin and future core-data growth, not space reserved for
+  ghost. Existing ghost allocation was 318,398,464 bytes and remains preserved;
+  this fix authorizes no deletion of that legacy evidence. The measured JSON
+  layout's projected new week needs 4,705,615,872 bytes (4.382446289 GiB), exceeding
+  additional headroom by 1,700,397,056 bytes (1.583618164 GiB) before margins.
+  No seven-day continuous capacity
+  claim follows from the unchanged 6 GiB logical budget; disk guards may pause
+  forecasts sooner. Other collectors' allocations are not reduced by this fix.
+  The [fix record](GHOST_TWAP_RETENTION_FIXES.md) preserves the exact arithmetic.
 - Capacity is shared with other collectors. The latest experiment's postflight
   had 11.64 GiB above the 10 GiB filesystem reserve before allowing for other
   collectors' remaining growth, not space reserved exclusively for ghost.
-  Recheck current free space and other relations' remaining growth allowances;
+  Those experiment values are historical; the newer snapshot above supersedes
+  them for this fix's capacity discussion. Recheck current free space and other relations' remaining growth allowances;
   their existing allocations are already included in filesystem usage. Budget
   the measured steady-state allocated relation plus in-flight writes and safety
   margin. Keep allocated-byte and actual free-disk guards: estimated live bytes
@@ -175,7 +207,9 @@ Codex reminder or notification automation, or imply any monitoring is running.
 The owner directed implementation without another study or test campaign. The
 [implementation checkpoint](GHOST_TWAP_CONTINUOUS_CHECKPOINT.md) records the
 shipped code, explicit thresholds, capacity policy and verification limits.
-It takes precedence over earlier prospective language in this plan. No new
-canary, PostgreSQL integration run or production activation is claimed. Read-time
+It takes precedence over earlier prospective language in this plan. The subsequent
+[retention-fix checkpoint](GHOST_TWAP_RETENTION_FIXES.md) records the separately
+authorized short fixtures/PostgreSQL validation and its limits. No new live
+canary or production activation is claimed. Read-time
 short-horizon usefulness still requires separate browser evidence; the new
 accuracy endpoint reports forecast performance and server-side lead only.

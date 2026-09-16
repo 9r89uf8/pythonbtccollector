@@ -1,0 +1,43 @@
+{
+  "runtime_commit": "9f03f40",
+  "scope": "Targeted maintenance and watermark-index correction; no full suite or live canary",
+  "fixture_checks": {
+    "cases_passed": 4,
+    "duration_seconds": "0.81",
+    "functions": [
+      "test_ghost_install_applies_schema_before_chainlink_restart",
+      "test_ghost_factory_uses_existing_redis_fields_and_closes_only_owned_clients",
+      "test_factory_cancellation_does_not_close_clients_before_runtime"
+    ]
+  },
+  "postgresql_lifecycle": {
+    "cases_passed": 1,
+    "duration_seconds": "1.86",
+    "database": "ghost_checkpoint_b_validation_retention_9f03f40",
+    "test": "tests/test_ghost_twap_retention_postgres.py",
+    "database_allocated_bytes": 9903127,
+    "final_counts": {"active_rows": 1, "incomplete_rows": 0, "compact_rows": 1, "hourly_rows": 2, "feed_rows": 1, "expired_recoveries": 1},
+    "counter_explanation": "Bad row retained, healthy compact retained, old compact expired with its summary retained; expired recovery was deliberately exercised",
+    "index_check": "New watermark index eligible with transaction-local enable_seqscan=off on the tiny disposable dataset; not a performance benchmark",
+    "cleanup": "Disposable database, Git worktree and temporary test files removed; database absence and active production services verified"
+  },
+  "capacity": {
+    "observed_at_utc": "2026-09-16T14:35:07.289178+00:00",
+    "free_bytes": 23556210688,
+    "floor_bytes": 10737418240,
+    "legacy_and_existing_ghost_bytes": 318398464,
+    "evidence_allocated_bytes": 935739392,
+    "microstructure_allocated_bytes": 2135588864,
+    "evidence_limit_bytes": 6442450944,
+    "microstructure_limit_bytes": 6442450944,
+    "evidence_remaining_bytes": 5506711552,
+    "microstructure_remaining_bytes": 4306862080,
+    "conditional_additional_ghost_bytes": 3005218816,
+    "conditional_additional_ghost_gib": "2.798828125",
+    "projected_new_compact_week_bytes": 4705615872,
+    "shortfall_before_margin_bytes": 1700397056,
+    "shortfall_before_margin_gib": "1.5836181640625",
+    "decision": "Keep seven-day retention and producer disabled; do not credit deletion of legacy evidence or change other collectors' budgets",
+    "limitations": "Conditional point-in-time allowance; core data, WAL, logs and future maintenance growth still need margin. Projection is from the earlier bounded storage experiment, not a measured live week."
+  }
+}
