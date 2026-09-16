@@ -114,15 +114,19 @@ class GhostSpool:
             path.unlink()
             self._sync_directory()
 
-    def campaign(self, start_ms: int) -> dict:
+    def campaign(self, start_ms: int, continuous: bool = False) -> dict:
         path = self.directory / 'campaign.json'
         if path.exists():
             state = json.loads(path.read_bytes())
             self._validate_campaign(state)
-            if state['start_ms'] != start_ms:
+            if bool(state.get('continuous', False)) != continuous:
+                raise ValueError('ghost mode differs; use a separate state directory')
+            if not continuous and state['start_ms'] != start_ms:
                 raise ValueError('existing canary start differs; archive the completed outbox first')
             return state
         state = {'start_ms': start_ms, 'stop_reason': None, 'last_wall_ms': start_ms}
+        if continuous:
+            state['continuous'] = True
         self.save_campaign(state)
         return state
 
@@ -136,8 +140,12 @@ class GhostSpool:
 
     @staticmethod
     def _validate_campaign(state: dict) -> None:
-        if not isinstance(state, dict) or set(state) != {'start_ms', 'stop_reason', 'last_wall_ms'}:
+        if not isinstance(state, dict) or set(state) not in (
+                {'start_ms', 'stop_reason', 'last_wall_ms'},
+                {'start_ms', 'stop_reason', 'last_wall_ms', 'continuous'}):
             raise ValueError('invalid canary metadata fields')
+        if 'continuous' in state and state['continuous'] is not True:
+            raise ValueError('invalid continuous campaign marker')
         if type(state['start_ms']) is not int or type(state['last_wall_ms']) is not int:
             raise ValueError('invalid canary clock types')
         if state['start_ms'] <= 0 or state['last_wall_ms'] < state['start_ms']:

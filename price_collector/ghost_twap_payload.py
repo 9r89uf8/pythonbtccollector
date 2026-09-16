@@ -227,7 +227,7 @@ def _parse(raw: bytes) -> GhostPayload:
     _require(type(raw) is bytes and 0 < len(raw) <= MAX_PAYLOAD_BYTES, 'payload bytes exceed bound or have wrong type')
     p = json.loads(raw.decode('utf-8'), parse_float=_no_float, parse_constant=_no_float, object_pairs_hook=_object)
     _require(isinstance(p, dict), 'payload must be an object')
-    _require(p['runtime_version'] == 'ghost-canary-v6' and type(p['contract_version']) is int and p['contract_version'] == 4,
+    _require(p['runtime_version'] in ('ghost-canary-v6', 'ghost-continuous-v1') and type(p['contract_version']) is int and p['contract_version'] == 4,
              'unsupported runtime/contract')
     _require(p['model_version'] == 'chainlink-60s-offset3-v1' and p['publication_state'] == 'attempted', 'unsupported model/publication state')
     _require(p['price_precision'] == 18 and type(p['price_precision']) is int and p['context_precision'] == 80

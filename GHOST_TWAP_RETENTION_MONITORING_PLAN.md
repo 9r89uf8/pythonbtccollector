@@ -7,16 +7,20 @@ production path. The archive foundation remains optional, tested code.
 The [peer-review verification](results/spot_twap_response/2026-09-16-retention-plan-review/REVIEW.md)
 records reproduced canary metrics and the changes incorporated below.
 The [completed compact-storage experiment](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
-now measures allocation and reuse. Both compact layouts preserve the tested
-accuracy evidence, but neither supports approval of continuous seven-day
-operation under the current budgets. The next checkpoint is a leaner measured
-representation or an explicitly reviewed capacity policy, before runtime expiry
-and monitoring implementation.
+now measures allocation and reuse. The owner subsequently directed implementation
+without another study. Production now uses the compact JSON representation, a
+separate continuous-mode capacity policy, seven-day expiry and cached monitoring.
+The old canary budget cannot support this mode. The new limits are 6 GiB total
+allocated ghost storage, warning at 5 GiB, admission pause at 5.5 GiB or 1,500,000
+retained decisions, and the existing 10 GiB filesystem reserve. These guards
+protect shared disk; they do not guarantee uninterrupted seven-day coverage.
 
-This is the next implementation contract to refine and validate. It changes no
-running service, SQL deletion guard, one-hour producer deadline or stored data.
-The producer remains disabled. Completed study/canary reports and their existing
-exports remain historical evidence; this plan concerns ongoing production data.
+This contract is implemented by the continuous runtime, compact store and accuracy
+monitor. Both enable flags default to false. Installation requires schema before
+the Chainlink/API restart; activation uses a separate continuous state directory.
+The historical canary mode keeps its deadline and export rules. Completed
+study/canary reports and exports remain historical evidence. See
+[the operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
 
 ## Retention and capacity
 
@@ -32,8 +36,7 @@ exports remain historical evidence; this plan concerns ongoing production data.
   The original hashes allow comparison with independently saved browser/observer
   bytes; they do not reconstruct deleted bytes or verify slot arithmetic alone.
 - Preserve small hourly/daily aggregates beyond individual-row expiry so gradual
-  deterioration remains visible. Proposed bounded default: 90 days of summaries.
-  This is a design default, not an enabled retention setting.
+  deterioration remains visible. Continuous mode retains 90 days of summaries.
 - Finalize idempotent summaries before deleting eligible terminal records in
   bounded batches. A summary failure defers deletion; it must not silently lose
   measurements. Record missing targets separately rather than guessing prices.
@@ -64,9 +67,10 @@ exports remain historical evidence; this plan concerns ongoing production data.
   replicas, not observed seven-day capacity. Three turnover cycles demonstrated
   reuse but did not prove an allocation plateau. The post-cleanup conditional
   shared-disk remainder was 2.409 GiB before other future growth. Neither layout
-  justifies merely raising the current caps and enabling continuous operation.
-  Test avoiding repeated metadata and identical target observations next;
-  savings from that additional normalization have not been established.
+  guarantees capacity under every traffic pattern. The implementation uses the
+  measured JSON format with the separate limits above and pauses publication if
+  allocated size or actual free disk reaches a guard. Additional normalization
+  is not assumed in the capacity arithmetic.
 - Capacity is shared with other collectors. The latest experiment's postflight
   had 11.64 GiB above the 10 GiB filesystem reserve before allowing for other
   collectors' remaining growth, not space reserved exclusively for ghost.
@@ -168,9 +172,10 @@ scans or calculations. A sleeping laptop must not interrupt server-side scoring;
 it still interrupts browser/tunnel measurement. This plan does not create a
 Codex reminder or notification automation, or imply any monitoring is running.
 
-Next checkpoint: measure a leaner compact representation or explicitly review
-additional capacity and shared budgets. Once capacity is justified, implement
-seven-day expiry, deterministic scoring/summary aggregation and monitoring health
-with focused tests; prove restart/late-result handling, expiry, cap behavior and
-space reuse in a disposable database. Then perform a reviewed bounded live run
-and repeat the awake-laptop browser check before enabling continuous production.
+The owner directed implementation without another study or test campaign. The
+[implementation checkpoint](GHOST_TWAP_CONTINUOUS_CHECKPOINT.md) records the
+shipped code, explicit thresholds, capacity policy and verification limits.
+It takes precedence over earlier prospective language in this plan. No new
+canary, PostgreSQL integration run or production activation is claimed. Read-time
+short-horizon usefulness still requires separate browser evidence; the new
+accuracy endpoint reports forecast performance and server-side lead only.

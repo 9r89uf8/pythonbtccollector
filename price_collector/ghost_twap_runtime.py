@@ -22,11 +22,13 @@ from price_collector.ghost_twap import (
     NS_PER_MS, NS_PER_SECOND, PRICE_QUANTUM, PriceEvent, _event_record, _json_bytes,
 )
 from price_collector.ghost_twap_spool import GhostSpool
+from price_collector.ghost_twap_health import GhostFeedHealth
 
 LOGGER = logging.getLogger(__name__)
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
 GHOST_CHANNEL = 'btc:live:ghost_chainlink_twap_60s:updates'
 RUNTIME_VERSION = 'ghost-canary-v6'
+CONTINUOUS_RUNTIME_VERSION = 'ghost-continuous-v1'
 PUBLICATION_ELIGIBILITY_POLICY = 'per-horizon-unreceived-v1'
 CANARY_MS = 60 * 60 * 1000
 CAMPAIGN_CHECKPOINT_SECONDS = 30
@@ -36,8 +38,8 @@ SHUTDOWN_SPOOL_SECONDS = 15.0
 SHUTDOWN_DRAIN_SECONDS = 30.0
 SHUTDOWN_RESOURCE_SECONDS = 5.0
 SHUTDOWN_RETRY_SECONDS = 0.1
-# Includes the stages above, spool close, and both independently owned clients.
-GHOST_SHUTDOWN_TIMEOUT_SECONDS = 70.0
+# Includes the stages above, monitor close, and independently owned clients.
+GHOST_SHUTDOWN_TIMEOUT_SECONDS = 80.0
 _CLEANUP_TASKS: set = set()
 MATCH_NS = 120 * NS_PER_SECOND
 WARN_BYTES = 1024 ** 3
@@ -45,6 +47,10 @@ STOP_BYTES = 1536 * 1024 ** 2
 BUDGET_BYTES = 2 * 1024 ** 3
 MAX_ROWS = 600000
 RESERVE_BYTES = 10 * 1024 ** 3
+CONTINUOUS_WARN_BYTES = 5 * 1024 ** 3
+CONTINUOUS_STOP_BYTES = 5632 * 1024 ** 2
+CONTINUOUS_BUDGET_BYTES = 6 * 1024 ** 3
+CONTINUOUS_MAX_ROWS = 1_500_000
 # Reserve space for publication bytes, six first results and bounded conflict/
 # late annotations. Input IDs are bounded ASCII; all clocks fit signed bigint.
 RESULT_GROWTH_RESERVE_BYTES = 64 * 1024
@@ -109,6 +115,7 @@ async def _shutdown_stage(coroutine, seconds: float, stage: str) -> bool:
 class GhostSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix='GHOST_TWAP_', case_sensitive=False)
     enabled: bool = False
+    continuous: bool = False
     canary_start_ms: int = Field(default=0, ge=0)
     state_directory: Path = Path('/var/lib/price-collector/ghost-twap')
     database_filesystem_path: Path = Path('/var/lib/postgresql')
@@ -155,6 +162,9 @@ class GhostRuntime:
         self.wall_ns, self.mono_ns = wall_ns, mono_ns
         self.disk_free = disk_free or (lambda: shutil.disk_usage(settings.database_filesystem_path).free)
         self.run_id = uuid4().hex
+        self.runtime_version = CONTINUOUS_RUNTIME_VERSION if settings.continuous else RUNTIME_VERSION
+        self.feed_health = GhostFeedHealth(self.run_id,self.wall_ns()//NS_PER_MS)
+        self.monitor = None
         self.engine = GhostTwapEngine(self.run_id, GhostPolicy(
             enabled=True, source_max_age_ms=settings.source_max_age_ms,
             receipt_max_age_ms=settings.receipt_max_age_ms))
@@ -214,10 +224,14 @@ class GhostRuntime:
 
     async def start(self) -> None:
         now_ms = self.wall_ns() // NS_PER_MS
-        if not self.settings.enabled or not 0 < self.settings.canary_start_ms <= now_ms:
+        if not self.settings.enabled or (not self.settings.continuous
+                and not 0 < self.settings.canary_start_ms <= now_ms):
             raise ValueError('enabled ghost needs an explicit past/current canary start')
         await self._spool(self.spool.open)
-        self.campaign = await self._spool(self.spool.campaign, self.settings.canary_start_ms)
+        if self.settings.continuous:
+            self.campaign = await self._spool(self.spool.campaign, now_ms, True)
+        else:
+            self.campaign = await self._spool(self.spool.campaign, self.settings.canary_start_ms)
         self.stop_reason = self.campaign.get('stop_reason')
         self._end_mono = self.mono_ns() + max(0, self.settings.canary_start_ms + CANARY_MS - now_ms) * NS_PER_MS
         initial = await self.store.initialize()
@@ -245,11 +259,16 @@ class GhostRuntime:
             (self._calculation_loop, 'ghost-calculation'),
             (self._publication_loop, 'ghost-publication'),
             (self._audit_loop, 'ghost-audit'), (self._guard_loop, 'ghost-guard'))]
+        if self.monitor is not None:
+            await self.monitor.start()
         LOGGER.info('ghost_runtime_started', extra={'run_id': self.run_id,
-                    'canary_end_ms': self.settings.canary_start_ms + CANARY_MS,
+                    'canary_end_ms': None if self.settings.continuous else self.settings.canary_start_ms + CANARY_MS,
+                    'continuous': self.settings.continuous,
                     'stop_reason': self.stop_reason})
 
     async def _recover(self, record: dict) -> None:
+        if self.settings.continuous and await self.store.reconcile_compacted(record):
+            return
         stored = await self.store.get_record(record['run_id'], record['decision_id'])
         if stored is not None:
             if stored['frozen_json'] != record['frozen_json']:
@@ -314,7 +333,7 @@ class GhostRuntime:
         return bool(code and code[:2] not in ('08', '40', '53', '55', '57'))
 
     def suspend(self, scope: str, reason: str) -> None:
-        if scope not in ('guard', 'audit', 'publication'):
+        if scope not in ('guard', 'audit', 'publication', 'capacity'):
             raise ValueError('invalid ghost suspension scope')
         if self.stop_reason or scope in self.suspensions:
             return
@@ -347,6 +366,8 @@ class GhostRuntime:
                 or self._dirty or self.late_events or self._campaign_dirty
                 or self._publishing is not None):
             return
+        if self.settings.continuous and not self.guard.get('capacity_ok',False):
+            return
         for scope, status in self.suspensions.items():
             completed = dict(status, active=False, resumed_wall_ns=self.wall_ns(),
                              resumed_monotonic_ns=self.mono_ns())
@@ -367,6 +388,8 @@ class GhostRuntime:
         if feed not in ('spot', 'twap'):
             self.stop('invalid_gap_feed')
             return
+        if self.settings.continuous:
+            self.feed_health.note_gap(feed,reason,self.wall_ns()//NS_PER_MS)
         # Fence every older candidate immediately, including one waiting for
         # fsync. An already-started Redis attempt retains its real outcome/order.
         self._publication_epoch += 1
@@ -399,6 +422,8 @@ class GhostRuntime:
                 self.counters['receipt_order_faults'] += 1
                 return
         self._last_admitted_receipt = (received_wall_ns, received_mono_ns)
+        if self.settings.continuous:
+            self.feed_health.observe(event)
         # Observe targets at admission, even when the constituent queue overflows.
         if feed == 'twap':
             self.observe_target(event)
@@ -544,19 +569,39 @@ class GhostRuntime:
             measurement = await asyncio.wait_for(self.store.measure(), timeout=2)
             if measurement.get('tablespaces', ['pg_default']) != ['pg_default']:
                 raise ValueError('ghost audit needs verified default tablespace placement')
-            measurement['row_count'] = max(measurement.get('row_count') or 0,
-                                           self.initial_rows + self._decisions)
+            continuous = self.settings.continuous
+            if continuous:
+                if type(measurement.get('row_count')) is not int:
+                    raise ValueError('continuous guard requires measured retained row count')
+            else:
+                measurement['row_count'] = max(measurement.get('row_count') or 0,
+                                               self.initial_rows + self._decisions)
             free = await asyncio.to_thread(self.disk_free)
             sample = dict(measurement, free_bytes=free, monotonic_ns=self.mono_ns())
-            if measurement['relation_bytes'] >= WARN_BYTES and self.mono_ns() - self._last_warning_ns >= 60 * NS_PER_SECOND:
+            warn = CONTINUOUS_WARN_BYTES if continuous else WARN_BYTES
+            stop = CONTINUOUS_STOP_BYTES if continuous else STOP_BYTES
+            rows = CONTINUOUS_MAX_ROWS if continuous else MAX_ROWS
+            if measurement['relation_bytes'] >= warn and self.mono_ns() - self._last_warning_ns >= 60 * NS_PER_SECOND:
                 LOGGER.warning('ghost_audit_relation_warning', extra={'bytes': measurement['relation_bytes']})
                 self._last_warning_ns = self.mono_ns()
-            if measurement['relation_bytes'] >= STOP_BYTES:
-                self.stop('audit_size_cap')
-            if measurement['row_count'] >= MAX_ROWS:
-                self.stop('audit_row_cap')
+            reasons = []
+            if measurement['relation_bytes'] >= stop:
+                reasons.append('audit_size_cap')
+            if measurement['row_count'] + (len(self.records) if continuous else 0) >= rows:
+                reasons.append('audit_row_cap')
             if free < RESERVE_BYTES:
-                self.stop('database_disk_reserve')
+                reasons.append('database_disk_reserve')
+            budget = CONTINUOUS_BUDGET_BYTES if continuous else BUDGET_BYTES
+            reserve = self.settings.audit_max_records * self.settings.record_max_bytes * 4
+            if measurement['relation_bytes'] + reserve >= budget:
+                reasons.append('audit_byte_reserve')
+            sample['capacity_ok'] = not reasons
+            sample['capacity_reasons'] = reasons
+            for reason in reasons:
+                if continuous:
+                    self.suspend('capacity', reason)
+                else:
+                    self.stop(reason)
             self.guard = sample
             self._resume_if_caught_up()
         except Exception as exc:
@@ -576,7 +621,7 @@ class GhostRuntime:
         if (self._campaign_saved_mono is None
                 or mono - self._campaign_saved_mono >= CAMPAIGN_CHECKPOINT_SECONDS * NS_PER_SECOND):
             self._campaign_dirty = True
-        if now >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono:
+        if not self.settings.continuous and (now >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono):
             self.stop('canary_deadline')
         if self.stop_reason:
             return False
@@ -585,12 +630,21 @@ class GhostRuntime:
             return False
         if self.suspensions:
             return False
-        if max(self.guard['row_count'], self.initial_rows + self._decisions) >= MAX_ROWS:
-            self.stop('audit_row_reserve')
+        rows = (self.guard['row_count'] + len(self.records) if self.settings.continuous
+                else max(self.guard['row_count'], self.initial_rows + self._decisions))
+        if rows >= (CONTINUOUS_MAX_ROWS if self.settings.continuous else MAX_ROWS):
+            if self.settings.continuous:
+                self.suspend('capacity', 'audit_row_reserve')
+            else:
+                self.stop('audit_row_reserve')
             return False
         # Full bounded serialized records plus extra update allowance stay under budget.
-        if self.guard['relation_bytes'] + self.settings.audit_max_records * self.settings.record_max_bytes * 4 >= BUDGET_BYTES:
-            self.stop('audit_byte_reserve')
+        budget = CONTINUOUS_BUDGET_BYTES if self.settings.continuous else BUDGET_BYTES
+        if self.guard['relation_bytes'] + self.settings.audit_max_records * self.settings.record_max_bytes * 4 >= budget:
+            if self.settings.continuous:
+                self.suspend('capacity', 'audit_byte_reserve')
+            else:
+                self.stop('audit_byte_reserve')
             return False
         if len(self.records) >= self.settings.audit_max_records:
             self.counters['audit_admission_pauses'] += 1
@@ -618,7 +672,8 @@ class GhostRuntime:
         self._admission_times.append(mono)
         frozen = json.loads(decision.to_audit_json())
         frozen['runtime_policy'] = self.settings.model_dump(mode='json')
-        frozen['runtime_version'] = RUNTIME_VERSION
+        frozen['runtime_version'] = self.runtime_version
+        frozen['campaign_start_ms'] = self.campaign['start_ms']
         frozen['publication_eligibility_policy'] = PUBLICATION_ELIGIBILITY_POLICY
         frozen['campaign_checkpoint_seconds'] = CAMPAIGN_CHECKPOINT_SECONDS
         frozen['runtime_suspension_history'] = dict(self.suspension_history)
@@ -702,7 +757,7 @@ class GhostRuntime:
         if self.guard is None or mono - self.guard['monotonic_ns'] > 3 * NS_PER_SECOND:
             self.suspend('guard', 'stale_guard')
             return False
-        if now // NS_PER_MS >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono:
+        if not self.settings.continuous and (now // NS_PER_MS >= self.settings.canary_start_ms + CANARY_MS or mono >= self._end_mono):
             self.stop('canary_deadline')
             return False
         return True
@@ -759,7 +814,7 @@ class GhostRuntime:
         live = json.loads(row.decision.to_live_json())
         for forecast, audit_forecast in zip(live['forecasts'], json.loads(row.frozen_json)['forecasts']):
             forecast['max_interior_carry_ms'] = audit_forecast['max_interior_carry_ms']
-        live.update(runtime_version=RUNTIME_VERSION, publication_sequence=int(row.decision.decision_id),
+        live.update(runtime_version=self.runtime_version, publication_sequence=int(row.decision.decision_id),
                     computation_completed_wall_ns=row.state['computation_completed_wall_ns'],
                     computation_completed_monotonic_ns=row.state['computation_completed_monotonic_ns'],
                     publication_intent_wall_ns=wall, publication_intent_monotonic_ns=mono,
@@ -942,6 +997,20 @@ class GhostRuntime:
             elapsed = asyncio.get_running_loop().time() - started
             await asyncio.sleep(max(0.05, 1 - elapsed))
 
+    def monitoring_health(self) -> dict:
+        """Bounded diagnostics for the independent maintenance/cache worker."""
+        wall, mono = self.wall_ns(), self.mono_ns()
+        return dict(run_id=self.run_id, mode='continuous' if self.settings.continuous else 'canary',
+                    runtime_version=self.runtime_version, stop_reason=self.stop_reason,
+                    suspensions=dict(self.suspensions), counters=dict(self.counters),
+                    guard=dict(self.guard) if self.guard is not None else None,
+                    pending_audit_records=len(self.records), pending_late_events=len(self.late_events),
+                    persistence_watermark_ms=min((row.decision.decision_wall_ns // NS_PER_MS
+                        for row in self.records.values()), default=wall // NS_PER_MS),
+                    horizon_recovery=dict(self.recovery),
+                    retention_days=7, summary_retention_days=90,
+                    feed_health=self.feed_health.snapshot(wall // NS_PER_MS, mono))
+
     async def close(self) -> None:
         if self._close_task is None:
             self._close_task = _retain_cleanup(self._close(), 'ghost-runtime-close')
@@ -956,6 +1025,11 @@ class GhostRuntime:
         self._wake.set()
         self._publish_wake.set()
         self._audit_wake.set()
+        if self.monitor is not None:
+            if not await self.monitor.close():
+                # Keep ownership of shared clients until maintenance and its
+                # CPU worker settle, even if the outer collector stops waiting.
+                await self.monitor.wait_closed()
         async def quiesce():
             await asyncio.gather(*self._tasks, return_exceptions=True)
         await _shutdown_stage(quiesce(), SHUTDOWN_QUIESCE_SECONDS, 'quiesce')
@@ -1056,13 +1130,23 @@ async def start_ghost_runtime(settings: Any) -> GhostRuntime | None:
         }
         if any(getattr(settings, name, None) != value for name, value in expected_spot.items()):
             raise ValueError('ghost requires canonical Chainlink BTC/USD spot identity')
-        pool = await asyncpg.create_pool(dsn=settings.DATABASE_URL, min_size=1, max_size=2,
+        pool = await asyncpg.create_pool(dsn=settings.DATABASE_URL, min_size=1,
+                                        max_size=4 if config.continuous else 2,
                                         command_timeout=2, timeout=5)
         client = redis_async.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT,
                                    db=settings.REDIS_DB, decode_responses=False,
                                    socket_connect_timeout=0.5, socket_timeout=0.5)
         spool = GhostSpool(config.state_directory, config.audit_max_records, config.record_max_bytes)
-        runtime = GhostRuntime(config, GhostAuditStore(pool), client, spool)
+        if config.continuous:
+            from price_collector.ghost_twap_retention import GhostRetentionStore
+            from price_collector.ghost_twap_monitor import GhostMonitor
+            store = GhostRetentionStore(pool)
+        else:
+            store = GhostAuditStore(pool)
+        runtime = GhostRuntime(config, store, client, spool)
+        if config.continuous:
+            runtime.monitor = GhostMonitor(store, client, runtime_health=runtime.monitoring_health,
+                active_identities=lambda: tuple((runtime.run_id, key) for key in runtime.records))
         await runtime.start()
     except BaseException:
         cleanup = _retain_cleanup(release_owned(runtime.close if runtime is not None else None),

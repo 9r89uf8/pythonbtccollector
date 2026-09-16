@@ -38,9 +38,12 @@ async def prepare():
             prefix = "ghost_checkpoint_b_validation_"
             if not name.startswith(prefix) or len(name) <= len(prefix):
                 raise RuntimeError("refusing non-disposable validation database")
-            await connection.execute("DROP TABLE IF EXISTS public.ghost_twap_audit CASCADE")
+            await connection.execute("DROP TABLE IF EXISTS public.ghost_twap_audit, "
+                "public.ghost_twap_compact, public.ghost_twap_accuracy_hourly, "
+                "public.ghost_twap_feed_health, public.ghost_twap_retention_state CASCADE")
             sql = (ROOT / "schema.sql").read_text(encoding="utf-8").split(
                 "CREATE TABLE IF NOT EXISTS providers", 1)[0]
+            sql += "\nCOMMIT;\n"
             await connection.execute(sql)
             now = await connection.fetchval("SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint")
         # Synthetic decisions are old enough to exercise real 96h expiry, while

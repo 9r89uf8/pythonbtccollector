@@ -29,6 +29,97 @@ Review receive ages as well as service status. An active socket or process
 does not establish fresh accepted events. Ports 9000, 5432 and 6379 must not
 listen on public interfaces. Current/live API checks must remain read-only.
 
+## Continuous ghost retention and accuracy
+
+This opt-in mode is implemented in the existing Chainlink service. It is disabled
+by default and does not change or reset the historical one-hour canaries below.
+Both `GHOST_TWAP_ENABLED=true` and `GHOST_TWAP_CONTINUOUS=true` are needed for
+continuous production. `GHOST_TWAP_CANARY_START_MS=0` remains valid and is ignored
+in this mode. Use `/var/lib/price-collector/ghost-continuous`, separate from every
+old canary directory. Its first-start clock is recorded automatically; subsequent
+restarts reuse that state and reconcile its outbox before new admission.
+
+After this change is pushed to GitHub, install it with the producer disabled.
+Apply the schema transaction before restarting either affected service:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+sudoedit /etc/price-collector/collector.env
+sudo systemctl restart price-collector-polymarket-chainlink price-api
+sudo systemctl status price-collector-polymarket-chainlink price-api --no-pager
+sudo journalctl -u price-collector-polymarket-chainlink -u price-api -n 100 --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/markets/current/live
+curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/accuracy
+```
+
+During installation keep `GHOST_TWAP_ENABLED=false` and
+`GHOST_TWAP_CONTINUOUS=false`. Add only the missing key to the existing collector
+environment; never replace the environment file with the example. Keep writer
+credentials out of `api.env`. The existing `GHOST_TWAP_API_ENABLED` flag governs
+the read-only accuracy route, and does not enable production. An absent or stale
+accuracy cache while continuous monitoring is off is an unavailable response,
+not a requirement to start forecasts.
+
+Before explicitly enabling continuous mode, review current database-filesystem
+free space and the other collectors' remaining relation budgets. Create the
+new state directory once with owner `pricecollector:pricecollector` and mode
+0700; refuse an unexpected existing directory instead of overwriting it. Then
+manually set both enable flags true and the continuous state path, preserving
+the 5,000 ms source-age and 3,000 ms receipt-age bounds. Restart only
+`price-collector-polymarket-chainlink` for that collector-only environment change.
+Never change paths or remove a stop marker to bypass a capacity or integrity
+guard. A restart reuses the original continuous state directory.
+
+The continuous limits are 6 GiB total allocated ghost relation budget, warning
+at 5 GiB, admission pause at 5.5 GiB, 1,500,000 retained decisions, and at least
+10 GiB free on the actual PostgreSQL filesystem. Table, index and TOAST allocation
+all count. This is shared-disk protection, not a guarantee that seven days always
+fit. Normal expiry/vacuum may leave allocated space reusable without shrinking
+the relation; do not infer free capacity from deleted row counts alone.
+
+The independent monitor compacts at most 100 eligible continuous decisions per
+maintenance cycle, about every five seconds. Terminal status and the 120-second
+matching window must both be complete. An atomic compact/hourly-summary commit
+precedes removal of verbose inputs; failed work is retried. Compact individual
+results expire after seven days, and hourly accuracy/feed-health summaries after
+90 days. These operations do not relax the legacy canary's verified-export rule.
+Do not expect full slot replay from compact hashes after verbose evidence expires.
+The monitor keeps running while new forecasts are paused for capacity. Disabling
+the entire worker stops its maintenance too; retained data remains bounded by
+admission guards, and maintenance resumes only when that worker is started again.
+
+Accuracy JSON refreshes once per minute with a 180-second Redis TTL. The API
+does one cached GET, with no historical query or aggregation. Inspect its
+`worker_health`, `runtime_health`, per-group `monitor` states and explicit panel
+denominators rather than treating a cached 200 response as fresh feed evidence:
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 TTL btc:live:ghost_chainlink_twap_60s:accuracy
+curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/accuracy
+sudo journalctl -u price-collector-polymarket-chainlink -n 100 --no-pager
+df -h /var/lib/postgresql
+```
+
+Completed panels use 1-hour, 24-hour and 7-day windows, with persistence/matching
+watermarks. Frozen per-policy baselines use the first available qualifying three
+full UTC days in the bounded snapshot, with
+at least 3,000 scored pairs and adequate publication/scoring coverage. Current
+comparisons require 24 qualifying hours and at least 1,000 pairs after the
+baseline. Deterioration requires MAE above 125% of baseline and paired excess
+above baseline plus 0.01 bp for three consecutive hourly checks; recovery requires
+MAE at most 110% or excess at most baseline plus 0.005 bp for three checks.
+Conflicts and inadequate coverage block accuracy classification; missing targets
+remain explicit counts rather than fabricated pairs.
+These are explicit engineering thresholds. Baselines and warning counters survive
+restarts. Receipt-gap durations belong to the hour containing their ending
+receipt; incomplete coverage and dropped health hours remain visible. Feed-health
+summaries describe accepted observations, not all upstream messages or browser
+delivery. No monitor failure may stop the official Chainlink feeds.
+
 ## Ghost TWAP checkpoint B
 
 The optional worker stays inside `price-collector-polymarket-chainlink`. B adds
@@ -46,7 +137,7 @@ restarting the Chainlink service. Keep ghost disabled during this installation:
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-sudo -u postgres psql --single-transaction -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
 sudoedit /etc/price-collector/collector.env
 sudo systemctl restart price-collector-polymarket-chainlink
 sudo systemctl status price-collector-polymarket-chainlink --no-pager
@@ -404,8 +495,8 @@ leave retained rows; use the recovery checks above rather than assuming a
 disabled restart reconciles them. Verify the stopped worker, absent key, empty
 outbox, terminal audit and externally verified export. Never repoint an active
 process at another campaign to bypass a guard. Another run needs separate
-authorization; continuous forecast production still requires a reviewed
-capacity/retention policy. The reliability release has since fixed the shutdown
+authorization; continuous production uses the separate opt-in policy above.
+The reliability release has since fixed the shutdown
 budgets. The owner-authorized [one-hour reliability canary](GHOST_TWAP_RELIABILITY_CANARY.md)
 stops at the one-hour deadline with a pending tail, using the versioned
 `price_collector.ghost_twap_canary_stop` operator command. Its launch record

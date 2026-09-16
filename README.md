@@ -907,6 +907,14 @@ The producer is disabled again; the Redis-only API remains enabled at deployment
 `5bc676c`. The [C findings](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
 record browser delivery, limitations and the audit/export status.
 
+Continuous retention and monitoring are now implemented as a separate, disabled
+mode. `GHOST_TWAP_ENABLED=true` together with `GHOST_TWAP_CONTINUOUS=true` selects
+it; `GHOST_TWAP_CANARY_START_MS` is ignored in this mode. Use a separate
+`/var/lib/price-collector/ghost-continuous` state directory: its original start,
+stop state and durable outbox survive restarts. These code changes do not enable
+the deployed producer or reset any earlier canary. See the
+[continuous operating procedure](OPERATIONS.md#continuous-ghost-retention-and-accuracy).
+
 The historical [combined results](GHOST_TWAP_COMBINED_CANARY_RESULTS.md) show post-warm-up sampled
 key coverage of 99.632%, five-second forecast usability of 98.003%, and 314
 partial batches retained by the new publication rule. Median publication latency
@@ -963,19 +971,46 @@ recovery pass resolved that tail while preserving frozen inputs and observed
 target/publication evidence. The producer remained disabled. The
 [reliability checkpoint](GHOST_TWAP_RELIABILITY_CHECKPOINT.md) fixes the nested
 shutdown budgets and distinguishes completed drainage from retained evidence.
-Continuous production still requires a reviewed capacity/retention policy; a
-successful service restart alone is not evidence of a drained outbox.
+A successful service restart alone is not evidence of a drained outbox.
 The [archive foundation](GHOST_TWAP_STORAGE_CHECKPOINT.md) supports bounded
 terminal-row batches and full external readback before exact-version
-acknowledgement. No archive service or automatic expiry is enabled yet.
+acknowledgement. No archive service is enabled. The new continuous retention
+path is separate from the legacy external-export prerequisite.
 The owner's [new retention and monitoring direction](GHOST_TWAP_RETENTION_MONITORING_PLAN.md)
 is seven days of individual forecasts with ongoing accuracy summaries; external
 archiving is optional for that design. The
 [compact-storage experiment](results/spot_twap_response/2026-09-16-compact-storage/FINDINGS.md)
 passed its integrity and reuse checks, but its two layouts project to 4.38 and
-5.52 GiB/week at the observed rate. Neither fits the current shared budget with
-a useful margin. A leaner measured format or reviewed capacity policy is needed
-before implementing and enabling continuous retention and monitoring.
+5.52 GiB/week at the observed rate. Neither fits the old 2 GiB canary budget.
+The new continuous policy budgets 6 GiB across ghost tables, indexes and TOAST,
+warns at 5 GiB, pauses new forecasts at 5.5 GiB or 1,500,000 retained decisions,
+and preserves a 10 GiB database-filesystem reserve. These bounds do not reserve
+shared disk exclusively for ghost or guarantee seven days at every event rate.
+
+After a continuous decision is terminal and its 120-second matching window has
+elapsed, bounded maintenance commits its compact record and hourly contribution
+atomically before retiring the verbose audit. Compact records retain exact
+Decimal forecast/target prices, original evidence hashes and result/timing
+status for seven days; hourly accuracy and accepted-feed health remain for 90
+days. Full slot arithmetic cannot be replayed after verbose inputs are retired.
+Maintenance leaves historical canary rows under their original export rules.
+Its worker runs independently every five seconds in batches of at most 100,
+including while forecast admission is paused on storage. Failures defer work and
+surface as unavailable health; they do not interrupt the official feeds.
+
+`GET /forecasts/chainlink-twap/accuracy` reads only the cached accuracy JSON at
+`btc:live:ghost_chainlink_twap_60s:accuracy`. The monitor refreshes this key every
+minute with a 180-second TTL; the endpoint never queries PostgreSQL or computes
+metrics. Completed 1-hour, 24-hour and 7-day panels retain explicit issued,
+published, early, missing and conflicted denominators. Confirmed Redis lead is
+not browser receipt lead. Each calculation/policy/horizon/cohort group establishes
+a persisted, frozen baseline from the first available qualifying three full UTC
+days in the bounded monitoring snapshot. After a long outage this is not a claim
+about the earliest qualifying window in all history.
+The status stays `collecting_baseline` until coverage qualifies. Three hourly
+checks are required for deterioration or recovery; the declared thresholds are
+engineering alerts, not statistical significance claims. Separate `worker_health`
+and runtime/store health expose maintenance, persistence and cache failures.
 
 The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
 adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after

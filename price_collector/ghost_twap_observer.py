@@ -22,7 +22,7 @@ import time
 VERSION = 'ghost-observer-v1'
 # The observation-file schema is unchanged. Keep historical v1 reanalysis
 # stable while accepting only explicitly reviewed payload contracts.
-PAYLOAD_CONTRACTS = {('ghost-canary-v5', 3), ('ghost-canary-v6', 4)}
+PAYLOAD_CONTRACTS = {('ghost-canary-v5', 3), ('ghost-canary-v6', 4), ('ghost-continuous-v1', 4)}
 KEY = 'btc:live:ghost_chainlink_twap_60s'
 HORIZONS = (1, 2, 3, 5, 10, 30)
 CANARY_MS = 3_600_000

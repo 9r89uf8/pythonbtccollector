@@ -419,9 +419,9 @@ def test_missing_status_and_first_late_evidence_stay_fixed_but_lead_can_be_inval
                         validate_record(record(terminal=True, state=changed, version=1)))
 
 
-def test_ghost_schema_is_single_table_with_hash_and_expiry_protection():
+def test_ghost_schema_preserves_audit_and_adds_bounded_retention_tables():
     sql = Path("schema.sql").read_text(encoding="utf-8").split("CREATE TABLE IF NOT EXISTS providers", 1)[0]
-    assert sql.count("CREATE TABLE IF NOT EXISTS") == 1
+    assert sql.count("CREATE TABLE IF NOT EXISTS") == 5
     assert "PRIMARY KEY (run_id, decision_id)" in sql
     assert "sha256(convert_to(NEW.frozen_json, 'UTF8'))" in sql
     assert "BEFORE INSERT OR UPDATE OR DELETE" in sql

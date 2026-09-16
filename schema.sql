@@ -1,4 +1,4 @@
-
+BEGIN;
 -- Optional ghost forecasts: one complete immutable decision, versioned outcomes.
 -- JSON is exact text (Decimal prices are strings); hashes cover the exported bytes.
 CREATE TABLE IF NOT EXISTS ghost_twap_audit (
@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS ghost_twap_audit_targets_idx
     ON ghost_twap_audit USING GIN (target_source_timestamps_ms) WHERE terminal;
 
 CREATE OR REPLACE FUNCTION ghost_twap_audit_guard() RETURNS trigger
-LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE
     target_key TEXT;
     old_target JSONB;
@@ -63,6 +63,16 @@ DECLARE
     evidence_field TEXT;
 BEGIN
     IF TG_OP = 'DELETE' THEN
+        -- Continuous compaction is a distinct atomic path. Legacy evidence still
+        -- requires its original external-export attestation and 96-hour age.
+        IF OLD.terminal AND OLD.frozen_json::jsonb #> '{runtime_policy,continuous}' = 'true'::jsonb
+           AND EXISTS (SELECT 1 FROM public.ghost_twap_compact c
+             WHERE c.run_id=OLD.run_id AND c.decision_id=OLD.decision_id
+               AND c.version=OLD.version AND c.frozen_sha256=OLD.frozen_sha256
+               AND c.state_sha256=OLD.state_sha256 AND c.summary_revision=c.compact_revision)
+        THEN
+            RETURN OLD;
+        END IF;
         IF NOT OLD.terminal OR OLD.verified_version IS NULL
            OR OLD.verified_version <> OLD.version
            OR OLD.verified_frozen_sha256 IS DISTINCT FROM OLD.frozen_sha256
@@ -183,6 +193,433 @@ CREATE TRIGGER ghost_twap_audit_guard_trigger
     BEFORE INSERT OR UPDATE OR DELETE ON ghost_twap_audit
     FOR EACH ROW EXECUTE FUNCTION ghost_twap_audit_guard();
 
+-- Continuous ghost retention. These tables are runtime storage, not the
+-- similarly named disposable research experiment. Original canaries stay in
+-- ghost_twap_audit and never enter this automatic compact/summary path.
+CREATE TABLE IF NOT EXISTS ghost_twap_compact (
+    run_id TEXT COLLATE "C" NOT NULL CHECK (length(run_id) BETWEEN 1 AND 128),
+    decision_id TEXT COLLATE "C" NOT NULL CHECK (length(decision_id) BETWEEN 1 AND 128),
+    decision_wall_ns BIGINT NOT NULL CHECK (decision_wall_ns>=0),
+    created_ms BIGINT NOT NULL CHECK (created_ms=decision_wall_ns/1000000),
+    version BIGINT NOT NULL CHECK (version>=0),
+    frozen_sha256 TEXT NOT NULL CHECK (frozen_sha256 ~ '^[0-9a-f]{64}$'),
+    state_sha256 TEXT NOT NULL CHECK (state_sha256 ~ '^[0-9a-f]{64}$'),
+    target_source_timestamps_ms BIGINT[] NOT NULL CHECK (cardinality(target_source_timestamps_ms)<=6),
+    hour_start_ms BIGINT NOT NULL CHECK (hour_start_ms=(created_ms/3600000)*3600000),
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb)='object' AND octet_length(body_json)<=131072),
+    body_sha256 TEXT NOT NULL CHECK (body_sha256 ~ '^[0-9a-f]{64}$'),
+    compact_revision BIGINT NOT NULL DEFAULT 0 CHECK (compact_revision>=0),
+    summary_revision BIGINT NOT NULL CHECK (summary_revision=compact_revision),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(run_id,decision_id)
+);
+CREATE INDEX IF NOT EXISTS ghost_twap_compact_age_idx ON ghost_twap_compact(created_ms,run_id,decision_id);
+CREATE INDEX IF NOT EXISTS ghost_twap_compact_targets_idx ON ghost_twap_compact USING GIN(target_source_timestamps_ms);
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_created_idx ON ghost_twap_audit(created_ms);
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_continuous_idx ON ghost_twap_audit(created_ms,run_id,decision_id)
+    WHERE terminal AND (frozen_json::jsonb #> '{runtime_policy,continuous}')='true'::jsonb;
+
+CREATE TABLE IF NOT EXISTS ghost_twap_accuracy_hourly (
+    hour_start_ms BIGINT PRIMARY KEY CHECK (hour_start_ms>=0 AND hour_start_ms%3600000=0),
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb)='object' AND octet_length(body_json)<=2097152),
+    body_sha256 TEXT NOT NULL CHECK (body_sha256 ~ '^[0-9a-f]{64}$'),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TABLE IF NOT EXISTS ghost_twap_feed_health (
+    run_id TEXT COLLATE "C" NOT NULL CHECK (length(run_id) BETWEEN 1 AND 128),
+    hour_start_ms BIGINT NOT NULL CHECK (hour_start_ms>=0 AND hour_start_ms%3600000=0),
+    revision BIGINT NOT NULL CHECK (revision>=0),
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb)='object' AND octet_length(body_json)<=131072),
+    body_sha256 TEXT NOT NULL CHECK (body_sha256 ~ '^[0-9a-f]{64}$'),
+    PRIMARY KEY(run_id,hour_start_ms)
+);
+CREATE INDEX IF NOT EXISTS ghost_twap_feed_health_age_idx ON ghost_twap_feed_health(hour_start_ms,run_id);
+CREATE TABLE IF NOT EXISTS ghost_twap_retention_state (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    active_rows BIGINT NOT NULL CHECK (active_rows>=0),
+    incomplete_rows BIGINT NOT NULL CHECK (incomplete_rows>=0),
+    compact_rows BIGINT NOT NULL CHECK (compact_rows>=0),
+    hourly_rows BIGINT NOT NULL CHECK (hourly_rows>=0),
+    feed_rows BIGINT NOT NULL CHECK (feed_rows>=0),
+    expired_before_ms BIGINT NOT NULL DEFAULT 0 CHECK (expired_before_ms>=0),
+    expired_recoveries BIGINT NOT NULL DEFAULT 0 CHECK (expired_recoveries>=0),
+    baseline_json TEXT CHECK (baseline_json IS NULL OR (jsonb_typeof(baseline_json::jsonb)='object' AND octet_length(baseline_json)<=2097152)),
+    warning_json TEXT CHECK (warning_json IS NULL OR (jsonb_typeof(warning_json::jsonb)='object' AND octet_length(warning_json)<=2097152))
+);
+-- One migration-time seed, protected against concurrent audit writes. Later
+-- initialization/guards read exact transactional counters, never count history.
+LOCK TABLE ghost_twap_audit,ghost_twap_compact,ghost_twap_accuracy_hourly,ghost_twap_feed_health IN SHARE ROW EXCLUSIVE MODE;
+INSERT INTO ghost_twap_retention_state(singleton,active_rows,incomplete_rows,compact_rows,hourly_rows,feed_rows)
+    SELECT true,(SELECT count(*) FROM ghost_twap_audit),(SELECT count(*) FROM ghost_twap_audit WHERE NOT terminal),
+      (SELECT count(*) FROM ghost_twap_compact),(SELECT count(*) FROM ghost_twap_accuracy_hourly),(SELECT count(*) FROM ghost_twap_feed_health)
+    WHERE NOT EXISTS(SELECT 1 FROM ghost_twap_retention_state WHERE singleton)
+    ON CONFLICT(singleton) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION ghost_twap_retention_count() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE delta BIGINT; pending_delta BIGINT;
+BEGIN
+    delta := CASE WHEN TG_OP='INSERT' THEN 1 WHEN TG_OP='DELETE' THEN -1 ELSE 0 END;
+    IF TG_TABLE_NAME='ghost_twap_audit' THEN
+        pending_delta := CASE WHEN TG_OP='INSERT' THEN CASE WHEN NEW.terminal THEN 0 ELSE 1 END
+          WHEN TG_OP='DELETE' THEN CASE WHEN OLD.terminal THEN 0 ELSE -1 END
+          ELSE CASE WHEN NEW.terminal=OLD.terminal THEN 0 WHEN NEW.terminal THEN -1 ELSE 1 END END;
+        IF delta<>0 OR pending_delta<>0 THEN
+            UPDATE public.ghost_twap_retention_state SET active_rows=active_rows+delta,incomplete_rows=incomplete_rows+pending_delta WHERE singleton;
+        END IF;
+    ELSIF TG_TABLE_NAME='ghost_twap_compact' THEN
+        UPDATE public.ghost_twap_retention_state SET compact_rows=compact_rows+delta WHERE singleton;
+    ELSIF TG_TABLE_NAME='ghost_twap_accuracy_hourly' THEN
+        UPDATE public.ghost_twap_retention_state SET hourly_rows=hourly_rows+delta WHERE singleton;
+    ELSIF TG_TABLE_NAME='ghost_twap_feed_health' THEN
+        UPDATE public.ghost_twap_retention_state SET feed_rows=feed_rows+delta WHERE singleton;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS ghost_twap_retention_count_trigger ON ghost_twap_audit;
+CREATE TRIGGER ghost_twap_retention_count_trigger AFTER INSERT OR DELETE OR UPDATE OF terminal ON ghost_twap_audit
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_retention_count();
+DROP TRIGGER IF EXISTS ghost_twap_retention_count_trigger ON ghost_twap_compact;
+CREATE TRIGGER ghost_twap_retention_count_trigger AFTER INSERT OR DELETE ON ghost_twap_compact
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_retention_count();
+DROP TRIGGER IF EXISTS ghost_twap_retention_count_trigger ON ghost_twap_accuracy_hourly;
+CREATE TRIGGER ghost_twap_retention_count_trigger AFTER INSERT OR DELETE ON ghost_twap_accuracy_hourly
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_retention_count();
+DROP TRIGGER IF EXISTS ghost_twap_retention_count_trigger ON ghost_twap_feed_health;
+CREATE TRIGGER ghost_twap_retention_count_trigger AFTER INSERT OR DELETE ON ghost_twap_feed_health
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_retention_count();
+
+CREATE OR REPLACE FUNCTION ghost_twap_retention_insert_guard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE floor_ms BIGINT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.run_id||chr(31)||NEW.decision_id,917));
+    IF EXISTS(SELECT 1 FROM public.ghost_twap_compact WHERE run_id=NEW.run_id AND decision_id=NEW.decision_id) THEN
+        RAISE EXCEPTION 'compacted ghost identity cannot be reinserted';
+    END IF;
+    IF NEW.frozen_json::jsonb #> '{runtime_policy,continuous}' = 'true'::jsonb THEN
+        SELECT greatest(expired_before_ms,(extract(epoch FROM clock_timestamp())*1000)::bigint-604800000)
+            INTO STRICT floor_ms FROM public.ghost_twap_retention_state WHERE singleton;
+        IF NEW.created_ms<>NEW.decision_wall_ns/1000000 OR NEW.created_ms<=floor_ms THEN
+            RAISE EXCEPTION 'expired or inconsistent continuous ghost decision cannot be inserted';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS ghost_twap_retention_insert_trigger ON ghost_twap_audit;
+CREATE TRIGGER ghost_twap_retention_insert_trigger BEFORE INSERT ON ghost_twap_audit
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_retention_insert_guard();
+
+CREATE OR REPLACE FUNCTION ghost_twap_compact_delete_guard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+    IF OLD.created_ms>(extract(epoch FROM clock_timestamp())*1000)::bigint-604800000
+       OR OLD.summary_revision<>OLD.compact_revision
+       OR NOT EXISTS(SELECT 1 FROM public.ghost_twap_accuracy_hourly WHERE hour_start_ms=OLD.hour_start_ms) THEN
+        RAISE EXCEPTION 'compact deletion requires seven-day age and committed summary';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+DROP TRIGGER IF EXISTS ghost_twap_compact_delete_trigger ON ghost_twap_compact;
+CREATE TRIGGER ghost_twap_compact_delete_trigger BEFORE DELETE ON ghost_twap_compact
+    FOR EACH ROW EXECUTE FUNCTION ghost_twap_compact_delete_guard();
+
+-- These functions are the writer's only access to retained compact/summary
+-- mutations. Python verifies arithmetic; SQL binds that pair to the exact
+-- locked active version and makes deletion inseparable from both writes.
+CREATE OR REPLACE FUNCTION ghost_twap_compact_event(e JSONB) RETURNS JSONB
+LANGUAGE sql IMMUTABLE SET search_path=pg_catalog,public AS $$
+    SELECT CASE WHEN e IS NULL OR e='null'::jsonb THEN 'null'::jsonb ELSE jsonb_build_object(
+      'value',(e->>'value')::numeric(38,18)::text,
+      'source_timestamp_ms',(e->>'source_timestamp_ms')::bigint,
+      'received_wall_ns',(e->>'received_wall_ns')::bigint,
+      'received_monotonic_ns',(e->>'received_monotonic_ns')::bigint,
+      'sequence',(e->>'sequence')::bigint,'event_id',e->'event_id','window_s',e->'window_s') END;
+$$;
+CREATE OR REPLACE FUNCTION ghost_twap_compact_expected(f JSONB,s JSONB,p_version BIGINT,p_created BIGINT,p_frozen TEXT,p_state TEXT)
+RETURNS JSONB LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog,public AS $$
+DECLARE pub JSONB; wire JSONB; selection JSONB; d JSONB; forecasts JSONB:='[]'::jsonb;
+    fc JSONB; target JSONB; h TEXT; attempted BOOLEAN; stage TEXT; clock_name TEXT;
+BEGIN
+    pub:=s->'publication'; wire:=(pub->>'payload_json')::jsonb; selection:=wire->'publication_eligibility';
+    attempted:=pub->>'attempt_monotonic_ns' IS NOT NULL;
+    d:=jsonb_build_object(
+      'run_id',f->'run_id','decision_id',f->'decision_id','created_ms',p_created,
+      'decision_wall_ns',(f->>'decision_wall_ns')::bigint,'decision_monotonic_ns',(f->>'decision_monotonic_ns')::bigint,
+      'record_version',p_version,'frozen_sha256',p_frozen,'state_sha256',p_state,
+      'attempted_payload_sha256',CASE WHEN attempted THEN encode(sha256(convert_to(pub->>'payload_json','UTF8')),'hex') ELSE NULL END,
+      'model_version',f->'model_version','runtime_version',f->'runtime_version','contract_version',f->'contract_version','policy',f->'policy',
+      'publication_eligibility_policy',f->'publication_eligibility_policy',
+      'campaign_start_ms',CASE WHEN f ? 'campaign_start_ms' THEN f->'campaign_start_ms' ELSE f #> '{runtime_policy,canary_start_ms}' END,
+      'current_spot',public.ghost_twap_compact_event(f->'current_spot'),'current_twap',public.ghost_twap_compact_event(f->'current_twap'),
+      'included_sequence',(f->>'included_sequence')::bigint,
+      'computation_completed_wall_ns',(s->>'computation_completed_wall_ns')::bigint,
+      'computation_completed_monotonic_ns',(s->>'computation_completed_monotonic_ns')::bigint,
+      'valid_until_wall_ns',(f->>'valid_until_wall_ns')::bigint,'publication_status',pub->'status',
+      'eligibility_checked_wall_ns',(selection->>'checked_wall_ns')::bigint,
+      'eligibility_checked_monotonic_ns',(selection->>'checked_monotonic_ns')::bigint,
+      'global_reasons',f->'reasons','causality_invalid',coalesce((s->>'causality_invalid')::boolean,false),
+      'shutdown',s->'shutdown','restart_reconciled',coalesce((s->>'restart_reconciled')::boolean,false),
+      'publication_restart_outcome',pub->'restart_outcome','gap_count',f->'gap_count',
+      'spot_reconnect_status',f #> '{spot_reconnect,status}','spot_reconnect_reason',f #> '{spot_reconnect,reason}');
+    FOREACH stage IN ARRAY ARRAY['intent','attempt','ack'] LOOP
+        FOREACH clock_name IN ARRAY ARRAY['wall_ns','monotonic_ns'] LOOP
+            d:=d||jsonb_build_object(stage||'_'||clock_name,(pub->>(stage||'_'||clock_name))::bigint);
+        END LOOP;
+    END LOOP;
+    FOR fc IN SELECT value FROM jsonb_array_elements(f->'forecasts') LOOP
+        h:=fc->>'horizon_s'; target:=s->'targets'->h;
+        forecasts:=forecasts||jsonb_build_array(jsonb_build_object(
+          'horizon_s',fc->'horizon_s','target_source_timestamp_ms',fc->'target_source_timestamp_ms',
+          'forecast_price',(fc->>'price')::numeric(38,18)::text,'quality',fc->'quality','counts',fc->'counts',
+          'max_interior_carry_ms',fc->'max_interior_carry_ms','reasons',fc->'reasons',
+          'attempted_eligible',attempted AND coalesce((selection->'eligible_horizons') @> jsonb_build_array(h::integer),false),
+          'exclusion_reasons',coalesce(selection->'excluded_horizons'->h,'[]'::jsonb),
+          'estimated_arrival_wall_ns',(fc->>'estimated_arrival_wall_ns')::bigint,
+          'estimated_remaining_ns',(fc->>'estimated_remaining_ns')::bigint,'target_status',target->'status',
+          'first_event',public.ghost_twap_compact_event(target->'first_event'),
+          'first_late_event',public.ghost_twap_compact_event(target->'first_late_event'),
+          'first_conflicting_event',public.ghost_twap_compact_event(target->'first_conflicting_event'),
+          'conflicted',target->'conflicted','clock_anomaly',coalesce((target->>'clock_anomaly')::boolean,false),
+          'late_missing',coalesce((target->>'late_missing')::boolean,false),
+          'error',(target->>'error')::numeric(38,18)::text,'persistence_error',(target->>'persistence_error')::numeric(38,18)::text,
+          'eta_error_ns',(target->>'eta_error_ns')::bigint,'confirmed_redis_lead_ns',(target->>'confirmed_redis_lead_ns')::bigint));
+    END LOOP;
+    RETURN jsonb_build_object('schema_version',1,'decision',d,'horizons',forecasts);
+END;
+$$;
+CREATE OR REPLACE FUNCTION ghost_twap_compact_commit(p_run TEXT,p_decision TEXT,p_version BIGINT,
+    p_frozen TEXT,p_state TEXT,p_body TEXT,p_summary TEXT,p_previous_summary TEXT) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE a public.ghost_twap_audit%ROWTYPE; b JSONB; s JSONB; h BIGINT; prior TEXT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_run||chr(31)||p_decision,917));
+    SELECT * INTO a FROM public.ghost_twap_audit WHERE run_id=p_run AND decision_id=p_decision FOR UPDATE;
+    IF NOT FOUND THEN RETURN false; END IF;
+    IF NOT a.terminal OR a.version<>p_version OR a.frozen_sha256<>p_frozen OR a.state_sha256<>p_state
+       OR (a.frozen_json::jsonb #> '{runtime_policy,continuous}') IS DISTINCT FROM 'true'::jsonb
+       OR a.decision_wall_ns>(extract(epoch FROM clock_timestamp())*1000000000)::bigint-120000000000 THEN
+        RETURN false;
+    END IF;
+    b:=p_body::jsonb; s:=p_summary::jsonb; h:=(a.created_ms/3600000)*3600000;
+    IF b-'compact_sha256' IS DISTINCT FROM public.ghost_twap_compact_expected(
+         a.frozen_json::jsonb,a.state_json::jsonb,a.version,a.created_ms,a.frozen_sha256,a.state_sha256) THEN
+        RAISE EXCEPTION 'compact evidence does not match frozen calculation and original outcomes';
+    END IF;
+    IF octet_length(p_body)>131072 OR octet_length(p_summary)>2097152
+       OR b #>> '{decision,run_id}' IS DISTINCT FROM p_run OR b #>> '{decision,decision_id}' IS DISTINCT FROM p_decision
+       OR (b #>> '{decision,record_version}')::bigint IS DISTINCT FROM p_version
+       OR b #>> '{decision,frozen_sha256}' IS DISTINCT FROM p_frozen OR b #>> '{decision,state_sha256}' IS DISTINCT FROM p_state
+       OR (b #>> '{decision,decision_wall_ns}')::bigint IS DISTINCT FROM a.decision_wall_ns
+       OR (b #>> '{decision,created_ms}')::bigint IS DISTINCT FROM a.created_ms
+       OR coalesce((b #>> '{decision,compact_revision}')::bigint,0)<>0
+       OR b->>'schema_version' IS DISTINCT FROM '1' OR jsonb_typeof(b->'horizons') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(b->'horizons') IS DISTINCT FROM 6
+       OR (b->>'compact_sha256' ~ '^[0-9a-f]{64}$') IS DISTINCT FROM true
+       OR (s->>'hour_start_ms')::bigint IS DISTINCT FROM h OR s->>'schema_version' IS DISTINCT FROM '1'
+       OR jsonb_typeof(s->'groups') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'invalid compact/summary lineage';
+    END IF;
+    PERFORM pg_advisory_xact_lock(-h-918);
+    SELECT body_sha256 INTO prior FROM public.ghost_twap_accuracy_hourly WHERE hour_start_ms=h FOR UPDATE;
+    IF prior IS DISTINCT FROM p_previous_summary THEN RETURN false; END IF;
+    INSERT INTO public.ghost_twap_accuracy_hourly(hour_start_ms,body_json,body_sha256)
+        VALUES(h,p_summary,encode(sha256(convert_to(p_summary,'UTF8')),'hex'))
+        ON CONFLICT(hour_start_ms) DO UPDATE SET body_json=excluded.body_json,body_sha256=excluded.body_sha256,updated_at=clock_timestamp();
+    INSERT INTO public.ghost_twap_compact(run_id,decision_id,decision_wall_ns,created_ms,version,frozen_sha256,state_sha256,
+        target_source_timestamps_ms,hour_start_ms,body_json,body_sha256,compact_revision,summary_revision)
+        VALUES(a.run_id,a.decision_id,a.decision_wall_ns,a.created_ms,a.version,a.frozen_sha256,a.state_sha256,
+          a.target_source_timestamps_ms,h,p_body,encode(sha256(convert_to(p_body,'UTF8')),'hex'),0,0);
+    DELETE FROM public.ghost_twap_audit WHERE run_id=a.run_id AND decision_id=a.decision_id;
+    RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ghost_twap_compact_annotate(p_run TEXT,p_decision TEXT,p_previous_body TEXT,
+    p_body TEXT,p_summary TEXT,p_previous_summary TEXT) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE a public.ghost_twap_compact%ROWTYPE; b JSONB; s JSONB; prior TEXT; revision BIGINT;
+    i INTEGER; old_h JSONB; new_h JSONB; field TEXT; event JSONB;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_run||chr(31)||p_decision,917));
+    SELECT * INTO a FROM public.ghost_twap_compact WHERE run_id=p_run AND decision_id=p_decision FOR UPDATE;
+    IF NOT FOUND OR a.body_sha256 IS DISTINCT FROM p_previous_body THEN RETURN false; END IF;
+    b:=p_body::jsonb; s:=p_summary::jsonb; revision:=(b #>> '{decision,compact_revision}')::bigint;
+    IF octet_length(p_body)>131072 OR octet_length(p_summary)>2097152
+       OR (b->'decision')-'compact_revision' IS DISTINCT FROM (a.body_json::jsonb->'decision')-'compact_revision'
+       OR revision IS DISTINCT FROM a.compact_revision+1
+       OR b->>'schema_version' IS DISTINCT FROM '1' OR jsonb_typeof(b->'horizons') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(b->'horizons') IS DISTINCT FROM 6
+       OR (b->>'compact_sha256' ~ '^[0-9a-f]{64}$') IS DISTINCT FROM true
+       OR (s->>'hour_start_ms')::bigint IS DISTINCT FROM a.hour_start_ms
+       OR s->>'schema_version' IS DISTINCT FROM '1' OR jsonb_typeof(s->'groups') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'invalid compact annotation lineage';
+    END IF;
+    FOR i IN 0..5 LOOP
+        old_h:=a.body_json::jsonb->'horizons'->i; new_h:=b->'horizons'->i;
+        IF old_h-ARRAY['first_late_event','first_conflicting_event','conflicted','late_missing','confirmed_redis_lead_ns']
+           IS DISTINCT FROM new_h-ARRAY['first_late_event','first_conflicting_event','conflicted','late_missing','confirmed_redis_lead_ns'] THEN
+            RAISE EXCEPTION 'compact first outcome/calculation is immutable';
+        END IF;
+        FOREACH field IN ARRAY ARRAY['first_late_event','first_conflicting_event'] LOOP
+            IF old_h->field IS DISTINCT FROM 'null'::jsonb AND old_h->field IS DISTINCT FROM new_h->field THEN
+                RAISE EXCEPTION 'compact first late/conflict event is immutable';
+            END IF;
+            IF old_h->field='null'::jsonb AND new_h->field IS DISTINCT FROM 'null'::jsonb THEN
+                event:=new_h->field;
+                IF jsonb_typeof(event) IS DISTINCT FROM 'object'
+                   OR event->'source_timestamp_ms' IS DISTINCT FROM new_h->'target_source_timestamp_ms'
+                   OR event->>'window_s' IS DISTINCT FROM '60'
+                   OR (event->>'source_timestamp_ms')::bigint*1000000>(event->>'received_wall_ns')::bigint
+                   OR NOT ((event->>'value')::numeric>0)
+                   OR (field='first_late_event' AND (new_h->>'target_status' NOT IN ('missing','restart_unmatched')
+                       OR new_h->'late_missing' IS DISTINCT FROM 'true'::jsonb))
+                   OR (field='first_conflicting_event' AND (new_h->>'target_status' IS DISTINCT FROM 'matched'
+                       OR new_h->'conflicted' IS DISTINCT FROM 'true'::jsonb
+                       OR (event->>'value')::numeric=(new_h #>> '{first_event,value}')::numeric)) THEN
+                    RAISE EXCEPTION 'invalid compact late/conflict annotation';
+                END IF;
+            END IF;
+        END LOOP;
+        FOREACH field IN ARRAY ARRAY['conflicted','late_missing'] LOOP
+            IF jsonb_typeof(new_h->field) IS DISTINCT FROM 'boolean'
+               OR (old_h->field='true'::jsonb AND new_h->field IS DISTINCT FROM 'true'::jsonb) THEN
+                RAISE EXCEPTION 'compact late/conflict flag cannot clear';
+            END IF;
+        END LOOP;
+        IF (new_h->'conflicted'='true'::jsonb AND old_h->'conflicted'='false'::jsonb
+               AND (new_h->'first_conflicting_event' IS NULL OR new_h->'first_conflicting_event'='null'::jsonb))
+           OR (new_h->'late_missing'='true'::jsonb AND old_h->'late_missing'='false'::jsonb
+               AND (new_h->'first_late_event' IS NULL OR new_h->'first_late_event'='null'::jsonb)) THEN
+            RAISE EXCEPTION 'compact flags require corresponding observed evidence';
+        END IF;
+        IF old_h->'confirmed_redis_lead_ns' IS DISTINCT FROM new_h->'confirmed_redis_lead_ns'
+           AND NOT (new_h->'confirmed_redis_lead_ns'='null'::jsonb AND new_h->'conflicted'='true'::jsonb) THEN
+            RAISE EXCEPTION 'compact confirmed lead cannot be invented';
+        END IF;
+    END LOOP;
+    PERFORM pg_advisory_xact_lock(-a.hour_start_ms-918);
+    SELECT body_sha256 INTO prior FROM public.ghost_twap_accuracy_hourly WHERE hour_start_ms=a.hour_start_ms FOR UPDATE;
+    IF prior IS NULL OR prior IS DISTINCT FROM p_previous_summary THEN RETURN false; END IF;
+    UPDATE public.ghost_twap_accuracy_hourly SET body_json=p_summary,body_sha256=encode(sha256(convert_to(p_summary,'UTF8')),'hex'),updated_at=clock_timestamp()
+        WHERE hour_start_ms=a.hour_start_ms;
+    UPDATE public.ghost_twap_compact SET body_json=p_body,body_sha256=encode(sha256(convert_to(p_body,'UTF8')),'hex'),
+        compact_revision=revision,summary_revision=revision,updated_at=clock_timestamp() WHERE run_id=p_run AND decision_id=p_decision;
+    RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ghost_twap_retention_expire(p_now_ms BIGINT,p_limit INTEGER)
+RETURNS TABLE(expired BIGINT,summary_expired BIGINT,feed_expired BIGINT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE n BIGINT;
+BEGIN
+    IF p_limit IS NULL OR p_limit<1 OR p_limit>100 OR p_now_ms IS NULL OR p_now_ms<0 THEN
+        RAISE EXCEPTION 'invalid retention bound';
+    END IF;
+    n:=least(p_now_ms,(extract(epoch FROM clock_timestamp())*1000)::bigint);
+    WITH candidates AS (SELECT run_id,decision_id FROM public.ghost_twap_compact WHERE created_ms<=n-604800000
+        ORDER BY created_ms,run_id,decision_id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+    DELETE FROM public.ghost_twap_compact a USING candidates c WHERE a.run_id=c.run_id AND a.decision_id=c.decision_id;
+    GET DIAGNOSTICS expired=ROW_COUNT;
+    WITH candidates AS (SELECT hour_start_ms FROM public.ghost_twap_accuracy_hourly h WHERE hour_start_ms+3600000<=n-7776000000
+        AND NOT EXISTS(SELECT 1 FROM public.ghost_twap_compact c WHERE c.hour_start_ms=h.hour_start_ms)
+        ORDER BY hour_start_ms LIMIT p_limit FOR UPDATE SKIP LOCKED)
+    DELETE FROM public.ghost_twap_accuracy_hourly h USING candidates c WHERE h.hour_start_ms=c.hour_start_ms;
+    GET DIAGNOSTICS summary_expired=ROW_COUNT;
+    WITH candidates AS (SELECT run_id,hour_start_ms FROM public.ghost_twap_feed_health WHERE hour_start_ms+3600000<=n-7776000000
+        ORDER BY hour_start_ms,run_id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+    DELETE FROM public.ghost_twap_feed_health h USING candidates c WHERE h.run_id=c.run_id AND h.hour_start_ms=c.hour_start_ms;
+    GET DIAGNOSTICS feed_expired=ROW_COUNT;
+    UPDATE public.ghost_twap_retention_state SET expired_before_ms=greatest(expired_before_ms,n-604800000) WHERE singleton;
+    RETURN NEXT;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ghost_twap_retention_expired_recovery() RETURNS VOID
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+    UPDATE public.ghost_twap_retention_state SET expired_recoveries=expired_recoveries+1 WHERE singleton;
+$$;
+CREATE OR REPLACE FUNCTION ghost_twap_retention_metadata(p_kind TEXT,p_body TEXT) RETURNS TEXT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE previous JSONB; incoming JSONB; pair RECORD; result TEXT;
+BEGIN
+    incoming:=p_body::jsonb;
+    IF octet_length(p_body)>2097152 OR incoming->>'schema_version' IS DISTINCT FROM '1'
+       OR jsonb_typeof(incoming->'groups') IS DISTINCT FROM 'object' OR p_kind NOT IN ('baseline','warning') THEN
+        RAISE EXCEPTION 'invalid retention metadata';
+    END IF;
+    SELECT CASE WHEN p_kind='baseline' THEN baseline_json ELSE warning_json END::jsonb INTO previous
+        FROM public.ghost_twap_retention_state WHERE singleton FOR UPDATE;
+    previous:=coalesce(previous,'{"schema_version":1,"groups":{}}'::jsonb);
+    FOR pair IN SELECT key,value FROM jsonb_each(incoming->'groups') LOOP
+        IF NOT (previous->'groups' ? pair.key) OR (p_kind='warning' AND
+           (pair.value->>'last_evaluated_end_ms')::bigint>(previous #>> ARRAY['groups',pair.key,'last_evaluated_end_ms'])::bigint) THEN
+            previous:=jsonb_set(previous,ARRAY['groups',pair.key],pair.value,true);
+        END IF;
+    END LOOP;
+    result:=previous::text;
+    IF octet_length(result)>2097152 THEN RAISE EXCEPTION 'retention metadata capacity exceeded'; END IF;
+    IF p_kind='baseline' THEN UPDATE public.ghost_twap_retention_state SET baseline_json=result WHERE singleton;
+    ELSE UPDATE public.ghost_twap_retention_state SET warning_json=result WHERE singleton; END IF;
+    RETURN result;
+END;
+$$;
+CREATE OR REPLACE FUNCTION ghost_twap_feed_health_commit(p_run TEXT,p_hour BIGINT,p_revision BIGINT,p_body TEXT) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE b JSONB; old_row public.ghost_twap_feed_health%ROWTYPE;
+BEGIN
+    b:=p_body::jsonb;
+    IF length(p_run) NOT BETWEEN 1 AND 128 OR p_hour<0 OR p_hour%3600000<>0 OR p_revision<0
+       OR octet_length(p_body)>131072 OR b->>'run_id' IS DISTINCT FROM p_run
+       OR (b->>'hour_start_ms')::bigint IS DISTINCT FROM p_hour OR (b->>'revision')::bigint IS DISTINCT FROM p_revision
+       OR jsonb_typeof(b->'complete') IS DISTINCT FROM 'boolean' OR jsonb_typeof(b->'feeds') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'invalid feed health snapshot';
+    END IF;
+    IF p_hour+3600000<=(extract(epoch FROM clock_timestamp())*1000)::bigint-7776000000 THEN RETURN; END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_run||chr(31)||p_hour::text,919));
+    SELECT * INTO old_row FROM public.ghost_twap_feed_health WHERE run_id=p_run AND hour_start_ms=p_hour FOR UPDATE;
+    IF FOUND THEN
+        IF p_revision<old_row.revision THEN RETURN; END IF;
+        IF p_revision=old_row.revision THEN
+            IF p_body::jsonb IS DISTINCT FROM old_row.body_json::jsonb THEN RAISE EXCEPTION 'same feed health revision changed'; END IF;
+            RETURN;
+        END IF;
+        IF old_row.body_json::jsonb->'complete'='true'::jsonb AND b->'complete'<>'true'::jsonb THEN
+            RAISE EXCEPTION 'complete feed health cannot regress';
+        END IF;
+    END IF;
+    INSERT INTO public.ghost_twap_feed_health(run_id,hour_start_ms,revision,body_json,body_sha256)
+        VALUES(p_run,p_hour,p_revision,p_body,encode(sha256(convert_to(p_body,'UTF8')),'hex'))
+        ON CONFLICT(run_id,hour_start_ms) DO UPDATE SET revision=excluded.revision,body_json=excluded.body_json,body_sha256=excluded.body_sha256;
+END;
+$$;
+
+-- Functions run as the migration owner with a locked path. No collector may
+-- mutate summaries/attestations or delete rows outside these bounded functions.
+ALTER TABLE public.ghost_twap_compact OWNER TO CURRENT_USER;
+ALTER TABLE public.ghost_twap_accuracy_hourly OWNER TO CURRENT_USER;
+ALTER TABLE public.ghost_twap_retention_state OWNER TO CURRENT_USER;
+ALTER TABLE public.ghost_twap_feed_health OWNER TO CURRENT_USER;
+REVOKE ALL ON public.ghost_twap_compact,public.ghost_twap_accuracy_hourly,
+    public.ghost_twap_retention_state,public.ghost_twap_feed_health FROM PUBLIC,price_writer,price_reader;
+GRANT SELECT ON public.ghost_twap_compact,public.ghost_twap_accuracy_hourly,
+    public.ghost_twap_retention_state,public.ghost_twap_feed_health TO price_writer,price_reader;
+REVOKE ALL ON FUNCTION ghost_twap_audit_guard(),ghost_twap_retention_count(),
+    ghost_twap_retention_insert_guard(),ghost_twap_compact_delete_guard(),
+    ghost_twap_compact_event(JSONB),ghost_twap_compact_expected(JSONB,JSONB,BIGINT,BIGINT,TEXT,TEXT),
+    ghost_twap_compact_commit(TEXT,TEXT,BIGINT,TEXT,TEXT,TEXT,TEXT,TEXT),
+    ghost_twap_compact_annotate(TEXT,TEXT,TEXT,TEXT,TEXT,TEXT),
+    ghost_twap_retention_expire(BIGINT,INTEGER),ghost_twap_retention_expired_recovery(),
+    ghost_twap_retention_metadata(TEXT,TEXT),ghost_twap_feed_health_commit(TEXT,BIGINT,BIGINT,TEXT)
+    FROM PUBLIC,price_reader,price_writer;
+GRANT EXECUTE ON FUNCTION ghost_twap_compact_commit(TEXT,TEXT,BIGINT,TEXT,TEXT,TEXT,TEXT,TEXT),
+    ghost_twap_compact_annotate(TEXT,TEXT,TEXT,TEXT,TEXT,TEXT),
+    ghost_twap_retention_expire(BIGINT,INTEGER),ghost_twap_retention_expired_recovery(),
+    ghost_twap_retention_metadata(TEXT,TEXT),ghost_twap_feed_health_commit(TEXT,BIGINT,BIGINT,TEXT) TO price_writer;
 CREATE TABLE IF NOT EXISTS providers (
     provider_id SMALLSERIAL PRIMARY KEY,
     provider_code TEXT NOT NULL UNIQUE,
@@ -1508,6 +1945,12 @@ GRANT INSERT (run_id, decision_id, decision_wall_ns, created_ms, frozen_json,
     target_source_timestamps_ms, state_json, version, terminal)
     ON public.ghost_twap_audit TO price_writer;
 GRANT UPDATE (state_json, version, terminal) ON public.ghost_twap_audit TO price_writer;
+-- Undo the broad ordinary-table grants above for the continuous retention
+-- tables. Only the guarded atomic SECURITY DEFINER functions may write them.
+REVOKE ALL ON public.ghost_twap_compact,public.ghost_twap_accuracy_hourly,
+    public.ghost_twap_retention_state,public.ghost_twap_feed_health FROM PUBLIC,price_writer,price_reader;
+GRANT SELECT ON public.ghost_twap_compact,public.ghost_twap_accuracy_hourly,
+    public.ghost_twap_retention_state,public.ghost_twap_feed_health TO price_writer,price_reader;
 -- End ghost audit privilege boundary.
 
 
@@ -1525,3 +1968,4 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO price_writer;
+COMMIT;

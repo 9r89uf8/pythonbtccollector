@@ -21,6 +21,7 @@ from price_collector.ghost_twap_payload import (
 from price_collector.ghost_twap_stream import GhostStreamClosed, GhostStreamHub, TooManyGhostClients
 
 GHOST_KEY = 'btc:live:ghost_chainlink_twap_60s'
+ACCURACY_KEY = 'btc:live:ghost_chainlink_twap_60s:accuracy'
 STREAM_PATH = '/forecasts/chainlink-twap/stream'
 HEADERS = {'Cache-Control': 'no-store, no-transform', 'X-Accel-Buffering': 'no'}
 router = APIRouter(prefix='/forecasts/chainlink-twap', tags=['ghost forecasts'])
@@ -87,6 +88,33 @@ class GhostApiService:
             raise GhostUnavailable('no_eligible_forecasts')
         return read
 
+    async def get_accuracy(self) -> tuple[bytes, int]:
+        """One cached read; no database, price arithmetic or aggregation."""
+        try:
+            raw = await asyncio.wait_for(self.reader.get(ACCURACY_KEY),
+                                        timeout=self.settings.read_timeout_ms / 1000)
+        except (RedisError, OSError, asyncio.TimeoutError) as exc:
+            raise GhostUnavailable('redis_unavailable') from exc
+        if raw is None:
+            raise GhostUnavailable('no_accuracy_summary')
+        try:
+            if not isinstance(raw, bytes) or len(raw) > 512 * 1024:
+                raise ValueError('accuracy byte budget')
+            body = json.loads(raw)
+            now = self.wall_ns() // 1_000_000
+            generated, attempted, expiry = (body[key] for key in
+                ('generated_at_ms', 'cache_publish_attempt_ms', 'valid_until_ms'))
+            if (type(body.get('schema_version')) is not int or body['schema_version'] != 1
+                    or any(type(value) is not int for value in (generated, attempted, expiry))
+                    or not 0 < generated <= attempted <= now < expiry
+                    or expiry - attempted != 180_000
+                    or now - generated > 180_000
+                    or body.get('status') not in ('available', 'unavailable')):
+                raise ValueError('accuracy metadata')
+        except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+            raise GhostUnavailable('invalid_or_expired_accuracy_summary') from exc
+        return raw, 200 if body['status'] == 'available' else 503
+
 
 def create_ghost_api_service(settings: Any, ghost_settings: GhostApiSettings) -> GhostApiService:
     connection = dict(host=settings.REDIS_HOST, port=settings.REDIS_PORT,
@@ -136,6 +164,18 @@ async def ghost_live(request: Request) -> Response:
         'X-Ghost-Decision-Id': str(read.payload.decision_id),
     })
     return Response(content=read.payload.raw, media_type='application/json', headers=headers)
+
+
+@router.get('/accuracy', response_class=Response)
+async def ghost_accuracy(request: Request) -> Response:
+    service = _service(request)
+    if service is None:
+        return _disabled_response(request)
+    try:
+        raw, status = await service.get_accuracy()
+    except GhostUnavailable as exc:
+        return unavailable(exc.reason)
+    return Response(content=raw, status_code=status, media_type='application/json', headers=HEADERS)
 
 
 def stream_frame(update: Any, *, skipped_updates: int, resync: bool,

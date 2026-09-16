@@ -33,13 +33,16 @@ async def prepare():
             name = await connection.fetchval("SELECT current_database()")
             if not name.startswith("ghost_checkpoint_b_validation_") or len(name) <= len("ghost_checkpoint_b_validation_"):
                 raise RuntimeError("refusing any database except the named disposable validation database")
-            await connection.execute("DROP TABLE IF EXISTS public.ghost_twap_audit CASCADE")
+            await connection.execute("DROP TABLE IF EXISTS public.ghost_twap_audit, "
+                "public.ghost_twap_compact, public.ghost_twap_accuracy_hourly, "
+                "public.ghost_twap_feed_health, public.ghost_twap_retention_state CASCADE")
             schema = SCHEMA.read_text(encoding="utf-8")
             sql = schema.split("CREATE TABLE IF NOT EXISTS providers", 1)[0]
             # Only this disposable table receives the real production ACL.
             # price_writer must already exist; never create/alter a cluster role.
             sql += schema.split("-- Ghost audit privilege boundary.", 1)[1].split(
                 "-- End ghost audit privilege boundary.", 1)[0]
+            sql += "\nCOMMIT;\n"
             await connection.execute(sql)
             await connection.execute(sql)  # Migration is repeatable on its own table.
         return pool
