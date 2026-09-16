@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from price_collector.collector import current_utc_epoch_ms
 from price_collector.config import Settings
+from price_collector.dashboard_api import fetch_dashboard_payload
 from price_collector.ghost_twap_api import (
     GhostApiDisabledReason, GhostApiSettings, GhostCompressionBypass, create_ghost_api_service,
     router as ghost_router,
@@ -643,6 +644,19 @@ async def markets_download_by_id(
         fill_display=fill_display,
         max_carry_forward_ms=max_carry_forward_ms,
     )
+
+
+@app.get("/markets/current/dashboard")
+async def markets_current_dashboard(request: Request) -> JSONResponse:
+    try:
+        payload = await fetch_dashboard_payload(get_pool(request), current_utc_epoch_ms())
+    except Exception:
+        logger.exception("dashboard_history_unavailable")
+        return JSONResponse(
+            {"state": "unavailable", "reason": "dashboard_history_unavailable"},
+            status_code=503, headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/markets/current/live")
