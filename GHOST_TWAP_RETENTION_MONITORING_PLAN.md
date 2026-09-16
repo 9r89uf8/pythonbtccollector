@@ -4,6 +4,8 @@ Owner direction recorded September 16, 2026 UTC: retain individual production
 forecasts for approximately seven days, then delete them, and monitor accuracy
 over time. External permanent archival is no longer a prerequisite for this
 production path. The archive foundation remains optional, tested code.
+The [peer-review verification](results/spot_twap_response/2026-09-16-retention-plan-review/REVIEW.md)
+records reproduced canary metrics and the changes incorporated below.
 
 This is the next implementation contract to refine and validate. It changes no
 running service, SQL deletion guard, one-hour producer deadline or stored data.
@@ -16,8 +18,13 @@ exports remain historical evidence; this plan concerns ongoing production data.
   Include all six horizons, exact Decimal forecast and official target prices,
   anchor price, source target stamp, decision/publication/target receipt clocks,
   exact attempted-payload eligibility, quality, assumed-slot/carry counts,
-  calculation/policy version, and missing/conflict status. Those fields support
+  calculation/policy version, and missing/conflict status. Retain the original
+  attempted-payload SHA-256, frozen/state hashes and record version as lineage,
+  plus a hash of the compact record itself. Hash the exact attempted bytes before
+  discarding them; a re-serialization is not a substitute. Those fields support
   re-scoring accuracy and confirmed lead throughout the retention window.
+  The original hashes allow comparison with independently saved browser/observer
+  bytes; they do not reconstruct deleted bytes or verify slot arithmetic alone.
 - Preserve small hourly/daily aggregates beyond individual-row expiry so gradual
   deterioration remains visible. Proposed bounded default: 90 days of summaries.
   This is a design default, not an enabled retention setting.
@@ -30,6 +37,8 @@ exports remain historical evidence; this plan concerns ongoing production data.
   completed. The new compact format will not retain a complete 60-slot debug
   snapshot per forecast for a week. Existing immutable audit rows are not stripped
   in place; migration and retirement of legacy rows require their own tested path.
+  Full slot-arithmetic replay ends when those verbose inputs are removed. The
+  compact rows continue to support accuracy and timing checks, not full replay.
 - Measure actual compact-row, index, update and maintenance costs before choosing
   a revised storage budget. The old format grew 90,710,016 allocated bytes in the
   latest canary hour. A simple seven-day extrapolation is 15,239,282,688 bytes
@@ -37,10 +46,27 @@ exports remain historical evidence; this plan concerns ongoing production data.
   These are illustrations from one hour, not a sustained capacity guarantee.
   Both exceed the current 1.5 GiB admission stop and 600,000-row cap. Merely
   changing an expiry constant to seven days cannot make continuous operation fit.
+  Four days of the same format would still imply about 8.11 GiB and 679,872 rows.
+  Compaction, measured allocation and guard changes are needed for either period;
+  seven days remains the owner's requested target. A peer's compact JSON size
+  and assumed overhead multiplier are estimates pending a reproducible encoder
+  and actual PostgreSQL insertion/update/expiry measurements. Do not assume typed
+  columns deliver a specific reduction until measured with indexes and TOAST.
+- Capacity is shared with other collectors. The canary preflight had 12.84 GiB
+  above the 10 GiB filesystem reserve, not space reserved exclusively for ghost.
+  Recheck current free space and other relations' remaining growth allowances;
+  their existing allocations are already included in filesystem usage. Budget
+  the measured steady-state allocated relation plus in-flight writes and safety
+  margin. Keep allocated-byte and actual free-disk guards: estimated live bytes
+  cannot replace checks for storage still allocated after deletion/vacuum.
 - Replace the external-export-only deletion requirement for the new production
   policy explicitly, with tests. Preserve safeguards against resurrecting expired
   rows from old outboxes and release row capacity without losing reservations for
   in-flight writes. Verify actual filesystem reserves and physical space reuse.
+  The legacy 96-hour minimum already equals four days; a four-day policy would
+  not require changing that age constant, although the export prerequisite and
+  other guards would change. Seven-day expiry requires an explicit seven-day
+  eligibility rule in both maintenance and the database protection.
 
 ## Continuous scoring
 
@@ -54,6 +80,19 @@ Keep a secondary all-valid-published-pairs panel so loss of early publication
 cannot silently remove difficult predictions from every accuracy view. Confirmed
 Redis lead remains server evidence, not a claim about browser arrival.
 
+The existing runtime matches targets in the half-open monotonic interval
+`[decision_time, decision_time + 120 seconds)`, independently of forecast horizon.
+Errors are calculated when valid targets arrive; normal terminalization occurs
+at decision +120 seconds. Aggregate committed terminal versions, and finalize an
+initial hourly summary only after every decision in the hour has crossed that
+deadline and the persistence watermark has caught up. This is at least hour-end
++120 seconds, plus scheduling/persistence lag, not a required +150 seconds.
+A +150-second schedule could be an explicit extra buffer, not a changed target
+matching rule. Shutdown/recovery tails remain separately censored. Later conflict
+or late-target annotations can revise terminal rows: apply idempotent corrections
+to summaries while source records remain within retention, and label summary
+revisions instead of treating initial terminalization as irreversible finality.
+
 Maintain rolling one-hour, 24-hour and seven-day views, separated by horizon and
 calculation/policy version. The compact daily/hourly summaries should expose:
 
@@ -65,6 +104,19 @@ calculation/policy version. The compact daily/hourly summaries should expose:
 | Confirmed publication lead and late-publication rate | Whether the forecast still precedes the actual report |
 | Issued/published/scored counts, target match rate, freshness and unavailable counts | Whether the accuracy cohort is losing difficult observations |
 | Source/receipt ages, pending/future slots, interior carry and known-input reconstruction error | Distinguish input stalls, ordinary forecast uncertainty and identity/alignment drift |
+
+Record per-feed accepted-event receipt gaps before compacting inputs: maximum
+monotonic inter-arrival gap, counts/durations over three and five seconds, observed
+source-stamp holes and late arrivals, reconnect/session boundaries, and unavailable
+decisions by reason. A stale-decision count alone cannot measure the duration of
+a feed pause. Source-stamp holes mean locally unobserved stamps over a declared
+interval; they do not establish that the provider never published those values.
+
+For one- and two-second horizons, separately measure read-time usefulness:
+whether an exact target was already observed by the cache/browser read, remained
+unreceived, or was unknown. Fresh payload TTL and positive publication lead do
+not establish remaining lead at read time. Keep all six accuracy panels, but make
+short-horizon usefulness claims only from the appropriate read-side evidence.
 
 The baseline must use the same target pairs as the ghost. If its absolute-error
 sum is zero, relative improvement is undefined, not an artificial success/failure.
@@ -88,6 +140,11 @@ coverage and sample counts, and sustained deterioration across complete windows,
 before flagging degraded accuracy. Freeze thresholds after baseline review and
 use a recovery threshold to avoid repeated alert toggling. Feed stalls, unknown
 targets and identity drift have separate status from ordinary forecast error.
+Use hourly panels diagnostically and a completed rolling 24-hour view against a
+frozen accepted baseline for slow accuracy deterioration, particularly at thirty
+seconds. Four quarter-hours from one canary cannot establish a universal hourly
+noise threshold or prove that 24 hours is sufficient; calibrate the warning's
+persistence, minimum coverage and recovery band over multiple days.
 
 Compute summaries off the feed and API request paths. Publish cached monitor
 status for a read-only health endpoint so the frontend does not trigger database
