@@ -153,12 +153,18 @@ class GhostMonitor:
             counts = {name: result[name] for name in ('compacted', 'expired', 'summary_expired')}
             if 'feed_expired' in result:
                 counts['feed_expired'] = result['feed_expired']
+            for name in ('failed','deferred','failed_rows_tracked','failure_tracking_evictions'):
+                counts[name] = result.get(name, 0)
             if any(type(value) is not int or value < 0 for value in counts.values()):
                 raise ValueError('Invalid maintenance counters')
             self._maintenance_result = counts
+            self._maintenance_result['failures'] = result.get('failures', [])[:10]
             self._last_maintenance_ms = self.wall_ns() // 1_000_000
             self._maintenance_runs += 1
-            self._success('maintenance')
+            if counts['failed_rows_tracked']:
+                self._failure('maintenance', ValueError('retained compaction failures'))
+            else:
+                self._success('maintenance')
         except asyncio.CancelledError:
             raise
         except Exception as exc:

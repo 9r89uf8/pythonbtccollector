@@ -308,29 +308,33 @@ def test_factory_cancellation_does_not_close_clients_before_runtime(monkeypatch,
         async def create_pool(**kwargs):
             return Pool()
         monkeypatch.setattr(module, 'GhostSettings', lambda: SimpleNamespace(
-            enabled=True, state_directory=tmp_path, audit_max_records=2, record_max_bytes=1024))
+            enabled=True, continuous=False, state_directory=tmp_path, audit_max_records=2, record_max_bytes=1024))
         monkeypatch.setattr(module, 'GhostRuntime', Runtime)
         monkeypatch.setattr(asyncpg, 'create_pool', create_pool)
         monkeypatch.setattr(redis_async, 'Redis', Redis)
         factory = asyncio.create_task(module.start_ghost_runtime(Settings()))
-        await started.wait()
-        if startup:
-            task = factory
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            if startup:
+                task = factory
+                task.cancel()
+            else:
+                value = await factory
+                task = asyncio.create_task(value.close())
+            await asyncio.wait_for(entered.wait(), timeout=1)
             task.cancel()
-        else:
-            value = await factory
-            task = asyncio.create_task(value.close())
-        await entered.wait()
-        task.cancel()
-        await asyncio.sleep(.01)
-        assert calls == []
-        release.set()
-        if startup:
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            await value.close()
-        assert calls == ['runtime', 'redis', 'pool']
+            await asyncio.sleep(.01)
+            assert calls == []
+            release.set()
+            if startup:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                await value.close()
+            assert calls == ['runtime', 'redis', 'pool']
+        finally:
+            # A failed phase assertion must not strand the owned cleanup task.
+            release.set()
     asyncio.run(scenario())

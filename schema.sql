@@ -218,6 +218,9 @@ CREATE INDEX IF NOT EXISTS ghost_twap_compact_targets_idx ON ghost_twap_compact 
 CREATE INDEX IF NOT EXISTS ghost_twap_audit_created_idx ON ghost_twap_audit(created_ms);
 CREATE INDEX IF NOT EXISTS ghost_twap_audit_continuous_idx ON ghost_twap_audit(created_ms,run_id,decision_id)
     WHERE terminal AND (frozen_json::jsonb #> '{runtime_policy,continuous}')='true'::jsonb;
+-- The watermark includes pending rows too. Its index must not require terminal.
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_continuous_watermark_idx ON ghost_twap_audit(created_ms)
+    WHERE (frozen_json::jsonb #> '{runtime_policy,continuous}')='true'::jsonb;
 
 CREATE TABLE IF NOT EXISTS ghost_twap_accuracy_hourly (
     hour_start_ms BIGINT PRIMARY KEY CHECK (hour_start_ms>=0 AND hour_start_ms%3600000=0),

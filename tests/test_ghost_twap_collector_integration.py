@@ -305,7 +305,7 @@ def test_ghost_factory_uses_existing_redis_fields_and_closes_only_owned_clients(
             calls.append(("pool", kwargs))
             return Pool()
         monkeypatch.setattr(runtime_module, "GhostSettings", lambda: SimpleNamespace(
-            enabled=True, state_directory=tmp_path, audit_max_records=2, record_max_bytes=1024))
+            enabled=True, continuous=False, state_directory=tmp_path, audit_max_records=2, record_max_bytes=1024))
         monkeypatch.setattr(runtime_module, "GhostSpool", lambda *args: object())
         monkeypatch.setattr(runtime_module, "GhostRuntime", Runtime)
         monkeypatch.setattr(asyncpg, "create_pool", create_pool)

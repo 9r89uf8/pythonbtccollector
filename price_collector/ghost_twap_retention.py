@@ -6,7 +6,11 @@ The legacy store/export contracts remain available on the inherited interface.
 """
 from __future__ import annotations
 
+import asyncio
+from collections import OrderedDict
 import json
+import logging
+import time
 from typing import Mapping
 
 from . import ghost_twap_accuracy as accuracy
@@ -25,6 +29,10 @@ DAY_MS = 86_400_000
 COMPACT_RETENTION_MS = 7 * DAY_MS
 SUMMARY_RETENTION_MS = 90 * DAY_MS
 FINALIZE_NS = 120_000_000_000
+COMPACTION_SECONDS = 3
+RETRY_SECONDS = 60
+MAX_FAILED_IDENTITIES = 128
+LOGGER = logging.getLogger(__name__)
 
 
 def _body(value: Mapping, maximum: int = 2 * 1024 * 1024) -> str:
@@ -52,6 +60,36 @@ async def _hour(connection, hour_start_ms: int) -> tuple:
 
 class GhostRetentionStore(GhostAuditStore):
     """Same audit store interface, with bounded continuous-only maintenance."""
+
+    def __init__(self, pool):
+        super().__init__(pool)
+        self._compact_after = (-1, '', '')
+        self._failed_compactions = OrderedDict()
+        self._failure_evictions = 0
+
+    async def _compact_one(self, identity: Mapping, now_ms: int) -> bool:
+        async with self._connection() as connection:
+            await _lock_identity(connection, identity['run_id'], identity['decision_id'])
+            row = await connection.fetchrow(f"SELECT {_SELECT} FROM {TABLE} "
+                "WHERE run_id=$1 AND decision_id=$2 FOR UPDATE", identity['run_id'], identity['decision_id'])
+            if row is None or not row['terminal'] or not _continuous(row):
+                return False
+            compact = accuracy.compact_record(dict(row), finalized_as_of_wall_ns=now_ms * 1_000_000)
+            delta = accuracy.contribution(compact)
+            previous, previous_hash = await _hour(connection, delta['hour_start_ms'])
+            combined = accuracy.merge(previous, delta)
+            accepted = await connection.fetchval("SELECT public.ghost_twap_compact_commit($1,$2,$3,$4,$5,$6,$7,$8)",
+                row['run_id'], row['decision_id'], row['version'], row['frozen_sha256'], row['state_sha256'],
+                _body(compact, 128 * 1024), _body(combined), previous_hash)
+            if not accepted:
+                raise GhostAuditConflict('compact/summary version changed during atomic commit')
+            return True
+
+    def compaction_health(self) -> dict:
+        failures = list(self._failed_compactions.values())
+        return dict(failed_rows_tracked=len(failures), failure_tracking_evictions=self._failure_evictions,
+                    failures=[{key:item[key] for key in ('run_id','decision_id','error_type','attempts')}
+                              for item in failures[:10]])
 
     async def initialize(self) -> dict:
         async with self._connection() as connection:
@@ -138,36 +176,57 @@ class GhostRetentionStore(GhostAuditStore):
         if not isinstance(exclude,(tuple,list)) or len(exclude)>MAX_ACTIVE_IDENTITIES:
             raise ValueError("active identity exclusion must contain at most 512 pairs")
         excluded = [_cursor(identity) for identity in exclude]
+        # Expiry must run even when an individual verbose row cannot compact.
+        async with self._connection() as connection:
+            expired = await connection.fetchrow("SELECT * FROM public.ghost_twap_retention_expire($1,$2)", now_ms, limit)
+        deferred = [key for key,value in self._failed_compactions.items()
+                    if value['retry_after'] > time.monotonic()]
         async with self._connection() as connection:
             # Candidate reads do not lock a batch across independent hour updates.
-            rows = await connection.fetch(f"SELECT run_id,decision_id FROM {TABLE} "
+            rows = await connection.fetch(f"SELECT created_ms,run_id,decision_id FROM {TABLE} "
                 "WHERE terminal AND (frozen_json::jsonb #> '{runtime_policy,continuous}')='true'::jsonb "
                 "AND decision_wall_ns <= ($1::bigint-120000)*1000000 "
                 "AND NOT EXISTS(SELECT 1 FROM unnest($3::text[],$4::text[]) e(r,d) "
                 f"WHERE e.r={TABLE}.run_id AND e.d={TABLE}.decision_id) "
+                "AND (created_ms,run_id,decision_id)>($5,$6,$7) "
+                "AND NOT EXISTS(SELECT 1 FROM unnest($8::text[],$9::text[]) e(r,d) "
+                f"WHERE e.r={TABLE}.run_id AND e.d={TABLE}.decision_id) "
                 "ORDER BY created_ms,run_id,decision_id LIMIT $2", now_ms, limit,
-                [x[0] for x in excluded],[x[1] for x in excluded])
-        compacted = 0
+                [x[0] for x in excluded],[x[1] for x in excluded],*self._compact_after,
+                [x[0] for x in deferred],[x[1] for x in deferred])
+        compacted = failed = examined = 0
+        deadline = time.monotonic() + COMPACTION_SECONDS
         for identity in rows:
-            async with self._connection() as connection:
-                await _lock_identity(connection, identity["run_id"], identity["decision_id"])
-                row = await connection.fetchrow(f"SELECT {_SELECT} FROM {TABLE} "
-                    "WHERE run_id=$1 AND decision_id=$2 FOR UPDATE", identity["run_id"], identity["decision_id"])
-                if row is None or not row["terminal"] or not _continuous(row):
-                    continue
-                compact = accuracy.compact_record(dict(row), finalized_as_of_wall_ns=now_ms * 1_000_000)
-                delta = accuracy.contribution(compact)
-                previous, previous_hash = await _hour(connection, delta["hour_start_ms"])
-                combined = accuracy.merge(previous, delta)
-                accepted = await connection.fetchval("SELECT public.ghost_twap_compact_commit($1,$2,$3,$4,$5,$6,$7,$8)",
-                    row["run_id"], row["decision_id"], row["version"], row["frozen_sha256"], row["state_sha256"],
-                    _body(compact, 128 * 1024), _body(combined), previous_hash)
-                if not accepted:
-                    raise GhostAuditConflict("compact/summary version changed during atomic commit")
-                compacted += 1
-        async with self._connection() as connection:
-            expired = await connection.fetchrow("SELECT * FROM public.ghost_twap_retention_expire($1,$2)", now_ms, limit)
-        return {"compacted": compacted, **dict(expired)}
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                break
+            self._compact_after = (identity['created_ms'],identity['run_id'],identity['decision_id'])
+            key = identity['run_id'],identity['decision_id']
+            examined += 1
+            try:
+                compacted += int(await asyncio.wait_for(self._compact_one(identity, now_ms), timeout=remaining))
+                self._failed_compactions.pop(key, None)
+            except Exception as exc:
+                # Connection, schema and cancellation/time-budget failures are
+                # global errors, not evidence that this particular row is bad.
+                code = getattr(exc, 'sqlstate', '') or ''
+                if not (isinstance(exc, (ValueError, KeyError, TypeError, ArithmeticError))
+                        or code == 'P0001' or code.startswith(('22','23'))):
+                    raise
+                old = self._failed_compactions.pop(key, {})
+                self._failed_compactions[key] = dict(run_id=key[0],decision_id=key[1],
+                    error_type=type(exc).__name__,attempts=old.get('attempts',0)+1,
+                    retry_after=time.monotonic()+RETRY_SECONDS)
+                if len(self._failed_compactions) > MAX_FAILED_IDENTITIES:
+                    self._failed_compactions.popitem(last=False)
+                    self._failure_evictions += 1
+                failed += 1
+                LOGGER.warning('ghost_compaction_row_deferred run_id=%s decision_id=%s error_type=%s',
+                               *key, type(exc).__name__)
+        if examined == len(rows) and len(rows) < limit:
+            self._compact_after = (-1, '', '')
+        return dict(compacted=compacted, failed=failed, deferred=len(deferred),
+                    **dict(expired), **self.compaction_health())
 
     async def note_late_target(self, event: Mapping, *, after: tuple | None = None,
                                limit: int = MAX_BATCH, exclude: tuple | list = ()) -> dict:
