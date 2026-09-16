@@ -16,6 +16,12 @@ from price_collector.retention_policy import HISTORY_RETENTION_DAYS, retained_ma
 
 DAY_MS = 86_400_000
 LOCK_ID = 740_101_610
+PARENT_TABLES = frozenset((
+    "public.polymarket_btc_5m_flip_evaluations",
+    "public.polymarket_btc_5m_markets", "public.market_windows",
+    "public.polymarket_twap_sessions", "public.polymarket_evidence_payloads",
+    "raw_capture.feed_sessions",
+))
 
 # Names are a fixed allowlist, never supplied by a caller or read from SQL text.
 # Optional retired tables are only expired if present, never recreated or read
@@ -150,13 +156,20 @@ async def expire_history(connection, now_ms, *, max_seconds=45, batch_size=2000)
         result["skipped"] = "another_retention_run"
         return result
     deadline = time.monotonic() + max_seconds
+    pending_leaves = {p.table for p in plan if p.table not in PARENT_TABLES}
+    completed_leaves = set()
     try:
         while time.monotonic() < deadline:
             progressed = False
             for expiry in plan:
                 if time.monotonic() >= deadline:
                     break
-                if expiry.table in result["errors"]:
+                if expiry.table in result["errors"] or expiry.table in completed_leaves:
+                    continue
+                # During initial catch-up, parent anti-joins would repeatedly
+                # scan thousands of markets whose children are still queued.
+                # Drain the finite, fixed-cutoff leaf set before those checks.
+                if expiry.table in PARENT_TABLES and pending_leaves:
                     continue
                 try:
                     async with connection.transaction():
@@ -166,6 +179,10 @@ async def expire_history(connection, now_ms, *, max_seconds=45, batch_size=2000)
                     count = int(status.split()[-1])
                     result["deleted"][expiry.table] += count
                     progressed |= count > 0
+                    if count < batch_size and expiry.table in pending_leaves:
+                        pending_leaves.remove(expiry.table)
+                        completed_leaves.add(expiry.table)
+                        progressed = True  # Parent phase may need another lap.
                 except (asyncpg.PostgresError, asyncio.TimeoutError, TimeoutError) as error:
                     # A FK race or lock timeout rolls back this batch only. No
                     # broad CASCADE, disabled constraints, or guessed deletion.
