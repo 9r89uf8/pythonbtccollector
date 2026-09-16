@@ -1,9 +1,13 @@
 # Browser evidence: reliability canary
 
 The export completed, but the browser observation did **not** provide full-hour
-delivery coverage. It contains a 49-minute gap in recorded probes, followed by
+delivery coverage. It contains a 49-minute gap while the laptop slept, followed by
 failed fetches and EventSource errors. The server-side observer, runtime audit
 and shutdown checks are separate evidence and cannot fill this browser gap.
+
+The September 16 attribution correction below changes no measured browser count,
+price or lead. [The addendum](peer_review_corrections/CORRECTIONS.md) preserves
+the original report at commit `7c31c2a` and records the new evidence separately.
 
 The raw JSONL has 9,214 records and 11,686,040 bytes; SHA-256 is
 `cf7c58705a29b30d9148ebeb376839d51423ec4fef583cb8f22d7684aa893be8`.
@@ -100,10 +104,16 @@ client skip increments in received envelopes. Zero reported skips cannot
 describe the unobserved period.
 
 [Tunnel stderr](TUNNEL_STDERR.txt) records an untimestamped connection reset.
-The [bounded Windows event check](WINDOWS_SYSTEM_EVENT_CHECK.json) found no
-matching events, which does not prove uninterrupted wakefulness or identify
-the reset's cause. These files do not establish whether the missing interval
-came from the page, browser scheduling, local machine, tunnel or network.
+The owner subsequently confirmed closing the laptop. Windows sleep/wake records
+give **23:06:46.252–23:55:48.708 UTC**, matching the missing browser interval.
+The [original event check](WINDOWS_SYSTEM_EVENT_CHECK.json) was a false negative:
+its UTC-kind hashtable bounds returned no records on this machine. Corrected
+local-time bounds and an independent explicit-UTC XPath query agree on four
+records, including the sleep and wake times. See
+[the preserved correction evidence](peer_review_corrections/WINDOWS_SLEEP_CORRECTION.json).
+Laptop sleep explains the missing capture; it does not supply the absent browser
+receipts or prove the exact instant/mechanism of the SSH reset. The droplet's
+independent producer and observer continued during the sleep interval.
 
 ## Reproduction and provenance
 

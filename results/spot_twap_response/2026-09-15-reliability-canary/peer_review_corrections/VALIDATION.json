@@ -1,0 +1,11 @@
+{
+  "recorded_utc": "2026-09-16T01:09:22.392931+00:00",
+  "command": "python -m pytest research/spot_twap_response/reliability_canary research/spot_twap_response/reliability_review_corrections -q",
+  "exit_code": 0,
+  "passed": 21,
+  "reported_seconds": "0.74",
+  "original_manifest_artifacts_verified_against_original_commit": 55,
+  "unchanged_original_artifacts": 49,
+  "revised_documents": 6,
+  "runtime_changes": false
+}

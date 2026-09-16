@@ -1,0 +1,135 @@
+{
+  "version": "windows-sleep-correction-v1",
+  "captured_utc": "2026-09-16T01:00:09.0687075Z",
+  "read_only": true,
+  "start_utc": "2026-09-15T22:56:00.0000000+00:00",
+  "end_utc": "2026-09-16T00:00:00.0000000+00:00",
+  "timezone": "Central Standard Time",
+  "local_start": "2026-09-15T17:56:00.0000000-05:00",
+  "local_end": "2026-09-15T19:00:00.0000000-05:00",
+  "original_query": {
+    "method": "original_utc_kind",
+    "count": 0,
+    "capped": false,
+    "events": []
+  },
+  "corrected_query": {
+    "method": "corrected_local_kind",
+    "count": 4,
+    "capped": false,
+    "events": [
+      {
+        "record_id": 63218,
+        "provider": "Microsoft-Windows-Power-Troubleshooter",
+        "event_id": 1,
+        "system_time_utc": "2026-09-15T23:55:50.6946233Z",
+        "data": {
+          "SleepTime": "2026-09-15T23:06:46.2521057Z",
+          "WakeTime": "2026-09-15T23:55:48.7079296Z",
+          "SleepDuration": "851",
+          "WakeDuration": "206",
+          "TargetState": "4",
+          "EffectiveState": "4",
+          "WakeSourceType": "1",
+          "WakeSourceText": ""
+        }
+      },
+      {
+        "record_id": 63209,
+        "provider": "Microsoft-Windows-Kernel-General",
+        "event_id": 1,
+        "system_time_utc": "2026-09-15T23:55:48.5008958Z",
+        "data": {
+          "NewTime": "2026-09-15T23:55:48.5000000Z",
+          "OldTime": "2026-09-15T23:06:47.7556611Z",
+          "Reason": "2"
+        }
+      },
+      {
+        "record_id": 63208,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "event_id": 107,
+        "system_time_utc": "2026-09-15T23:06:47.7557303Z",
+        "data": {
+          "TargetState": "4",
+          "EffectiveState": "4"
+        }
+      },
+      {
+        "record_id": 63207,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "event_id": 42,
+        "system_time_utc": "2026-09-15T23:06:47.0741912Z",
+        "data": {
+          "TargetState": "4",
+          "EffectiveState": "4",
+          "Reason": "0"
+        }
+      }
+    ]
+  },
+  "independent_utc_query": {
+    "method": "explicit_utc_xpath",
+    "count": 4,
+    "capped": false,
+    "events": [
+      {
+        "record_id": 63218,
+        "provider": "Microsoft-Windows-Power-Troubleshooter",
+        "event_id": 1,
+        "system_time_utc": "2026-09-15T23:55:50.6946233Z",
+        "data": {
+          "SleepTime": "2026-09-15T23:06:46.2521057Z",
+          "WakeTime": "2026-09-15T23:55:48.7079296Z",
+          "SleepDuration": "851",
+          "WakeDuration": "206",
+          "TargetState": "4",
+          "EffectiveState": "4",
+          "WakeSourceType": "1",
+          "WakeSourceText": ""
+        }
+      },
+      {
+        "record_id": 63209,
+        "provider": "Microsoft-Windows-Kernel-General",
+        "event_id": 1,
+        "system_time_utc": "2026-09-15T23:55:48.5008958Z",
+        "data": {
+          "NewTime": "2026-09-15T23:55:48.5000000Z",
+          "OldTime": "2026-09-15T23:06:47.7556611Z",
+          "Reason": "2"
+        }
+      },
+      {
+        "record_id": 63208,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "event_id": 107,
+        "system_time_utc": "2026-09-15T23:06:47.7557303Z",
+        "data": {
+          "TargetState": "4",
+          "EffectiveState": "4"
+        }
+      },
+      {
+        "record_id": 63207,
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "event_id": 42,
+        "system_time_utc": "2026-09-15T23:06:47.0741912Z",
+        "data": {
+          "TargetState": "4",
+          "EffectiveState": "4",
+          "Reason": "0"
+        }
+      }
+    ]
+  },
+  "corrected_and_xpath_record_ids_match": true,
+  "original_check_path": "results/spot_twap_response/2026-09-15-reliability-canary/WINDOWS_SYSTEM_EVENT_CHECK.json",
+  "original_check_preserved": true,
+  "user_report": "The owner stated that they closed the laptop around the middle of the canary.",
+  "code_sha256": "ee07b33738b1597ef1f8bfe730f3b1919cdbcf4da0bb2c493903b7cca2f0973f",
+  "limitations": [
+    "Evidence concerns the local laptop, not production feed availability.",
+    "An event-query correction cannot recreate missing browser receipts or identify the remote cause of separate source-feed silences."
+  ]
+}

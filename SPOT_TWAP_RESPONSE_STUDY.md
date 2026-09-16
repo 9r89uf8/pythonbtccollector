@@ -1,5 +1,13 @@
 # Spot-to-TWAP response study — results and methods
 
+**September 16 attribution update:** the owner confirmed closing the laptop,
+and corrected Windows queries identify sleep during the 49-minute browser gap.
+The droplet's independently measured hour remains valid; full-hour browser
+delivery is still unmeasured. Short server cache gaps align with received-feed
+pauses and freshness expiry. [The review corrections](results/spot_twap_response/2026-09-15-reliability-canary/peer_review_corrections/CORRECTIONS.md)
+also distinguish earlier missing target stamps from unobserved continuation at
+shutdown. All reported price, lead and coverage statistics are unchanged.
+
 **Status: the historical ghost/delay/settlement pilots are verified; bounded live production and API/SSE delivery are implemented.** Two one-hour B canaries, the short C browser observation and the September 15 reliability canary are complete. The latest browser hour has substantial missing observations and does not establish full-hour frontend reliability. The fixed September 1–8 replays and projected-lead grid companion are complete. The revised event-response study and precise first-arrival attribution remain outstanding. This file consolidates the study; the [original leader-risk findings](H3_TWAP_LEADER_RISK_FINAL_REPORT.md) retain separate provenance. See the [live plan](GHOST_TWAP_LIVE_PLAN.md) for implementation and continuous-operation limits.
 
 **Latest reliability result:** the [September 15 one-hour official report](results/spot_twap_response/2026-09-15-reliability-canary/FINDINGS.md) records **7,082 terminal, externally verified decisions** and all **36,000 Redis observation bins**. After 65 seconds, fresh eligible 5/10/30-second forecasts were present in **99.567%** of planned cache bins. In the comparison ending at least 120 seconds before stop, median errors were **$0.0300 / $0.2684 / $2.9955**, with confirmed Redis lead **4.650 / 9.668 / 29.654 seconds**. Included-event receipt to acknowledgement remained **39.212 ms median**, above the 10 ms objective. The new shutdown path drained all **223 tail records in 6.829 seconds**, without recovery intervention. The browser missed about **49 minutes**; its conditional early-segment price/lead results do not replace those unknown intervals. The producer is disabled and the API remains enabled. Full-hour frontend reliability and continuous-operation storage remain open.

@@ -5,7 +5,8 @@ The producer is disabled again; the read-only API remains enabled. Runtime
 reliability fixes are deployed at `d404312`, with the bounded stop helper at
 `81ee6f1`. The [latest official findings](results/spot_twap_response/2026-09-15-reliability-canary/FINDINGS.md)
 record a clean automatic stop and a complete Redis observation hour, alongside
-an incomplete browser capture with about 49 minutes of missing samples.
+an incomplete browser capture with about 49 minutes of missing samples during
+confirmed laptop sleep.
 Full-hour frontend reliability and continuous-operation storage remain open.
 [Original C findings and audit/export status](results/spot_twap_response/2026-09-15-checkpoint-c/FINDINGS.md)
 remain separate from the historical B results.

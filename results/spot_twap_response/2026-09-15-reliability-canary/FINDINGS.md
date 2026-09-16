@@ -1,8 +1,15 @@
 # Official results: one-hour ghost TWAP reliability canary
 
+Attribution corrections recorded September 16 UTC are documented in
+[the review addendum](peer_review_corrections/CORRECTIONS.md). The owner confirmed
+closing the laptop, and a corrected Windows query identifies the matching sleep
+interval. Scored prices, lead, coverage and raw evidence are unchanged. The
+original `FINAL_MANIFEST.json` describes the report at commit `7c31c2a`; the
+addendum's manifest records this revised interpretation separately.
+
 The bounded producer and shutdown checks passed. The local Redis observer
 covered the full hour, and the audit was exported and verified. The browser
-capture missed about 49 minutes of scheduled observations, so this run does
+capture missed about 49 minutes while the laptop slept, so this run does
 **not** establish full-hour frontend reliability. Missing browser observations
 remain unknown; server observations do not replace them.
 
@@ -19,7 +26,10 @@ storage-policy change or replacement canary was started.
 - Policies unchanged: source age at most 5,000 ms; receipt age at most 3,000 ms;
   Decimal arithmetic, exact attempted payloads and durable-before-publish ordering.
 - **7,082 new decisions**, all terminal; **7,075 acknowledged publications** and
-  seven batches that expired or lost their target before publication.
+  seven unpublished decisions with no calculable forecast: one missing spot and
+  six stale TWAP inputs (one of those six also had stale spot). The saved generic
+  publication status is `expired_or_target_received`, but these seven did not
+  lose a previously calculable target.
 - Full audit export: **23,411 rows**, **1,078,545,445 bytes**; SHA-256
   `f104fa1507bc327254932faa52acf73432816867eb4257fceb5254b8e49d4954`.
   All 23,411 export acknowledgements succeeded, with zero stale/ineligible rows.
@@ -129,6 +139,15 @@ unknown bins remain separate. These sampled spans do not prove uninterrupted
 absence between probes. [OBSERVER_GAPS.json](OBSERVER_GAPS.json) preserves the
 exact intervals and startup warm-up separately.
 
+The [feed-gap review](peer_review_corrections/feed_gap_review.json) links all
+three cache absences to locally received input pauses and exact payload expiry.
+TWAP source stamps jump from 22:57:56 to 22:58:04, 23:12:01 to 23:12:08, and
+23:55:27 to 23:55:35 UTC. Spot also pauses. The limiting deadlines were,
+respectively, TWAP receipt age, spot receipt age and TWAP source age. The input
+sequence is contiguous across each boundary, but this does not identify whether
+the cause was upstream, network delivery or collector handling. Three episodes
+describe this hour; they do not establish a recurring three-per-hour rate.
+
 ## Browser result: incomplete hour
 
 The primary browser hour has **6,578 recorded probes out of 36,000**. It missed
@@ -154,9 +173,15 @@ recomputed from raw JSON with Decimal arithmetic, without substituting audit
 receipt times. The explicit pre-stop comparison panel gives the same pairs
 because all observed forecasts arrived early; it cannot recover later coverage.
 
-The tunnel logged an untimestamped connection reset and had exited. The bounded
-Windows event check found no matching sleep/resume/clock-change records; this
-does not establish the cause of the pause or prove uninterrupted wakefulness.
+The owner confirmed closing the laptop. Windows records sleep at
+**23:06:46.252 UTC** and wake at **23:55:48.708 UTC**, matching the browser pause.
+The original Windows event query supplied UTC-kind bounds in a form that yielded
+a false negative on this machine. Corrected local-time bounds and a separate
+explicit-UTC XPath query return the same four records. The original empty check
+is preserved but superseded by
+[WINDOWS_SLEEP_CORRECTION.json](peer_review_corrections/WINDOWS_SLEEP_CORRECTION.json).
+The tunnel logged an untimestamped connection reset and was found exited after wake;
+the exact SSH failure instant is not present in its stderr.
 All 28 failed GETs occurred before response headers, and none recorded its
 three-second abort timer firing. The 28 EventSource errors and missing samples
 remain in the evidence. No reload or replacement capture was used.
@@ -178,10 +203,27 @@ final outbox pass. The outbox is empty and every audit row is terminal. There
 was no recovery-script intervention. This directly closes the previously
 observed five-second drain failure for this run.
 
-Terminal does not mean every target was observed. The shutdown left explicit
-unobserved-target markers: 8 / 12 / 15 / 22 / 36 / 76 at horizons
-1 / 2 / 3 / 5 / 10 / 30 seconds, respectively. These are censored targets,
-not forecast losses. Normal missing exact target stamps are counted separately.
+Terminal does not mean every target was observed. The 169 targets labelled
+`restart_unmatched` comprise two different groups:
+
+| Horizon | Earlier absent exact stamps | Beyond the last observed TWAP stamp | Total |
+| --- | ---: | ---: | ---: |
+| 1 second | 8 | 0 | 8 |
+| 2 seconds | 10 | 2 | 12 |
+| 3 seconds | 12 | 3 | 15 |
+| 5 seconds | 15 | 7 | 22 |
+| 10 seconds | 20 | 16 | 36 |
+| 30 seconds | 21 | 55 | 76 |
+
+The first group has 86 forecast-target pairs across ten absent earlier stamps;
+the second has 83 pairs beyond the last observed source stamp, 23:56:37 UTC.
+Thus the shutdown status alone does not establish that stopping caused all 169
+missing targets. Separately, 498 fully-aged `missing` pairs cover 46 earlier
+absent stamps. All are absent from the retained received-event union; this is
+not proof of provider nonpublication or what a longer observation would have
+received. These are missingness categories, not forecast losses. The detailed
+[target attribution check](peer_review_corrections/audit_target_corrections.json)
+preserves the exact stamps and brackets without changing the audit statuses.
 
 All six core services were active afterward, the four source prices were fresh,
 the ghost Redis key was absent and listeners remained local. The disabled
@@ -198,20 +240,30 @@ and [runtime provenance addendum](STOP_RUNTIME_PROVENANCE_ADDENDUM.json).
 ## What this closes and what remains
 
 The new drain budget worked on a real pending tail, and bounded production
-continued independently of the local browser/tunnel failure. No source gap or
-reconnect recovery appears in the recorded runtime evidence. This run does not
+continued while the laptop slept. Three received-input silences and cache
+expiries are documented above. No explicit transport-gap or reconnect-recovery
+record appears around those silences; absence of that metadata is not continuous
+feed availability. This run does not
 demonstrate a live Redis resubscription; the deliberate-drop proof remains the
 previous real-client TCP regression tests. The [bounded API journal check](API_RECONNECT_OBSERVATION.json)
 found no matching entries, but the hub has no dedicated reconnect journal
 logger, so that absence cannot exclude an unlogged Redis interruption.
 
-Full-hour frontend delivery still needs a successful observation with the local
-capture and tunnel kept running, with gaps retained if they recur. Before
+Full-hour frontend delivery still needs a successful observation with the laptop
+awake and the local capture and SSH tunnel kept running. A browser running on
+the droplet would not measure the owner's laptop-to-droplet path. Before
 continuous production, the full-evidence storage/export/expiry policy still
 needs implementation and validation for that operating mode. The audit relation
 grew from 218,710,016 to 309,420,032 bytes between preflight and the post-stop
 measurement (90,710,016 bytes); one-hour guards do not establish sustainable
 continuous operation. No evidence was expired or compacted in this run.
+
+At that single hour's net growth, the recorded 309,420,032-byte relation would
+have about **14.34 additional hours** before the 1.5 GiB admission threshold.
+This is a linear capacity illustration, not a prediction or authorization:
+the independent campaign deadline still stops the current implementation at
+one hour. Storage/export/expiry for continuous operation remains the priority
+before enabling that mode.
 
 The results measure forecast reconstruction and delivery. They do not establish
 profitability, fills, a trading advantage or a universal error bound.
@@ -225,6 +277,9 @@ no collector, API, schema, dependency or production setting.
 
 The [analysis README](../../../research/spot_twap_response/reliability_canary/README.md),
 [browser review](BROWSER_REVIEW.md), [validation record](ANALYSIS_VALIDATION.json)
-and [final manifest](FINAL_MANIFEST.json) provide commands, definitions, file
-hashes and raw evidence locations. The dedicated browser was closed after
+and [original measurement manifest](FINAL_MANIFEST.json) provide commands,
+definitions, file hashes and raw evidence locations. That original manifest's
+document hashes apply to commit `7c31c2a`; the
+[correction manifest](peer_review_corrections/CORRECTION_MANIFEST.json) records
+revised documents without rewriting the original evidence. The dedicated browser was closed after
 export; its original tunnel had already exited. Other sessions were preserved.

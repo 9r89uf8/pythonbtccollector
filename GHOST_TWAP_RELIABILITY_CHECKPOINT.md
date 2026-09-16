@@ -17,7 +17,7 @@ completed on September 15 at 23:56:38 UTC. Its shutdown drained all 223 tail
 records in 6.829 seconds with no retained outbox rows or recovery helper; all
 7,082 new audit rows are terminal and externally verified. Production cache
 observation covered the full hour, but the browser capture missed about 49
-minutes and does not establish full-hour frontend delivery. The producer is
+minutes during confirmed laptop sleep and does not establish full-hour frontend delivery. The producer is
 disabled again. No Redis or source reconnect was observed in this campaign;
 the deliberate Redis-drop regression evidence remains the local TCP tests.
 

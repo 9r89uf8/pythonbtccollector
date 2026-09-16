@@ -11,7 +11,7 @@ Status: **completed September 15, 2026, 22:56:38–23:56:38 UTC**
 (5:56:38–6:56:38 PM CDT). The automatic stop drained all 223 tail records in
 6.829 seconds; all 7,082 campaign decisions are terminal and externally verified.
 The full-hour Redis observer completed all 36,000 bins. The local browser
-capture missed about 49 minutes of scheduled observations and cannot establish
+capture missed about 49 minutes while the owner's laptop slept and cannot establish
 full-hour frontend reliability. Its missing intervals remain unknown.
 The producer is disabled and the read-only API remains enabled.
 [Official findings](results/spot_twap_response/2026-09-15-reliability-canary/FINDINGS.md)
