@@ -44,6 +44,9 @@ CREATE INDEX IF NOT EXISTS ghost_twap_audit_incomplete_idx
 CREATE INDEX IF NOT EXISTS ghost_twap_audit_expiry_idx
     ON ghost_twap_audit (created_ms, run_id, decision_id)
     WHERE terminal AND verified_version IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ghost_twap_audit_archive_idx
+    ON ghost_twap_audit (created_ms, run_id, decision_id)
+    WHERE terminal AND verified_version IS NULL;
 CREATE INDEX IF NOT EXISTS ghost_twap_audit_targets_idx
     ON ghost_twap_audit USING GIN (target_source_timestamps_ms) WHERE terminal;
 

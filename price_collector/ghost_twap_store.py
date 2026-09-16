@@ -287,6 +287,21 @@ class GhostAuditStore:
     async def list_incomplete(self, *, after: tuple | None = None, limit: int = MAX_BATCH) -> list:
         return await self.export_page(after=after, limit=limit, incomplete_only=True)
 
+    async def archive_candidates(self, *, limit: int = MAX_BATCH) -> list:
+        """One bounded snapshot; do not retain a cursor across archive cycles.
+
+        A pending row can become terminal, or an earlier exported row can change,
+        behind any prior cursor. The trigger clears verification on state changes.
+        Read without locks; the existing acknowledgement CAS detects upload races.
+        Network I/O must happen after this transaction has released its connection.
+        """
+        _batch(limit)
+        async with self._connection() as connection:
+            rows = await connection.fetch(f"SELECT {_SELECT} FROM {TABLE} "
+                "WHERE terminal AND verified_version IS NULL "
+                "ORDER BY created_ms, run_id, decision_id LIMIT $1", limit)
+        return [dict(row) for row in rows]
+
     async def get_record(self, run_id: str, decision_id: str) -> dict | None:
         """Read the latest committed version before reconciling a restarted spool."""
         _text(run_id, "run_id")

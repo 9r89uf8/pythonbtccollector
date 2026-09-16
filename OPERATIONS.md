@@ -202,6 +202,13 @@ The adjacent manifest records exact bytes/row count. Retain both outside the
 droplet. A changed result makes its acknowledgement ineligible; re-export those
 current results before expiry. A local droplet copy alone is not external proof.
 
+The [archive foundation](GHOST_TWAP_STORAGE_CHECKPOINT.md) adds a separate bounded
+batch transaction for a future always-on operator job. It is not called by the
+collector or API, has no configured transport yet, and does not change this
+manual export/expiry procedure. Never configure a same-droplet directory as the
+external archive. Its deployment ordering and remaining continuous-operation
+requirements are recorded in that checkpoint.
+
 After verified export and at least 96 hours of row age, explicit maintenance can
 delete at most 100 eligible rows per command:
 

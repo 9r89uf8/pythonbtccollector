@@ -342,3 +342,9 @@
 /results/spot_twap_response/2026-09-15-reliability-canary/** -text
 /research/spot_twap_response/reliability_canary/** -text
 /research/spot_twap_response/reliability_review_corrections/** -text
+
+# Preserve archive transaction and checkpoint evidence bytes.
+/GHOST_TWAP_STORAGE_CHECKPOINT.md -text
+/price_collector/ghost_twap_archive.py -text
+/tests/test_ghost_twap_archive.py -text
+/tests/test_ghost_twap_archive_postgres.py -text

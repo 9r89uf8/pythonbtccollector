@@ -965,6 +965,9 @@ target/publication evidence. The producer remained disabled. The
 shutdown budgets and distinguishes completed drainage from retained evidence.
 Continuous production still requires a reviewed capacity/retention policy; a
 successful service restart alone is not evidence of a drained outbox.
+The [archive foundation](GHOST_TWAP_STORAGE_CHECKPOINT.md) supports bounded
+terminal-row batches and full external readback before exact-version
+acknowledgement. No archive service or automatic expiry is enabled yet.
 
 The [batch-eligibility checkpoint](GHOST_TWAP_BATCH_ELIGIBILITY_CHECKPOINT.md)
 adds runtime `ghost-canary-v5`. Each publication rechecks target arrival after
