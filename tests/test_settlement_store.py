@@ -24,12 +24,12 @@ def signal(price, *, qualifies=None):
                 lead_bps=str(lead), qualifies=abs(lead) >= 2 if qualifies is None else qualifies)
 
 
-def decision(identifier="d1", *, offset_ms=0, prices=("101", "99", "100.01"), quality="healthy"):
-    end = START + 300_000
+def decision(identifier="d1", *, offset_ms=0, prices=("101", "99", "100.01"), quality="healthy", market_start_ms=START):
+    end = market_start_ms + 300_000
     clock = (end - 29_000 + offset_ms) * 1_000_000
     frozen = dict(run_id="run", decision_id=identifier, schema_version=1, kind="settlement",
         rule_version="settlement-first-2bp-v1", threshold_bps="2",
-        market_id=START // 300_000, market_start_ms=START, market_end_ms=end,
+        market_id=market_start_ms // 300_000, market_start_ms=market_start_ms, market_end_ms=end,
         target_source_timestamp_ms=end, decision_wall_ns=str(clock), decision_monotonic_ns="1000000",
         valid_until_wall_ns=str(clock + 2_000_000_000), status="available", quality=quality,
         reference=dict(price_to_beat="100", condition_id="c", up_token_id="u", down_token_id="d"),
@@ -257,7 +257,7 @@ def test_store_versions_compaction_retry_first_match_and_frozen_report():
             await store.persist(record(frozen, state, version=3, terminal=True))
         result = await store.maintain(store.report_due_ms, persistence_complete=False)
         assert result["final"] and result["status"] == "final_incomplete"
-        assert result["scheduled_markets"] == 1440
+        assert result["scheduled_markets"] == 576
         assert result["signals"]["ghost"]["resolved"] == 1
         assert await store.report(store.report_due_ms + DAY_MS, persistence_complete=True) == result
         assert sum("INSERT INTO settlement_evaluation_reports" in sql for sql, _ in pool.connection.sql) == 1
@@ -267,10 +267,24 @@ def test_store_versions_compaction_retry_first_match_and_frozen_report():
 def test_report_freezes_after_outcome_cutoff_when_complete_and_marks_missed_due():
     async def scenario():
         pool = Pool(); store = SettlementStore(pool, START)
+        assert store.end_ms == START + 2 * DAY_MS
+        assert store.cutoff_ms == START + 3 * DAY_MS
+        assert store.report_due_ms == START + 3 * DAY_MS + 6 * 3_600_000
+        before_end = await store.maintain(store.end_ms - 1)
+        assert before_end["scheduled_markets"] == 575 and not before_end["final"]
+        at_end = await store.maintain(store.end_ms)
+        assert at_end["scheduled_markets"] == 576 and not at_end["final"]
         early = await store.maintain(store.cutoff_ms - 1)
         assert not early["final"]
         result = await store.maintain(store.cutoff_ms)
         assert result["final"] and result["status"] == "final"
+        delayed = SettlementStore(Pool(), START)
+        waiting = await delayed.maintain(delayed.cutoff_ms, persistence_complete=False)
+        assert waiting["scheduled_markets"] == 576 and not waiting["final"]
+        waiting = await delayed.maintain(delayed.report_due_ms - 1, persistence_complete=False)
+        assert not waiting["final"]
+        result = await delayed.maintain(delayed.report_due_ms, persistence_complete=False)
+        assert result["final"] and result["status"] == "final_incomplete"
         late = build_report([], START, store.report_due_ms + 1, final=True, persistence_complete=True)
         assert late["status"] == "final_incomplete" and late["report_deadline_missed"]
     asyncio.run(scenario())
@@ -286,6 +300,12 @@ def test_unarmed_and_outside_window_live_audit_does_not_enter_evaluation():
         assert (await SettlementStore(pool, START + DAY_MS).report(START))["status"] == "scheduled"
         assert (await SettlementStore(pool, START).report(START + 90 * DAY_MS))["status"] == "expired"
         assert not pool.connection.reports
+        armed = SettlementStore(pool, START)
+        last, last_state = decision("last", market_start_ms=armed.end_ms - 300_000)
+        outside, outside_state = decision("outside", market_start_ms=armed.end_ms)
+        assert await armed.persist(record(last, last_state)) == "inserted"
+        assert await armed.persist(record(outside, outside_state)) == "inserted"
+        assert set(pool.connection.markets) == {(START, last["market_id"])}
     asyncio.run(scenario())
 
 
@@ -320,4 +340,5 @@ def test_schema_has_separate_indexed_retention_and_immutable_final_guards():
     assert "expired settlement cannot be reinserted" in sql
     assert "settlement first target is immutable" in sql
     assert "final settlement report is immutable" in sql
-    assert "518400000" in sql  # finalization never precedes five days + the 24-hour outcome cutoff
+    assert "172800000" in sql  # market starts are inside two complete UTC days
+    assert "259200000" in sql  # finalization never precedes two days + the 24-hour outcome cutoff

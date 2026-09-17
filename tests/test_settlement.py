@@ -150,14 +150,14 @@ def test_context_canonical_decimal_equality_and_conflict_latch():
     with pytest.raises(ValueError): decode_context(" " * 8193)
 
 
-def test_settings_are_default_off_and_campaign_is_fixed_five_days_plus_one_day(monkeypatch):
+def test_settings_are_default_off_and_campaign_is_fixed_two_days_plus_one_day(monkeypatch):
     monkeypatch.delenv("SETTLEMENT_ENABLED", raising=False)
     monkeypatch.delenv("SETTLEMENT_EVALUATION_START_MS", raising=False)
     assert SettlementSettings().enabled is False
     start = START // DAY_MS * DAY_MS
     settings = SettlementSettings(enabled=True, evaluation_start_ms=start)
-    assert settings.evaluation_end_ms == start + 5 * DAY_MS
-    assert settings.evaluation_cutoff_ms == start + 6 * DAY_MS
+    assert settings.evaluation_end_ms == start + 2 * DAY_MS
+    assert settings.evaluation_cutoff_ms == start + 3 * DAY_MS
     with pytest.raises(ValueError): SettlementSettings(evaluation_start_ms=start + 1)
 
 

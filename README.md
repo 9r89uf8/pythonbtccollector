@@ -1111,7 +1111,7 @@ fills or a frozen fee schedule for future markets.
 ## Ghost TWAP — optional worker
 
 The new exact-close settlement candidate is implemented **off by default**;
-its five-day prospective evaluation has not started. It is separate from the
+its two-day prospective evaluation has not started. It is separate from the
 existing rolling-horizon ghost. See the
 [settlement implementation and rollout](GHOST_TWAP_REFERENCE.md#settlement-implementation-and-rollout)
 for the frozen 2-bp rule, endpoints, settings, retention and schema-first update.

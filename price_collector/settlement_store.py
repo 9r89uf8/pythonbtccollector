@@ -1,4 +1,4 @@
-"""Bounded settlement evidence and a five-day, frozen-outcome evaluation.
+"""Bounded settlement evidence and a two-day, frozen-outcome evaluation.
 
 No feed, Redis publication, order path, or research import. The runtime owns its
 durable outbox; database acknowledgement must not be mistaken for publication.
@@ -16,11 +16,11 @@ from price_collector.ghost_twap_store import (
 )
 
 DAY_MS = 86_400_000
-EVALUATION_DAYS = 5
+EVALUATION_DAYS = 2
 INDIVIDUAL_MS = 7 * DAY_MS
 REPORT_MS = 90 * DAY_MS
 MAX_BATCH = 100
-MAX_MARKETS = 1_440
+MAX_MARKETS = 576
 WARN_BYTES = 256 * 1024 * 1024
 STOP_BYTES = 512 * 1024 * 1024
 ROW_CAP = 200_000
@@ -460,7 +460,7 @@ class SettlementStore:
     async def maintain(self, now_ms: int, *, persistence_complete: bool = True) -> dict:
         if (self.start_ms and not self._finalized and self.cutoff_ms <= now_ms < self.start_ms + REPORT_MS
                 and (persistence_complete or now_ms >= self.report_due_ms)):
-            # A bounded 1,440-market sweep closes the outcome snapshot before
+            # A bounded 576-market sweep closes the outcome snapshot before
             # freezing. Each page has its own short transaction and row limit.
             self._outcome_cursor = -1
             for _ in range(MAX_MARKETS // MAX_BATCH + 1):
@@ -515,7 +515,7 @@ async def finalize_disabled_evaluations(connection, now_ms: int) -> dict:
         WHERE e.evaluation_start_ms<=$1 AND e.evaluation_start_ms>$2 AND NOT EXISTS (
             SELECT 1 FROM settlement_evaluation_reports r WHERE r.evaluation_start_ms=e.evaluation_start_ms)
         GROUP BY e.evaluation_start_ms) due ORDER BY evaluation_start_ms LIMIT 10""",
-        now_ms - 6 * DAY_MS - 6 * 3_600_000, now_ms - REPORT_MS)
+        now_ms - (EVALUATION_DAYS + 1) * DAY_MS - 6 * 3_600_000, now_ms - REPORT_MS)
     result = {"finalized": 0, "errors": {}}
     for row in rows:
         start = int(row["evaluation_start_ms"])

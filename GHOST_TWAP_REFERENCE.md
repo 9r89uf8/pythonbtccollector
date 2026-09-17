@@ -682,8 +682,14 @@ deadline is an explicit incomplete report, never a silently reconstructed one.
 
 ### One bounded prospective evaluation
 
+Owner amendment, September 17, 2026 UTC: shorten the originally proposed five
+days to **two complete UTC days (576 scheduled markets)**. Keep the 2-bp rule,
+24-hour outcome cutoff, six-hour finalization deadline and retention unchanged.
+The intended window is September 18 00:00 through September 20 00:00 UTC;
+arming follows deployment and the unarmed live checks below.
+
 After focused boundary, reference-causality, expiry and outcome-matching checks,
-freeze code, the rule and exact dates for five fresh complete UTC days. Fix the
+freeze code, the rule and exact dates for two fresh complete UTC days. Fix the
 outcome-reporting cutoff at 24 hours after the final market closes. Start this
 new evidence period explicitly; the existing rolling-ghost producer did not
 already collect the required settlement calls. Do not tune the rule during the
@@ -798,12 +804,12 @@ Settings to review manually, preserving the existing environment files:
   The API retains only its reader credentials.
 - Zero evaluation start means **unarmed live display/audit**, not a running
   study. After deployment verification, set one reviewed future UTC-midnight
-  epoch millisecond value to declare five complete days. Keep that value and
+  epoch millisecond value to declare two complete days. Keep that value and
   the frozen rule unchanged through the 24-hour outcome cutoff. Finalization
   runs after the cutoff, with an additional six-hour deadline; late/missing
   completion is explicitly incomplete.
 
-During the five-day evaluation, check the cached `/settlement/report` endpoint
+During the two-day evaluation, check the cached `/settlement/report` endpoint
 (full route above) at least daily and after any collector restart. Its
 `runtime.fault` must be null: a non-null value stops new settlement admission
 for that process lifetime, even while fresh reports continue. Inspect the
@@ -829,7 +835,7 @@ eligible 2.5-bp candidate, and cleared the live values at expiry/close while
 preserving only the historical note. This is UI verification, not live market
 evidence. The PostgreSQL schema check was subsequently completed as recorded
 below. Production storage/latency remain live rollout checks; no new canary or
-five-day study has run here.
+two-day study has run here.
 
 Review follow-up, September 17, 2026 UTC: the full schema was applied to an
 isolated `settlement_validation_*` database on the droplet's PostgreSQL 16.15
@@ -874,4 +880,4 @@ The existing retention timer loads the updated module on its next invocation;
 no unit change/reload or immediate extra deletion run is needed. The local
 dashboard proxy must be restarted to load its two new allowlisted routes;
 the frontend stays on the user's computer. Live enabling and the dated
-five-day evaluation are separate operational steps after review.
+two-day evaluation are separate operational steps after review.

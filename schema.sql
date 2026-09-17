@@ -1926,7 +1926,7 @@ WHERE provider_code = 'binance_usdm_perp'
 ON CONFLICT (provider_id, symbol) DO NOTHING;
 
 -- Settlement evaluation: bounded individual evidence, compact first calls, and
--- a frozen five-day report. Independent of official feeds and ghost contract 4.
+-- a frozen two-day report. Independent of official feeds and ghost contract 4.
 CREATE TABLE IF NOT EXISTS settlement_audit (
     run_id TEXT COLLATE "C" NOT NULL CHECK (length(run_id) BETWEEN 1 AND 128),
     decision_id TEXT COLLATE "C" NOT NULL CHECK (length(decision_id) BETWEEN 1 AND 128),
@@ -1963,7 +1963,7 @@ CREATE TABLE IF NOT EXISTS settlement_market_evaluation (
     PRIMARY KEY(evaluation_start_ms,market_id),
     CHECK (market_start_ms % 300000 = 0 AND market_id = market_start_ms / 300000
         AND market_end_ms = market_start_ms + 300000),
-    CHECK (market_start_ms >= evaluation_start_ms AND market_start_ms < evaluation_start_ms + 432000000)
+    CHECK (market_start_ms >= evaluation_start_ms AND market_start_ms < evaluation_start_ms + 172800000)
 );
 CREATE INDEX IF NOT EXISTS settlement_market_expiry_idx ON settlement_market_evaluation(market_end_ms);
 
@@ -2046,7 +2046,7 @@ BEGIN
         END IF;
         IF TG_OP='UPDATE' AND (OLD.final OR NEW.evaluation_start_ms<>OLD.evaluation_start_ms OR NEW.created_ms<>OLD.created_ms)
         THEN RAISE EXCEPTION 'final settlement report is immutable'; END IF;
-        IF NEW.final AND (NEW.updated_ms<NEW.evaluation_start_ms+518400000 OR now_ms<NEW.evaluation_start_ms+518400000)
+        IF NEW.final AND (NEW.updated_ms<NEW.evaluation_start_ms+259200000 OR now_ms<NEW.evaluation_start_ms+259200000)
         THEN RAISE EXCEPTION 'settlement final report is not due'; END IF;
         RETURN NEW;
     END IF;

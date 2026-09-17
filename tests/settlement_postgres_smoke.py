@@ -64,7 +64,7 @@ async def main(name):
         assert await connection.fetchval('SELECT current_database()') == name
         assert await connection.fetchval('SELECT count(*) FROM settlement_audit') == 0, 'scratch database must be empty'
         now = await connection.fetchval('SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint')
-        start = now // DAY_MS * DAY_MS - 6 * DAY_MS
+        start = now // DAY_MS * DAY_MS - 3 * DAY_MS
         async def writer(client):
             await client.execute('SET ROLE price_writer')
         pool = await asyncpg.create_pool(database=name, user='postgres', host='/var/run/postgresql',
@@ -93,6 +93,14 @@ async def main(name):
         del changed_body['first_calls']['ghost']
         await rejected(connection, 'UPDATE settlement_market_evaluation SET body_json=$1',
                        json.dumps(changed_body), contains='first call only accepts')
+        await rejected(connection, '''INSERT INTO settlement_market_evaluation
+            (evaluation_start_ms,market_id,market_start_ms,market_end_ms,body_json)
+            VALUES($1,$2,$3,$4,'{}')''', start, store.end_ms // 300_000, store.end_ms,
+            store.end_ms + 300_000, contains='check constraint')
+        await rejected(connection, '''INSERT INTO settlement_evaluation_reports
+            (evaluation_start_ms,created_ms,updated_ms,final,body_json)
+            VALUES($1,$2,$2,true,'{}')''', start, store.cutoff_ms - 1,
+            contains='final report is not due')
         await connection.execute('RESET ROLE')
 
         for record in (a, b):
@@ -100,7 +108,7 @@ async def main(name):
             assert await store.persist(record) == 'updated'
         report = await store.maintain(now)
         assert report['final'] is True
-        assert report['scheduled_markets'] == 1440
+        assert report['scheduled_markets'] == 576
         assert all(report['signals'][signal]['calls'] == 1 and report['signals'][signal]['unknown'] == 1
                    for signal in ('ghost', 'twap', 'spot'))
         assert await connection.fetchval('SELECT count(*) FROM settlement_audit WHERE frozen_json IS NULL') == 2
@@ -117,6 +125,7 @@ async def main(name):
         print(json.dumps(dict(database=name, server=await connection.fetchval('SHOW server_version'),
             result='passed', checks=['writer persistence and idempotency', 'per-signal first call and revocation',
                 'immutable audit and publication clocks', 'seven-day deletion guard', 'immutable first call',
+                'two-day market boundary', 'three-day finalization cutoff',
                 'terminal compaction', 'actual outcome-query and final report SQL', 'immutable final report',
                 'reader/writer privilege split', 'capacity query'], relation_bytes=guard['relation_bytes'])))
     finally:

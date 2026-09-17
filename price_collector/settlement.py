@@ -38,7 +38,7 @@ class SettlementSettings(BaseSettings):
 
     @property
     def evaluation_end_ms(self) -> int:
-        return self.evaluation_start_ms + 5 * DAY_MS if self.evaluation_start_ms else 0
+        return self.evaluation_start_ms + 2 * DAY_MS if self.evaluation_start_ms else 0
 
     @property
     def evaluation_cutoff_ms(self) -> int:
