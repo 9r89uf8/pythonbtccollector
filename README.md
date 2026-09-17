@@ -1110,6 +1110,15 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
+The new exact-close settlement candidate is implemented **off by default**;
+its five-day prospective evaluation has not started. It is separate from the
+existing rolling-horizon ghost. See the
+[settlement implementation and rollout](GHOST_TWAP_REFERENCE.md#settlement-implementation-and-rollout)
+for the frozen 2-bp rule, endpoints, settings, retention and schema-first update.
+`SETTLEMENT_ENABLED` controls the bounded context handoff and producer inside
+the existing probabilities/Chainlink services; `SETTLEMENT_API_ENABLED` controls
+Redis-only delivery. No new service or public listener is introduced.
+
 The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
 verified research, measured 3.1-second inclusion delay, live-canary findings,
 forecast formula, API behavior, chart metrics, retention and limitations. Dated

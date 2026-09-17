@@ -1,4 +1,4 @@
-"""Bounded, operator-owned expiry of non-ghost collector history.
+"""Bounded, operator-owned expiry of collector and settlement history.
 
 Run separately from collectors, using PostgreSQL peer authentication. Ordinary
 collector/API roles gain no permissions. The default CLI only inspects; --apply
@@ -89,6 +89,14 @@ async def expiry_plan(connection, now_ms):
             raise RuntimeError(f"required retention table missing: {table}")
 
     plan = []
+    # Independent of the optional producer flag: stopping settlement must not
+    # make its records permanent. These are separate from ordinary ten-day data.
+    for table, column, days in (("settlement_audit", "created_ms", 7),
+                                ("settlement_market_evaluation", "market_end_ms", 7),
+                                ("settlement_evaluation_reports", "created_ms", 90)):
+        if await connection.fetchval("SELECT to_regclass($1)::text", "public." + table):
+            plan.append(Expiry("public." + table, f"t.{column} < $1", f"t.{column}",
+                               max(0, now_ms - days * DAY_MS)))
     for table, column, _ in MARKET_TABLES:
         if table not in present:
             continue
@@ -165,6 +173,17 @@ async def expire_history(connection, now_ms, *, max_seconds=45, batch_size=2000)
     pending_leaves = {p.table for p in plan if p.table not in PARENT_TABLES}
     completed_leaves = set()
     try:
+        # A disabled producer cannot finish its own evaluation. Preserve the
+        # already-captured aggregate with an explicit incomplete marker before
+        # individual expiry; an optional report failure cannot stop history GC.
+        from price_collector.settlement_store import finalize_disabled_evaluations
+        try:
+            result["settlement_finalization"] = await asyncio.wait_for(
+                finalize_disabled_evaluations(connection, now_ms), timeout=min(5, max_seconds / 3))
+        except Exception as error:
+            result["settlement_finalization"] = {"finalized": 0, "errors": {"job": type(error).__name__}}
+        if result["settlement_finalization"]["errors"]:
+            result["errors"]["settlement_finalization"] = "incomplete_report_finalization"
         while time.monotonic() < deadline:
             progressed = False
             for expiry in plan:
@@ -231,7 +250,7 @@ async def _run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="delete history older than the fixed 10-day policy")
+    parser.add_argument("--apply", action="store_true", help="apply fixed history retention (10 days; settlement individuals 7 days/reports 90 days)")
     parser.add_argument("--max-seconds", type=int, default=45)
     parser.add_argument("--batch-size", type=int, default=2000,
                         help="rows per transaction (maximum 10000); default 2000")

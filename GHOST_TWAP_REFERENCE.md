@@ -713,3 +713,122 @@ The first deliverable is a prospective result with coverage and limitations,
 not a calibrated 99% probability for an individual market. Any later confidence
 label needs a separate acceptance decision supported by fresh evidence. A
 20-cell tier system, extra spot feature or machine-learning model is outside v1.
+
+### Settlement implementation and rollout
+
+Implemented locally on September 17, 2026 UTC; **not deployed, enabled or
+prospectively validated by this checkpoint**. The existing rolling ghost remains
+contract 4. The settlement output has its own schema 1 and
+`settlement-first-2bp-v1` rule. This implementation incorporates all three agreed
+amendments above. The new dashboard card calls it **Unvalidated** and shows the
+exact-close price, website opening reference, side, signed lead, remaining time
+and slot quality. At expiry/close it removes the live signal and labels any
+retained last observation as historical, not the immutable first call.
+
+The small calculation is in `price_collector/settlement.py`. It reuses the
+frozen ghost slots, adds only the necessary future tail through anchor+32, and
+uses Decimal throughout. The current TWAP and spot baselines use the identical
+reference. Both healthy and degraded projections qualify under the existing
+carry limit. The first observed stream boundary event is retained separately
+for an opening-reference difference diagnostic; a missing boundary event is
+not reconstructed or substituted for the website reference.
+
+`settlement_runtime.py` runs inside the existing Chainlink ghost worker. The
+probabilities evidence worker supplies the bounded context cache from its
+existing HTTP request; there is no extra feed or metadata poller. The consumer
+pins when it first obtained each context. Frozen inputs reach a separate
+fsynced outbox before publication. PostgreSQL writes run independently. Each
+attempt is rechecked, has an absolute expiry no later than E, and records its
+exact transmitted bytes and actual acknowledgement clocks. A gap or reference
+change after a valid attempt is recorded separately: it cannot retrospectively
+erase a timely acknowledged first call. Late/unknown acknowledgements earn no
+first-call credit. Startup reconciles durable records without republishing.
+Optional failures cannot stop the existing six-horizon input path.
+
+The new read-only routes are:
+
+| Route | Purpose |
+| --- | --- |
+| `/forecasts/chainlink-twap/settlement/live` | One Redis GET; original serialized snapshot or typed 503 |
+| `/forecasts/chainlink-twap/settlement/stream` | Existing bounded SSE transport; named `settlement` events and reconnect resync |
+| `/forecasts/chainlink-twap/settlement/report` | Cached prospective evaluation report; no request-time SQL |
+
+Cache keys are `btc:live:ghost_settlement_context`, `btc:live:ghost_settlement`,
+its `:updates` channel, and its `:report` summary. Snapshot/SSE have no-store
+headers, independent wire validation and the existing pinned monotonic expiry.
+The API still binds only to loopback and the local dashboard uses the SSH
+tunnel. The original source caches and rolling ghost endpoints are unchanged.
+
+`settlement_store.py` and the three additive `settlement_*` tables retain
+individual frozen projections/target results, per-market first calls, and
+aggregate reports. Full slot detail compacts after the 120-second match window;
+individual and per-market evidence expires at seven days. Only aggregate
+reports retain ninety days. The existing operator retention timer also expires
+these tables when the settlement flag is off. If the producer is absent at the
+report deadline, that timer preserves a bounded **incomplete** report from
+already captured evidence before expiry; it never invents late outcomes.
+
+Reports include each signal's own first-call coverage, resolved losses,
+unknown outcomes, acknowledgement timing, day/side/quality breakdowns,
+abstention/publication reasons, revocations, and the paired comparison at the
+ghost's first call. Official outcome identity and the fixed reporting cutoff
+are checked. No individual confidence percentage or independence-based bound
+is emitted. A changed configuration cannot reassign recovered decisions to a
+different evaluation: the chosen evaluation start is frozen with each record.
+
+Resource bounds: at most 512 in-memory/outbox records, 128 KiB per record,
+0.5-second explicit Redis operation deadlines, 256 MiB relation warning and
+512 MiB relation cap with reserve, and 200,000 audit rows. The existing ghost
+disk/health guards also gate admission. Storage usage at live rates has not
+yet been measured for this output. Optional startup initiates cancellation
+after five seconds; owned filesystem cleanup may take longer. On shutdown,
+ordinary ghost preservation proceeds independently of settlement cleanup.
+
+Settings to review manually, preserving the existing environment files:
+
+- `/etc/price-collector/collector.env`: `SETTLEMENT_ENABLED=false` and
+  `SETTLEMENT_EVALUATION_START_MS=0` are the safe install defaults. Enabling
+  requires the existing `GHOST_TWAP_ENABLED=true`, `GHOST_TWAP_CONTINUOUS=true`
+  and `POLYMARKET_EVIDENCE_ENABLED=true`. Do not enable unrelated raw capture.
+- `/etc/price-collector/api.env`: `SETTLEMENT_API_ENABLED=false` by default.
+  The API retains only its reader credentials.
+- Zero evaluation start means **unarmed live display/audit**, not a running
+  study. After deployment verification, set one reviewed future UTC-midnight
+  epoch millisecond value to declare five complete days. Keep that value and
+  the frozen rule unchanged through the 24-hour outcome cutoff. Finalization
+  runs after the cutoff, with an additional six-hour deadline; late/missing
+  completion is explicitly incomplete.
+
+Validation for this build: the full backend suite passed **1,733 tests with
+17 optional integration tests skipped**. A final recovery-association change
+then passed the affected runtime/store/retention subset, **44 passed, 1 skip**.
+Focused frontend consumer and proxy checks passed. A real browser loaded an
+isolated fixture through the production settlement consumer, displayed an
+eligible 2.5-bp candidate, and cleared the live values at expiry/close while
+preserving only the historical note. This is UI verification, not live market
+evidence. PostgreSQL schema execution and production storage/latency remain
+deployment checks; no new canary or five-day study has run here.
+
+For the code/schema installation, run **after pushing this release to GitHub**.
+Apply schema before restarting the probabilities, Chainlink and API services.
+Keep the settlement flags off and the evaluation unarmed for this installation.
+No new service/unit, public port, or production frontend is needed.
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+sudo systemctl restart price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api
+sudo systemctl status price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/live
+sudo journalctl -u price-collector-polymarket-probabilities -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
+```
+
+The settlement route should return a typed disabled 503 during this install.
+The existing retention timer loads the updated module on its next invocation;
+no unit change/reload or immediate extra deletion run is needed. The local
+dashboard proxy must be restarted to load its two new allowlisted routes;
+the frontend stays on the user's computer. Live enabling and the dated
+five-day evaluation are separate operational steps after review.

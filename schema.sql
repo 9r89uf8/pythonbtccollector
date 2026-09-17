@@ -1925,6 +1925,164 @@ FROM providers
 WHERE provider_code = 'binance_usdm_perp'
 ON CONFLICT (provider_id, symbol) DO NOTHING;
 
+-- Settlement evaluation: bounded individual evidence, compact first calls, and
+-- a frozen five-day report. Independent of official feeds and ghost contract 4.
+CREATE TABLE IF NOT EXISTS settlement_audit (
+    run_id TEXT COLLATE "C" NOT NULL CHECK (length(run_id) BETWEEN 1 AND 128),
+    decision_id TEXT COLLATE "C" NOT NULL CHECK (length(decision_id) BETWEEN 1 AND 128),
+    evaluation_start_ms BIGINT NOT NULL CHECK (evaluation_start_ms >= 0 AND evaluation_start_ms % 86400000 = 0),
+    market_id BIGINT NOT NULL,
+    market_start_ms BIGINT NOT NULL,
+    market_end_ms BIGINT NOT NULL,
+    decision_wall_ns BIGINT NOT NULL,
+    created_ms BIGINT NOT NULL,
+    frozen_json TEXT CHECK (jsonb_typeof(frozen_json::jsonb) = 'object'),
+    frozen_sha256 TEXT NOT NULL CHECK (frozen_sha256 ~ '^[0-9a-f]{64}$'),
+    compact_json TEXT NOT NULL CHECK (jsonb_typeof(compact_json::jsonb) = 'object'),
+    state_json TEXT NOT NULL CHECK (jsonb_typeof(state_json::jsonb) = 'object'),
+    version BIGINT NOT NULL CHECK (version >= 0),
+    terminal BOOLEAN NOT NULL,
+    PRIMARY KEY(run_id,decision_id),
+    CHECK (market_start_ms % 300000 = 0 AND market_id = market_start_ms / 300000
+        AND market_end_ms = market_start_ms + 300000),
+    CHECK (decision_wall_ns >= (market_end_ms - 30000) * 1000000
+        AND decision_wall_ns < market_end_ms * 1000000 AND created_ms = decision_wall_ns / 1000000),
+    CHECK (coalesce(octet_length(frozen_json),0) + octet_length(state_json) <= 131072),
+    CHECK (octet_length(compact_json) <= 65536)
+);
+CREATE INDEX IF NOT EXISTS settlement_audit_expiry_idx ON settlement_audit(created_ms,run_id,decision_id);
+CREATE INDEX IF NOT EXISTS settlement_audit_compact_idx ON settlement_audit(market_end_ms,run_id,decision_id)
+    WHERE terminal AND frozen_json IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS settlement_market_evaluation (
+    evaluation_start_ms BIGINT NOT NULL CHECK (evaluation_start_ms >= 0 AND evaluation_start_ms % 86400000 = 0),
+    market_id BIGINT NOT NULL,
+    market_start_ms BIGINT NOT NULL,
+    market_end_ms BIGINT NOT NULL,
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb) = 'object' AND octet_length(body_json) <= 131072),
+    PRIMARY KEY(evaluation_start_ms,market_id),
+    CHECK (market_start_ms % 300000 = 0 AND market_id = market_start_ms / 300000
+        AND market_end_ms = market_start_ms + 300000),
+    CHECK (market_start_ms >= evaluation_start_ms AND market_start_ms < evaluation_start_ms + 432000000)
+);
+CREATE INDEX IF NOT EXISTS settlement_market_expiry_idx ON settlement_market_evaluation(market_end_ms);
+
+CREATE TABLE IF NOT EXISTS settlement_evaluation_reports (
+    evaluation_start_ms BIGINT PRIMARY KEY CHECK (evaluation_start_ms >= 0 AND evaluation_start_ms % 86400000 = 0),
+    created_ms BIGINT NOT NULL CHECK (created_ms >= evaluation_start_ms),
+    updated_ms BIGINT NOT NULL CHECK (updated_ms >= created_ms),
+    final BOOLEAN NOT NULL,
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb) = 'object' AND octet_length(body_json) <= 131072)
+);
+CREATE INDEX IF NOT EXISTS settlement_report_expiry_idx ON settlement_evaluation_reports(created_ms);
+
+CREATE OR REPLACE FUNCTION settlement_audit_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+DECLARE
+    now_ms BIGINT := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    old_state JSONB;
+    new_state JSONB;
+    field TEXT;
+BEGIN
+    IF TG_OP='DELETE' THEN
+        IF OLD.created_ms > now_ms-604800000 THEN RAISE EXCEPTION 'settlement retention is seven days'; END IF;
+        RETURN OLD;
+    END IF;
+    IF TG_OP='INSERT' THEN
+        IF NEW.created_ms <= now_ms-604800000 THEN RAISE EXCEPTION 'expired settlement cannot be reinserted'; END IF;
+        IF NEW.frozen_json IS NULL OR NEW.frozen_sha256 IS DISTINCT FROM
+            encode(sha256(convert_to(NEW.frozen_json,'UTF8')),'hex')
+            OR NEW.compact_json::jsonb IS DISTINCT FROM (NEW.frozen_json::jsonb - 'slots' - 'slot_inputs')
+        THEN RAISE EXCEPTION 'settlement frozen hash or compact evidence differs'; END IF;
+        RETURN NEW;
+    END IF;
+    IF ROW(NEW.run_id,NEW.decision_id,NEW.evaluation_start_ms,NEW.market_id,NEW.market_start_ms,
+        NEW.market_end_ms,NEW.decision_wall_ns,NEW.created_ms,NEW.frozen_sha256,NEW.compact_json)
+        IS DISTINCT FROM ROW(OLD.run_id,OLD.decision_id,OLD.evaluation_start_ms,OLD.market_id,OLD.market_start_ms,
+        OLD.market_end_ms,OLD.decision_wall_ns,OLD.created_ms,OLD.frozen_sha256,OLD.compact_json)
+    THEN RAISE EXCEPTION 'frozen settlement identity is immutable'; END IF;
+    IF NEW.frozen_json IS DISTINCT FROM OLD.frozen_json AND
+        NOT (OLD.frozen_json IS NOT NULL AND NEW.frozen_json IS NULL AND OLD.terminal AND OLD.market_end_ms+120000<=now_ms)
+    THEN RAISE EXCEPTION 'settlement detail only compacts after terminal match window'; END IF;
+    IF NEW.version<OLD.version OR (OLD.terminal AND NOT NEW.terminal)
+        OR (NEW.version=OLD.version AND ROW(NEW.state_json,NEW.terminal) IS DISTINCT FROM ROW(OLD.state_json,OLD.terminal))
+    THEN RAISE EXCEPTION 'settlement state version cannot regress or collide'; END IF;
+    old_state := OLD.state_json::jsonb; new_state := NEW.state_json::jsonb;
+    FOREACH field IN ARRAY ARRAY['intent_wall_ns','intent_monotonic_ns','attempt_wall_ns','attempt_monotonic_ns',
+        'ack_wall_ns','ack_monotonic_ns','failure_wall_ns','failure_monotonic_ns'] LOOP
+        IF old_state->'publication' ? field AND old_state->'publication'->field IS DISTINCT FROM new_state->'publication'->field
+        THEN RAISE EXCEPTION 'settlement publication clocks are immutable'; END IF;
+    END LOOP;
+    IF old_state#>>'{publication,status}' NOT IN ('reserved','intent','attempting','attempted') AND
+        old_state#>>'{publication,status}' IS DISTINCT FROM new_state#>>'{publication,status}'
+    THEN RAISE EXCEPTION 'settlement publication outcome is immutable'; END IF;
+    IF old_state#>>'{publication,status}'='acknowledged' AND
+        old_state#>'{publication,eligible_before_close}' IS DISTINCT FROM new_state#>'{publication,eligible_before_close}'
+    THEN RAISE EXCEPTION 'settlement acknowledged eligibility is immutable'; END IF;
+    IF old_state#>'{publication,attempted_payload}' IS NOT NULL AND
+        old_state#>'{publication,attempted_payload}' IS DISTINCT FROM new_state#>'{publication,attempted_payload}'
+    THEN RAISE EXCEPTION 'settlement attempted payload is immutable'; END IF;
+    IF old_state#>'{target,first_event}' IS NOT NULL AND old_state#>'{target,first_event}'<>'null'::jsonb
+        AND old_state#>'{target,first_event}' IS DISTINCT FROM new_state#>'{target,first_event}'
+    THEN RAISE EXCEPTION 'settlement first target is immutable'; END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS settlement_audit_guard_trigger ON settlement_audit;
+CREATE TRIGGER settlement_audit_guard_trigger BEFORE INSERT OR UPDATE OR DELETE ON settlement_audit
+    FOR EACH ROW EXECUTE FUNCTION settlement_audit_guard();
+
+CREATE OR REPLACE FUNCTION settlement_summary_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+DECLARE
+    now_ms BIGINT := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    signal TEXT;
+    old_call JSONB;
+    new_call JSONB;
+BEGIN
+    IF TG_TABLE_NAME='settlement_evaluation_reports' THEN
+        IF TG_OP='DELETE' THEN
+            IF OLD.created_ms>now_ms-7776000000 THEN RAISE EXCEPTION 'settlement reports retain ninety days'; END IF;
+            RETURN OLD;
+        END IF;
+        IF TG_OP='UPDATE' AND (OLD.final OR NEW.evaluation_start_ms<>OLD.evaluation_start_ms OR NEW.created_ms<>OLD.created_ms)
+        THEN RAISE EXCEPTION 'final settlement report is immutable'; END IF;
+        IF NEW.final AND (NEW.updated_ms<NEW.evaluation_start_ms+518400000 OR now_ms<NEW.evaluation_start_ms+518400000)
+        THEN RAISE EXCEPTION 'settlement final report is not due'; END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' THEN
+        IF OLD.market_end_ms>now_ms-604800000 THEN RAISE EXCEPTION 'settlement calls retain seven days'; END IF;
+        RETURN OLD;
+    END IF;
+    IF TG_OP='INSERT' THEN
+        IF NEW.market_end_ms<=now_ms-604800000 THEN RAISE EXCEPTION 'expired settlement calls cannot be reinserted'; END IF;
+        RETURN NEW;
+    END IF;
+    IF ROW(NEW.evaluation_start_ms,NEW.market_id,NEW.market_start_ms,NEW.market_end_ms)
+        IS DISTINCT FROM ROW(OLD.evaluation_start_ms,OLD.market_id,OLD.market_start_ms,OLD.market_end_ms)
+    THEN RAISE EXCEPTION 'settlement market identity is immutable'; END IF;
+    FOREACH signal IN ARRAY ARRAY['ghost','twap','spot'] LOOP
+        old_call:=OLD.body_json::jsonb->'first_calls'->signal;
+        new_call:=NEW.body_json::jsonb->'first_calls'->signal;
+        IF old_call IS NOT NULL AND old_call IS DISTINCT FROM new_call THEN
+            IF jsonb_typeof(new_call) IS DISTINCT FROM 'object'
+                OR new_call#>>'{order,0}' IS NULL OR new_call#>>'{order,1}' IS NULL OR new_call#>>'{order,2}' IS NULL
+                OR ROW((new_call#>>'{order,0}')::bigint,(new_call#>>'{order,1}') COLLATE "C",(new_call#>>'{order,2}') COLLATE "C")
+                >= ROW((old_call#>>'{order,0}')::bigint,(old_call#>>'{order,1}') COLLATE "C",(old_call#>>'{order,2}') COLLATE "C")
+            THEN RAISE EXCEPTION 'settlement first call only accepts an earlier acknowledged publication'; END IF;
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS settlement_market_guard_trigger ON settlement_market_evaluation;
+CREATE TRIGGER settlement_market_guard_trigger BEFORE INSERT OR UPDATE OR DELETE ON settlement_market_evaluation
+    FOR EACH ROW EXECUTE FUNCTION settlement_summary_guard();
+DROP TRIGGER IF EXISTS settlement_report_guard_trigger ON settlement_evaluation_reports;
+CREATE TRIGGER settlement_report_guard_trigger BEFORE INSERT OR UPDATE OR DELETE ON settlement_evaluation_reports
+    FOR EACH ROW EXECUTE FUNCTION settlement_summary_guard();
+REVOKE ALL ON FUNCTION settlement_audit_guard(),settlement_summary_guard() FROM PUBLIC;
+-- End settlement evaluation schema.
+
 -- A database reset preserves the login roles but removes database-local
 -- privileges. Keep schema.sql sufficient to restore the writer/reader split
 -- without relying on an earlier manual bootstrap session.

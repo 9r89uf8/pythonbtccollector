@@ -199,7 +199,9 @@ async def ghost_comparison(request: Request) -> Response:
 
 
 def stream_frame(update: Any, *, skipped_updates: int, resync: bool,
-                 wall_ns: int, monotonic_ns: int) -> bytes:
+                 wall_ns: int, monotonic_ns: int, event_name: str = 'ghost') -> bytes:
+    if event_name not in ('ghost', 'settlement'):
+        raise ValueError('unsupported stream event')
     read = update.read
     fresh = read is not None and read.is_fresh(wall_ns=wall_ns, monotonic_ns=monotonic_ns)
     state = update.state if fresh or read is None else 'unavailable'
@@ -217,11 +219,12 @@ def stream_frame(update: Any, *, skipped_updates: int, resync: bool,
     }
     # The nested ghost is the exact producer JSON byte sequence. Only delivery
     # metadata is encoded here; prices and forecast arithmetic are untouched.
-    body = b'{"api":' + json.dumps(metadata, separators=(',', ':'), allow_nan=False).encode() + b',"ghost":'
+    body = (b'{"api":' + json.dumps(metadata, separators=(',', ':'), allow_nan=False).encode()
+            + b',"' + event_name.encode() + b'":')
     body += read.payload.raw if fresh else b'null'
     body += b'}'
     event_id = f'{update.instance_id}:{update.generation}:{update.sequence}'
-    return (f'id: {event_id}\nevent: ghost\n'.encode()
+    return (f'id: {event_id}\nevent: {event_name}\n'.encode()
             + b''.join(b'data: ' + line + b'\n' for line in body.splitlines()) + b'\n')
 
 
@@ -229,12 +232,13 @@ class GhostStreamResponse(Response):
     """Deadline the actual ASGI send, including headers, and always unregister."""
     media_type = 'text/event-stream'
 
-    def __init__(self, service: GhostApiService, client: Any) -> None:
+    def __init__(self, service: GhostApiService, client: Any, *, event_name: str = 'ghost') -> None:
         super().__init__(content=None, headers=HEADERS, media_type=self.media_type)
         self.raw_headers = [(name, value) for name, value in self.raw_headers
                             if name != b'content-length']
         self.service = service
         self.client = client
+        self.event_name = event_name
 
     async def __call__(self, scope, receive, send) -> None:
         async def checked_send(message):
@@ -259,7 +263,8 @@ class GhostStreamResponse(Response):
                 frame = stream_frame(
                     update, skipped_updates=delivery.skipped_updates,
                     resync=update.resync or previous_generation != update.generation,
-                    wall_ns=self.service.wall_ns(), monotonic_ns=self.service.monotonic_ns())
+                    wall_ns=self.service.wall_ns(), monotonic_ns=self.service.monotonic_ns(),
+                    event_name=self.event_name)
                 await checked_send({'type': 'http.response.body', 'body': frame, 'more_body': True})
                 previous_generation = update.generation
 
@@ -301,5 +306,7 @@ class GhostCompressionBypass:
 
     async def __call__(self, scope, receive, send) -> None:
         app = self.app if scope['type'] == 'http' and scope.get('path') in (
-            STREAM_PATH, '/forecasts/chainlink-twap/live') else self.compressed
+            STREAM_PATH, '/forecasts/chainlink-twap/live',
+            '/forecasts/chainlink-twap/settlement/live',
+            '/forecasts/chainlink-twap/settlement/stream') else self.compressed
         await app(scope, receive, send)

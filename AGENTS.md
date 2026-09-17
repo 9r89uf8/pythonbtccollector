@@ -213,6 +213,19 @@ The corresponding Python entry points are:
   fixed grid, read timeout, byte cap and exact payload ledger. Never interpret
   read errors as absence or local cache observations as browser delivery.
 
+### Optional Settlement Candidate
+
+The optional exact-close settlement feature is documented in
+`GHOST_TWAP_REFERENCE.md`. Keep its own versioned output and default-off
+`SETTLEMENT_ENABLED`/`SETTLEMENT_API_ENABLED` flags independent of the six-horizon
+contract. Use the decision's ending market, observed website opening reference,
+and actual acknowledgement before close. Preserve each signal's first 2-bp call
+even after revocation; never describe the candidate as validated or locked.
+`SETTLEMENT_EVALUATION_START_MS=0` is unarmed, not an evaluation already in progress.
+Settlement individual and market-call records expire at seven days; only
+aggregate reports retain ninety days. The existing operator retention timer
+also enforces these limits when the producer is disabled.
+
 ### Binance Futures, Flow, and Book
 
 - Require `BINANCE_FUTURES_STREAMS_ENABLED=true`; the collector cannot provide

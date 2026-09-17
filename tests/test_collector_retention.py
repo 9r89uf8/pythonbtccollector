@@ -55,6 +55,20 @@ def test_cli_default_only_inspects(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["remaining"]["public.price_samples"] is True
 
 
+def test_settlement_expiry_is_independent_of_producer_and_has_its_own_ages(monkeypatch):
+    from price_collector.retention import DAY_MS, expiry_plan
+    monkeypatch.setenv("SETTLEMENT_ENABLED", "false")
+    class Connection:
+        async def fetchval(self, query, table): return table
+    now = 20_000 * DAY_MS
+    plan = {item.table: item for item in asyncio.run(expiry_plan(Connection(), now))}
+    assert plan["public.settlement_audit"].cutoff == now - 7 * DAY_MS
+    assert plan["public.settlement_market_evaluation"].cutoff == now - 7 * DAY_MS
+    assert plan["public.settlement_evaluation_reports"].cutoff == now - 90 * DAY_MS
+    assert "LIMIT $2 FOR UPDATE SKIP LOCKED" in plan["public.settlement_audit"].delete_sql()
+    assert plan["public.price_samples"].cutoff == (now - 10 * DAY_MS) // 300_000
+
+
 async def insert(connection, table, **values):
     # Identifiers are fixture constants; values always use bind parameters.
     assert table.replace("_", "").replace(".", "").isalnum()

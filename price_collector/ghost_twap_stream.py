@@ -99,7 +99,8 @@ class GhostStreamHub:
     def __init__(self, request_client, subscriber_client, *, wall_ns=time.time_ns,
                  monotonic_ns=time.monotonic_ns, max_clients=8, buffer_size=128,
                  read_timeout_seconds=0.5, reconnect_delay=0.25, heartbeat_seconds=10.0,
-                 expiry_poll_seconds=0.1):
+                 expiry_poll_seconds=0.1, key=GHOST_KEY, channel=GHOST_CHANNEL,
+                 parser=None):
         for name, value, upper in (('max_clients', max_clients, 128),
                                    ('buffer_size', buffer_size, 1024)):
             if type(value) is not int or not 1 <= value <= upper:
@@ -109,6 +110,8 @@ class GhostStreamHub:
                 raise ValueError('invalid stream timing bound')
         self.request_client = request_client
         self.subscriber_client = subscriber_client
+        self.key, self.channel = key, channel
+        self.parse_payload = parser or parse_ghost_payload
         self.wall_ns, self.monotonic_ns = wall_ns, monotonic_ns
         self.max_clients, self.buffer_size = max_clients, buffer_size
         self.read_timeout, self.reconnect_delay = read_timeout_seconds, reconnect_delay
@@ -201,8 +204,8 @@ class GhostStreamHub:
     async def _authoritative(self, *, resync: bool, faults=None) -> None:
         start_wall, start_mono = self.wall_ns(), self.monotonic_ns()
         pipe = self.request_client.pipeline(transaction=True)
-        pipe.get(GHOST_KEY)
-        pipe.pttl(GHOST_KEY)
+        pipe.get(self.key)
+        pipe.pttl(self.key)
         raw, ttl = await asyncio.wait_for(pipe.execute(), self.read_timeout)
         if faults:
             raise faults[0]
@@ -218,7 +221,7 @@ class GhostStreamHub:
             self._emit(None, 'invalid_cache_ttl', resync=resync)
             return
         try:
-            payload = parse_ghost_payload(raw)
+            payload = self.parse_payload(raw)
             read = bind_read_clock(payload, wall_ns=end_wall, monotonic_ns=end_mono)
         except InvalidGhostPayload:
             self._needs_authoritative = True
@@ -280,7 +283,7 @@ class GhostStreamHub:
                 now = loop.time()
                 if message is not None:
                     if (message.get('type') in ('subscribe', 'unsubscribe')
-                            and message.get('channel') in (GHOST_CHANNEL, GHOST_CHANNEL.encode())):
+                            and message.get('channel') in (self.channel, self.channel.encode())):
                         # redis-py can reconnect and resubscribe inside a read
                         # without raising to this supervisor. Only _connection
                         # consumes the initial ACK; a later ACK is a new loss
@@ -291,7 +294,7 @@ class GhostStreamHub:
                         self._emit(None, 'subscriber_reconnected', resync=True)
                         raise _Resync('subscriber_reconnected')
                     last_server, ping_sent = now, None
-                    if message.get('type') == 'message' and message.get('channel') in (GHOST_CHANNEL, GHOST_CHANNEL.encode()):
+                    if message.get('type') == 'message' and message.get('channel') in (self.channel, self.channel.encode()):
                         raw = message.get('data')
                         if type(raw) is not bytes or len(raw) > MAX_PAYLOAD_BYTES:
                             raw = None
@@ -316,7 +319,7 @@ class GhostStreamHub:
         pubsub = self.subscriber_client.pubsub()
         pump = None
         try:
-            await asyncio.wait_for(pubsub.subscribe(GHOST_CHANNEL), SUBSCRIBER_IO_SECONDS)
+            await asyncio.wait_for(pubsub.subscribe(self.channel), SUBSCRIBER_IO_SECONDS)
             loop = asyncio.get_running_loop()
             deadline = loop.time()+SUBSCRIBER_IO_SECONDS
             while True:
@@ -325,7 +328,7 @@ class GhostStreamHub:
                     raise _Resync('subscription_ack_timeout')
                 message = await asyncio.wait_for(pubsub.get_message(ignore_subscribe_messages=False, timeout=remaining), remaining)
                 if (message is not None and message.get('type') == 'subscribe'
-                        and message.get('channel') in (GHOST_CHANNEL, GHOST_CHANNEL.encode())):
+                        and message.get('channel') in (self.channel, self.channel.encode())):
                     break
             queue = asyncio.Queue(maxsize=self.buffer_size)
             faults = []
@@ -337,7 +340,7 @@ class GhostStreamHub:
                     raise item
                 raw, wall, mono = item
                 try:
-                    payload = parse_ghost_payload(raw)
+                    payload = self.parse_payload(raw)
                     read = bind_read_clock(payload, wall_ns=wall, monotonic_ns=mono)
                 except InvalidGhostPayload:
                     self._emit(None, 'invalid_payload')
