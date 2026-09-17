@@ -247,6 +247,7 @@ def build_report(rows: list[Mapping], start_ms: int, now_ms: int, *, final: bool
               "publication_status_counts": {},
               "limitations": ["No calibrated individual-market probability or confidence tier",
                               "Abstentions count in coverage, not as forecast losses",
+                              "TWAP and spot baseline calls are evaluated only at eligible acknowledged ghost settlement publications; ghost-specific unavailability also removes baseline opportunities",
                               "Unknown official outcomes remain unknown; later outcomes cannot change final report"]}
     quality, reasons, publication_statuses = Counter(), Counter(), Counter()
     for row in known.values():

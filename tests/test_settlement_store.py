@@ -167,6 +167,7 @@ def test_report_separates_coverage_unknown_abstention_and_paired_baselines():
     body = capture_outcome(body, resolution(), START + 400_000)
     report = build_report([market_row(body)], START, START + DAY_MS, final=False, persistence_complete=True)
     assert (report["scheduled_markets"], report["observed_markets"], report["no_observation_markets"]) == (288, 1, 287)
+    assert "TWAP and spot baseline calls are evaluated only at eligible acknowledged ghost settlement publications; ghost-specific unavailability also removes baseline opportunities" in report["limitations"]
     ghost, twap, spot = [report["signals"][x] for x in ("ghost", "twap", "spot")]
     assert (ghost["calls"], ghost["losses"], ghost["abstentions"]) == (1, 0, 287)
     assert (twap["calls"], twap["losses"]) == (1, 1)

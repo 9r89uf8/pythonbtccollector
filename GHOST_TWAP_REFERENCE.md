@@ -697,6 +697,10 @@ ghost-selected paired comparison for the symmetric baseline-rule comparison.
 Neither establishes an entire coverage-versus-risk frontier. Include daily,
 Up/Down and feed-quality breakdowns.
 
+TWAP and spot baseline calls are evaluated only at eligible acknowledged ghost
+settlement publications: ghost-specific unavailability also removes baseline
+opportunities, so their coverage does not measure independent baseline feeds.
+
 - Coverage denominator: every scheduled market in the declared window, with
   unavailable references, input gaps, below-threshold markets and late/unknown
   publications counted separately.
@@ -799,6 +803,23 @@ Settings to review manually, preserving the existing environment files:
   runs after the cutoff, with an additional six-hour deadline; late/missing
   completion is explicitly incomplete.
 
+During the five-day evaluation, check the cached `/settlement/report` endpoint
+(full route above) at least daily and after any collector restart. Its
+`runtime.fault` must be null: a non-null value stops new settlement admission
+for that process lifetime, even while fresh reports continue. Inspect the
+Chainlink journal, correct the cause and restart that collector only after
+preserving its outbox; keep the evaluation dates unchanged and count the gap.
+Also verify the report is current (`generated_at_ms`/`valid_until_ms`) and its
+decision counters advance during the final 30 seconds of markets. A missing or
+stale report is an unknown monitoring state, not evidence of a clear fault.
+With a fresh report and null fault, rising
+`evaluation.reason_counts.reference_unavailable_or_noncausal` or
+`runtime.counters.context_read_errors` instead points to missing/invalid market
+context; inspect the probabilities evidence worker and context cache. That
+condition withholds calls without latching `runtime.fault`. A missing live
+snapshot outside the final 30 seconds is expected, so use the report for this
+operating check.
+
 Validation for this build: the full backend suite passed **1,733 tests with
 17 optional integration tests skipped**. A final recovery-association change
 then passed the affected runtime/store/retention subset, **44 passed, 1 skip**.
@@ -806,8 +827,30 @@ Focused frontend consumer and proxy checks passed. A real browser loaded an
 isolated fixture through the production settlement consumer, displayed an
 eligible 2.5-bp candidate, and cleared the live values at expiry/close while
 preserving only the historical note. This is UI verification, not live market
-evidence. PostgreSQL schema execution and production storage/latency remain
-deployment checks; no new canary or five-day study has run here.
+evidence. The PostgreSQL schema check was subsequently completed as recorded
+below. Production storage/latency remain live rollout checks; no new canary or
+five-day study has run here.
+
+Review follow-up, September 17, 2026 UTC: the full schema was applied to an
+isolated `settlement_validation_*` database on the droplet's PostgreSQL 16.15
+server. `tests/settlement_postgres_smoke.py` then exercised the real store with
+the writer role and checked persistence/idempotency, each signal's first call,
+revocation accounting, rejected changes to frozen evidence/ACK clocks/first
+calls, the seven-day deletion guard, terminal compaction, the actual
+outcome/report queries, immutable final reports, reader permissions and the
+capacity query. All passed. Reapplying the entire schema also succeeded and
+preserved both audit rows, the market summary and the final report. These are
+synthetic database checks, not additional forecasting evidence or a live-rate
+storage measurement. The scratch database and all temporary files were removed;
+production tables, service code, flags and processes were unchanged. The
+affected local report tests also passed: 27 tests.
+
+The schema already begins with `BEGIN;` and ends with `COMMIT;`, with no
+intervening top-level commit. Consequently the documented
+`psql -v ON_ERROR_STOP=1 -f schema.sql` apply is already transactional; an
+additional `--single-transaction` option is unnecessary. The executed schema
+file's SHA-256 was
+`173390d095c94a7ee755086be0c66d03a8cf047ff6ccaea0baacd45e6b1a0fef`.
 
 For the code/schema installation, run **after pushing this release to GitHub**.
 Apply schema before restarting the probabilities, Chainlink and API services.
