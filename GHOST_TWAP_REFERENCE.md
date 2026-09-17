@@ -588,10 +588,10 @@ behavior. For current operations and exact service commands, use
 
 ## Proposed settlement-winner monitor
 
-**Status: design for joint review; not implemented, activated or validated.**
-The independent review agrees that an exact-close projection is feasible and
-promising. The corrected, smaller proposal below still needs the reviewing
-agent's confirmation; their earlier review is not approval of these revisions.
+**Status: jointly agreed design; implementation authorized, not activated or validated.**
+The independent reviewer accepted this section subject to symmetric baseline
+rules, an explicit report deadline and precise eligibility/context definitions.
+Those three amendments are incorporated below; this is the agreed build scope.
 
 ### Evidence checked during planning
 
@@ -621,8 +621,11 @@ That observation does not establish an opening-reference rounding tolerance.
    Reuse the existing freshness, carry and reconnect rules. Source-age limits
    can require a target up to 35 seconds beyond the latest TWAP stamp; do not
    interpolate the six existing fixed horizons. Preserve the ending market
-   identity with the shared market helper, rather than assigning E to the next
-   market or duplicating the market-ID formula.
+   identity with the shared helper applied to the decision's own UTC second
+   while it precedes E, rather than assigning E to the next market. Healthy and
+   degraded forecasts qualify under the unchanged ten-second carry cap; retain
+   carry counts and ages. Extend the frozen slot view through anchor+32 when
+   necessary without changing the existing six-horizon contract.
 2. Use the validated website Price to Beat already observed by the existing
    evidence collector, available to the producer before its decision. Missing,
    invalid or conflicting website references mean no candidate call. Do not
@@ -630,10 +633,11 @@ That observation does not establish an opening-reference rounding tolerance.
    stream event. Record that event and its difference for diagnostics when
    available; website/stream precision agreement needs an explicit policy
    before it can become a qualification rule.
-3. Record the projected side and signed dollar/bp lead on every published
-   settlement update. The one exploratory candidate rule is the **first
+3. Record ghost, current-TWAP and spot sides and signed dollar/bp leads on every
+   published settlement update. Each signal has its own **first
    eligible, acknowledged-before-close update with absolute projected lead
-   at least 2 bp**, within the final 30 seconds. This cutoff is an explicitly
+   at least 2 bp**, within the final 30 seconds. The ghost is the primary signal;
+   TWAP and spot are symmetric baselines. This cutoff is an explicitly
    selected development hypothesis, not an established low-risk threshold.
    Keep the first call immutable, even if later updates reverse or become
    stale. Later updates remain visible but are not independent first calls.
@@ -649,8 +653,11 @@ Keep the current six-horizon contract unchanged. Reuse the existing Chainlink
 worker and calculation/publication helpers for a separate versioned settlement
 record and Redis output, with thin read-only API/SSE delivery. No new service,
 model, feed connection or duplicate HTTP poller. The existing evidence worker
-can deliver bounded market context through Redis to the producer's in-memory
-state; do not query PostgreSQL on the feed or forecast request path. Record
+delivers bounded market context from the probabilities collector through a
+dedicated Redis key to the Chainlink producer's in-memory state. The writer
+applies the same identity, request-parameter, receipt and completion checks as
+the dashboard opening-reference path, and rejects conflicting website values.
+Do not query PostgreSQL on the feed or forecast request path. Record
 both the reference's original observation time and when the producer obtained it.
 
 Reuse frozen-input evidence and durable-before-publication ordering; slot counts
@@ -665,6 +672,13 @@ Individual forecasts/results retain the existing seven-day limit; do not add
 an indefinite research exception. Compact after matching using the existing
 bounded pattern, and retain declared cohort/day counts under the existing
 90-day accuracy-summary policy. Raw observations retain their existing limits.
+Automatically materialize the final report within six hours after the fixed
+outcome cutoff, before the earliest individual rows expire at seven days.
+Retained report aggregates include scheduled-market coverage/reasons; per-signal
+calls, resolved losses and unresolved calls; call-time summaries; daily, side
+and quality breakdowns; paired wins/losses at the ghost call; and revocations.
+Keep these bounded report summaries for ninety days. A missed finalization
+deadline is an explicit incomplete report, never a silently reconstructed one.
 
 ### One bounded prospective evaluation
 
@@ -675,11 +689,13 @@ new evidence period explicitly; the existing rolling-ghost producer did not
 already collect the required settlement calls. Do not tune the rule during the
 window or stop early when a repeatedly checked statistic looks favorable.
 
-At each first call, freeze current-TWAP and spot sides/leads at that same
-decision. Compare their official-winner errors with the ghost on identical
-markets and report paired improvements/worsenings. Report call timing and
-coverage as well as errors; this comparison alone does not establish an entire
-coverage-versus-risk frontier. Include daily, Up/Down and feed-quality breakdowns.
+Evaluate each of ghost, TWAP and spot at its own first acknowledged 2-bp
+qualification in the window, reporting coverage, losses and call timing.
+Additionally compare all three sides at the ghost's first-call instant on the
+same markets and report paired improvements/worsenings. Do not mistake that
+ghost-selected paired comparison for the symmetric baseline-rule comparison.
+Neither establishes an entire coverage-versus-risk frontier. Include daily,
+Up/Down and feed-quality breakdowns.
 
 - Coverage denominator: every scheduled market in the declared window, with
   unavailable references, input gaps, below-threshold markets and late/unknown
