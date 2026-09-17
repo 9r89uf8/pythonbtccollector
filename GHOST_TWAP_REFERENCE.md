@@ -585,3 +585,115 @@ No broad new test campaign is needed merely to consolidate documentation.
 Implementation changes still receive focused checks appropriate to the changed
 behavior. For current operations and exact service commands, use
 [README production operations](README.md#continuous-ghost-retention-and-accuracy).
+
+## Proposed settlement-winner monitor
+
+**Status: design for joint review; not implemented, activated or validated.**
+The independent review agrees that an exact-close projection is feasible and
+promising. The corrected, smaller proposal below still needs the reviewing
+agent's confirmation; their earlier review is not approval of these revisions.
+
+### Evidence checked during planning
+
+Saved CSVs at `0a1f998` reproduce the receipt-clock pilot's 30-second projected
+lead bins: 31/247, 4/261, 0/393, 1/494 and 0/530 losses/markets for [0,1),
+[1,2), [2,4), [4,8) and at least 8 bp. The paired comparison is 102 markets
+improved over current TWAP, 13 worsened and 23 wrong under both. These are
+re-summed historical outputs, not a fresh replay of deleted observations.
+
+Projected lead at least 2 bp had 1/1,417 losses in that development cohort.
+Current-TWAP lead at least 2 bp had 23/1,405; at least 4 bp had 5/984. These
+selected subsets overlap but are not identical matched pairs. Comparing the
+1/1,417 result directly with H3's 19/4,019 mixes cohorts and cannot establish a
+coverage gain at a fixed risk. The 1.243-bp p90 belongs to the generic rolling
+30-second ghost, not the exact-close replay. At a $110,000 strike, an $11 lead
+is exactly 1 bp and belongs to [1,2), not [0,1). Historical requested slots also
+included carry; they were not all directly observed.
+
+The archived closing-price comparison found near equality, not exact equality:
+the maximum difference was $0.000000000014051072 across 1,925 comparisons.
+That observation does not establish an opening-reference rounding tolerance.
+
+### One output and one candidate rule
+
+1. During the final 30 wall-clock seconds, update one forecast for the ending
+   market's exact close E using the same 60-slot calculation, E−62 through E−3.
+   Reuse the existing freshness, carry and reconnect rules. Source-age limits
+   can require a target up to 35 seconds beyond the latest TWAP stamp; do not
+   interpolate the six existing fixed horizons. Preserve the ending market
+   identity with the shared market helper, rather than assigning E to the next
+   market or duplicating the market-ID formula.
+2. Use the validated website Price to Beat already observed by the existing
+   evidence collector, available to the producer before its decision. Missing,
+   invalid or conflicting website references mean no candidate call. Do not
+   substitute a reconciled later price or silently fall back to the opening
+   stream event. Record that event and its difference for diagnostics when
+   available; website/stream precision agreement needs an explicit policy
+   before it can become a qualification rule.
+3. Record the projected side and signed dollar/bp lead on every published
+   settlement update. The one exploratory candidate rule is the **first
+   eligible, acknowledged-before-close update with absolute projected lead
+   at least 2 bp**, within the final 30 seconds. This cutoff is an explicitly
+   selected development hypothesis, not an established low-risk threshold.
+   Keep the first call immutable, even if later updates reverse or become
+   stale. Later updates remain visible but are not independent first calls.
+4. Display projected closing price, projected side, Price to Beat, signed
+   distance, time remaining and feed quality. Label the candidate rule
+   **unvalidated**. Do not show "locked", a confidence percentage or a claim
+   that no further TWAP/quote crossing will occur. At E, expire live eligibility
+   and retain the ending call only as historical/awaiting official outcome.
+
+### Small implementation boundary
+
+Keep the current six-horizon contract unchanged. Reuse the existing Chainlink
+worker and calculation/publication helpers for a separate versioned settlement
+record and Redis output, with thin read-only API/SSE delivery. No new service,
+model, feed connection or duplicate HTTP poller. The existing evidence worker
+can deliver bounded market context through Redis to the producer's in-memory
+state; do not query PostgreSQL on the feed or forecast request path. Record
+both the reference's original observation time and when the producer obtained it.
+
+Reuse frozen-input evidence and durable-before-publication ordering; slot counts
+alone cannot reproduce same-second revisions. Preserve the frozen calculation
+and reference while acknowledgement, first exact-E target and official outcome
+are attached separately. Cap live expiry at E, recheck before publication and
+record actual acknowledgement: late/unknown acknowledgement does not qualify
+as a pre-close call merely because it preceded a delayed closing print. Outcome
+matching must follow the market's official resolution and tie rule.
+
+Individual forecasts/results retain the existing seven-day limit; do not add
+an indefinite research exception. Compact after matching using the existing
+bounded pattern, and retain declared cohort/day counts under the existing
+90-day accuracy-summary policy. Raw observations retain their existing limits.
+
+### One bounded prospective evaluation
+
+After focused boundary, reference-causality, expiry and outcome-matching checks,
+freeze code, the rule and exact dates for five fresh complete UTC days. Fix the
+outcome-reporting cutoff at 24 hours after the final market closes. Start this
+new evidence period explicitly; the existing rolling-ghost producer did not
+already collect the required settlement calls. Do not tune the rule during the
+window or stop early when a repeatedly checked statistic looks favorable.
+
+At each first call, freeze current-TWAP and spot sides/leads at that same
+decision. Compare their official-winner errors with the ghost on identical
+markets and report paired improvements/worsenings. Report call timing and
+coverage as well as errors; this comparison alone does not establish an entire
+coverage-versus-risk frontier. Include daily, Up/Down and feed-quality breakdowns.
+
+- Coverage denominator: every scheduled market in the declared window, with
+  unavailable references, input gaps, below-threshold markets and late/unknown
+  publications counted separately.
+- Descriptive loss denominator: resolved issued first calls, not abstentions.
+  Keep unresolved issued calls explicit, and never remove an earlier issued
+  call because it was later revoked, stale or wrong.
+- If a binomial upper bound is reported, label its fixed-sample independent,
+  comparable-market assumptions. For conservative unresolved-outcome analysis,
+  also calculate the bound treating every unresolved issued call as a possible
+  loss. One call per market does not prove independence; resampling all-zero-loss
+  days does not establish a useful zero-event risk bound.
+
+The first deliverable is a prospective result with coverage and limitations,
+not a calibrated 99% probability for an individual market. Any later confidence
+label needs a separate acceptance decision supported by fresh evidence. A
+20-cell tier system, extra spot feature or machine-learning model is outside v1.
