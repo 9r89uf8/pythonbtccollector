@@ -1110,9 +1110,11 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-The new exact-close settlement candidate is implemented **off by default**;
-its two-day prospective evaluation has not started. It is separate from the
-existing rolling-horizon ghost. See the
+The exact-close settlement candidate remains **off by default** in configuration
+and is now enabled on the private deployment. Its two-day prospective evaluation
+is scheduled for **September 18 00:00 to September 20 00:00 UTC, 2026**
+(576 markets); it is still **Unvalidated**. It is separate from the existing
+rolling-horizon ghost. See the
 [settlement implementation and rollout](GHOST_TWAP_REFERENCE.md#settlement-implementation-and-rollout)
 for the frozen 2-bp rule, endpoints, settings, retention and schema-first update.
 `SETTLEMENT_ENABLED` controls the bounded context handoff and producer inside

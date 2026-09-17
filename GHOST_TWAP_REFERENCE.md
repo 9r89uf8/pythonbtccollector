@@ -685,8 +685,8 @@ deadline is an explicit incomplete report, never a silently reconstructed one.
 Owner amendment, September 17, 2026 UTC: shorten the originally proposed five
 days to **two complete UTC days (576 scheduled markets)**. Keep the 2-bp rule,
 24-hour outcome cutoff, six-hour finalization deadline and retention unchanged.
-The intended window is September 18 00:00 through September 20 00:00 UTC;
-arming follows deployment and the unarmed live checks below.
+The armed window is September 18 00:00 through September 20 00:00 UTC;
+deployment and the two unarmed live-close checks are recorded below.
 
 After focused boundary, reference-causality, expiry and outcome-matching checks,
 freeze code, the rule and exact dates for two fresh complete UTC days. Fix the
@@ -726,8 +726,8 @@ label needs a separate acceptance decision supported by fresh evidence. A
 
 ### Settlement implementation and rollout
 
-Implemented locally on September 17, 2026 UTC; **not deployed, enabled or
-prospectively validated by this checkpoint**. The existing rolling ghost remains
+Deployed and enabled on September 17, 2026 UTC; the two-day evaluation is
+**scheduled, not yet prospectively validated**. The existing rolling ghost remains
 contract 4. The settlement output has its own schema 1 and
 `settlement-first-2bp-v1` rule. This implementation incorporates all three agreed
 amendments above. The new dashboard card calls it **Unvalidated** and shows the
@@ -789,8 +789,8 @@ different evaluation: the chosen evaluation start is frozen with each record.
 Resource bounds: at most 512 in-memory/outbox records, 128 KiB per record,
 0.5-second explicit Redis operation deadlines, 256 MiB relation warning and
 512 MiB relation cap with reserve, and 200,000 audit rows. The existing ghost
-disk/health guards also gate admission. Storage usage at live rates has not
-yet been measured for this output. Optional startup initiates cancellation
+disk/health guards also gate admission. Sustained storage growth has not
+yet been established for this output. Optional startup initiates cancellation
 after five seconds; owned filesystem cleanup may take longer. On shutdown,
 ordinary ghost preservation proceeds independently of settlement cleanup.
 
@@ -834,8 +834,8 @@ isolated fixture through the production settlement consumer, displayed an
 eligible 2.5-bp candidate, and cleared the live values at expiry/close while
 preserving only the historical note. This is UI verification, not live market
 evidence. The PostgreSQL schema check was subsequently completed as recorded
-below. Production storage/latency remain live rollout checks; no new canary or
-two-day study has run here.
+below. These were pre-deployment checks; the subsequent two live-close checks
+are recorded below and do not establish two-day performance.
 
 Review follow-up, September 17, 2026 UTC: the full schema was applied to an
 isolated `settlement_validation_*` database on the droplet's PostgreSQL 16.15
@@ -860,24 +860,87 @@ file's SHA-256 was
 
 For the code/schema installation, run **after pushing this release to GitHub**.
 Apply schema before restarting the probabilities, Chainlink and API services.
-Keep the settlement flags off and the evaluation unarmed for this installation.
+For an initial installation, keep the settlement flags off and evaluation
+unarmed. Pause the two affected writers and the retention job while applying
+the full schema: its existing ghost-audit DDL can deadlock with live writes.
+Use a subshell cleanup trap so a failed apply restores those services.
 No new service/unit, public port, or production frontend is needed.
 
 ```bash
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
-sudo systemctl restart price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api
+(
+  set -eu
+  trap 'sudo systemctl start price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-collector-retention.timer' EXIT
+  sudo systemctl stop price-collector-retention.timer price-collector-retention.service
+  sudo systemctl stop price-collector-polymarket-probabilities price-collector-polymarket-chainlink
+  sudo -u postgres env PGOPTIONS='-c lock_timeout=3s -c statement_timeout=30s' psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+  sudo systemctl restart price-api
+)
 sudo systemctl status price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
 curl --fail http://127.0.0.1:9000/healthz
 curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/live
 sudo journalctl -u price-collector-polymarket-probabilities -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
 ```
 
-The settlement route should return a typed disabled 503 during this install.
+The settlement route should return a typed disabled 503 during initial install.
 The existing retention timer loads the updated module on its next invocation;
 no unit change/reload or immediate extra deletion run is needed. The local
 dashboard proxy must be restarted to load its two new allowlisted routes;
 the frontend stays on the user's computer. Live enabling and the dated
 two-day evaluation are separate operational steps after review.
+
+### September 17 deployment and two-day evaluation
+
+Backend runtime `a33fccf` was pushed to GitHub and installed by fast-forward-only
+pull. The separate local dashboard was fast-forwarded to `a090d02`; its proxy
+and SSH tunnel were restarted on the user's computer. Nothing was deployed as
+a frontend on the droplet. The two-day build passed **1,734 tests, 17 optional
+integration skips**. Its revised schema/store smoke check also passed on the
+droplet's PostgreSQL 16.15 in an isolated scratch database, including rejection
+of a market at the two-day end and finalization before the three-day cutoff.
+The scratch database was removed.
+
+The first production schema attempt deadlocked against an active ghost-audit
+writer and rolled back its transaction. Applying it with the affected writers
+and retention job paused succeeded. The installation was checked with settlement
+disabled before enabling producer/context and API flags. Existing source feeds,
+reader credentials, private listeners and retention settings were preserved.
+
+Two unarmed live markets verified the complete publication and matching path:
+
+| Closing UTC stamp | Market ID | Available / acknowledged before close / exact-target matched | First exact closing TWAP |
+| --- | --- | --- | --- |
+| September 17 02:15 | 5965370 | 60 / 60 / 60 | 76126.528295786627727360 |
+| September 17 02:20 | 5965371 | 60 / 60 / 60 | 76093.777889763472179200 |
+
+At 02:21 UTC the first market's 60 rows were terminal and compacted, the report
+showed 120 decisions and acknowledgements, no fault and no persistence backlog.
+These are operational checks, not a candidate loss-rate estimate. A real browser
+observed the second market from its first eligible projection at 02:19:30 until
+close: the projected price updated from $76,101.18 to $76,093.78, using the
+observed website reference $76,126.53. It cleared the live candidate at the market
+boundary and kept only a labelled historical note. This checks live rendering
+and expiry; it does not measure browser delivery latency or establish zero gaps.
+
+After these checks, `SETTLEMENT_EVALUATION_START_MS=1789689600000` was installed
+in the existing collector environment, preserving all other settings and file
+permissions, and only the Chainlink service was restarted. The cached report
+confirmed **scheduled**, persistence complete, null runtime fault and:
+
+| Boundary | UTC | Epoch milliseconds |
+| --- | --- | --- |
+| Start, inclusive | September 18 00:00 | 1789689600000 |
+| End, exclusive | September 20 00:00 | 1789862400000 |
+| Outcome cutoff | September 21 00:00 | 1789948800000 |
+| Final report deadline | September 21 06:00 | 1789970400000 |
+
+The two-day window covers 576 scheduled five-minute markets. In Chicago it runs
+from September 17 at 7 p.m. through September 19 at 7 p.m. CDT. Live projections
+are already enabled, but earlier unarmed observations do not belong to this
+evaluation. Keep the frozen 2-bp rule and dates unchanged. The producer generates
+the final aggregate after the outcome cutoff; absence at the final deadline is
+reported as incomplete. Individual evidence still expires after seven days and
+aggregate reports after ninety days. The dashboard remains **Unvalidated**;
+no "locked winner" confidence is established by this deployment.
