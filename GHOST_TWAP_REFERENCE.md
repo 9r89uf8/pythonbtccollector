@@ -735,6 +735,21 @@ ordering and actual acknowledgement evidence.
 
 ### Update procedure
 
+The final-minute extension was deployed September 20, 2026 at 21:03 UTC from
+runtime commit `47e4ce4`; the local dashboard is `78c8b67`. The new window and
+two-second admission cadence use a separate cohort. Existing thirty-second
+history, the ordinary rolling ghost engine and its charts remain unchanged.
+
+Validation: the full backend suite passed 1,751 tests with 17 opt-in skips;
+all 93 settlement tests passed after the final cadence adjustment. A disposable
+PostgreSQL 16.15 database accepted the deployed schema, the upgrade twice, old
+records and new records at exactly sixty seconds, and separate history buckets.
+Production applied that migration before restarting. All collector/API services
+were active with loopback-only data listeners, no settlement runtime fault,
+and acknowledged projections issued more than thirty seconds before close.
+The new history collects automatically; percentages require thirty resolved
+markets in each individual cell, not thirty markets in total.
+
 The original thirty-second estimator deployment on September 20, 2026 at
 19:27 UTC installed runtime `fcbcb0d`
 from GitHub `main`. The corrected catch-up rule waits for the day's retained
@@ -773,16 +788,15 @@ window while preserving the original thirty-second records and their identities.
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-sudo sed -i '/^SETTLEMENT_EVALUATION_START_MS=/d' /etc/price-collector/collector.env
 (
   set -eu
-  trap 'sudo systemctl start price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-collector-retention.timer' EXIT
+  trap 'sudo systemctl start price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-collector-retention.timer' EXIT
   sudo systemctl stop price-collector-retention.timer price-collector-retention.service
-  sudo systemctl stop price-collector-polymarket-probabilities price-collector-polymarket-chainlink
+  sudo systemctl stop price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink
   sudo -u postgres env PGOPTIONS='-c lock_timeout=3s -c statement_timeout=30s' psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
   sudo systemctl restart price-api
 )
-sudo systemctl status price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
+sudo systemctl status price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
 curl --fail http://127.0.0.1:9000/healthz
 curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
 sudo journalctl -u price-collector-polymarket-probabilities -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
