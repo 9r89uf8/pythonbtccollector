@@ -593,12 +593,25 @@ It leaves the existing rolling 1-, 2-, 3-, 5-, 10- and 30-second ghost prices,
 source feeds, publication rules and accuracy monitor unchanged. It does not
 issue a locked-winner label or fit a statistical prediction model.
 
-In the final 30 seconds of each five-minute market, the separate settlement
+In the final 60 seconds of each five-minute market, the separate settlement
 projection calculates the exact closing TWAP using the sixty source slots from
 E−62 through E−3. It reuses the frozen ghost inputs, existing freshness/carry
 rules and causally observed website Price to Beat. A missing or conflicting
 reference makes the projection unavailable. Current TWAP and spot margins use
-the same reference. All financial calculation remains Decimal.
+the same reference. All financial calculation remains Decimal. Earlier decisions
+contain more future slots held at the latest received spot; extending this
+observation window does not establish the same accuracy at sixty seconds as at
+five or ten seconds.
+
+The optional settlement output admits the first successfully admitted decision
+in each fixed two-second UTC wall-clock interval. Further offers in that
+interval increment `sampling_skipped` without another publication or audit row. Clock regressions
+cannot reopen an admitted interval. An unavailable first observation can therefore
+delay a usable refinement until the next interval; retained counts reflect actual
+eligible acknowledgements. This sampling limit changes only the exact-close
+estimator, not the rolling ghost's event-driven updates. Input freshness and TTL
+remain unchanged: when a projection expires, the panel waits for the next valid
+publication rather than extending its lifetime.
 
 ### Historical cell definition
 
@@ -609,11 +622,14 @@ classification. Later ticks cannot replace the selected observation merely
 because they were more accurate. Late, uncertain or ineligible publications
 cannot enter the sample.
 
-Time buckets cover the final 30 seconds. Absolute margin bins are [0,1), [1,2),
-[2,4), [4,8) and at least 8 basis points; one basis point is 0.01% of the opening
-reference. Ghost, current TWAP and spot have distinct cell counts. Up and Down
+Twelve five-second time buckets cover the final 60 seconds. Absolute margin bins
+are [0,1), [1,2), [2,4), [4,8) and at least 8 basis points; one basis point is
+0.01% of the opening reference. Ghost, current TWAP and spot have distinct cell counts. Up and Down
 leading sides are explicitly pooled. Each market contributes at most once to a
 given signal/time cell. A tie has no leading side and must not count as a win.
+The versioned sixty-second window and two-second sampling cadence form a new
+cohort. Original thirty-second history retains its hashes and separate counts;
+it cannot fill the new cohort's cells merely because some time buckets overlap.
 
 An observed leading side is compared with the identity-validated official
 market winner. A loss means the market settled on the opposite side, not that
@@ -639,7 +655,12 @@ Each compact market row keeps its selected observations and copied official
 outcome, so it never depends on an already-expired resolution row. The
 `settlement_history_markets` table has one row per compatible cohort and market.
 The `settlement_history_daily` table keeps only bounded daily count summaries
-for ninety days. No new record is retained forever.
+for ninety days. No new record is retained forever. One admission per two-second
+interval through the final minute gives at most thirty admissions per market
+during an uninterrupted run, about 60,480 per week. This is not an availability
+or storage guarantee: restarts, row sizes and other retained records still
+matter. The 200,000 audit-row guard and existing 512 MiB relation budget remain
+authoritative; do not raise them to accommodate the longer observation window.
 
 The worker folds retained audit records in bounded batches, then replaces the
 corresponding daily totals idempotently. It does not increment counters again
@@ -683,7 +704,8 @@ The ordinary six-horizon ghost remains independent of optional-history faults.
 | `/forecasts/chainlink-twap/settlement/stream` | Existing bounded SSE transport, named `settlement` events and reconnect resync |
 | `/forecasts/chainlink-twap/settlement/history` | Bounded cached historical cell counts; Redis only |
 
-The projection uses schema 2 and rule `historical-settlement-v1`. The former
+The projection uses schema 3, rule `historical-settlement-v2` and
+`observation_window_s=60`, with `sampling_interval_ms=2000`. The former
 `/settlement/report` endpoint and the first-2-bp candidate/evaluation workflow
 are retired. The dashboard combines a current valid projection with the cached
 historical table; it clears live eligibility at expiry or the market close.
@@ -701,7 +723,7 @@ files with examples:
 - `/etc/price-collector/api.env`: `SETTLEMENT_API_ENABLED` remains false by
   default. The API keeps reader credentials only.
 
-A projection outside the final 30 seconds is normally unavailable. Use the
+A projection outside the final 60 seconds is normally unavailable. Use the
 history response's generation/expiry, compatibility, missing observations and
 runtime health for the operational check. Check `incomplete_frozen_days` before
 interpreting the counts as complete daily coverage. Normal in-flight work in
@@ -713,7 +735,8 @@ ordering and actual acknowledgement evidence.
 
 ### Update procedure
 
-Deployment on September 20, 2026 at 19:27 UTC installed runtime `fcbcb0d`
+The original thirty-second estimator deployment on September 20, 2026 at
+19:27 UTC installed runtime `fcbcb0d`
 from GitHub `main`. The corrected catch-up rule waits for the day's retained
 inputs before freezing, and history health excludes ordinary in-flight work in
 the current market. Aggregation/cache errors no longer clear the live projection's
@@ -742,6 +765,9 @@ Run after the reviewed backend release has been pushed to GitHub. Apply schema
 before restarting services. Pause the affected writers and retention job during
 the full schema apply; existing ghost-audit DDL can contend with live writes.
 The cleanup trap restores the paused services if schema application fails.
+The sixty-second extension requires the version-aware settlement audit schedule
+check migration in `schema.sql` before its writer restarts. It accepts the new
+window while preserving the original thirty-second records and their identities.
 
 ```bash
 cd /opt/price-collector

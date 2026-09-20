@@ -187,6 +187,30 @@ def test_optional_default_off_does_not_create_resources(monkeypatch):
     assert parent.settlement is None
 
 
+def test_final60_admission_is_once_per_two_seconds_and_pauses_do_not_consume_slot(tmp_path):
+    async def run():
+        runtime, snapshot, clock = setup(tmp_path, decision(horizon=62, remaining=60_000))
+        runtime.guard['capacity_ok'] = False
+        runtime.offer(snapshot, 0)
+        assert not runtime.records
+        runtime.guard['capacity_ok'] = True
+        runtime.offer(snapshot, 0)
+        runtime.offer(replace(snapshot, decision_id='2', decision_wall_ns=clock['wall'] + 500 * NS,
+                              decision_monotonic_ns=clock['mono'] + 500 * NS), 0)
+        assert list(runtime.records) == ['1'] and runtime.counters['sampling_skipped'] == 1
+        await runtime.publish_one(runtime.records['1'])
+        assert parse_settlement_payload(runtime.redis.publications[0][4]).forecasts[0].horizon_s == 62
+        clock['wall'] += 2000 * NS
+        clock['mono'] += 2000 * NS
+        runtime.offer(replace(snapshot, decision_id='3', decision_wall_ns=clock['wall'],
+                              decision_monotonic_ns=clock['mono']), 0)
+        assert list(runtime.records) == ['1', '3']
+        runtime.offer(replace(snapshot, decision_id='4'), 0)
+        assert runtime.counters['sampling_skipped'] == 2
+        await runtime.close()
+    asyncio.run(run())
+
+
 def test_publication_script_expires_on_absolute_close_without_refresh():
     assert "redis.call('TIME')" in PUBLISH
     assert "'PXAT'" in PUBLISH

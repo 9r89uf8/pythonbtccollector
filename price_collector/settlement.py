@@ -17,7 +17,8 @@ SETTLEMENT_KEY = "btc:live:ghost_settlement"
 SETTLEMENT_CHANNEL = SETTLEMENT_KEY + ":updates"
 CONTEXT_KEY = "btc:live:ghost_settlement_context"
 CONTEXT_MAX_BYTES = 8192
-RULE_VERSION = "historical-settlement-v1"
+RULE_VERSION = "historical-settlement-v2"
+OBSERVATION_WINDOW_S = 60
 DAY_MS = 86_400_000
 NS_MS = 1_000_000
 CATEGORIES = ("observed", "carried", "pending", "future", "missing")
@@ -161,8 +162,8 @@ def build_projection(decision: Decision, context: dict | None,
     expiry = min(decision.valid_until_wall_ns, target * NS_MS)
     remaining = target - now_ms
     reasons = list(decision.reasons)
-    if not 0 < target * NS_MS - wall <= 30_000 * NS_MS:
-        reasons.append("outside_final_30_seconds")
+    if not 0 < target * NS_MS - wall <= OBSERVATION_WINDOW_S * 1000 * NS_MS:
+        reasons.append("outside_final_60_seconds")
     if expiry <= wall:
         reasons.append("inputs_expired")
     if (not decision.policy.enabled or decision.policy.source_max_age_ms > 5000
@@ -192,15 +193,16 @@ def build_projection(decision: Decision, context: dict | None,
         reasons.append("reference_unavailable_or_noncausal")
     anchor = decision.current_twap
     horizon = None if anchor is None else (target - anchor.source_timestamp_ms) // 1000
-    if horizon is None or not 1 <= horizon <= 35:
+    if horizon is None or not 1 <= horizon <= OBSERVATION_WINDOW_S + 5:
         reasons.append("unsupported_closing_horizon")
     by_stamp = {slot.slot_timestamp_ms: slot for slot in decision.slots}
     selected = []
     for stamp in range(target - 62_000, target - 2_000, 1000):
         slot = by_stamp.get(stamp)
         if slot is None and anchor is not None and decision.current_spot is not None:
-            if (anchor.source_timestamp_ms + 28_000 <= stamp <= anchor.source_timestamp_ms + 32_000
-                    and stamp * NS_MS > wall):
+            # Only extend the future tail. Missing past inputs must remain
+            # missing; they cannot be reconstructed with today's spot.
+            if (stamp > decision.slots[-1].slot_timestamp_ms and stamp * NS_MS > wall):
                 slot = Slot(stamp, decision.current_spot.value, decision.current_spot, "future", None)
         if slot is None:
             slot = Slot(stamp, None, None, "missing", None)
@@ -234,7 +236,9 @@ def build_projection(decision: Decision, context: dict | None,
     frozen_reference.update(available_wall_ns=context_available_wall_ns,
                             available_monotonic_ns=context_available_monotonic_ns)
     projection = _safe(dict(
-        schema_version=2, kind="settlement", model_version="chainlink-60s-offset3-settlement-v1",
+        schema_version=3, kind="settlement", model_version="chainlink-60s-offset3-settlement-v1",
+        observation_window_s=OBSERVATION_WINDOW_S,
+        sampling_interval_ms=2000,
         rule_version=RULE_VERSION, run_id=decision.run_id, decision_id=decision.decision_id,
         market_id=market.market_id, market_start_ms=market.market_start_ms, market_end_ms=target,
         target_source_timestamp_ms=target, decision_time_ms=now_ms,

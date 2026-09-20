@@ -31,9 +31,14 @@ def parse_settlement_payload(raw: bytes) -> GhostPayload:
     try:
         _require(type(raw) is bytes and 0 < len(raw) <= 65536, 'settlement byte budget')
         p = json.loads(raw, parse_float=_no_float, parse_constant=_no_float, object_pairs_hook=_object)
-        _require(type(p['schema_version']) is int and p['schema_version'] == 2 and p['kind'] == 'settlement'
+        legacy = p.get('schema_version') == 2 and p.get('rule_version') == 'historical-settlement-v1'
+        current = (p.get('schema_version') == 3 and p.get('rule_version') == 'historical-settlement-v2'
+                   and type(p.get('observation_window_s')) is int and p['observation_window_s'] == 60
+                   and type(p.get('sampling_interval_ms')) is int and p['sampling_interval_ms'] == 2000)
+        window_s = 30 if legacy else 60
+        _require(type(p['schema_version']) is int and (legacy or current) and p['kind'] == 'settlement'
                  and p['model_version'] == 'chainlink-60s-offset3-settlement-v1'
-                 and p['rule_version'] == 'historical-settlement-v1'
+                 and (not legacy or 'observation_window_s' not in p)
                  and 'threshold_bps' not in p, 'unsupported settlement contract')
         _require(p['history_cohort'] == cohort_key(p), 'incompatible history cohort')
         run = _text(p['run_id'], 'run id', 128)
@@ -50,7 +55,7 @@ def parse_settlement_payload(raw: bytes) -> GhostPayload:
                  and _integer(p['market_end_ms'], 'market end') == end
                  and _integer(p['target_source_timestamp_ms'], 'target') == end
                  and _integer(p['remaining_ms'], 'remaining ms') == end - wall // NS_MS
-                 and 0 < end * NS_MS - wall <= 30_000 * NS_MS, 'wrong ending market')
+                 and 0 < end * NS_MS - wall <= window_s * 1000 * NS_MS, 'wrong ending market')
         attempt = _clock(p['publication_attempt_wall_ns'], 'attempt wall')
         attempt_mono = _clock(p['publication_attempt_monotonic_ns'], 'attempt mono')
         expiry = _clock(p['valid_until_wall_ns'], 'expiry')
@@ -71,7 +76,7 @@ def parse_settlement_payload(raw: bytes) -> GhostPayload:
                               event.received_wall_ns + receipt_cap * NS_MS,
                               wall + event.producer_received_monotonic_ns + receipt_cap * NS_MS - mono))
         _require(expiry <= min(deadlines), 'expiry exceeds frozen input lifetime')
-        horizon = _integer(p['source_horizon_s'], 'horizon', 1, 35)
+        horizon = _integer(p['source_horizon_s'], 'horizon', 1, window_s + 5)
         _require(twap.source_timestamp_ms + horizon * 1000 == end, 'wrong horizon')
         quality = p['quality']
         _require(p['status'] == 'available' and quality in ('healthy', 'degraded') and p['reasons'] == [],

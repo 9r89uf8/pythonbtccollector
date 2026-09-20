@@ -17,7 +17,7 @@ import asyncpg
 from price_collector.settlement_store import SettlementStore, DAY_MS
 
 
-def decision(start, identity, offset, prices):
+def decision(start, identity, offset, prices, *, observation_window_s=30):
     end = start + 300_000
     wall = (end - 29_000 + offset) * 1_000_000
     with localcontext() as arithmetic:
@@ -35,6 +35,10 @@ def decision(start, identity, offset, prices):
         valid_until_wall_ns=str(wall + 2_000_000_000), status='available', quality='healthy',
         reference=dict(price_to_beat='100', condition_id='c', up_token_id='u', down_token_id='d'),
         reasons=[], signals=signals, slots=[], slot_inputs=[])
+    if observation_window_s == 60:
+        frozen.update(schema_version=3, rule_version='historical-settlement-v2',
+                      observation_window_s=60, sampling_interval_ms=2000)
+        frozen.pop('threshold_bps')
     state = dict(publication=dict(status='acknowledged', attempt_wall_ns=str(wall + 1),
         ack_wall_ns=str(wall + 2), eligible_before_close=True), target=dict(status='pending', first_event=None))
     wire = {key: value for key, value in frozen.items() if key not in ('slots', 'slot_inputs')}
@@ -112,11 +116,25 @@ async def main(name):
         await connection.execute('RESET ROLE')
         guard = await store.guard()
         assert guard['capacity_ok'] and guard['row_count'] == 2
+        minute = decision(start, 'minute', -31_000, ('100.03', '100.01', '99.97'), observation_window_s=60)
+        assert await store.persist(minute) == 'inserted', 'new contract must admit the final-60s boundary'
+        assert await store.persist(minute) == 'unchanged'
+        mixed = await store.maintain(now)
+        by_selection = {cohort['selection_version']: cohort['id'] for cohort in mixed['cohorts']}
+        assert set(by_selection) == {'first-ack-5s-v1', 'first-ack-5s-v2'}
+        legacy_coverage = [row for row in mixed['coverage'] if row['cohort'] == by_selection['first-ack-5s-v1']]
+        minute_coverage = [row for row in mixed['coverage'] if row['cohort'] == by_selection['first-ack-5s-v2']]
+        assert len(legacy_coverage) == 6 and len(minute_coverage) == 12
+        assert next(row for row in minute_coverage if row['time_bucket'] == '55-60')['selected_markets'] == 1
+        assert await connection.fetchval("""SELECT count(*) FROM pg_constraint
+            WHERE conrelid='settlement_audit'::regclass
+            AND conname='settlement_audit_observation_window_check'""") == 1
         print(json.dumps(dict(database=name, server=await connection.fetchval('SHOW server_version'),
             result='passed', checks=['writer persistence and idempotency', 'first ACK per time bucket',
                 'immutable audit and publication clocks', 'seven-day individual deletion guard',
                 'daily freeze and ninety-day aggregate guard', 'terminal compaction',
-                'bounded fold and outcome join SQL', 'reader/writer privilege split', 'capacity query'],
+                'bounded fold and outcome join SQL', 'reader/writer privilege split', 'capacity query',
+                'versioned sixty-second admission', 'separate legacy and minute history buckets'],
                 relation_bytes=guard['relation_bytes'])))
     finally:
         if pool is not None:

@@ -1945,11 +1945,39 @@ CREATE TABLE IF NOT EXISTS settlement_audit (
     PRIMARY KEY(run_id,decision_id),
     CHECK (market_start_ms % 300000 = 0 AND market_id = market_start_ms / 300000
         AND market_end_ms = market_start_ms + 300000),
-    CHECK (decision_wall_ns >= (market_end_ms - 30000) * 1000000
-        AND decision_wall_ns < market_end_ms * 1000000 AND created_ms = decision_wall_ns / 1000000),
     CHECK (coalesce(octet_length(frozen_json),0) + octet_length(state_json) <= 131072),
     CHECK (octet_length(compact_json) <= 65536)
 );
+-- Replace the original anonymous final-30s schedule check on existing installs.
+-- The frozen version controls admission; a legacy row cannot acquire 60s scope.
+DO $$
+DECLARE old_check RECORD;
+BEGIN
+    FOR old_check IN SELECT conname FROM pg_constraint
+        WHERE conrelid='settlement_audit'::regclass AND contype='c'
+          AND conname<>'settlement_audit_observation_window_check'
+          AND pg_get_constraintdef(oid) LIKE '%decision_wall_ns%'
+          AND pg_get_constraintdef(oid) LIKE '%market_end_ms%'
+          AND pg_get_constraintdef(oid) LIKE '%created_ms%'
+    LOOP
+        EXECUTE format('ALTER TABLE settlement_audit DROP CONSTRAINT %I',old_check.conname);
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='settlement_audit'::regclass
+                   AND conname='settlement_audit_observation_window_check') THEN
+        ALTER TABLE settlement_audit ADD CONSTRAINT settlement_audit_observation_window_check
+        CHECK (decision_wall_ns >= (market_end_ms - CASE
+            WHEN compact_json::jsonb->'schema_version'='3'::jsonb
+              AND compact_json::jsonb->>'rule_version'='historical-settlement-v2'
+              AND compact_json::jsonb->'observation_window_s'='60'::jsonb
+              AND compact_json::jsonb->'sampling_interval_ms'='2000'::jsonb THEN 60000
+            WHEN NOT (compact_json::jsonb ? 'observation_window_s')
+              AND compact_json::jsonb->'schema_version' IN ('1'::jsonb,'2'::jsonb)
+              AND compact_json::jsonb->>'rule_version'<>'historical-settlement-v2' THEN 30000
+            ELSE 0 END) * 1000000
+          AND decision_wall_ns < market_end_ms * 1000000
+          AND created_ms = decision_wall_ns / 1000000);
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS settlement_audit_expiry_idx ON settlement_audit(created_ms,run_id,decision_id);
 CREATE INDEX IF NOT EXISTS settlement_audit_compact_idx ON settlement_audit(market_end_ms,run_id,decision_id)
     WHERE terminal AND frozen_json IS NOT NULL;

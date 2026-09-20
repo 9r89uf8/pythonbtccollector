@@ -11,7 +11,7 @@ import json
 from typing import Any, Mapping
 
 from price_collector.settlement_history import (
-    cohort_key, daily_summary, history_summary, observe,
+    cohort_key, daily_summary, history_summary, observe, observation_window_s,
 )
 
 from price_collector.ghost_twap_store import (
@@ -163,13 +163,14 @@ class SettlementStore:
         frozen, state = _json_object(incoming["frozen_json"]), _json_object(incoming["state_json"])
         start, end = _int(frozen["market_start_ms"]), _int(frozen["market_end_ms"])
         market = _int(frozen["market_id"])
+        window_ms = observation_window_s(frozen) * 1000
         evaluation_start = _int(frozen.get("evaluation_start_ms", 0))
         if evaluation_start % DAY_MS:
             raise ValueError("frozen evaluation start must be a UTC day boundary")
         if (start % 300_000 or end != start + 300_000 or market != start // 300_000
                 or _int(frozen["target_source_timestamp_ms"]) != end
                 or incoming["created_ms"] != incoming["decision_wall_ns"] // 1_000_000
-                or not (end - 30_000) * 1_000_000 <= incoming["decision_wall_ns"] < end * 1_000_000):
+                or not (end - window_ms) * 1_000_000 <= incoming["decision_wall_ns"] < end * 1_000_000):
             raise ValueError("decision outside frozen settlement schedule")
         compact = _canonical(_public(frozen))
         async with self._connection() as connection:
@@ -271,7 +272,8 @@ class SettlementStore:
                     # freezing totals, including the pre-expiry fallback.
                     continue
                 prior = _json_object(existing["body_json"]) if existing else None
-                first_observation_ms = (prior.get("covered_start_ms") or day) + 270_000 if prior else None
+                window_ms = prior["description"].get("observation_window_s", 30) * 1000 if prior else 30_000
+                first_observation_ms = (prior.get("covered_start_ms") or day) + 300_000 - window_ms if prior else None
                 if prior and now_ms >= first_observation_ms + INDIVIDUAL_MS:
                     # If the worker was disabled through expiry, retain its
                     # last totals instead of replacing them with a partial day.

@@ -43,7 +43,7 @@ def context(value="100"):
         received_monotonic_ns=10000 * NS, identity_validated=True)
 
 
-def decision(*, horizon=32, remaining=30_000, omit=None, value="100.03"):
+def decision(*, horizon=32, remaining=30_000, omit=None, value="100.03", trending=False):
     engine = GhostTwapEngine("settlement-test", GhostPolicy(enabled=True))
     anchor = END - horizon * 1000
     now = END - remaining
@@ -53,7 +53,8 @@ def decision(*, horizon=32, remaining=30_000, omit=None, value="100.03"):
             continue
         seq += 1
         receipt = max(stamp + 1000, now - 1000) if stamp == anchor else stamp + 1000
-        engine.accept(PriceEvent("spot", Decimal(value), stamp, receipt * NS,
+        price = Decimal(value) + (Decimal(stamp - anchor) / 1000 if trending else 0)
+        engine.accept(PriceEvent("spot", price, stamp, receipt * NS,
             (receipt - START) * NS, seq, str(seq)))
     seq += 1
     engine.accept(PriceEvent("twap", Decimal("100.01"), anchor, (now - 500) * NS,
@@ -79,7 +80,8 @@ def test_closing_projection_extends_future_tail_without_mutating_six_horizon_con
     assert len(result["slots"]) == 60
     assert result["counts"] == dict(observed=31, carried=0, pending=2, future=27, missing=0)
     assert result["projected_price"] == "100.030000000000000000"
-    assert result["schema_version"] == 2 and result["history_cohort"]
+    assert result["schema_version"] == 3 and result["history_cohort"]
+    assert result["observation_window_s"] == 60 and result["sampling_interval_ms"] == 2000
     assert all("qualifies" not in signal for signal in result["signals"].values())
     assert len(snapshot.slots) == 89 and len(snapshot.forecasts) == 6
     assert snapshot.to_audit_json() == original
@@ -126,8 +128,8 @@ def test_reference_and_availability_fail_closed(fault):
         assert result["market_end_ms"] == END + 300000
 
 
-def test_only_final_30_seconds_and_exact_margins_have_no_candidate_threshold():
-    assert "outside_final_30_seconds" in project(decision(remaining=30001))["reasons"]
+def test_only_final_60_seconds_and_exact_margins_have_no_candidate_threshold():
+    assert "outside_final_60_seconds" in project(decision(horizon=62, remaining=60001))["reasons"]
     with localcontext() as ctx:
         ctx.prec = 80
         snapshot = decision(value="100.019999999999999999")
@@ -136,6 +138,31 @@ def test_only_final_30_seconds_and_exact_margins_have_no_candidate_threshold():
     exact = project(decision(value="100.02"))
     assert exact["signals"]["ghost"]["lead_bps"] == "2.000000000000000000"
     assert "threshold_bps" not in exact and "qualifies" not in exact["signals"]["ghost"]
+
+
+@pytest.mark.parametrize("seconds", [30, 31, 45, 59, 60])
+def test_earlier_projection_keeps_known_prices_and_fills_only_future_tail(seconds):
+    snapshot = decision(horizon=seconds + 2, remaining=seconds * 1000, value="100", trending=True)
+    before = snapshot.to_audit_json()
+    result = project(snapshot)
+    # Spot rises $1 each source second through the anchor, then is held at100.
+    # There are (60-seconds) lower known prices: -1, -2, ... -(60-seconds).
+    n = 60 - seconds
+    with localcontext() as ctx:
+        ctx.prec = 80
+        expected = (Decimal(100) - Decimal(n * (n + 1)) / 120).quantize(Decimal('1e-18'))
+    assert result['status'] == 'available'
+    assert Decimal(result['projected_price']) == expected
+    assert result['counts'] == dict(observed=n + 1, pending=2, future=seconds - 3, carried=0, missing=0)
+    assert snapshot.to_audit_json() == before
+
+
+def test_extended_projection_does_not_fill_a_missing_past_slot_with_current_spot():
+    snapshot = decision(horizon=47, remaining=45_000)
+    stamp = END - 55_000
+    snapshot = replace(snapshot, slots=tuple(slot for slot in snapshot.slots if slot.slot_timestamp_ms != stamp))
+    result = project(snapshot)
+    assert result['status'] == 'unavailable' and result['counts']['missing'] == 1
 
 
 def test_context_canonical_decimal_equality_and_conflict_latch():

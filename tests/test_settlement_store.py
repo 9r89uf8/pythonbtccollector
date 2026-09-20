@@ -49,6 +49,14 @@ def seal(frozen, state):
     state["publication"]["attempted_payload"] = json.dumps(wire)
 
 
+def minute_contract(frozen, state):
+    frozen.update(schema_version=3, rule_version="historical-settlement-v2",
+                  observation_window_s=60, sampling_interval_ms=2000)
+    frozen.pop("threshold_bps", None)
+    seal(frozen, state)
+    return frozen, state
+
+
 def record(frozen, state, *, version=0, terminal=False):
     return dict(run_id=frozen["run_id"], decision_id=frozen["decision_id"],
                 decision_wall_ns=int(frozen["decision_wall_ns"]),
@@ -205,6 +213,7 @@ def test_cohort_ignores_old_call_rule_but_changes_with_model_and_policy():
     assert cohort_key(old) == cohort_key(new)
     assert cohort_key(new) != cohort_key(dict(new, model_version="model-2"))
     assert cohort_key(new) != cohort_key(dict(new, policy={"source_max_age_ms": 3000}))
+    assert cohort_key(old) == "acf0f5763a79d9fd72e455caa58ac3f070da186f99f57bb7b1ad17cd0bb1e628"
 
 
 def test_time_and_margin_boundaries_are_exact():
@@ -212,8 +221,55 @@ def test_time_and_margin_boundaries_are_exact():
     assert time_bucket(4_999_999_999) == "0-5"
     assert time_bucket(5_000_000_000) == "5-10"
     assert time_bucket(30_000_000_000) == "25-30"
+    assert time_bucket(29_999_999_999, window_s=60) == "25-30"
+    assert time_bucket(30_000_000_000, window_s=60) == "30-35"
+    assert time_bucket(55_000_000_000, window_s=60) == "55-60"
+    assert time_bucket(60_000_000_000, window_s=60) == "55-60"
+    assert time_bucket(60_000_000_001, window_s=60) is None
     assert [margin_bucket(Decimal(x)) for x in ("0.999999999999999999", "1", "-2", "4", "-8")] == [
         "0-1", "1-2", "2-4", "4-8", "8+"]
+
+
+def test_minute_contract_admits_earlier_decisions_without_expanding_legacy():
+    async def scenario():
+        pool = Pool(); store = SettlementStore(pool)
+        frozen, state = decision("minute", offset_ms=-31_000)
+        with pytest.raises(ValueError, match="schedule"):
+            await store.persist(record(frozen, state))
+        minute_contract(frozen, state)
+        for change in (dict(schema_version=2), dict(rule_version="historical-settlement-v1"),
+                       dict(observation_window_s=120), dict(sampling_interval_ms=500)):
+            bad = dict(frozen, **change)
+            with pytest.raises(ValueError, match="observation window"):
+                await store.persist(record(bad, state))
+        assert await store.persist(record(frozen, state)) == "inserted"
+        assert await store.persist(record(frozen, state)) == "unchanged"
+        assert not pool.connection.markets and not pool.connection.reports
+        too_early, early_state = minute_contract(*decision("early", offset_ms=-31_001))
+        with pytest.raises(ValueError, match="schedule"):
+            await store.persist(record(too_early, early_state))
+    asyncio.run(scenario())
+
+
+def test_mixed_history_keeps_legacy_six_buckets_and_new_twelve_distinct():
+    legacy, old_state = decision(prices=("100.01", "100", "99.99"))
+    minute, state = minute_contract(*decision("minute", offset_ms=-30_000,
+        prices=("100.01", "100", "99.99"), market_start_ms=START + 300_000))
+    legacy_body = observe({}, legacy, old_state, eligible=True)
+    minute_body = observe({}, minute, state, eligible=True)
+    assert set(minute_body["buckets"]) == {"55-60"}
+    assert legacy_body["cohort"] != minute_body["cohort"]
+    assert minute_body["description"]["sampling_interval_ms"] == 2000
+    days = [daily_summary([body], day_ms=START, now_ms=START + DAY_MS, final=False)
+            for body in (legacy_body, minute_body)]
+    history = history_summary(days, START + DAY_MS, complete=True)
+    old_coverage = [row for row in history["coverage"] if row["cohort"] == legacy_body["cohort"]]
+    new_coverage = [row for row in history["coverage"] if row["cohort"] == minute_body["cohort"]]
+    assert len(old_coverage) == 6 and len(new_coverage) == 12
+    assert "55-60" not in {row["time_bucket"] for row in old_coverage}
+    assert next(row for row in new_coverage if row["time_bucket"] == "55-60")["selected_markets"] == 1
+    assert len([row for row in history["cells"] if row["cohort"] == legacy_body["cohort"]]) == 90
+    assert len([row for row in history["cells"] if row["cohort"] == minute_body["cohort"]]) == 180
 
 
 def test_first_ack_selected_before_binning_and_no_replacement_with_later_better_margin():

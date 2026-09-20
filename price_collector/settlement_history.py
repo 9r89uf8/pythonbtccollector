@@ -9,11 +9,34 @@ import json
 from typing import Mapping
 
 DAY_MS = 86_400_000
-SELECTION_VERSION = "first-ack-5s-v1"
-TIME_BUCKETS = ("0-5", "5-10", "10-15", "15-20", "20-25", "25-30")
+LEGACY_SELECTION_VERSION = "first-ack-5s-v1"
+SELECTION_VERSION = "first-ack-5s-v2"
+TIME_BUCKETS = tuple(f"{lower}-{lower + 5}" for lower in range(0, 60, 5))
 MARGIN_BUCKETS = ("0-1", "1-2", "2-4", "4-8", "8+")
 SIGNALS = ("ghost", "twap", "spot")
 MIN_PERCENT_COUNT = 30
+
+
+def observation_window_s(projection: Mapping) -> int:
+    """Keep legacy evidence scoped to 30s; only contract 3 admits 60s."""
+    window = projection.get("observation_window_s")
+    if "observation_window_s" not in projection:
+        if projection.get("schema_version") == 3 or projection.get("rule_version") == "historical-settlement-v2":
+            raise ValueError("missing settlement observation window")
+        return 30
+    if (type(window) is not int or window != 60 or projection.get("schema_version") != 3
+            or projection.get("rule_version") != "historical-settlement-v2"
+            or type(projection.get("sampling_interval_ms")) is not int
+            or projection["sampling_interval_ms"] != 2000):
+        raise ValueError("unsupported settlement observation window")
+    return 60
+
+
+def _buckets(description: Mapping) -> tuple[str, ...]:
+    window = description.get("observation_window_s", 30)
+    if type(window) is not int or window not in (30, 60):
+        raise ValueError("unsupported history observation window")
+    return TIME_BUCKETS[:window // 5]
 
 
 def cohort_description(projection: Mapping) -> dict:
@@ -23,13 +46,18 @@ def cohort_description(projection: Mapping) -> dict:
     coverage denominator. Actual usable references are validated by the producer.
     Market-specific condition/token IDs are checked against each outcome instead.
     """
-    return {
+    window = observation_window_s(projection)
+    description = {
         "model_version": projection.get("model_version"),
         "policy": deepcopy(projection.get("policy", {})),
         "settlement_rule_version": "btc-5m-twap-60",
         "reference_version": "causal-observed-website-opening-v1",
-        "selection_version": SELECTION_VERSION,
+        "selection_version": LEGACY_SELECTION_VERSION if window == 30 else SELECTION_VERSION,
     }
+    if window == 60:
+        description["observation_window_s"] = 60
+        description["sampling_interval_ms"] = 2000
+    return description
 
 
 def cohort_key(projection: Mapping) -> str:
@@ -37,10 +65,11 @@ def cohort_key(projection: Mapping) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def time_bucket(remaining_ns: int) -> str | None:
-    if not 0 < remaining_ns <= 30_000_000_000:
+def time_bucket(remaining_ns: int, *, window_s: int = 30) -> str | None:
+    buckets = _buckets({"observation_window_s": window_s})
+    if not 0 < remaining_ns <= window_s * 1_000_000_000:
         return None
-    return TIME_BUCKETS[min(5, remaining_ns // 5_000_000_000)]
+    return buckets[min(len(buckets) - 1, remaining_ns // 5_000_000_000)]
 
 
 def margin_bucket(margin: Decimal) -> str:
@@ -71,7 +100,8 @@ def observe(body: dict, projection: Mapping, state: Mapping, *, eligible: bool) 
     if not eligible:
         return result
     ack = int(state["publication"]["ack_wall_ns"])
-    bucket = time_bucket(result["market_end_ms"] * 1_000_000 - ack)
+    bucket = time_bucket(result["market_end_ms"] * 1_000_000 - ack,
+                         window_s=observation_window_s(projection))
     if bucket is None:
         return result
     order = [str(ack), str(projection["run_id"]), str(projection["decision_id"])]
@@ -124,9 +154,12 @@ def daily_summary(markets: list[dict], *, day_ms: int, now_ms: int, final: bool)
     if any(item["cohort"] != cohort or item["market_start_ms"] // DAY_MS * DAY_MS != day_ms for item in markets):
         raise ValueError("mixed daily cohort")
     closed = [item for item in markets if item["market_end_ms"] <= now_ms]
-    counts, selected, ties = {}, Counter(), {bucket: Counter() for bucket in TIME_BUCKETS}
+    buckets = _buckets(markets[0]["description"])
+    counts, selected, ties = {}, Counter(), {bucket: Counter() for bucket in buckets}
     for market in closed:
         for bucket, observation in market["buckets"].items():
+            if bucket not in buckets:
+                raise ValueError("observation outside historical cohort window")
             selected[bucket] += 1
             outcome = market.get("official_outcome")
             if outcome and any(outcome.get(key) != value for key, value in observation["identity"].items()):
@@ -152,7 +185,7 @@ def daily_summary(markets: list[dict], *, day_ms: int, now_ms: int, final: bool)
             "covered_end_ms": max((item["market_end_ms"] for item in closed), default=None),
             "observed_markets": len(closed), "cells": cells,
             "coverage": [{"time_bucket": bucket, "selected_markets": selected[bucket],
-                          "ties": {name: ties[bucket][name] for name in SIGNALS}} for bucket in TIME_BUCKETS]}
+                          "ties": {name: ties[bucket][name] for name in SIGNALS}} for bucket in buckets]}
 
 
 def history_summary(days: list[dict], now_ms: int, *, complete: bool) -> dict:
@@ -166,6 +199,7 @@ def history_summary(days: list[dict], now_ms: int, *, complete: bool) -> dict:
         grouped.setdefault(day["cohort"], []).append(day)
     cells, coverage, cohorts = [], [], []
     for cohort, records in sorted(grouped.items()):
+        buckets = _buckets(records[-1]["description"])
         starts = [item["covered_start_ms"] for item in records if item["covered_start_ms"] is not None]
         ends = [item["covered_end_ms"] for item in records if item["covered_end_ms"] is not None]
         start, end = min(starts, default=None), max(ends, default=None)
@@ -177,7 +211,7 @@ def history_summary(days: list[dict], now_ms: int, *, complete: bool) -> dict:
                         "incomplete_frozen_days": sum(item.get("final", False) and not item.get("persistence_complete", True)
                                                       for item in records)})
         totals, selected = {}, Counter()
-        tie_counts = {bucket: Counter() for bucket in TIME_BUCKETS}
+        tie_counts = {bucket: Counter() for bucket in buckets}
         for record in records:
             for cell in record["cells"]:
                 key = (cell["signal"], cell["time_bucket"], cell["margin_bucket"])
@@ -186,7 +220,7 @@ def history_summary(days: list[dict], now_ms: int, *, complete: bool) -> dict:
             for item in record["coverage"]:
                 selected[item["time_bucket"]] += item["selected_markets"]
                 tie_counts[item["time_bucket"]].update(item["ties"])
-        for bucket in TIME_BUCKETS:
+        for bucket in buckets:
             coverage.append({"cohort": cohort, "time_bucket": bucket, "observed_markets": observed,
                              "selected_markets": selected[bucket],
                              "no_eligible_publication_markets": observed - selected[bucket],

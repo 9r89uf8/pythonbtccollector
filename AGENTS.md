@@ -218,15 +218,27 @@ The corresponding Python entry points are:
 The optional historical estimator is documented in `GHOST_TWAP_REFERENCE.md`.
 Keep `SETTLEMENT_ENABLED`/`SETTLEMENT_API_ENABLED` default off and independent of
 the unchanged six-horizon ghost contract. Reuse the exact-close projection only
-in the final 30 seconds, with the decision's ending market and causally observed
+in the final 60 seconds, with the decision's ending market and causally observed
 website opening reference. Do not restore the retired two-day first-2-bp study,
 evaluation start setting, candidate label or automatic study finalization.
-Preserve its saved research and results.
+Preserve its saved research and results. The exact-close projection uses schema
+3, rule `historical-settlement-v2`, `observation_window_s=60` and
+`sampling_interval_ms=2000`; keep its new history cohort separate from the
+original thirty-second cohort.
+
+Admit at most the first successfully admitted settlement decision in each fixed
+two-second UTC wall-clock interval, counting further offers in that interval as
+`sampling_skipped`. Do not reopen an admitted interval after a clock regression.
+Apply this limit before publication and audit creation, never by dropping already published
+evidence. Keep the existing row/byte caps; the rolling ghost's event cadence and
+six forecasts are unchanged. Do not extend freshness or TTL to bridge a missed
+update; wait for the next valid publication. Migrate the settlement audit's
+schedule check to accept the versioned sixty-second window before restarting its writer.
 
 Select the first eligible acknowledged publication in each market's fixed
-five-second remaining-time bucket before classifying its absolute margin into
-[0,1), [1,2), [2,4), [4,8) or at least 8 bp. Use actual acknowledgement time and
-identity-validated official outcomes. Keep ghost, TWAP and spot counts distinct;
+five-second remaining-time bucket across the final minute before classifying
+its absolute margin into [0,1), [1,2), [2,4), [4,8) or at least 8 bp. Use actual
+acknowledgement time and identity-validated official outcomes. Keep ghost, TWAP and spot counts distinct;
 pool Up/Down explicitly, preserve ties/unknowns/missing observations and separate
 incompatible calculation/settlement/policy versions. A cell counts markets, not
 ticks. Counts describe historical outcomes, never a locked winner or certified

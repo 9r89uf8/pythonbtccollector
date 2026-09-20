@@ -20,6 +20,7 @@ from price_collector.ghost_twap_spool import GhostSpool
 from price_collector.settlement import (
     SettlementSettings, build_projection, public_payload, decode_context, CONTEXT_KEY,
     SETTLEMENT_KEY, SETTLEMENT_CHANNEL,
+    OBSERVATION_WINDOW_S,
 )
 from price_collector.settlement_wire import HISTORY_KEY, parse_settlement_payload
 
@@ -60,6 +61,7 @@ class SettlementRuntime:
         self._fault = None
         self._history_fault = None
         self._last_maintenance = 0
+        self._last_admitted_slot = -1
 
     async def _owned_thread(self, method, *args):
         task = asyncio.get_running_loop().run_in_executor(None, partial(method, *args))
@@ -139,7 +141,11 @@ class SettlementRuntime:
     def offer(self, decision, epoch):
         now = decision.decision_wall_ns // NS_MS
         remaining = 300_000 - now % 300_000
-        if remaining > 30_000 or self._closed:
+        if remaining > OBSERVATION_WINDOW_S * 1000 or self._closed:
+            return
+        sampling_slot = now // 2000
+        if sampling_slot <= self._last_admitted_slot:
+            self.counters['sampling_skipped'] += 1
             return
         if not self._safe(epoch) or len(self.records) >= MAX_RECORDS:
             self.counters['admission_paused'] += 1
@@ -165,6 +171,9 @@ class SettlementRuntime:
             LOGGER.exception('settlement calculation paused')
             return
         self.records[p['decision_id']] = row
+        # Bound the extended window's audit volume before any publication.
+        # This cadence belongs only to settlement, not the rolling ghost.
+        self._last_admitted_slot = sampling_slot
         self.pending.append(p['decision_id'])
         self.dirty.add(p['decision_id'])
         self.counters['decisions'] += 1

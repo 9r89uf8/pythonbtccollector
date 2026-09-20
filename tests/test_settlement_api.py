@@ -51,6 +51,26 @@ def test_wire_accepts_real_pure_projection_and_preserves_exact_bytes():
     assert parsed.has_eligible_prices
 
 
+def test_final60_wire_and_legacy30_contract_remain_separate():
+    from price_collector.settlement_history import cohort_key
+    earlier = public_payload(project(decision(horizon=62, remaining=60_000)))
+    earlier.update(publication_state='attempted',
+        publication_attempt_wall_ns=str(int(earlier['decision_wall_ns']) + 10 * NS),
+        publication_attempt_monotonic_ns=str(int(earlier['decision_monotonic_ns']) + 10 * NS))
+    assert parse_settlement_payload(encoded(earlier)).forecasts[0].horizon_s == 62
+    old = payload()
+    old.update(schema_version=2, rule_version='historical-settlement-v1')
+    old.pop('observation_window_s')
+    old.pop('sampling_interval_ms')
+    old['history_cohort'] = cohort_key(old)
+    assert parse_settlement_payload(encoded(old)).has_eligible_prices
+    earlier.update(schema_version=2, rule_version='historical-settlement-v1')
+    earlier.pop('observation_window_s')
+    earlier.pop('sampling_interval_ms')
+    earlier['history_cohort'] = cohort_key(earlier)
+    with pytest.raises(InvalidGhostPayload): parse_settlement_payload(encoded(earlier))
+
+
 @pytest.mark.parametrize('fault', ['market_start', 'window', 'source_url', 'params', 'http_status',
     'prestart_reference', 'reference_availability', 'baseline_price', 'side', 'lead', 'qualifies',
     'expiry_after_close', 'attempt_at_close', 'carry_count', 'cohort'])

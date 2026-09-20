@@ -1111,7 +1111,7 @@ fills or a frozen fee schedule for future markets.
 ## Ghost TWAP — optional worker
 
 The optional historical settlement estimator replaces the retired two-day
-candidate study. In the final 30 seconds it shows how often the leading side
+candidate study. In the final 60 seconds it shows how often the leading side
 won in past markets with a similar projected margin and remaining time, with
 counts, unknowns and the history dates. These are descriptive frequencies,
 not a guarantee that the live winner is locked. The rolling 1-, 2-, 3-, 5-,
@@ -1125,6 +1125,14 @@ listener is introduced. Remove the obsolete `SETTLEMENT_EVALUATION_START_MS`
 setting when updating; saved study results remain preserved. History records
 with an incomplete freeze remain visibly partial; the panel reports these
 days rather than presenting them as complete evidence.
+
+The exact-close estimator admits at most one decision per fixed two-second UTC
+interval and uses twelve five-second time buckets. Its schema-3 sixty-second observation window
+has a new history cohort; retained thirty-second observations keep their
+original identity and are not relabelled or pooled into it. The existing row
+and storage caps remain fixed. Expired projections wait for a fresh update;
+their TTL is not extended to bridge the interval. Apply the schedule-check
+migration in `schema.sql` before restarting the Chainlink writer; the referenced update sequence does this.
 
 The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
 verified research, measured 3.1-second inclusion delay, live-canary findings,
