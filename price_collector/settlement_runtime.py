@@ -58,6 +58,7 @@ class SettlementRuntime:
         self._closed = False
         self._closing = None
         self._fault = None
+        self._history_fault = None
         self._last_maintenance = 0
 
     async def _owned_thread(self, method, *args):
@@ -302,18 +303,34 @@ class SettlementRuntime:
         await self.flush()
         mono, now = self.mono_ns(), self.wall_ns() // NS_MS
         if not self._last_maintenance or mono - self._last_maintenance >= 30_000 * NS_MS:
-            history = await self.store.maintain(now,
-                persistence_complete=not self.dirty and not self.pending and not self._fault)
-            attempted = self.wall_ns() // NS_MS
-            envelope = dict(schema_version=1, status='available', generated_at_ms=now,
-                cache_publish_attempt_ms=attempted, valid_until_ms=attempted + 180_000,
-                history=history, runtime=dict(counters=dict(self.counters), fault=self._fault,
-                    pending_records=len(self.records), persistence_pending=len(self.dirty)))
-            encoded = _json_bytes(envelope)
-            if len(encoded) > 512 * 1024:
-                raise ValueError('settlement history cache byte budget')
-            await asyncio.wait_for(self.redis.set(HISTORY_KEY, encoded, px=180_000), .5)
+            # Current-market decisions normally remain in flight. History only
+            # includes markets whose target matching window has already ended.
+            overdue = any(key in self.dirty or key in self.pending
+                for key, row in self.records.items()
+                if row['projection']['market_end_ms'] + MATCH_MS <= now)
+            try:
+                await self._publish_history(now, complete=not overdue and not self._fault)
+                self._history_fault = None
+            except Exception as error:
+                # A history-cache/aggregation failure must not erase a fresh
+                # publication guard. Audit persistence/guard failures above
+                # still suspend admission through the maintenance supervisor.
+                self._history_fault = type(error).__name__
+                self.counters['history_errors'] += 1
+                LOGGER.exception('settlement history unavailable')
             self._last_maintenance = mono
+
+    async def _publish_history(self, now, *, complete):
+        history = await self.store.maintain(now, persistence_complete=complete)
+        attempted = self.wall_ns() // NS_MS
+        envelope = dict(schema_version=1, status='available', generated_at_ms=now,
+            cache_publish_attempt_ms=attempted, valid_until_ms=attempted + 180_000,
+            history=history, runtime=dict(counters=dict(self.counters), fault=self._fault,
+                pending_records=len(self.records), persistence_pending=len(self.dirty)))
+        encoded = _json_bytes(envelope)
+        if len(encoded) > 512 * 1024:
+            raise ValueError('settlement history cache byte budget')
+        await asyncio.wait_for(self.redis.set(HISTORY_KEY, encoded, px=180_000), .5)
 
     async def _maintenance_loop(self):
         while not self._closed:

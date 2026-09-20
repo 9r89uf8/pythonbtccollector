@@ -220,8 +220,9 @@ class SettlementStore:
         async with self._connection() as connection:
             rows = await connection.fetch("""SELECT run_id,decision_id,version,compact_json,state_json
                 FROM settlement_audit WHERE history_folded_version < version
-                AND created_ms>$1 ORDER BY created_ms,run_id,decision_id
-                LIMIT 100 FOR UPDATE SKIP LOCKED""", now_ms - INDIVIDUAL_MS)
+                AND created_ms>$1 AND market_end_ms+120000<=$2
+                ORDER BY created_ms,run_id,decision_id
+                LIMIT 100 FOR UPDATE SKIP LOCKED""", now_ms - INDIVIDUAL_MS, now_ms)
             for row in rows:
                 frozen, state = _json_object(row["compact_json"]), _json_object(row["state_json"])
                 cohort = cohort_key(frozen)
@@ -260,10 +261,22 @@ class SettlementStore:
                     WHERE cohort=$1 AND day_ms=$2 FOR UPDATE""", cohort, day)
                 if existing and existing["final"]:
                     continue
-                if existing and now_ms >= day + INDIVIDUAL_MS:
+                pending = await connection.fetchval("""SELECT EXISTS(SELECT 1 FROM settlement_audit
+                    WHERE history_folded_version < version AND created_ms>$1
+                    AND market_start_ms >= $2 AND market_start_ms < $3)""",
+                    now_ms - INDIVIDUAL_MS, day, day + DAY_MS)
+                if pending:
+                    # An old day's first page is not its complete history.
+                    # Finish its retained input before either replacing or
+                    # freezing totals, including the pre-expiry fallback.
+                    continue
+                prior = _json_object(existing["body_json"]) if existing else None
+                first_observation_ms = (prior.get("covered_start_ms") or day) + 270_000 if prior else None
+                if prior and now_ms >= first_observation_ms + INDIVIDUAL_MS:
                     # If the worker was disabled through expiry, retain its
                     # last totals instead of replacing them with a partial day.
-                    body = _json_object(existing["body_json"])
+                    # Day+7 midnight alone does not mean an input has expired.
+                    body = prior
                     body.update(final=True, outcome_freeze_ms=now_ms, persistence_complete=False)
                     for cell in body["cells"]:
                         cell["frozen_unknown"] = cell.get("frozen_unknown", 0) + cell.get("pending", 0)
@@ -316,7 +329,8 @@ class SettlementStore:
                 break
         async with self._connection() as connection:
             pending = await connection.fetchval("""SELECT EXISTS(SELECT 1 FROM settlement_audit
-                WHERE history_folded_version < version AND created_ms>$1)""", now_ms - INDIVIDUAL_MS)
+                WHERE history_folded_version < version AND created_ms>$1
+                AND market_end_ms+120000<=$2)""", now_ms - INDIVIDUAL_MS, now_ms)
         complete = persistence_complete and not pending
         await self._rebuild_days(now_ms, complete=complete)
         async with self._connection() as connection:

@@ -1122,7 +1122,9 @@ for selection rules, API routes, retention and the schema-first update.
 the existing probabilities/Chainlink services; `SETTLEMENT_API_ENABLED` controls
 Redis-only delivery. Both remain off by default. No new service or public
 listener is introduced. Remove the obsolete `SETTLEMENT_EVALUATION_START_MS`
-setting when updating; saved study results remain preserved.
+setting when updating; saved study results remain preserved. History records
+with an incomplete freeze remain visibly partial; the panel reports these
+days rather than presenting them as complete evidence.
 
 The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
 verified research, measured 3.1-second inclusion delay, live-canary findings,

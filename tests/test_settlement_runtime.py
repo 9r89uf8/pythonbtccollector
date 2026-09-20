@@ -220,3 +220,39 @@ def test_shutdown_cancels_slow_optional_maintenance_and_preserves_outbox(tmp_pat
         await asyncio.wait_for(runtime.close(), 2)
         assert runtime.store.rows[-1]['terminal']
     asyncio.run(run())
+
+
+def test_live_inflight_decision_is_not_historical_backlog_but_overdue_one_is(tmp_path):
+    async def run():
+        runtime, snapshot, clock = setup(tmp_path)
+        calls = []
+        async def history(now, **kwargs):
+            calls.append(kwargs['persistence_complete'])
+            return {'status': 'available'}
+        runtime.store.maintain = history
+        runtime.offer(snapshot, 0)
+        row = runtime.records['1']
+        row['busy'] = True
+        await runtime.maintain()
+        assert calls == [True]
+        clock['wall'], clock['mono'] = (END + 120000) * NS, 420000 * NS
+        await runtime.maintain()
+        assert calls == [True, False]
+        row['busy'] = False
+        await runtime.close()
+    asyncio.run(run())
+
+
+def test_history_failure_does_not_withhold_a_fresh_live_projection(tmp_path):
+    async def run():
+        runtime, snapshot, _ = setup(tmp_path)
+        async def history(*args, **kwargs):
+            raise OSError('history query failed')
+        runtime.store.maintain = history
+        await runtime.maintain()
+        assert runtime.guard['capacity_ok'] and runtime.counters['history_errors'] == 1
+        runtime.offer(snapshot, 0)
+        await runtime.publish_one(runtime.records['1'])
+        assert runtime.records['1']['state']['publication']['status'] == 'acknowledged'
+        await runtime.close()
+    asyncio.run(run())

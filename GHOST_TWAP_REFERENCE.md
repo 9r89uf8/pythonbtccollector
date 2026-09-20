@@ -643,9 +643,21 @@ for ninety days. No new record is retained forever.
 
 The worker folds retained audit records in bounded batches, then replaces the
 corresponding daily totals idempotently. It does not increment counters again
-on a replay or restart. A day's outcomes freeze after the day has ended by at
-least 24 hours and its available audit records have been folded; unresolved
-outcomes remain unknown. That freeze precedes seven-day individual expiry.
+on a replay or restart. Normally, a day's outcomes freeze after the day has
+ended by at least 24 hours and its available audit records have been folded;
+unresolved outcomes remain unknown. An incomplete freeze is labelled partial,
+not a complete day or a successful study. The cohort's `incomplete_frozen_days`
+count preserves this limitation beside its rates.
+
+Remaining retained audit rows for that day must be folded before any freeze,
+including the fallback at six days after the day's start. That fallback can
+freeze an incomplete day when other historical persistence is still catching
+up, before individual expiry begins. If the worker returns only after some of
+the previously covered day's individual evidence may have expired, it preserves
+the last daily totals as explicitly incomplete instead of replacing them with
+only the surviving rows. Merely crossing midnight seven days later is not
+proof that a covered market's records have expired.
+
 Daily summaries preserve a recorded loss after its individual evidence expires,
 until the summary itself reaches ninety days. Whole summary days expire at the
 ninety-day cutoff, potentially less than one day early.
@@ -691,7 +703,10 @@ files with examples:
 
 A projection outside the final 30 seconds is normally unavailable. Use the
 history response's generation/expiry, compatibility, missing observations and
-runtime health for the operational check. An unavailable or stale history cache
+runtime health for the operational check. Check `incomplete_frozen_days` before
+interpreting the counts as complete daily coverage. Normal in-flight work in
+the still-open market is separate from a backlog of completed-market history.
+An unavailable or stale history cache
 is an unknown monitoring state, not evidence that the historical loss rate is
 zero. Keep the existing independent outbox, guards, durable-before-publication
 ordering and actual acknowledgement evidence.
@@ -719,7 +734,7 @@ sudo sed -i '/^SETTLEMENT_EVALUATION_START_MS=/d' /etc/price-collector/collector
 sudo systemctl status price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
 curl --fail http://127.0.0.1:9000/healthz
 curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
-sudo journalctl -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
+sudo journalctl -u price-collector-polymarket-probabilities -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
 ```
 
 The existing retention timer loads the updated module on its next invocation;
@@ -727,6 +742,8 @@ no unit change, daemon reload or immediate extra deletion is required. Restart
 the local dashboard proxy to load its new history allowlist entry. Keep all
 frontend assets off the droplet. A successful local test is not a deployment
 or a measured live estimator result.
+
+<a id="settlement-implementation-and-rollout"></a>
 
 ### Retired study and retained research
 

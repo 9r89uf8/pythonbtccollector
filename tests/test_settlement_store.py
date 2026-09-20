@@ -278,70 +278,112 @@ def test_schema_retains_evidence_and_adds_guarded_history_marker_and_finite_expi
     assert "final settlement report is immutable" in sql
 
 
+class HistoryConnection(Connection):
+    def __init__(self):
+        super().__init__()
+        self.history = {}
+        self.daily = {}
+
+    async def fetchval(self, sql, *args):
+        if "SELECT final FROM settlement_history_daily" in sql:
+            return self.daily.get(args[:2], {}).get("final")
+        if "SELECT body_json FROM settlement_history_markets" in sql:
+            return self.history.get(args[:2])
+        if "SELECT EXISTS" in sql:
+            rows = (row for row in self.audit.values()
+                    if row.get("history_folded_version", -1) < row["version"] and row["created_ms"] > args[0])
+            if "market_start_ms >=" in sql:
+                return any(args[1] <= row["market_start_ms"] < args[2] for row in rows)
+            return any(row["market_end_ms"] + 120_000 <= args[1] for row in rows)
+        return await super().fetchval(sql, *args)
+
+    async def fetch(self, sql, *args):
+        if "FROM settlement_audit WHERE history_folded_version" in sql:
+            return [deepcopy(row) for row in self.audit.values()
+                    if row.get("history_folded_version", -1) < row["version"] and row["created_ms"] > args[0]
+                    and row["market_end_ms"] + 120_000 <= args[1]][:100]
+        if "SELECT DISTINCT h.cohort" in sql:
+            return [dict(cohort=cohort, day_ms=START) for cohort in sorted({key[0] for key in self.history})
+                    if not self.daily.get((cohort, START), {}).get("final")]
+        if "FROM settlement_history_markets h" in sql:
+            return [dict(market_id=market, body_json=body, **resolution())
+                    for (cohort, market), body in self.history.items() if cohort == args[0]]
+        if "SELECT body_json FROM settlement_history_daily" in sql:
+            return [deepcopy(row) for row in self.daily.values()]
+        return []
+
+    async def fetchrow(self, sql, *args):
+        if "FROM settlement_history_daily" in sql:
+            return deepcopy(self.daily.get(args[:2]))
+        return await super().fetchrow(sql, *args)
+
+    async def execute(self, sql, *args):
+        if "INSERT INTO settlement_history_markets" in sql:
+            self.history[args[:2]] = args[5]
+        elif "UPDATE settlement_history_markets" in sql:
+            self.history[args[:2]] = args[2]
+        elif "SET history_folded_version" in sql:
+            self.audit[args[:2]]["history_folded_version"] = args[2]
+        elif "INSERT INTO settlement_history_daily" in sql:
+            self.daily[args[:2]] = dict(final=args[3], body_json=args[4])
+        elif "UPDATE settlement_history_daily" in sql:
+            self.daily[args[:2]] = dict(final=True, body_json=args[3])
+        else:
+            await super().execute(sql, *args)
+
+
 def test_background_fold_retries_and_later_ack_are_idempotent():
-    class HistoryConnection(Connection):
-        def __init__(self):
-            super().__init__()
-            self.history = {}
-            self.daily = {}
-
-        async def fetchval(self, sql, *args):
-            if "SELECT final FROM settlement_history_daily" in sql:
-                return self.daily.get(args[:2], {}).get("final")
-            if "SELECT body_json FROM settlement_history_markets" in sql:
-                return self.history.get(args[:2])
-            if "SELECT EXISTS" in sql:
-                return any(row.get("history_folded_version", -1) < row["version"] for row in self.audit.values())
-            return await super().fetchval(sql, *args)
-
-        async def fetch(self, sql, *args):
-            if "FROM settlement_audit WHERE history_folded_version" in sql:
-                return [deepcopy(row) for row in self.audit.values()
-                        if row.get("history_folded_version", -1) < row["version"] and row["created_ms"] > args[0]][:100]
-            if "SELECT DISTINCT h.cohort" in sql:
-                return [dict(cohort=cohort, day_ms=START) for cohort in sorted({key[0] for key in self.history})
-                        if not self.daily.get((cohort, START), {}).get("final")]
-            if "FROM settlement_history_markets h" in sql:
-                return [dict(market_id=market, body_json=body, **resolution())
-                        for (cohort, market), body in self.history.items() if cohort == args[0]]
-            if "SELECT body_json FROM settlement_history_daily" in sql:
-                return [deepcopy(row) for row in self.daily.values()]
-            return []
-
-        async def fetchrow(self, sql, *args):
-            if "FROM settlement_history_daily" in sql:
-                return deepcopy(self.daily.get(args[:2]))
-            return await super().fetchrow(sql, *args)
-
-        async def execute(self, sql, *args):
-            if "INSERT INTO settlement_history_markets" in sql:
-                self.history[args[:2]] = args[5]
-            elif "UPDATE settlement_history_markets" in sql:
-                self.history[args[:2]] = args[2]
-            elif "SET history_folded_version" in sql:
-                self.audit[args[:2]]["history_folded_version"] = args[2]
-            elif "INSERT INTO settlement_history_daily" in sql:
-                self.daily[args[:2]] = dict(final=args[3], body_json=args[4])
-            else:
-                await super().execute(sql, *args)
-
     async def scenario():
         pool = Pool(); pool.connection = HistoryConnection()
         frozen, acknowledged = decision(prices=("100.01", "99.99", "100.01"))
         reserved = dict(publication={"status": "reserved"}, target={"status": "pending", "first_event": None})
         store = SettlementStore(pool)
         await store.persist(record(frozen, reserved))
-        before = await store.maintain(START + 400_000)
+        before = await store.maintain(START + 430_000)
         assert sum(cell["resolved"] for cell in before["cells"]) == 0
         await store.persist(record(frozen, acknowledged, version=1))
-        after = await store.maintain(START + 400_000)
+        after = await store.maintain(START + 430_000)
         assert sum(cell["wins"] for cell in after["cells"]) == 2
         assert sum(cell["losses"] for cell in after["cells"]) == 1
-        retry = await SettlementStore(pool).maintain(START + 400_000)
+        retry = await SettlementStore(pool).maintain(START + 430_000)
         assert retry["cells"] == after["cells"]
         final = await store.maintain(START + 2 * DAY_MS)
         assert next(iter(pool.connection.daily.values()))["final"] is True
         pool.connection.history.clear()  # individual records have expired
         retained = await store.maintain(START + 8 * DAY_MS)
         assert retained["cells"] == final["cells"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("age_ms", (6 * DAY_MS, 7 * DAY_MS + 60_000))
+def test_old_day_catchup_finishes_every_page_before_freezing(age_ms):
+    async def scenario():
+        pool = Pool(); pool.connection = HistoryConnection()
+        store = SettlementStore(pool)
+        frozen, state = decision("initial", prices=("100.03", "100.01", "99.97"))
+        await store.persist(record(frozen, state))
+        await store.maintain(START + DAY_MS)
+        prior = next(iter(pool.connection.daily.values()))
+        assert not prior["final"] and json.loads(prior["body_json"])["observed_markets"] == 1
+
+        # Three ticks in each of 288 markets need multiple 400-record passes.
+        # Even just after day+7 midnight, every input here remains retained.
+        for market in range(288):
+            for tick in range(3):
+                frozen, state = decision(f"{market}-{tick}", offset_ms=tick * 100,
+                    prices=("100.03", "100.01", "99.97"), market_start_ms=START + market * 300_000)
+                await store.persist(record(frozen, state))
+        now = START + age_ms
+        for _ in range(2):
+            report = await store.maintain(now)
+            assert report["backfill_pending"] is True
+            assert not next(iter(pool.connection.daily.values()))["final"]
+        report = await store.maintain(now)
+        final = next(iter(pool.connection.daily.values()))
+        assert report["status"] == "available" and final["final"] is True
+        assert json.loads(final["body_json"])["observed_markets"] == 288
+        assert sum(cell["wins"] for cell in report["cells"] if cell["signal"] == "ghost") == 288
+        assert sum(cell["losses"] for cell in report["cells"] if cell["signal"] == "spot") == 288
+        assert all(row["history_folded_version"] == row["version"] for row in pool.connection.audit.values())
+        assert (await store.maintain(now))["cells"] == report["cells"]
     asyncio.run(scenario())
