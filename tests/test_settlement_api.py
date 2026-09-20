@@ -11,7 +11,7 @@ from price_collector.ghost_twap_api import GhostCompressionBypass
 from price_collector.ghost_twap_payload import InvalidGhostPayload, bind_read_clock
 from price_collector.settlement import public_payload
 from price_collector.settlement_api import SettlementApiService, SettlementApiSettings, router
-from price_collector.settlement_wire import KEY, parse_settlement_payload
+from price_collector.settlement_wire import KEY, HISTORY_KEY, parse_settlement_payload
 from test_ghost_twap_api import AsgiRequest, PostgreSQLTrap, Reader
 from test_settlement import END, NS, decision, project
 
@@ -53,7 +53,7 @@ def test_wire_accepts_real_pure_projection_and_preserves_exact_bytes():
 
 @pytest.mark.parametrize('fault', ['market_start', 'window', 'source_url', 'params', 'http_status',
     'prestart_reference', 'reference_availability', 'baseline_price', 'side', 'lead', 'qualifies',
-    'expiry_after_close', 'attempt_at_close', 'carry_count'])
+    'expiry_after_close', 'attempt_at_close', 'carry_count', 'cohort'])
 def test_wire_rejects_identity_causal_and_arithmetic_tampering(fault):
     body = payload()
     reference = body['reference']
@@ -68,6 +68,7 @@ def test_wire_rejects_identity_causal_and_arithmetic_tampering(fault):
     elif fault == 'side': body['signals']['ghost']['side'] = 'down'
     elif fault == 'lead': body['signals']['ghost']['signed_lead_usd'] = '1.000000000000000000'
     elif fault == 'qualifies': body['signals']['twap']['qualifies'] = True
+    elif fault == 'cohort': body['history_cohort'] = 'wrong-policy-history'
     elif fault == 'expiry_after_close':
         body['valid_until_wall_ns'] = str((END + 1) * NS)
         body['valid_until_ms'] = END + 1
@@ -104,6 +105,22 @@ def test_stream_uses_separate_event_and_same_original_projection():
         assert b'"kind":"settlement"' in request.body
         assert service.hub.client_count == 0
     asyncio.run(run())
+
+
+def test_history_is_cached_bytes_only_and_old_study_route_is_removed():
+    service, app, reader, clock = service_for()
+    now = clock['wall'] // NS
+    reader.raw = encoded(dict(schema_version=1, status='available', generated_at_ms=now,
+        cache_publish_attempt_ms=now, valid_until_ms=now + 180000,
+        history=dict(status='warming_up', cells=[])))
+    client = TestClient(app)
+    response = client.get('/forecasts/chainlink-twap/settlement/history')
+    assert response.status_code == 200 and response.content == reader.raw
+    assert reader.calls == [HISTORY_KEY]
+    assert 'no-store' in response.headers['cache-control']
+    assert client.get('/forecasts/chainlink-twap/settlement/report').status_code == 404
+    clock['wall'] += 180000 * NS
+    assert client.get('/forecasts/chainlink-twap/settlement/history').status_code == 503
 
 
 def test_bad_optional_api_settings_disable_only_settlement(monkeypatch):

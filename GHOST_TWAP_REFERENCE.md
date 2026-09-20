@@ -586,290 +586,128 @@ Implementation changes still receive focused checks appropriate to the changed
 behavior. For current operations and exact service commands, use
 [README production operations](README.md#continuous-ghost-retention-and-accuracy).
 
-## Proposed settlement-winner monitor
+## Historical settlement win rates
 
-**Status: jointly agreed design; implementation authorized, not activated or validated.**
-The independent reviewer accepted this section subject to symmetric baseline
-rules, an explicit report deadline and precise eligibility/context definitions.
-Those three amendments are incorporated below; this is the agreed build scope.
+The historical estimator replaces the two-day first-2-bp candidate feature.
+It leaves the existing rolling 1-, 2-, 3-, 5-, 10- and 30-second ghost prices,
+source feeds, publication rules and accuracy monitor unchanged. It does not
+issue a locked-winner label or fit a statistical prediction model.
 
-### Evidence checked during planning
+In the final 30 seconds of each five-minute market, the separate settlement
+projection calculates the exact closing TWAP using the sixty source slots from
+E−62 through E−3. It reuses the frozen ghost inputs, existing freshness/carry
+rules and causally observed website Price to Beat. A missing or conflicting
+reference makes the projection unavailable. Current TWAP and spot margins use
+the same reference. All financial calculation remains Decimal.
 
-Saved CSVs at `0a1f998` reproduce the receipt-clock pilot's 30-second projected
-lead bins: 31/247, 4/261, 0/393, 1/494 and 0/530 losses/markets for [0,1),
-[1,2), [2,4), [4,8) and at least 8 bp. The paired comparison is 102 markets
-improved over current TWAP, 13 worsened and 23 wrong under both. These are
-re-summed historical outputs, not a fresh replay of deleted observations.
+### Historical cell definition
 
-Projected lead at least 2 bp had 1/1,417 losses in that development cohort.
-Current-TWAP lead at least 2 bp had 23/1,405; at least 4 bp had 5/984. These
-selected subsets overlap but are not identical matched pairs. Comparing the
-1/1,417 result directly with H3's 19/4,019 mixes cohorts and cannot establish a
-coverage gain at a fixed risk. The 1.243-bp p90 belongs to the generic rolling
-30-second ghost, not the exact-close replay. At a $110,000 strike, an $11 lead
-is exactly 1 bp and belongs to [1,2), not [0,1). Historical requested slots also
-included carry; they were not all directly observed.
+The background worker selects the first eligible, acknowledged publication in
+each market's five-second remaining-time bucket. Selection uses the actual
+acknowledgement clock, not the earlier decision clock, and happens before margin
+classification. Later ticks cannot replace the selected observation merely
+because they were more accurate. Late, uncertain or ineligible publications
+cannot enter the sample.
 
-The archived closing-price comparison found near equality, not exact equality:
-the maximum difference was $0.000000000014051072 across 1,925 comparisons.
-That observation does not establish an opening-reference rounding tolerance.
+Time buckets cover the final 30 seconds. Absolute margin bins are [0,1), [1,2),
+[2,4), [4,8) and at least 8 basis points; one basis point is 0.01% of the opening
+reference. Ghost, current TWAP and spot have distinct cell counts. Up and Down
+leading sides are explicitly pooled. Each market contributes at most once to a
+given signal/time cell. A tie has no leading side and must not count as a win.
 
-### One output and one candidate rule
+An observed leading side is compared with the identity-validated official
+market winner. A loss means the market settled on the opposite side, not that
+the live price briefly crossed its reference. Outcomes not yet known and
+markets with no usable observation remain visible separately. Different model,
+settlement identity, input policy or selection versions do not silently pool.
+The baseline signals share the eligible settlement-publication sample; their
+coverage is not the independent coverage of their source feeds.
 
-1. During the final 30 wall-clock seconds, update one forecast for the ending
-   market's exact close E using the same 60-slot calculation, E−62 through E−3.
-   Reuse the existing freshness, carry and reconnect rules. Source-age limits
-   can require a target up to 35 seconds beyond the latest TWAP stamp; do not
-   interpolate the six existing fixed horizons. Preserve the ending market
-   identity with the shared helper applied to the decision's own UTC second
-   while it precedes E, rather than assigning E to the next market. Healthy and
-   degraded forecasts qualify under the unchanged ten-second carry cap; retain
-   carry counts and ages. Extend the frozen slot view through anchor+32 when
-   necessary without changing the existing six-horizon contract.
-2. Use the validated website Price to Beat already observed by the existing
-   evidence collector, available to the producer before its decision. Missing,
-   invalid or conflicting website references mean no candidate call. Do not
-   substitute a reconciled later price or silently fall back to the opening
-   stream event. Record that event and its difference for diagnostics when
-   available; website/stream precision agreement needs an explicit policy
-   before it can become a qualification rule.
-3. Record ghost, current-TWAP and spot sides and signed dollar/bp leads on every
-   published settlement update. Each signal has its own **first
-   eligible, acknowledged-before-close update with absolute projected lead
-   at least 2 bp**, within the final 30 seconds. The ghost is the primary signal;
-   TWAP and spot are symmetric baselines. This cutoff is an explicitly
-   selected development hypothesis, not an established low-risk threshold.
-   Keep the first call immutable, even if later updates reverse or become
-   stale. Later updates remain visible but are not independent first calls.
-4. Display projected closing price, projected side, Price to Beat, signed
-   distance, time remaining and feed quality. Label the candidate rule
-   **unvalidated**. Do not show "locked", a confidence percentage or a claim
-   that no further TWAP/quote crossing will occur. At E, expire live eligibility
-   and retain the ending call only as historical/awaiting official outcome.
+The panel displays counts and covered dates first. For example, “57 wins and
+3 losses among 60 resolved markets” describes the selected historical cell.
+At least 30 resolved markets are required to display a historical percentage
+and Wilson 95% interval; below that it shows limited history and counts. Thirty
+is a display threshold, not a proof of calibration. The interval assumes
+independent, comparable markets; adjacent markets and changing regimes can
+violate those assumptions. Neither a high percentage nor zero recorded losses
+certifies the current market's winning probability or a profitable trade.
 
-### Small implementation boundary
+### Storage and background work
 
-Keep the current six-horizon contract unchanged. Reuse the existing Chainlink
-worker and calculation/publication helpers for a separate versioned settlement
-record and Redis output, with thin read-only API/SSE delivery. No new service,
-model, feed connection or duplicate HTTP poller. The existing evidence worker
-delivers bounded market context from the probabilities collector through a
-dedicated Redis key to the Chainlink producer's in-memory state. The writer
-applies the same identity, request-parameter, receipt and completion checks as
-the dashboard opening-reference path, and rejects conflicting website values.
-Do not query PostgreSQL on the feed or forecast request path. Record
-both the reference's original observation time and when the producer obtained it.
+Individual settlement audit and compact per-market history retain seven days.
+Each compact market row keeps its selected observations and copied official
+outcome, so it never depends on an already-expired resolution row. The
+`settlement_history_markets` table has one row per compatible cohort and market.
+The `settlement_history_daily` table keeps only bounded daily count summaries
+for ninety days. No new record is retained forever.
 
-Reuse frozen-input evidence and durable-before-publication ordering; slot counts
-alone cannot reproduce same-second revisions. Preserve the frozen calculation
-and reference while acknowledgement, first exact-E target and official outcome
-are attached separately. Cap live expiry at E, recheck before publication and
-record actual acknowledgement: late/unknown acknowledgement does not qualify
-as a pre-close call merely because it preceded a delayed closing print. Outcome
-matching must follow the market's official resolution and tie rule.
+The worker folds retained audit records in bounded batches, then replaces the
+corresponding daily totals idempotently. It does not increment counters again
+on a replay or restart. A day's outcomes freeze after the day has ended by at
+least 24 hours and its available audit records have been folded; unresolved
+outcomes remain unknown. That freeze precedes seven-day individual expiry.
+Daily summaries preserve a recorded loss after its individual evidence expires,
+until the summary itself reaches ninety days. Whole summary days expire at the
+ninety-day cutoff, potentially less than one day early.
 
-Individual forecasts/results retain the existing seven-day limit; do not add
-an indefinite research exception. Compact after matching using the existing
-bounded pattern, and retain declared cohort/day counts under the existing
-90-day accuracy-summary policy. Raw observations retain their existing limits.
-Automatically materialize the final report within six hours after the fixed
-outcome cutoff, before the earliest individual rows expire at seven days.
-Retained report aggregates include scheduled-market coverage/reasons; per-signal
-calls, resolved losses and unresolved calls; call-time summaries; daily, side
-and quality breakdowns; paired wins/losses at the ghost call; and revocations.
-Keep these bounded report summaries for ninety days. A missed finalization
-deadline is an explicit incomplete report, never a silently reconstructed one.
+Missing raw history cannot be reconstructed from the former study's first-call
+summary. Initial history is limited to compatible retained publications and
+explicitly reports its covered dates and missing observations. Backfill must
+finish before the retained raw records expire. With the optional producer off,
+the independent retention timer still expires individual records and summaries;
+it does not run a replacement study or manufacture missing historical cells.
 
-### One bounded prospective evaluation
+Aggregation uses the existing optional worker and database pool. Neither feed
+event handling nor an API request performs a historical query. The worker
+publishes a bounded cached table with generation and expiry times to Redis.
+A stale or absent cache is reported unavailable rather than relabelled current.
+The ordinary six-horizon ghost remains independent of optional-history faults.
 
-Owner amendment, September 17, 2026 UTC: shorten the originally proposed five
-days to **two complete UTC days (576 scheduled markets)**. Keep the 2-bp rule,
-24-hour outcome cutoff, six-hour finalization deadline and retention unchanged.
-The armed window is September 18 00:00 through September 20 00:00 UTC;
-deployment and the two unarmed live-close checks are recorded below.
-
-After focused boundary, reference-causality, expiry and outcome-matching checks,
-freeze code, the rule and exact dates for two fresh complete UTC days. Fix the
-outcome-reporting cutoff at 24 hours after the final market closes. Start this
-new evidence period explicitly; the existing rolling-ghost producer did not
-already collect the required settlement calls. Do not tune the rule during the
-window or stop early when a repeatedly checked statistic looks favorable.
-
-Evaluate each of ghost, TWAP and spot at its own first acknowledged 2-bp
-qualification in the window, reporting coverage, losses and call timing.
-Additionally compare all three sides at the ghost's first-call instant on the
-same markets and report paired improvements/worsenings. Do not mistake that
-ghost-selected paired comparison for the symmetric baseline-rule comparison.
-Neither establishes an entire coverage-versus-risk frontier. Include daily,
-Up/Down and feed-quality breakdowns.
-
-TWAP and spot baseline calls are evaluated only at eligible acknowledged ghost
-settlement publications: ghost-specific unavailability also removes baseline
-opportunities, so their coverage does not measure independent baseline feeds.
-
-- Coverage denominator: every scheduled market in the declared window, with
-  unavailable references, input gaps, below-threshold markets and late/unknown
-  publications counted separately.
-- Descriptive loss denominator: resolved issued first calls, not abstentions.
-  Keep unresolved issued calls explicit, and never remove an earlier issued
-  call because it was later revoked, stale or wrong.
-- If a binomial upper bound is reported, label its fixed-sample independent,
-  comparable-market assumptions. For conservative unresolved-outcome analysis,
-  also calculate the bound treating every unresolved issued call as a possible
-  loss. One call per market does not prove independence; resampling all-zero-loss
-  days does not establish a useful zero-event risk bound.
-
-The first deliverable is a prospective result with coverage and limitations,
-not a calibrated 99% probability for an individual market. Any later confidence
-label needs a separate acceptance decision supported by fresh evidence. A
-20-cell tier system, extra spot feature or machine-learning model is outside v1.
-
-### Settlement implementation and rollout
-
-Deployed and enabled on September 17, 2026 UTC; the two-day evaluation is
-**scheduled, not yet prospectively validated**. The existing rolling ghost remains
-contract 4. The settlement output has its own schema 1 and
-`settlement-first-2bp-v1` rule. This implementation incorporates all three agreed
-amendments above. The new dashboard card calls it **Unvalidated** and shows the
-exact-close price, website opening reference, side, signed lead, remaining time
-and slot quality. At expiry/close it removes the live signal and labels any
-retained last observation as historical, not the immutable first call.
-
-The small calculation is in `price_collector/settlement.py`. It reuses the
-frozen ghost slots, adds only the necessary future tail through anchor+32, and
-uses Decimal throughout. The current TWAP and spot baselines use the identical
-reference. Both healthy and degraded projections qualify under the existing
-carry limit. The first observed stream boundary event is retained separately
-for an opening-reference difference diagnostic; a missing boundary event is
-not reconstructed or substituted for the website reference.
-
-`settlement_runtime.py` runs inside the existing Chainlink ghost worker. The
-probabilities evidence worker supplies the bounded context cache from its
-existing HTTP request; there is no extra feed or metadata poller. The consumer
-pins when it first obtained each context. Frozen inputs reach a separate
-fsynced outbox before publication. PostgreSQL writes run independently. Each
-attempt is rechecked, has an absolute expiry no later than E, and records its
-exact transmitted bytes and actual acknowledgement clocks. A gap or reference
-change after a valid attempt is recorded separately: it cannot retrospectively
-erase a timely acknowledged first call. Late/unknown acknowledgements earn no
-first-call credit. Startup reconciles durable records without republishing.
-Optional failures cannot stop the existing six-horizon input path.
-
-The new read-only routes are:
+### Routes and settings
 
 | Route | Purpose |
 | --- | --- |
-| `/forecasts/chainlink-twap/settlement/live` | One Redis GET; original serialized snapshot or typed 503 |
-| `/forecasts/chainlink-twap/settlement/stream` | Existing bounded SSE transport; named `settlement` events and reconnect resync |
-| `/forecasts/chainlink-twap/settlement/report` | Cached prospective evaluation report; no request-time SQL |
+| `/forecasts/chainlink-twap/settlement/live` | One Redis GET of the exact-close projection; typed 503 when unavailable |
+| `/forecasts/chainlink-twap/settlement/stream` | Existing bounded SSE transport, named `settlement` events and reconnect resync |
+| `/forecasts/chainlink-twap/settlement/history` | Bounded cached historical cell counts; Redis only |
 
-Cache keys are `btc:live:ghost_settlement_context`, `btc:live:ghost_settlement`,
-its `:updates` channel, and its `:report` summary. Snapshot/SSE have no-store
-headers, independent wire validation and the existing pinned monotonic expiry.
-The API still binds only to loopback and the local dashboard uses the SSH
-tunnel. The original source caches and rolling ghost endpoints are unchanged.
+The projection uses schema 2 and rule `historical-settlement-v1`. The former
+`/settlement/report` endpoint and the first-2-bp candidate/evaluation workflow
+are retired. The dashboard combines a current valid projection with the cached
+historical table; it clears live eligibility at expiry or the market close.
+The local dashboard remains on the user's computer and reaches the loopback
+API through its SSH tunnel. No new listener, production frontend or service
+is introduced.
 
-`settlement_store.py` and the three additive `settlement_*` tables retain
-individual frozen projections/target results, per-market first calls, and
-aggregate reports. Full slot detail compacts after the 120-second match window;
-individual and per-market evidence expires at seven days. Only aggregate
-reports retain ninety days. The existing operator retention timer also expires
-these tables when the settlement flag is off. If the producer is absent at the
-report deadline, that timer preserves a bounded **incomplete** report from
-already captured evidence before expiry; it never invents late outcomes.
+Review only these existing environment entries; never replace the production
+files with examples:
 
-Reports include each signal's own first-call coverage, resolved losses,
-unknown outcomes, acknowledgement timing, day/side/quality breakdowns,
-abstention/publication reasons, revocations, and the paired comparison at the
-ghost's first call. Official outcome identity and the fixed reporting cutoff
-are checked. No individual confidence percentage or independence-based bound
-is emitted. A changed configuration cannot reassign recovered decisions to a
-different evaluation: the chosen evaluation start is frozen with each record.
+- `/etc/price-collector/collector.env`: `SETTLEMENT_ENABLED` remains false by
+  default. Enabling requires the existing `GHOST_TWAP_ENABLED=true`,
+  `GHOST_TWAP_CONTINUOUS=true` and `POLYMARKET_EVIDENCE_ENABLED=true`. Remove
+  obsolete `SETTLEMENT_EVALUATION_START_MS`; no evaluation needs arming.
+- `/etc/price-collector/api.env`: `SETTLEMENT_API_ENABLED` remains false by
+  default. The API keeps reader credentials only.
 
-Resource bounds: at most 512 in-memory/outbox records, 128 KiB per record,
-0.5-second explicit Redis operation deadlines, 256 MiB relation warning and
-512 MiB relation cap with reserve, and 200,000 audit rows. The existing ghost
-disk/health guards also gate admission. Sustained storage growth has not
-yet been established for this output. Optional startup initiates cancellation
-after five seconds; owned filesystem cleanup may take longer. On shutdown,
-ordinary ghost preservation proceeds independently of settlement cleanup.
+A projection outside the final 30 seconds is normally unavailable. Use the
+history response's generation/expiry, compatibility, missing observations and
+runtime health for the operational check. An unavailable or stale history cache
+is an unknown monitoring state, not evidence that the historical loss rate is
+zero. Keep the existing independent outbox, guards, durable-before-publication
+ordering and actual acknowledgement evidence.
 
-Settings to review manually, preserving the existing environment files:
+### Update procedure
 
-- `/etc/price-collector/collector.env`: `SETTLEMENT_ENABLED=false` and
-  `SETTLEMENT_EVALUATION_START_MS=0` are the safe install defaults. Enabling
-  requires the existing `GHOST_TWAP_ENABLED=true`, `GHOST_TWAP_CONTINUOUS=true`
-  and `POLYMARKET_EVIDENCE_ENABLED=true`. Do not enable unrelated raw capture.
-- `/etc/price-collector/api.env`: `SETTLEMENT_API_ENABLED=false` by default.
-  The API retains only its reader credentials.
-- Zero evaluation start means **unarmed live display/audit**, not a running
-  study. After deployment verification, set one reviewed future UTC-midnight
-  epoch millisecond value to declare two complete days. Keep that value and
-  the frozen rule unchanged through the 24-hour outcome cutoff. Finalization
-  runs after the cutoff, with an additional six-hour deadline; late/missing
-  completion is explicitly incomplete.
-
-During the two-day evaluation, check the cached `/settlement/report` endpoint
-(full route above) at least daily and after any collector restart. Its
-`runtime.fault` must be null: a non-null value stops new settlement admission
-for that process lifetime, even while fresh reports continue. Inspect the
-Chainlink journal, correct the cause and restart that collector only after
-preserving its outbox; keep the evaluation dates unchanged and count the gap.
-Also verify the report is current (`generated_at_ms`/`valid_until_ms`) and its
-decision counters advance during the final 30 seconds of markets. A missing or
-stale report is an unknown monitoring state, not evidence of a clear fault.
-With a fresh report and null fault, rising
-`evaluation.reason_counts.reference_unavailable_or_noncausal` or
-`runtime.counters.context_read_errors` instead points to missing/invalid market
-context; inspect the probabilities evidence worker and context cache. That
-condition withholds calls without latching `runtime.fault`. A missing live
-snapshot outside the final 30 seconds is expected, so use the report for this
-operating check.
-
-Validation for this build: the full backend suite passed **1,733 tests with
-17 optional integration tests skipped**. A final recovery-association change
-then passed the affected runtime/store/retention subset, **44 passed, 1 skip**.
-Focused frontend consumer and proxy checks passed. A real browser loaded an
-isolated fixture through the production settlement consumer, displayed an
-eligible 2.5-bp candidate, and cleared the live values at expiry/close while
-preserving only the historical note. This is UI verification, not live market
-evidence. The PostgreSQL schema check was subsequently completed as recorded
-below. These were pre-deployment checks; the subsequent two live-close checks
-are recorded below and do not establish two-day performance.
-
-Review follow-up, September 17, 2026 UTC: the full schema was applied to an
-isolated `settlement_validation_*` database on the droplet's PostgreSQL 16.15
-server. `tests/settlement_postgres_smoke.py` then exercised the real store with
-the writer role and checked persistence/idempotency, each signal's first call,
-revocation accounting, rejected changes to frozen evidence/ACK clocks/first
-calls, the seven-day deletion guard, terminal compaction, the actual
-outcome/report queries, immutable final reports, reader permissions and the
-capacity query. All passed. Reapplying the entire schema also succeeded and
-preserved both audit rows, the market summary and the final report. These are
-synthetic database checks, not additional forecasting evidence or a live-rate
-storage measurement. The scratch database and all temporary files were removed;
-production tables, service code, flags and processes were unchanged. The
-affected local report tests also passed: 27 tests.
-
-The schema already begins with `BEGIN;` and ends with `COMMIT;`, with no
-intervening top-level commit. Consequently the documented
-`psql -v ON_ERROR_STOP=1 -f schema.sql` apply is already transactional; an
-additional `--single-transaction` option is unnecessary. The executed schema
-file's SHA-256 was
-`173390d095c94a7ee755086be0c66d03a8cf047ff6ccaea0baacd45e6b1a0fef`.
-
-For the code/schema installation, run **after pushing this release to GitHub**.
-Apply schema before restarting the probabilities, Chainlink and API services.
-For an initial installation, keep the settlement flags off and evaluation
-unarmed. Pause the two affected writers and the retention job while applying
-the full schema: its existing ghost-audit DDL can deadlock with live writes.
-Use a subshell cleanup trap so a failed apply restores those services.
-No new service/unit, public port, or production frontend is needed.
+Run after the reviewed backend release has been pushed to GitHub. Apply schema
+before restarting services. Pause the affected writers and retention job during
+the full schema apply; existing ghost-audit DDL can contend with live writes.
+The cleanup trap restores the paused services if schema application fails.
 
 ```bash
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo sed -i '/^SETTLEMENT_EVALUATION_START_MS=/d' /etc/price-collector/collector.env
 (
   set -eu
   trap 'sudo systemctl start price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-collector-retention.timer' EXIT
@@ -880,67 +718,36 @@ sudo -u pricecollector .venv/bin/pip install -r requirements.txt
 )
 sudo systemctl status price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
 curl --fail http://127.0.0.1:9000/healthz
-curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/live
-sudo journalctl -u price-collector-polymarket-probabilities -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
+curl -i http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
+sudo journalctl -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
 ```
 
-The settlement route should return a typed disabled 503 during initial install.
 The existing retention timer loads the updated module on its next invocation;
-no unit change/reload or immediate extra deletion run is needed. The local
-dashboard proxy must be restarted to load its two new allowlisted routes;
-the frontend stays on the user's computer. Live enabling and the dated
-two-day evaluation are separate operational steps after review.
+no unit change, daemon reload or immediate extra deletion is required. Restart
+the local dashboard proxy to load its new history allowlist entry. Keep all
+frontend assets off the droplet. A successful local test is not a deployment
+or a measured live estimator result.
 
-### September 17 deployment and two-day evaluation
+### Retired study and retained research
 
-Backend runtime `a33fccf` was pushed to GitHub and installed by fast-forward-only
-pull. The separate local dashboard was fast-forwarded to `a090d02`; its proxy
-and SSH tunnel were restarted on the user's computer. Nothing was deployed as
-a frontend on the droplet. The two-day build passed **1,734 tests, 17 optional
-integration skips**. Its revised schema/store smoke check also passed on the
-droplet's PostgreSQL 16.15 in an isolated scratch database, including rejection
-of a market at the two-day end and finalization before the three-day cutoff.
-The scratch database was removed.
+The prior feature used each signal's first acknowledged absolute 2-bp call in
+the final 30 seconds. Its frozen collection window was September 18 00:00 to
+September 20 00:00 UTC, 2026 (576 scheduled markets); its original outcome
+cutoff was September 21 00:00 UTC. Those dates describe the retired study,
+not settings or instructions for the historical estimator. Saved study results,
+source-finality labels and any authorized closeout amendments stay preserved
+in their existing evidence archive. Existing legacy database study rows expire
+under their original seven-day/90-day policy; the replacement does not rewrite
+those results or resume automatic report finalization.
 
-The first production schema attempt deadlocked against an active ghost-audit
-writer and rolled back its transaction. Applying it with the affected writers
-and retention job paused succeeded. The installation was checked with settlement
-disabled before enabling producer/context and API flags. Existing source feeds,
-reader credentials, private listeners and retention settings were preserved.
-
-Two unarmed live markets verified the complete publication and matching path:
-
-| Closing UTC stamp | Market ID | Available / acknowledged before close / exact-target matched | First exact closing TWAP |
-| --- | --- | --- | --- |
-| September 17 02:15 | 5965370 | 60 / 60 / 60 | 76126.528295786627727360 |
-| September 17 02:20 | 5965371 | 60 / 60 / 60 | 76093.777889763472179200 |
-
-At 02:21 UTC the first market's 60 rows were terminal and compacted, the report
-showed 120 decisions and acknowledgements, no fault and no persistence backlog.
-These are operational checks, not a candidate loss-rate estimate. A real browser
-observed the second market from its first eligible projection at 02:19:30 until
-close: the projected price updated from $76,101.18 to $76,093.78, using the
-observed website reference $76,126.53. It cleared the live candidate at the market
-boundary and kept only a labelled historical note. This checks live rendering
-and expiry; it does not measure browser delivery latency or establish zero gaps.
-
-After these checks, `SETTLEMENT_EVALUATION_START_MS=1789689600000` was installed
-in the existing collector environment, preserving all other settings and file
-permissions, and only the Chainlink service was restarted. The cached report
-confirmed **scheduled**, persistence complete, null runtime fault and:
-
-| Boundary | UTC | Epoch milliseconds |
-| --- | --- | --- |
-| Start, inclusive | September 18 00:00 | 1789689600000 |
-| End, exclusive | September 20 00:00 | 1789862400000 |
-| Outcome cutoff | September 21 00:00 | 1789948800000 |
-| Final report deadline | September 21 06:00 | 1789970400000 |
-
-The two-day window covers 576 scheduled five-minute markets. In Chicago it runs
-from September 17 at 7 p.m. through September 19 at 7 p.m. CDT. Live projections
-are already enabled, but earlier unarmed observations do not belong to this
-evaluation. Keep the frozen 2-bp rule and dates unchanged. The producer generates
-the final aggregate after the outcome cutoff; absence at the final deadline is
-reported as incomplete. Individual evidence still expires after seven days and
-aggregate reports after ninety days. The dashboard remains **Unvalidated**;
-no "locked winner" confidence is established by this deployment.
+The planning evidence remains useful context. Saved development CSVs at
+`0a1f998` reported 31/247, 4/261, 0/393, 1/494 and 0/530 losses/markets at the
+30-second checkpoint for projected margins [0,1), [1,2), [2,4), [4,8) and at
+least 8 bp. Those cells belong to a receipt-clock pilot, not this ongoing
+first-publication-per-time-bucket cohort. Projected margins of at least 2 bp
+had 1/1,417 losses; current-TWAP margins of at least 2 bp had 23/1,405 and
+at least 4 bp had 5/984. Different selected subsets are not a paired test.
+The historical closing-price identity was nearly exact, with maximum difference
+$0.000000000014051072 across 1,925 comparisons; that does not establish an
+opening-reference rounding tolerance. Preserve these clock/cohort distinctions
+when interpreting the new table.

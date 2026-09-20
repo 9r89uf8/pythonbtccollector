@@ -1954,6 +1954,72 @@ CREATE INDEX IF NOT EXISTS settlement_audit_expiry_idx ON settlement_audit(creat
 CREATE INDEX IF NOT EXISTS settlement_audit_compact_idx ON settlement_audit(market_end_ms,run_id,decision_id)
     WHERE terminal AND frozen_json IS NOT NULL;
 
+-- First acknowledged observations feed a bounded descriptive history. The
+-- durable fold marker handles a later ACK/version update without double counts.
+ALTER TABLE settlement_audit ADD COLUMN IF NOT EXISTS history_folded_version BIGINT NOT NULL DEFAULT -1
+    CHECK (history_folded_version >= -1 AND history_folded_version <= version);
+CREATE INDEX IF NOT EXISTS settlement_audit_history_pending_idx
+    ON settlement_audit(created_ms,run_id,decision_id) WHERE history_folded_version < version;
+
+CREATE TABLE IF NOT EXISTS settlement_history_markets (
+    cohort TEXT NOT NULL CHECK (cohort ~ '^[0-9a-f]{64}$'),
+    market_id BIGINT NOT NULL,
+    market_start_ms BIGINT NOT NULL,
+    market_end_ms BIGINT NOT NULL,
+    updated_ms BIGINT NOT NULL,
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb)='object' AND octet_length(body_json)<=32768),
+    PRIMARY KEY(cohort,market_id),
+    CHECK (market_start_ms%300000=0 AND market_id=market_start_ms/300000 AND market_end_ms=market_start_ms+300000)
+);
+CREATE INDEX IF NOT EXISTS settlement_history_markets_expiry_idx ON settlement_history_markets(market_end_ms);
+CREATE INDEX IF NOT EXISTS settlement_history_markets_day_idx ON settlement_history_markets(cohort,market_start_ms);
+CREATE TABLE IF NOT EXISTS settlement_history_daily (
+    cohort TEXT NOT NULL CHECK (cohort ~ '^[0-9a-f]{64}$'),
+    day_ms BIGINT NOT NULL CHECK (day_ms%86400000=0),
+    updated_ms BIGINT NOT NULL,
+    final BOOLEAN NOT NULL,
+    body_json TEXT NOT NULL CHECK (jsonb_typeof(body_json::jsonb)='object' AND octet_length(body_json)<=65536),
+    PRIMARY KEY(cohort,day_ms)
+);
+CREATE INDEX IF NOT EXISTS settlement_history_daily_expiry_idx ON settlement_history_daily(day_ms);
+CREATE OR REPLACE FUNCTION settlement_history_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+DECLARE now_ms BIGINT := floor(extract(epoch FROM clock_timestamp())*1000)::bigint;
+BEGIN
+    IF TG_TABLE_NAME='settlement_history_daily' THEN
+        IF TG_OP='DELETE' THEN
+            IF OLD.day_ms>((now_ms-7776000000)/86400000)*86400000
+            THEN RAISE EXCEPTION 'history daily counts retain ninety days'; END IF;
+            RETURN OLD;
+        END IF;
+        IF NEW.day_ms<=((now_ms-7776000000)/86400000)*86400000
+        THEN RAISE EXCEPTION 'expired history day cannot be reinserted'; END IF;
+        IF TG_OP='UPDATE' AND (OLD.final OR ROW(OLD.cohort,OLD.day_ms) IS DISTINCT FROM ROW(NEW.cohort,NEW.day_ms))
+        THEN RAISE EXCEPTION 'frozen history day is immutable'; END IF;
+        IF NEW.final AND now_ms<NEW.day_ms+172800000
+        THEN RAISE EXCEPTION 'history outcome freeze is not due'; END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' THEN
+        IF OLD.market_end_ms>now_ms-604800000
+        THEN RAISE EXCEPTION 'history individual retention is seven days'; END IF;
+        RETURN OLD;
+    END IF;
+    IF NEW.market_end_ms<=now_ms-604800000
+    THEN RAISE EXCEPTION 'expired market history cannot be reinserted'; END IF;
+    IF TG_OP='UPDATE' AND ROW(OLD.cohort,OLD.market_id,OLD.market_start_ms,OLD.market_end_ms)
+        IS DISTINCT FROM ROW(NEW.cohort,NEW.market_id,NEW.market_start_ms,NEW.market_end_ms)
+    THEN RAISE EXCEPTION 'history market identity is immutable'; END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS settlement_history_market_guard_trigger ON settlement_history_markets;
+CREATE TRIGGER settlement_history_market_guard_trigger BEFORE INSERT OR UPDATE OR DELETE ON settlement_history_markets
+    FOR EACH ROW EXECUTE FUNCTION settlement_history_guard();
+DROP TRIGGER IF EXISTS settlement_history_daily_guard_trigger ON settlement_history_daily;
+CREATE TRIGGER settlement_history_daily_guard_trigger BEFORE INSERT OR UPDATE OR DELETE ON settlement_history_daily
+    FOR EACH ROW EXECUTE FUNCTION settlement_history_guard();
+REVOKE ALL ON FUNCTION settlement_history_guard() FROM PUBLIC;
+
 CREATE TABLE IF NOT EXISTS settlement_market_evaluation (
     evaluation_start_ms BIGINT NOT NULL CHECK (evaluation_start_ms >= 0 AND evaluation_start_ms % 86400000 = 0),
     market_id BIGINT NOT NULL,

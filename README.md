@@ -1110,16 +1110,19 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-The exact-close settlement candidate remains **off by default** in configuration
-and is now enabled on the private deployment. Its two-day prospective evaluation
-is scheduled for **September 18 00:00 to September 20 00:00 UTC, 2026**
-(576 markets); it is still **Unvalidated**. It is separate from the existing
-rolling-horizon ghost. See the
-[settlement implementation and rollout](GHOST_TWAP_REFERENCE.md#settlement-implementation-and-rollout)
-for the frozen 2-bp rule, endpoints, settings, retention and schema-first update.
+The optional historical settlement estimator replaces the retired two-day
+candidate study. In the final 30 seconds it shows how often the leading side
+won in past markets with a similar projected margin and remaining time, with
+counts, unknowns and the history dates. These are descriptive frequencies,
+not a guarantee that the live winner is locked. The rolling 1-, 2-, 3-, 5-,
+10- and 30-second ghost prices and their accuracy monitor are unchanged.
+See [historical settlement win rates](GHOST_TWAP_REFERENCE.md#historical-settlement-win-rates)
+for selection rules, API routes, retention and the schema-first update.
 `SETTLEMENT_ENABLED` controls the bounded context handoff and producer inside
 the existing probabilities/Chainlink services; `SETTLEMENT_API_ENABLED` controls
-Redis-only delivery. No new service or public listener is introduced.
+Redis-only delivery. Both remain off by default. No new service or public
+listener is introduced. Remove the obsolete `SETTLEMENT_EVALUATION_START_MS`
+setting when updating; saved study results remain preserved.
 
 The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
 verified research, measured 3.1-second inclusion delay, live-canary findings,

@@ -1,4 +1,4 @@
-"""Optional Redis-only settlement snapshot, stream and evaluation report."""
+"""Optional Redis-only exact-close projection and historical win frequencies."""
 from __future__ import annotations
 
 import asyncio
@@ -14,9 +14,9 @@ from price_collector.ghost_twap_api import (
 )
 from price_collector.ghost_twap_payload import bind_read_clock, InvalidGhostPayload
 from price_collector.ghost_twap_stream import GhostStreamHub, GhostStreamClosed, TooManyGhostClients
-from price_collector.settlement_wire import KEY, CHANNEL, REPORT_KEY, parse_settlement_payload
+from price_collector.settlement_wire import KEY, CHANNEL, HISTORY_KEY, parse_settlement_payload
 
-router = APIRouter(prefix='/forecasts/chainlink-twap/settlement', tags=['settlement candidate'])
+router = APIRouter(prefix='/forecasts/chainlink-twap/settlement', tags=['settlement history'])
 
 
 class SettlementApiSettings(GhostApiSettings):
@@ -92,13 +92,13 @@ async def settlement_stream(request: Request):
     return GhostStreamResponse(service, client, event_name='settlement')
 
 
-@router.get('/report', response_class=Response)
-async def settlement_report(request: Request):
+@router.get('/history', response_class=Response)
+async def settlement_history(request: Request):
     service = _service(request)
     if service is None:
         return unavailable('disabled')
     try:
-        raw, status = await service._cached_summary(REPORT_KEY, 512 * 1024, 'settlement_report')
+        raw, status = await service._cached_summary(HISTORY_KEY, 512 * 1024, 'settlement_history')
     except GhostUnavailable as exc:
         return unavailable(exc.reason)
     return Response(raw, status_code=status, media_type='application/json', headers=HEADERS)

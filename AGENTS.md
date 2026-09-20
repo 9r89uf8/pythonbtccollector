@@ -213,18 +213,31 @@ The corresponding Python entry points are:
   fixed grid, read timeout, byte cap and exact payload ledger. Never interpret
   read errors as absence or local cache observations as browser delivery.
 
-### Optional Settlement Candidate
+### Optional Historical Settlement Win Rates
 
-The optional exact-close settlement feature is documented in
-`GHOST_TWAP_REFERENCE.md`. Keep its own versioned output and default-off
-`SETTLEMENT_ENABLED`/`SETTLEMENT_API_ENABLED` flags independent of the six-horizon
-contract. Use the decision's ending market, observed website opening reference,
-and actual acknowledgement before close. Preserve each signal's first 2-bp call
-even after revocation; never describe the candidate as validated or locked.
-`SETTLEMENT_EVALUATION_START_MS=0` is unarmed, not an evaluation already in progress.
-Settlement individual and market-call records expire at seven days; only
-aggregate reports retain ninety days. The existing operator retention timer
-also enforces these limits when the producer is disabled.
+The optional historical estimator is documented in `GHOST_TWAP_REFERENCE.md`.
+Keep `SETTLEMENT_ENABLED`/`SETTLEMENT_API_ENABLED` default off and independent of
+the unchanged six-horizon ghost contract. Reuse the exact-close projection only
+in the final 30 seconds, with the decision's ending market and causally observed
+website opening reference. Do not restore the retired two-day first-2-bp study,
+evaluation start setting, candidate label or automatic study finalization.
+Preserve its saved research and results.
+
+Select the first eligible acknowledged publication in each market's fixed
+five-second remaining-time bucket before classifying its absolute margin into
+[0,1), [1,2), [2,4), [4,8) or at least 8 bp. Use actual acknowledgement time and
+identity-validated official outcomes. Keep ghost, TWAP and spot counts distinct;
+pool Up/Down explicitly, preserve ties/unknowns/missing observations and separate
+incompatible calculation/settlement/policy versions. A cell counts markets, not
+ticks. Counts describe historical outcomes, never a locked winner or certified
+live probability. Any Wilson range must state its comparable-independent-market
+assumption; below 30 resolved observations display counts without a percentage.
+
+Keep per-market evidence seven days and daily count summaries ninety days.
+Replace daily totals idempotently, freeze outcomes before individual expiry,
+and keep unresolved outcomes explicit. The background worker builds the bounded
+Redis history cache; API requests read Redis only. A stale cache is unavailable.
+The operator retention timer enforces finite expiry even with the producer off.
 
 ### Binance Futures, Flow, and Book
 

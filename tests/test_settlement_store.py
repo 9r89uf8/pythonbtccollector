@@ -8,10 +8,12 @@ import pytest
 
 from price_collector.ghost_twap_store import GhostAuditConflict
 from price_collector.settlement_store import (
-    DAY_MS, RULE, SOURCE, SettlementStore, build_report, capture_outcome,
-    official_outcome, publication_eligible, update_market,
+    DAY_MS, RULE, SOURCE, SettlementStore, capture_outcome,
+    official_outcome, publication_eligible,
 )
-
+from price_collector.settlement_history import (
+    cohort_key, observe, time_bucket, margin_bucket, daily_summary, history_summary,
+)
 
 START = 20_000 * DAY_MS
 
@@ -62,126 +64,6 @@ def resolution(**changes):
         resolution_source="polymarket_clob_rest", last_checked_ms=START + 310_000), **changes)
 
 
-@pytest.mark.parametrize("fault", ("deadline", "close", "no_ack", "not_eligible", "attempt_after_ack", "monotonic_regression"))
-def test_only_actual_acknowledged_fresh_preclose_publications_count(fault):
-    frozen, state = decision()
-    assert publication_eligible(frozen, state)
-    pub = state["publication"]
-    if fault == "deadline": pub["ack_wall_ns"] = frozen["valid_until_wall_ns"]
-    if fault == "close":
-        frozen["valid_until_wall_ns"] = str((frozen["market_end_ms"] + 1000) * 1_000_000)
-        pub["ack_wall_ns"] = str(frozen["market_end_ms"] * 1_000_000)
-    if fault == "no_ack": pub["status"] = "attempting"
-    if fault == "not_eligible": pub["eligible_before_close"] = False
-    if fault == "attempt_after_ack": pub["attempt_wall_ns"] = str(int(pub["ack_wall_ns"]) + 1)
-    if fault == "monotonic_regression": pub.update(attempt_monotonic_ns="999999", ack_monotonic_ns="1000001")
-    assert not publication_eligible(frozen, state)
-    assert update_market({}, frozen, state, inserted=True)["first_calls"] == {}
-
-
-def test_signal_owns_first_call_and_paired_baseline_keeps_ghost_instant():
-    frozen, state = decision(prices=("100.01", "101", "99"))
-    body = update_market({}, frozen, state, inserted=True)
-    assert set(body["first_calls"]) == {"twap", "spot"}
-    later, state = decision("d2", offset_ms=500, prices=("101", "100.01", "99"))
-    body = update_market(body, later, state, inserted=True)
-    assert body["first_calls"]["ghost"]["frozen"]["signals"]["twap"]["price"] == "100.01"
-    assert body["first_calls"]["twap"]["signal"]["price"] == "101"
-    assert body["revocations"]["twap"] == 1
-    newest, state = decision("d3", offset_ms=900, prices=("100.01", "100.01", "99"))
-    body = update_market(body, newest, state, inserted=True)
-    assert body["revocations"] == {"twap": 1, "ghost": 1}
-    newest["decision_id"] = "d4"; newest["decision_wall_ns"] = str(int(newest["decision_wall_ns"]) + 1)
-    body = update_market(body, newest, state, inserted=True)
-    assert body["revocations"] == {"twap": 1, "ghost": 1}
-    assert set(body["first_calls"]) == {"ghost", "twap", "spot"}
-
-
-def test_recovery_selects_earliest_ack_with_deterministic_tie_without_rewriting_call():
-    later, later_state = decision("z", offset_ms=500)
-    body = update_market({}, later, later_state, inserted=True)
-    earlier, earlier_state = decision("a", offset_ms=100)
-    body = update_market(body, earlier, earlier_state, inserted=True)
-    assert body["first_calls"]["ghost"]["frozen"]["decision_id"] == "a"
-    same, same_state = decision("b", offset_ms=100)
-    body = update_market(body, same, same_state, inserted=True)
-    assert body["first_calls"]["ghost"]["frozen"]["decision_id"] == "a"
-    assert body["revocations"] == {}
-
-
-def test_rounded_display_lead_cannot_admit_a_below_threshold_price():
-    frozen, state = decision(prices=("100.019999999999999999", "100.02", "99.98"))
-    frozen["signals"]["ghost"].update(qualifies=True, lead_bps="2.000000000000000000")
-    seal(frozen, state)
-    body = update_market({}, frozen, state, inserted=True)
-    assert set(body["first_calls"]) == {"twap", "spot"}
-
-
-def test_publication_credit_requires_the_actual_attempted_values():
-    frozen, state = decision()
-    body = json.loads(state["publication"]["attempted_payload"])
-    body["signals"]["ghost"]["price"] = "102"
-    state["publication"]["attempted_payload"] = json.dumps(body)
-    assert not publication_eligible(frozen, state)
-
-
-def test_status_updates_are_idempotent_and_ack_timing_is_from_actual_publication():
-    frozen, ack = decision()
-    reserved = dict(publication=dict(status="reserved"))
-    body = update_market({}, frozen, reserved, inserted=True)
-    body = update_market(body, frozen, ack, inserted=False, previous_state=reserved)
-    body = update_market(body, frozen, ack, inserted=False, previous_state=ack)
-    assert body["publication_status_counts"] == {"reserved": 0, "acknowledged": 1}
-    assert body["eligible_publications"] == 1
-    report = build_report([market_row(body)], START, START + DAY_MS, final=False, persistence_complete=True)
-    assert report["signals"]["ghost"]["call_timing"]["median_remaining_ns"] == "28999999998"
-    assert report["signals"]["spot"]["abstention_reasons"]["below_threshold"] == 1
-
-
-@pytest.mark.parametrize("change", [dict(winner="Down"), dict(resolution_type="split"),
-    dict(up_payout=Decimal("0.99")), dict(settlement_window_s=30),
-    dict(reconciled_settlement_rule_version="btc-5m-twap-30"),
-    dict(resolution_source="inferred"), dict(up_token_id="d"), dict(condition_id=None),
-    dict(last_checked_ms=START + 400_001)])
-def test_official_outcome_requires_payout_identity_and_known_by_cutoff(change):
-    assert official_outcome(resolution(), START + 400_000)["winner"] == "up"
-    assert official_outcome(resolution(**change), START + 400_000) is None
-
-
-def test_pre_cutoff_revision_can_remove_outcome_but_late_resolution_cannot_backdate():
-    body = capture_outcome({}, resolution(), START + 400_000)
-    assert body["official_outcome"]["winner"] == "up"
-    assert capture_outcome(body, resolution(last_checked_ms=START + 500_000, winner="Down"), START + 400_000) == body
-    revised = capture_outcome(body, resolution(last_checked_ms=START + 350_000, resolution_status="pending"), START + 400_000)
-    assert revised["official_outcome"] is None
-
-
-def market_row(body):
-    return dict(market_id=START // 300_000, market_start_ms=START,
-                market_end_ms=START + 300_000, body_json=json.dumps(body))
-
-
-def test_report_separates_coverage_unknown_abstention_and_paired_baselines():
-    frozen, state = decision(quality="degraded")
-    body = update_market({}, frozen, state, inserted=True)
-    body = capture_outcome(body, resolution(), START + 400_000)
-    report = build_report([market_row(body)], START, START + DAY_MS, final=False, persistence_complete=True)
-    assert (report["scheduled_markets"], report["observed_markets"], report["no_observation_markets"]) == (288, 1, 287)
-    assert "TWAP and spot baseline calls are evaluated only at eligible acknowledged ghost settlement publications; ghost-specific unavailability also removes baseline opportunities" in report["limitations"]
-    ghost, twap, spot = [report["signals"][x] for x in ("ghost", "twap", "spot")]
-    assert (ghost["calls"], ghost["losses"], ghost["abstentions"]) == (1, 0, 287)
-    assert (twap["calls"], twap["losses"]) == (1, 1)
-    assert spot["calls"] == 0
-    assert ghost["by_quality"]["degraded"]["resolved"] == 1
-    assert report["paired_at_ghost_first"]["twap"]["ghost_only_correct"] == 1
-    assert report["paired_at_ghost_first"]["spot"]["both_correct"] == 1  # paired baseline need not qualify
-    body["official_outcome"]["condition_id"] = "different-market"
-    report = build_report([market_row(body)], START, START + DAY_MS, final=False, persistence_complete=True)
-    assert report["signals"]["ghost"]["unknown"] == 1
-    assert report["signals"]["ghost"]["loss_rate"] is None
-    assert report["paired_at_ghost_first"]["twap"]["unknown_outcome"] == 1
-
-
 class Context:
     def __init__(self, item): self.item = item
     async def __aenter__(self): return self.item
@@ -194,7 +76,7 @@ class Connection:
     def transaction(self): return Context(self)
     async def execute(self, sql, *args):
         self.sql.append((sql, args))
-        if sql.startswith("UPDATE settlement_audit"):
+        if sql.startswith("UPDATE settlement_audit SET state_json"):
             self.audit[args[:2]].update(state_json=args[2], version=args[3], terminal=args[4])
         elif "INSERT INTO settlement_market_evaluation" in sql:
             self.markets.setdefault(args[:2], dict(evaluation_start_ms=args[0], market_id=args[1],
@@ -215,7 +97,7 @@ class Connection:
             self.reports[args[0]] = dict(final=args[2], body_json=args[3])
             return args[3]
         if "FROM settlement_evaluation_reports" in sql: return self.reports[args[0]]["body_json"]
-        return self.markets[args[:2]]["body_json"]
+        return None
     async def fetchrow(self, sql, *args):
         self.sql.append((sql, args))
         if "FROM settlement_audit" in sql: return deepcopy(self.audit.get(args[:2]))
@@ -236,9 +118,51 @@ class Pool:
         return Context(self.connection)
 
 
-def test_store_versions_compaction_retry_first_match_and_frozen_report():
+@pytest.mark.parametrize("fault", ("deadline", "close", "no_ack", "not_eligible", "attempt_after_ack", "monotonic_regression"))
+def test_only_actual_acknowledged_fresh_preclose_publications_count(fault):
+    frozen, state = decision()
+    assert publication_eligible(frozen, state)
+    pub = state["publication"]
+    if fault == "deadline": pub["ack_wall_ns"] = frozen["valid_until_wall_ns"]
+    if fault == "close":
+        frozen["valid_until_wall_ns"] = str((frozen["market_end_ms"] + 1000) * 1_000_000)
+        pub["ack_wall_ns"] = str(frozen["market_end_ms"] * 1_000_000)
+    if fault == "no_ack": pub["status"] = "attempting"
+    if fault == "not_eligible": pub["eligible_before_close"] = False
+    if fault == "attempt_after_ack": pub["attempt_wall_ns"] = str(int(pub["ack_wall_ns"]) + 1)
+    if fault == "monotonic_regression": pub.update(attempt_monotonic_ns="999999", ack_monotonic_ns="1000001")
+    assert not publication_eligible(frozen, state)
+
+
+def test_publication_credit_requires_the_actual_attempted_values():
+    frozen, state = decision()
+    body = json.loads(state["publication"]["attempted_payload"])
+    body["signals"]["ghost"]["price"] = "102"
+    state["publication"]["attempted_payload"] = json.dumps(body)
+    assert not publication_eligible(frozen, state)
+
+
+@pytest.mark.parametrize("change", [dict(winner="Down"), dict(resolution_type="split"),
+    dict(up_payout=Decimal("0.99")), dict(settlement_window_s=30),
+    dict(reconciled_settlement_rule_version="btc-5m-twap-30"),
+    dict(resolution_source="inferred"), dict(up_token_id="d"), dict(condition_id=None),
+    dict(last_checked_ms=START + 400_001)])
+def test_official_outcome_requires_payout_identity_and_known_by_cutoff(change):
+    assert official_outcome(resolution(), START + 400_000)["winner"] == "up"
+    assert official_outcome(resolution(**change), START + 400_000) is None
+
+
+def test_pre_cutoff_revision_can_remove_outcome_but_late_resolution_cannot_backdate():
+    body = capture_outcome({}, resolution(), START + 400_000)
+    assert body["official_outcome"]["winner"] == "up"
+    assert capture_outcome(body, resolution(last_checked_ms=START + 500_000, winner="Down"), START + 400_000) == body
+    revised = capture_outcome(body, resolution(last_checked_ms=START + 350_000, resolution_status="pending"), START + 400_000)
+    assert revised["official_outcome"] is None
+
+
+def test_store_keeps_version_and_frozen_target_guards_without_writing_study():
     async def scenario():
-        pool = Pool(); store = SettlementStore(pool, START)
+        pool = Pool(); store = SettlementStore(pool)
         frozen, state = decision()
         first = record(frozen, state)
         assert await store.persist(first) == "inserted"
@@ -250,95 +174,174 @@ def test_store_versions_compaction_retry_first_match_and_frozen_report():
         final = record(frozen, state, version=2, terminal=True)
         assert await store.persist(final) == "updated"
         pool.connection.audit[("run", "d1")]["frozen_json"] = None
-        assert await store.persist(final) == "unchanged"  # retry cannot re-inflate compact evidence
+        assert await store.persist(final) == "unchanged"
         assert await store.persist(first) == "stale"
         state["target"]["first_event"]["value"] = "101"
         with pytest.raises(GhostAuditConflict, match="target"):
             await store.persist(record(frozen, state, version=3, terminal=True))
-        result = await store.maintain(store.report_due_ms, persistence_complete=False)
-        assert result["final"] and result["status"] == "final_incomplete"
-        assert result["scheduled_markets"] == 576
-        assert result["signals"]["ghost"]["resolved"] == 1
-        assert await store.report(store.report_due_ms + DAY_MS, persistence_complete=True) == result
-        assert sum("INSERT INTO settlement_evaluation_reports" in sql for sql, _ in pool.connection.sql) == 1
+        assert not pool.connection.markets and not pool.connection.reports
+        assert not any("INSERT INTO settlement_market_evaluation" in sql for sql, _ in pool.connection.sql)
+        assert not hasattr(store, "report")
     asyncio.run(scenario())
 
 
-def test_report_freezes_after_outcome_cutoff_when_complete_and_marks_missed_due():
+def test_old_frozen_study_association_survives_recovery_without_rearming():
     async def scenario():
-        pool = Pool(); store = SettlementStore(pool, START)
-        assert store.end_ms == START + 2 * DAY_MS
-        assert store.cutoff_ms == START + 3 * DAY_MS
-        assert store.report_due_ms == START + 3 * DAY_MS + 6 * 3_600_000
-        before_end = await store.maintain(store.end_ms - 1)
-        assert before_end["scheduled_markets"] == 575 and not before_end["final"]
-        at_end = await store.maintain(store.end_ms)
-        assert at_end["scheduled_markets"] == 576 and not at_end["final"]
-        early = await store.maintain(store.cutoff_ms - 1)
-        assert not early["final"]
-        result = await store.maintain(store.cutoff_ms)
-        assert result["final"] and result["status"] == "final"
-        delayed = SettlementStore(Pool(), START)
-        waiting = await delayed.maintain(delayed.cutoff_ms, persistence_complete=False)
-        assert waiting["scheduled_markets"] == 576 and not waiting["final"]
-        waiting = await delayed.maintain(delayed.report_due_ms - 1, persistence_complete=False)
-        assert not waiting["final"]
-        result = await delayed.maintain(delayed.report_due_ms, persistence_complete=False)
-        assert result["final"] and result["status"] == "final_incomplete"
-        late = build_report([], START, store.report_due_ms + 1, final=True, persistence_complete=True)
-        assert late["status"] == "final_incomplete" and late["report_deadline_missed"]
-    asyncio.run(scenario())
-
-
-def test_unarmed_and_outside_window_live_audit_does_not_enter_evaluation():
-    async def scenario():
-        pool = Pool(); store = SettlementStore(pool, 0)
-        frozen, state = decision()
-        assert await store.persist(record(frozen, state)) == "inserted"
-        assert not pool.connection.markets
-        assert (await store.report(START))["status"] == "unarmed"
-        assert (await SettlementStore(pool, START + DAY_MS).report(START))["status"] == "scheduled"
-        assert (await SettlementStore(pool, START).report(START + 90 * DAY_MS))["status"] == "expired"
-        assert not pool.connection.reports
-        armed = SettlementStore(pool, START)
-        last, last_state = decision("last", market_start_ms=armed.end_ms - 300_000)
-        outside, outside_state = decision("outside", market_start_ms=armed.end_ms)
-        assert await armed.persist(record(last, last_state)) == "inserted"
-        assert await armed.persist(record(outside, outside_state)) == "inserted"
-        assert set(pool.connection.markets) == {(START, last["market_id"])}
-    asyncio.run(scenario())
-
-
-def test_recovery_uses_frozen_evaluation_association_after_configuration_changes():
-    async def scenario():
-        pool = Pool()
-        frozen, state = decision("unarmed")
-        frozen["evaluation_start_ms"] = 0
-        seal(frozen, state)
-        saved = record(frozen, state)
-        assert await SettlementStore(pool, 0).persist(saved) == "inserted"
-        assert await SettlementStore(pool, START).persist(saved) == "unchanged"
-        assert pool.connection.audit[("run", "unarmed")]["evaluation_start_ms"] == 0
-        assert not pool.connection.markets
-        frozen, state = decision("prior")
+        pool = Pool(); frozen, state = decision()
         frozen["evaluation_start_ms"] = START
         seal(frozen, state)
-        saved = record(frozen, state)
-        assert await SettlementStore(pool, START + 7 * DAY_MS).persist(saved) == "inserted"
-        assert (START, frozen["market_id"]) in pool.connection.markets
-        assert (START + 7 * DAY_MS, frozen["market_id"]) not in pool.connection.markets
-        state["target"] = dict(status="restart_unmatched", first_event=None)
-        assert await SettlementStore(pool, 0).persist(record(frozen, state, version=1, terminal=True)) == "updated"
+        assert await SettlementStore(pool).persist(record(frozen, state)) == "inserted"
+        assert await SettlementStore(pool).persist(record(frozen, state)) == "unchanged"
+        assert pool.connection.audit[("run", "d1")]["evaluation_start_ms"] == START
+        assert not pool.connection.markets
     asyncio.run(scenario())
 
 
-def test_schema_has_separate_indexed_retention_and_immutable_final_guards():
-    sql = Path("schema.sql").read_text(encoding="utf-8").split("-- Settlement evaluation:", 1)[1].split("-- End settlement evaluation schema.")[0]
-    assert "PRIMARY KEY(run_id,decision_id)" in sql
-    assert "PRIMARY KEY(evaluation_start_ms,market_id)" in sql
-    assert "settlement_audit_expiry_idx" in sql and "settlement_audit_compact_idx" in sql
-    assert "expired settlement cannot be reinserted" in sql
-    assert "settlement first target is immutable" in sql
+def test_cohort_ignores_old_call_rule_but_changes_with_model_and_policy():
+    frozen, _ = decision()
+    old = dict(frozen, model_version="model-1", policy={"source_max_age_ms": 5000})
+    new = dict(old, schema_version=2, rule_version="historical-settlement-v1")
+    new.pop("threshold_bps")
+    assert cohort_key(old) == cohort_key(new)
+    assert cohort_key(new) != cohort_key(dict(new, model_version="model-2"))
+    assert cohort_key(new) != cohort_key(dict(new, policy={"source_max_age_ms": 3000}))
+
+
+def test_time_and_margin_boundaries_are_exact():
+    assert time_bucket(0) is None and time_bucket(30_000_000_001) is None
+    assert time_bucket(4_999_999_999) == "0-5"
+    assert time_bucket(5_000_000_000) == "5-10"
+    assert time_bucket(30_000_000_000) == "25-30"
+    assert [margin_bucket(Decimal(x)) for x in ("0.999999999999999999", "1", "-2", "4", "-8")] == [
+        "0-1", "1-2", "2-4", "4-8", "8+"]
+
+
+def test_first_ack_selected_before_binning_and_no_replacement_with_later_better_margin():
+    later, later_state = decision("late", offset_ms=500, prices=("101", "99", "100.01"))
+    earlier, earlier_state = decision("early", prices=("100.01", "100", "99.99"))
+    body = observe({}, later, later_state, eligible=True)
+    body = observe(body, earlier, earlier_state, eligible=True)
+    assert body["buckets"]["25-30"]["order"][2] == "early"
+    assert body["buckets"]["25-30"]["signals"]["ghost"]["margin_bps"] == "1.0000"
+    assert observe(body, later, later_state, eligible=True) == body
+    assert observe(body, earlier, earlier_state, eligible=True) == body
+    # Decision stamp is 25.5s out; its ACK crosses into the 20-25s bucket.
+    boundary, state = decision("boundary", offset_ms=3500)
+    state["publication"]["ack_wall_ns"] = str((boundary["market_end_ms"] - 24_900) * 1_000_000)
+    body = observe(body, boundary, state, eligible=True)
+    assert "20-25" in body["buckets"]
+
+
+def test_counts_use_one_market_and_keep_losses_unknown_ties_and_missing_separate():
+    frozen, state = decision(prices=("100.01", "100", "99.99"))
+    winner = capture_outcome(observe({}, frozen, state, eligible=True), resolution(), START + 400_000)
+    second, state2 = decision("second", market_start_ms=START + 300_000, prices=("100.01", "100", "99.99"))
+    unknown = observe({}, second, state2, eligible=True)
+    third, state3 = decision("third", market_start_ms=START + 900_000)
+    unavailable = observe({}, third, state3, eligible=False)
+    day = daily_summary([winner, unknown, unavailable], day_ms=START, now_ms=START + DAY_MS, final=False)
+    history = history_summary([day], START + DAY_MS, complete=True)
+    ghost = next(c for c in history["cells"] if (c["signal"], c["time_bucket"], c["margin_bucket"]) == ("ghost", "25-30", "1-2"))
+    spot = next(c for c in history["cells"] if (c["signal"], c["time_bucket"], c["margin_bucket"]) == ("spot", "25-30", "1-2"))
+    assert (ghost["wins"], ghost["losses"], ghost["unknown"], ghost["pending"]) == (1, 0, 1, 1)
+    assert (spot["wins"], spot["losses"], spot["unknown"]) == (0, 1, 1)
+    assert ghost["win_rate_pct"] is None and ghost["interval95_pct"] is None
+    coverage = next(c for c in history["coverage"] if c["time_bucket"] == "25-30")
+    assert coverage["no_observation_markets"] == 1
+    assert coverage["no_eligible_publication_markets"] == 1
+    assert coverage["ties"]["twap"] == 2
+    unknown["official_outcome"] = dict(winner["official_outcome"], condition_id="other-market")
+    final = daily_summary([winner, unknown], day_ms=START, now_ms=START + 2 * DAY_MS, final=True)
+    unknown_cell = next(c for c in final["cells"] if c["signal"] == "ghost")
+    assert unknown_cell["unknown"] == 1 and unknown_cell["frozen_unknown"] == 1 and unknown_cell["pending"] == 0
+    # Aggregate losses survive beyond the individual seven-day expiry.
+    retained = history_summary([final], START + 8 * DAY_MS, complete=True)
+    assert sum(c["losses"] for c in retained["cells"] if c["signal"] == "spot") == 1
+    assert not history_summary([final], START + 90 * DAY_MS, complete=True)["cells"]
+
+
+def test_percent_and_interval_only_use_resolved_markets():
+    from price_collector.settlement_history import percentage
+    assert percentage(29, 29) == (None, None)
+    rate, interval = percentage(57, 60)
+    assert rate == "95.00" and Decimal(interval[0]) < 95 < Decimal(interval[1])
+
+
+def test_schema_retains_evidence_and_adds_guarded_history_marker_and_finite_expiry():
+    sql = Path("schema.sql").read_text(encoding="utf-8")
+    assert "history_folded_version < version" in sql
+    assert "DEFAULT -1" in sql
+    assert "PRIMARY KEY(cohort,market_id)" in sql and "PRIMARY KEY(cohort,day_ms)" in sql
+    assert "frozen history day is immutable" in sql
+    assert "history individual retention is seven days" in sql
+    assert "history daily counts retain ninety days" in sql
     assert "final settlement report is immutable" in sql
-    assert "172800000" in sql  # market starts are inside two complete UTC days
-    assert "259200000" in sql  # finalization never precedes two days + the 24-hour outcome cutoff
+
+
+def test_background_fold_retries_and_later_ack_are_idempotent():
+    class HistoryConnection(Connection):
+        def __init__(self):
+            super().__init__()
+            self.history = {}
+            self.daily = {}
+
+        async def fetchval(self, sql, *args):
+            if "SELECT final FROM settlement_history_daily" in sql:
+                return self.daily.get(args[:2], {}).get("final")
+            if "SELECT body_json FROM settlement_history_markets" in sql:
+                return self.history.get(args[:2])
+            if "SELECT EXISTS" in sql:
+                return any(row.get("history_folded_version", -1) < row["version"] for row in self.audit.values())
+            return await super().fetchval(sql, *args)
+
+        async def fetch(self, sql, *args):
+            if "FROM settlement_audit WHERE history_folded_version" in sql:
+                return [deepcopy(row) for row in self.audit.values()
+                        if row.get("history_folded_version", -1) < row["version"] and row["created_ms"] > args[0]][:100]
+            if "SELECT DISTINCT h.cohort" in sql:
+                return [dict(cohort=cohort, day_ms=START) for cohort in sorted({key[0] for key in self.history})
+                        if not self.daily.get((cohort, START), {}).get("final")]
+            if "FROM settlement_history_markets h" in sql:
+                return [dict(market_id=market, body_json=body, **resolution())
+                        for (cohort, market), body in self.history.items() if cohort == args[0]]
+            if "SELECT body_json FROM settlement_history_daily" in sql:
+                return [deepcopy(row) for row in self.daily.values()]
+            return []
+
+        async def fetchrow(self, sql, *args):
+            if "FROM settlement_history_daily" in sql:
+                return deepcopy(self.daily.get(args[:2]))
+            return await super().fetchrow(sql, *args)
+
+        async def execute(self, sql, *args):
+            if "INSERT INTO settlement_history_markets" in sql:
+                self.history[args[:2]] = args[5]
+            elif "UPDATE settlement_history_markets" in sql:
+                self.history[args[:2]] = args[2]
+            elif "SET history_folded_version" in sql:
+                self.audit[args[:2]]["history_folded_version"] = args[2]
+            elif "INSERT INTO settlement_history_daily" in sql:
+                self.daily[args[:2]] = dict(final=args[3], body_json=args[4])
+            else:
+                await super().execute(sql, *args)
+
+    async def scenario():
+        pool = Pool(); pool.connection = HistoryConnection()
+        frozen, acknowledged = decision(prices=("100.01", "99.99", "100.01"))
+        reserved = dict(publication={"status": "reserved"}, target={"status": "pending", "first_event": None})
+        store = SettlementStore(pool)
+        await store.persist(record(frozen, reserved))
+        before = await store.maintain(START + 400_000)
+        assert sum(cell["resolved"] for cell in before["cells"]) == 0
+        await store.persist(record(frozen, acknowledged, version=1))
+        after = await store.maintain(START + 400_000)
+        assert sum(cell["wins"] for cell in after["cells"]) == 2
+        assert sum(cell["losses"] for cell in after["cells"]) == 1
+        retry = await SettlementStore(pool).maintain(START + 400_000)
+        assert retry["cells"] == after["cells"]
+        final = await store.maintain(START + 2 * DAY_MS)
+        assert next(iter(pool.connection.daily.values()))["final"] is True
+        pool.connection.history.clear()  # individual records have expired
+        retained = await store.maintain(START + 8 * DAY_MS)
+        assert retained["cells"] == final["cells"]
+    asyncio.run(scenario())

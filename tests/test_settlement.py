@@ -79,8 +79,8 @@ def test_closing_projection_extends_future_tail_without_mutating_six_horizon_con
     assert len(result["slots"]) == 60
     assert result["counts"] == dict(observed=31, carried=0, pending=2, future=27, missing=0)
     assert result["projected_price"] == "100.030000000000000000"
-    assert result["signals"]["ghost"]["qualifies"] is True
-    assert result["signals"]["twap"]["qualifies"] is False
+    assert result["schema_version"] == 2 and result["history_cohort"]
+    assert all("qualifies" not in signal for signal in result["signals"].values())
     assert len(snapshot.slots) == 89 and len(snapshot.forecasts) == 6
     assert snapshot.to_audit_json() == original
     assert "slots" not in public_payload(result) and "slot_inputs" not in public_payload(result)
@@ -99,7 +99,7 @@ def test_interior_carry_stays_available_and_degraded_with_frozen_constituents():
     result = project(decision(omit=END - 50_000))
     assert result["quality"] == "degraded" and result["status"] == "available"
     assert result["counts"]["carried"] == 1 and result["max_interior_carry_ms"] == 1000
-    assert result["signals"]["ghost"]["qualifies"] is True
+    assert result["signals"]["ghost"]["side"] == "up"
     assert {s["input_sequence"] for s in result["slots"]} <= {e["sequence"] for e in result["slot_inputs"]}
 
 
@@ -120,21 +120,22 @@ def test_reference_and_availability_fail_closed(fault):
     else: snapshot = replace(snapshot, decision_wall_ns=END * NS, decision_monotonic_ns=300000 * NS)
     result = project(snapshot, reference, **kwargs)
     assert result["status"] == "unavailable" and result["projected_price"] is None
-    assert all(not value["qualifies"] for value in result["signals"].values())
+    assert all("qualifies" not in value for value in result["signals"].values())
     if fault == "after_end":
         assert result["market_id"] == market_for_sample_second(END).market_id
         assert result["market_end_ms"] == END + 300000
 
 
-def test_only_final_30_seconds_and_decimal_threshold_do_not_use_display_rounding():
+def test_only_final_30_seconds_and_exact_margins_have_no_candidate_threshold():
     assert "outside_final_30_seconds" in project(decision(remaining=30001))["reasons"]
     with localcontext() as ctx:
         ctx.prec = 80
         snapshot = decision(value="100.019999999999999999")
     result = project(snapshot)
-    assert result["signals"]["ghost"]["qualifies"] is False
+    assert result["signals"]["ghost"]["lead_bps"] == "1.999999999999999900"
     exact = project(decision(value="100.02"))
-    assert exact["signals"]["ghost"]["qualifies"] is True
+    assert exact["signals"]["ghost"]["lead_bps"] == "2.000000000000000000"
+    assert "threshold_bps" not in exact and "qualifies" not in exact["signals"]["ghost"]
 
 
 def test_context_canonical_decimal_equality_and_conflict_latch():
@@ -150,15 +151,11 @@ def test_context_canonical_decimal_equality_and_conflict_latch():
     with pytest.raises(ValueError): decode_context(" " * 8193)
 
 
-def test_settings_are_default_off_and_campaign_is_fixed_two_days_plus_one_day(monkeypatch):
+def test_settings_default_off_and_retired_campaign_environment_has_no_effect(monkeypatch):
     monkeypatch.delenv("SETTLEMENT_ENABLED", raising=False)
-    monkeypatch.delenv("SETTLEMENT_EVALUATION_START_MS", raising=False)
+    monkeypatch.setenv("SETTLEMENT_EVALUATION_START_MS", "retired-setting")
     assert SettlementSettings().enabled is False
-    start = START // DAY_MS * DAY_MS
-    settings = SettlementSettings(enabled=True, evaluation_start_ms=start)
-    assert settings.evaluation_end_ms == start + 2 * DAY_MS
-    assert settings.evaluation_cutoff_ms == start + 3 * DAY_MS
-    with pytest.raises(ValueError): SettlementSettings(evaluation_start_ms=start + 1)
+    assert SettlementSettings(enabled=True).model_dump() == {"enabled": True}
 
 
 class Redis:
@@ -182,6 +179,15 @@ def runtime(redis, *, enabled=True, client=None):
         parse_market=lambda *args, **kwargs: market(),
         wall_ns=lambda: (START + 200000) * NS, monotonic_ns=lambda: 200000 * NS,
         settlement_settings=SettlementSettings(enabled=enabled), settlement_redis=redis)
+
+
+def test_bad_optional_history_setting_does_not_break_evidence_collector(monkeypatch):
+    monkeypatch.setenv("SETTLEMENT_ENABLED", "invalid")
+    instance = CollectionEvidenceRuntime(pool=None, settings=EvidenceSettings(), writer=Writer(),
+        collector_settings=SimpleNamespace(POLYMARKET_GAMMA_BASE_URL="https://gamma.example.test",
+            POLYMARKET_CLOB_BASE_URL="https://clob.example.test"),
+        parse_market=lambda *args, **kwargs: market(), settlement_redis=Redis())
+    assert instance.settlement_settings.enabled is False
 
 
 def test_metadata_context_latch_survives_worker_recreation_and_default_off_does_nothing():

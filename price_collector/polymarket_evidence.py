@@ -314,7 +314,7 @@ class CollectionEvidenceRuntime:
             # Pydantic exceptions include raw environment values; the optional
             # feature can fail closed without copying those values into logs.
             LOGGER.error("settlement_context_settings_invalid")
-            self.settlement_settings = SettlementSettings(enabled=False, evaluation_start_ms=0)
+            self.settlement_settings = SettlementSettings(enabled=False)
         self._settlement_redis = settlement_redis
         self._owns_settlement_redis = settlement_redis is None
         self._settlement_context_lock = None

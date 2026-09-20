@@ -21,7 +21,7 @@ from price_collector.settlement import (
     SettlementSettings, build_projection, public_payload, decode_context, CONTEXT_KEY,
     SETTLEMENT_KEY, SETTLEMENT_CHANNEL,
 )
-from price_collector.settlement_wire import REPORT_KEY, parse_settlement_payload
+from price_collector.settlement_wire import HISTORY_KEY, parse_settlement_payload
 
 LOGGER = logging.getLogger(__name__)
 NS_MS = 1_000_000
@@ -145,7 +145,6 @@ class SettlementRuntime:
             return
         try:
             p = build_projection(decision, self.context, self.context_wall, self.context_mono)
-            p['evaluation_start_ms'] = self.settings.evaluation_start_ms
             opening = self.openings.get(p['market_start_ms'])
             p['opening_stream'] = deepcopy(opening)
             p['opening_stream_difference_usd'] = None
@@ -303,14 +302,17 @@ class SettlementRuntime:
         await self.flush()
         mono, now = self.mono_ns(), self.wall_ns() // NS_MS
         if not self._last_maintenance or mono - self._last_maintenance >= 30_000 * NS_MS:
-            report = await self.store.maintain(now,
+            history = await self.store.maintain(now,
                 persistence_complete=not self.dirty and not self.pending and not self._fault)
             attempted = self.wall_ns() // NS_MS
             envelope = dict(schema_version=1, status='available', generated_at_ms=now,
                 cache_publish_attempt_ms=attempted, valid_until_ms=attempted + 180_000,
-                evaluation=report, runtime=dict(counters=dict(self.counters), fault=self._fault,
+                history=history, runtime=dict(counters=dict(self.counters), fault=self._fault,
                     pending_records=len(self.records), persistence_pending=len(self.dirty)))
-            await asyncio.wait_for(self.redis.set(REPORT_KEY, _json_bytes(envelope), px=180_000), .5)
+            encoded = _json_bytes(envelope)
+            if len(encoded) > 512 * 1024:
+                raise ValueError('settlement history cache byte budget')
+            await asyncio.wait_for(self.redis.set(HISTORY_KEY, encoded, px=180_000), .5)
             self._last_maintenance = mono
 
     async def _maintenance_loop(self):
@@ -364,7 +366,7 @@ async def attach_settlement(parent, pool):
             return
         if not parent.settings.continuous:
             raise ValueError('settlement requires the continuous ghost worker')
-        runtime = SettlementRuntime(parent, config, SettlementStore(pool, config.evaluation_start_ms),
+        runtime = SettlementRuntime(parent, config, SettlementStore(pool),
             GhostSpool(parent.settings.state_directory / 'settlement', MAX_RECORDS, MAX_BYTES))
         await runtime.start()
         parent.settlement = runtime

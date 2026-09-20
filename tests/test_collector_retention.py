@@ -63,10 +63,24 @@ def test_settlement_expiry_is_independent_of_producer_and_has_its_own_ages(monke
     now = 20_000 * DAY_MS
     plan = {item.table: item for item in asyncio.run(expiry_plan(Connection(), now))}
     assert plan["public.settlement_audit"].cutoff == now - 7 * DAY_MS
+    assert plan["public.settlement_history_markets"].cutoff == now - 7 * DAY_MS
+    assert plan["public.settlement_history_daily"].cutoff == now - 90 * DAY_MS
+    assert plan["public.settlement_history_daily"].predicate == "t.day_ms <= $1"
     assert plan["public.settlement_market_evaluation"].cutoff == now - 7 * DAY_MS
     assert plan["public.settlement_evaluation_reports"].cutoff == now - 90 * DAY_MS
     assert "LIMIT $2 FOR UPDATE SKIP LOCKED" in plan["public.settlement_audit"].delete_sql()
     assert plan["public.price_samples"].cutoff == (now - 10 * DAY_MS) // 300_000
+
+
+def test_daily_history_expires_whole_cutoff_day_without_expiring_newer_summaries():
+    from price_collector.retention import DAY_MS, expiry_plan
+    class Connection:
+        async def fetchval(self, query, table): return table
+    now = 20_000 * DAY_MS + DAY_MS // 2
+    plan = {item.table: item for item in asyncio.run(expiry_plan(Connection(), now))}
+    daily = plan["public.settlement_history_daily"]
+    assert daily.cutoff == (20_000 - 90) * DAY_MS
+    assert "t.day_ms <= $1" in daily.delete_sql()
 
 
 async def insert(connection, table, **values):

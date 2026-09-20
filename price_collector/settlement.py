@@ -7,7 +7,6 @@ from decimal import Decimal, InvalidOperation, localcontext
 import json
 from typing import Any
 
-from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from price_collector.dashboard_api import opening_reference
@@ -18,8 +17,7 @@ SETTLEMENT_KEY = "btc:live:ghost_settlement"
 SETTLEMENT_CHANNEL = SETTLEMENT_KEY + ":updates"
 CONTEXT_KEY = "btc:live:ghost_settlement_context"
 CONTEXT_MAX_BYTES = 8192
-RULE_VERSION = "settlement-first-2bp-v1"
-THRESHOLD_BPS = Decimal("2")
+RULE_VERSION = "historical-settlement-v1"
 DAY_MS = 86_400_000
 NS_MS = 1_000_000
 CATEGORIES = ("observed", "carried", "pending", "future", "missing")
@@ -28,21 +26,6 @@ CATEGORIES = ("observed", "carried", "pending", "future", "missing")
 class SettlementSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SETTLEMENT_", case_sensitive=False)
     enabled: bool = False
-    evaluation_start_ms: int = Field(default=0, ge=0)
-
-    @model_validator(mode="after")
-    def validate_start(self):
-        if self.evaluation_start_ms % DAY_MS:
-            raise ValueError("settlement evaluation start must be UTC-day aligned")
-        return self
-
-    @property
-    def evaluation_end_ms(self) -> int:
-        return self.evaluation_start_ms + 2 * DAY_MS if self.evaluation_start_ms else 0
-
-    @property
-    def evaluation_cutoff_ms(self) -> int:
-        return self.evaluation_end_ms + DAY_MS if self.evaluation_start_ms else 0
 
 
 def _safe(value: Any) -> Any:
@@ -245,15 +228,14 @@ def build_projection(decision: Decision, context: dict | None,
             signals[name] = dict(price=None if value is None else format(value, ".18f"),
                 side=None if lead is None else "up" if lead > 0 else "down" if lead < 0 else "tie",
                 signed_lead_usd=None if lead is None else format(lead, ".18f"),
-                lead_bps=None if bps is None else format(bps.quantize(PRICE_QUANTUM), ".18f"),
-                qualifies=not reasons and bps is not None and abs(bps) >= THRESHOLD_BPS)
+                lead_bps=None if bps is None else format(bps.quantize(PRICE_QUANTUM), ".18f"))
     inputs = {slot.input.sequence: slot.input for slot in selected if slot.input is not None}
     frozen_reference = deepcopy(context) if context is not None else {}
     frozen_reference.update(available_wall_ns=context_available_wall_ns,
                             available_monotonic_ns=context_available_monotonic_ns)
-    return _safe(dict(
-        schema_version=1, kind="settlement", model_version="chainlink-60s-offset3-settlement-v1",
-        rule_version=RULE_VERSION, threshold_bps="2", run_id=decision.run_id, decision_id=decision.decision_id,
+    projection = _safe(dict(
+        schema_version=2, kind="settlement", model_version="chainlink-60s-offset3-settlement-v1",
+        rule_version=RULE_VERSION, run_id=decision.run_id, decision_id=decision.decision_id,
         market_id=market.market_id, market_start_ms=market.market_start_ms, market_end_ms=target,
         target_source_timestamp_ms=target, decision_time_ms=now_ms,
         decision_wall_ns=wall, decision_monotonic_ns=mono, source_horizon_s=horizon,
@@ -269,6 +251,9 @@ def build_projection(decision: Decision, context: dict | None,
                     category=slot.category, carry_age_ms=slot.carry_age_ms) for slot in selected],
         slot_inputs=[_event(inputs[key]) for key in sorted(inputs)],
     ))
+    from price_collector.settlement_history import cohort_key
+    projection["history_cohort"] = cohort_key(projection)
+    return projection
 
 
 def public_payload(projection: dict) -> dict:

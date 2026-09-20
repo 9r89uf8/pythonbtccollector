@@ -11,10 +11,11 @@ from price_collector.ghost_twap_payload import (
     _clock, _text, _price, _input, _fresh_at, _no_float, _object,
 )
 from price_collector.market import market_for_sample_second
+from price_collector.settlement_history import cohort_key
 
 KEY = 'btc:live:ghost_settlement'
 CHANNEL = KEY + ':updates'
-REPORT_KEY = KEY + ':report'
+HISTORY_KEY = KEY + ':history'
 NS_MS = 1_000_000
 VALIDATION_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN)
 PRICE_ENDPOINT = 'https://polymarket.com/api/crypto/crypto-price'
@@ -30,10 +31,11 @@ def parse_settlement_payload(raw: bytes) -> GhostPayload:
     try:
         _require(type(raw) is bytes and 0 < len(raw) <= 65536, 'settlement byte budget')
         p = json.loads(raw, parse_float=_no_float, parse_constant=_no_float, object_pairs_hook=_object)
-        _require(type(p['schema_version']) is int and p['schema_version'] == 1 and p['kind'] == 'settlement'
+        _require(type(p['schema_version']) is int and p['schema_version'] == 2 and p['kind'] == 'settlement'
                  and p['model_version'] == 'chainlink-60s-offset3-settlement-v1'
-                 and p['rule_version'] == 'settlement-first-2bp-v1'
-                 and p['threshold_bps'] == '2', 'unsupported settlement contract')
+                 and p['rule_version'] == 'historical-settlement-v1'
+                 and 'threshold_bps' not in p, 'unsupported settlement contract')
+        _require(p['history_cohort'] == cohort_key(p), 'incompatible history cohort')
         run = _text(p['run_id'], 'run id', 128)
         _require(re.fullmatch(r'[A-Za-z0-9_-]+', run) is not None, 'invalid run id')
         _require(isinstance(p['decision_id'], str) and re.fullmatch(r'[1-9][0-9]{0,18}', p['decision_id']) is not None,
@@ -115,7 +117,7 @@ def parse_settlement_payload(raw: bytes) -> GhostPayload:
             for name, expected_price in (('ghost', price), ('twap', twap.value), ('spot', spot.value)):
                 signal = p['signals'][name]
                 _require(_price(signal['price']) == expected_price, 'signal price differs from input')
-                _require(signal['side'] in ('up', 'down', 'tie') and type(signal['qualifies']) is bool, 'invalid signal')
+                _require(signal['side'] in ('up', 'down', 'tie') and 'qualifies' not in signal, 'invalid signal')
                 for field in ('signed_lead_usd', 'lead_bps'):
                     _require(isinstance(signal[field], str) and re.fullmatch(r'-?[0-9]{1,30}\.[0-9]{18}', signal[field]) is not None,
                              'invalid signal decimal')
@@ -124,8 +126,7 @@ def parse_settlement_payload(raw: bytes) -> GhostPayload:
                 _require(Decimal(signal['signed_lead_usd']) == lead and Decimal(signal['lead_bps']) == bps,
                          'signal lead differs from price and reference')
                 side = 'up' if lead > 0 else 'down' if lead < 0 else 'tie'
-                qualifies = abs(lead) * Decimal(10000) >= opening * Decimal(2)
-                _require(signal['side'] == side and signal['qualifies'] == qualifies, 'signal side/qualification mismatch')
+                _require(signal['side'] == side, 'signal side mismatch')
         forecast = GhostForecast(horizon, end, price, quality, (), counts, None, None, maximum)
         return GhostPayload(raw, run, identifier, wall, mono, attempt, attempt_mono, expiry,
                             source_cap, receipt_cap, spot, twap, (forecast,), (horizon,))
