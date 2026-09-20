@@ -713,6 +713,31 @@ ordering and actual acknowledgement evidence.
 
 ### Update procedure
 
+Deployment on September 20, 2026 at 19:27 UTC installed runtime `fcbcb0d`
+from GitHub `main`. The corrected catch-up rule waits for the day's retained
+inputs before freezing, and history health excludes ordinary in-flight work in
+the current market. Aggregation/cache errors no longer clear the live projection's
+publication guard; audit-persistence and capacity failures still suspend it.
+The rolling ghost calculation and its six horizons were unchanged.
+
+Validation: 1,741 tests passed with 17 opt-in skips. PostgreSQL 16.15 scratch
+validation passed schema application twice, real writer persistence, first-ACK
+selection, idempotent folding, daily freeze, retention and reader/writer guards.
+The scratch database and checkout were then removed. Production applied the
+schema before restarting; all four collectors were briefly paused during the
+full schema transaction to avoid unrelated writer/DDL contention, then restored.
+No permanent setting or price arithmetic changed beyond retiring the study date.
+
+Post-deployment health, rolling forecast, accuracy, comparison and settlement
+history routes returned HTTP 200; the retired study report route returned 404.
+The browser received actual closing projections and ordinary ghost prices. The
+initial historical backfill was active with no runtime fault, so rates were not
+yet presented as a completed history. The local dashboard's `1c6b40e` explicitly
+labels this initial state as building historical counts. It remains local-only.
+The original study's early closeout and a compact pre-deployment comparison are
+preserved privately; deployment retired its automatic finalizer before the
+original September 21 cutoff, without calling either snapshot protocol-final.
+
 Run after the reviewed backend release has been pushed to GitHub. Apply schema
 before restarting services. Pause the affected writers and retention job during
 the full schema apply; existing ghost-audit DDL can contend with live writes.
