@@ -165,7 +165,6 @@ class GhostRuntime:
         self.runtime_version = CONTINUOUS_RUNTIME_VERSION if settings.continuous else RUNTIME_VERSION
         self.feed_health = GhostFeedHealth(self.run_id,self.wall_ns()//NS_PER_MS)
         self.monitor = None
-        self.settlement = None
         self.engine = GhostTwapEngine(self.run_id, GhostPolicy(
             enabled=True, source_max_age_ms=settings.source_max_age_ms,
             receipt_max_age_ms=settings.receipt_max_age_ms))
@@ -402,15 +401,6 @@ class GhostRuntime:
                            self.wall_ns(), self.mono_ns()))
         self._wake.set()
 
-    def _settlement_offer(self, method, *args):
-        if self.settlement is None:
-            return
-        try:
-            getattr(self.settlement, method)(*args)
-        except Exception:
-            self.settlement._fault = 'input_hook_failure'
-            LOGGER.exception('settlement hook failed; ordinary ghost remains active')
-
     def offer_price(self, feed: str, value: Decimal, source_ms: int,
                     received_wall_ns: int, received_mono_ns: int, event_id: str,
                     window_s: int | None = None) -> None:
@@ -436,7 +426,6 @@ class GhostRuntime:
             self.feed_health.observe(event)
         # Observe targets at admission, even when the constituent queue overflows.
         if feed == 'twap':
-            self._settlement_offer('observe_target', event)
             self.observe_target(event)
             if event.source_timestamp_ms * NS_PER_MS > event.received_wall_ns:
                 self.counters['invalid_target_clocks'] += 1
@@ -727,7 +716,6 @@ class GhostRuntime:
         self._expired_emitted = decision.valid_until_wall_ns <= wall
         self._audit_wake.set()
         self._publish_wake.set()
-        self._settlement_offer('offer', decision, self._publication_epoch)
         return row
 
     def finalize_due(self) -> None:
@@ -1037,8 +1025,6 @@ class GhostRuntime:
         self._wake.set()
         self._publish_wake.set()
         self._audit_wake.set()
-        settlement_close = (_retain_cleanup(self.settlement.close(), 'settlement-owned-close')
-                            if self.settlement is not None else None)
         if self.monitor is not None:
             if not await self.monitor.close():
                 # Keep ownership of shared clients until maintenance and its
@@ -1096,10 +1082,6 @@ class GhostRuntime:
         await _shutdown_stage(drain(), SHUTDOWN_DRAIN_SECONDS, 'drain')
         drained = not (self._dirty or self._campaign_dirty or self.late_events)
         await _shutdown_stage(self._spool(self.spool.close), SHUTDOWN_RESOURCE_SECONDS, 'spool-close')
-        if settlement_close is not None:
-            # Preserve the ordinary ghost first, and keep shared clients owned
-            # until both optional workers have settled their I/O.
-            await _settle_cleanup(settlement_close)
         self.shutdown_summary = dict(initial_records=initial_records,
             drained_records=initial_records-len(self.records), retained_records=len(self.records),
             pending_dirty=len(self._dirty), pending_late_events=len(self.late_events),
@@ -1166,11 +1148,6 @@ async def start_ghost_runtime(settings: Any) -> GhostRuntime | None:
             runtime.monitor = GhostMonitor(store, client, runtime_health=runtime.monitoring_health,
                 active_identities=lambda: tuple((runtime.run_id, key) for key in runtime.records))
         await runtime.start()
-        from price_collector.settlement_runtime import attach_settlement
-        try:
-            await asyncio.wait_for(attach_settlement(runtime, pool), 5)
-        except asyncio.TimeoutError:
-            LOGGER.error('settlement startup exceeded its budget; ordinary ghost remains active')
     except BaseException:
         cleanup = _retain_cleanup(release_owned(runtime.close if runtime is not None else None),
                                   'ghost-startup-cleanup')

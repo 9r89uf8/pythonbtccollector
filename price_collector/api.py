@@ -16,9 +16,6 @@ from price_collector.ghost_twap_api import (
     GhostApiDisabledReason, GhostApiSettings, GhostCompressionBypass, create_ghost_api_service,
     router as ghost_router,
 )
-from price_collector.settlement_api import (
-    SettlementApiSettings, create_settlement_api_service, router as settlement_router,
-)
 from price_collector.db import (
     create_read_pool,
     decimal_string_or_none,
@@ -330,13 +327,6 @@ def requested_microstructure_groups(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
-    app.state.settlement_api_disabled_reason = 'disabled'
-    try:
-        settlement_settings = SettlementApiSettings()
-    except ValidationError:
-        settlement_settings = None
-        app.state.settlement_api_disabled_reason = 'invalid_settings'
-        logger.error('Settlement API disabled: reason=invalid_settings')
     app.state.ghost_api_disabled_reason = GhostApiDisabledReason.DISABLED
     try:
         ghost_settings = GhostApiSettings()
@@ -362,19 +352,12 @@ async def lifespan(app: FastAPI):
         if ghost_api is not None:
             cleanup.push_async_callback(ghost_api.close)
             await ghost_api.start()
-        settlement_api = (create_settlement_api_service(settings, settlement_settings)
-            if settlement_settings is not None and settlement_settings.enabled else None)
-        app.state.settlement_api = settlement_api
-        if settlement_api is not None:
-            cleanup.push_async_callback(settlement_api.close)
-            await settlement_api.start()
         yield
 
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(GhostCompressionBypass, minimum_size=1_000)
 app.include_router(ghost_router)
-app.include_router(settlement_router)
 
 
 @app.get("/healthz")

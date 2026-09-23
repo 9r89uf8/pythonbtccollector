@@ -213,51 +213,12 @@ The corresponding Python entry points are:
   fixed grid, read timeout, byte cap and exact payload ledger. Never interpret
   read errors as absence or local cache observations as browser delivery.
 
-### Optional Historical Settlement Win Rates
+### Retired Historical win rate
 
-The optional historical estimator is documented in `GHOST_TWAP_REFERENCE.md`.
-Keep `SETTLEMENT_ENABLED`/`SETTLEMENT_API_ENABLED` default off and independent of
-the unchanged six-horizon ghost contract. Record current official TWAP, spot and
-time throughout the full five-minute market, using the causally observed website
-opening reference. Do not calculate a closing projection for this panel.
-Do not restore the retired two-day first-2-bp study,
-evaluation start setting, candidate label or automatic study finalization.
-Preserve its saved research and results. Observed market conditions use schema
-4, rule `historical-market-conditions-v1`, `observation_window_s=300` and
-`sampling_interval_ms=5000`; preserve the separate legacy 30/60-second cohorts.
-
-Admit at most the first successfully admitted observation in each fixed
-five-second UTC wall-clock interval, counting further offers in that interval as
-`sampling_skipped`. Do not reopen an admitted interval after a clock regression.
-Apply this limit before audit creation. Fsync complete frozen conditions before
-recording them; no new forecast publication or acknowledgement is claimed.
-Keep the existing row/byte caps; the rolling ghost's cadence and forecasts are
-unchanged. The panel uses independently fresh current prices; never extend TTL
-to bridge a missed update. Migrate the audit schedule check before writer restart.
-
-Select the first eligible recorded decision-time observation in each market/time
-bucket before classifying both absolute margins into [0,1), [1,2), [2,4), [4,8)
-or at least 8 bp, plus spot agreement/opposition/tie relative to the TWAP-leading
-side. Use finer five-second buckets in the final minute and wider early buckets.
-A combined win means the TWAP-leading side matches the identity-validated official
-winner. Pool Up/Down explicitly, preserve ties/unknowns/missing observations and separate
-incompatible calculation/settlement/policy versions. A cell counts markets, not
-ticks. Counts describe historical outcomes, never a locked winner or certified
-live probability. Any Wilson range must state its comparable-independent-market
-assumption; below 30 resolved observations display counts without a percentage.
-
-Keep per-market evidence seven days and daily count summaries ninety days.
-Use retained paired legacy per-market observations to reconstruct separate
-combined-condition daily cohorts; never derive joint counts from marginal daily
-totals. Preserve original first-ACK sampling, policy, 30/60-second coverage and
-outcome-freeze cutoff. Do not relabel them as schema-4 observations or pool
-incompatible cohorts. Select a displayed cohort by resolved sample size, never
-win rate, and label its source. Bound reconstruction to one day/cohort and 288
-markets per pass; persist only compact daily counts within existing guards.
-Replace daily totals idempotently, freeze outcomes before individual expiry,
-and keep unresolved outcomes explicit. The background worker builds the bounded
-Redis history cache; API requests read Redis only. A stale cache is unavailable.
-The operator retention timer enforces finite expiry even with the producer off.
+The owner removed the Historical win rate panel and its dedicated live data on
+September 23, 2026. Do not restore its settlement_* tables, worker, cache or API.
+Preserve original collected markets/prices, official outcomes, Ghost forecasts
+and accuracy, and the separate read-only research archives.
 
 ### Binance Futures, Flow, and Book
 

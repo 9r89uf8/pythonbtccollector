@@ -27,9 +27,6 @@ from price_collector.polymarket_evidence_store import (
     EvidenceWriter,
     QuoteObservation,
 )
-from price_collector.settlement import (
-    CONTEXT_KEY, CONTEXT_MAX_BYTES, SettlementSettings, decode_context, latch_context, make_context,
-)
 
 
 LOGGER = logging.getLogger("price_collector.polymarket_evidence")
@@ -286,8 +283,6 @@ class CollectionEvidenceRuntime:
         client: Optional[httpx.AsyncClient] = None,
         wall_ns: Callable[[], int] = time.time_ns,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
-        settlement_settings: Optional[SettlementSettings] = None,
-        settlement_redis: Optional[Any] = None,
     ) -> None:
         self.settings = settings
         self.collector_settings = collector_settings
@@ -308,27 +303,9 @@ class CollectionEvidenceRuntime:
         self._market_tasks: dict[int, asyncio.Task] = {}
         self._sessions: dict[UUID, QuoteCapture] = {}
         self._closing = False
-        try:
-            self.settlement_settings = settlement_settings or SettlementSettings()
-        except ValueError:
-            # Pydantic exceptions include raw environment values; the optional
-            # feature can fail closed without copying those values into logs.
-            LOGGER.error("settlement_context_settings_invalid")
-            self.settlement_settings = SettlementSettings(enabled=False)
-        self._settlement_redis = settlement_redis
-        self._owns_settlement_redis = settlement_redis is None
-        self._settlement_context_lock = None
-        self._settlement_context_memory = None
 
     async def start(self) -> None:
         await self.writer.start()
-        if self.settlement_settings.enabled and self._settlement_redis is None:
-            import redis.asyncio as redis
-            self._settlement_redis = redis.Redis(
-                host=self.collector_settings.REDIS_HOST, port=self.collector_settings.REDIS_PORT,
-                db=self.collector_settings.REDIS_DB, socket_timeout=0.25,
-                socket_connect_timeout=0.25, max_connections=2, decode_responses=False,
-            )
         if self.client is None:
             self.client = httpx.AsyncClient(
                 timeout=5.0,
@@ -378,7 +355,6 @@ class CollectionEvidenceRuntime:
     async def observe_http(
         self, market: Any, kind: str, url: str, parser: Callable[[Any], tuple[str, dict[str, Any]]],
         *, params: Optional[Mapping[str, str]] = None,
-        identity_validated: bool = False,
     ) -> str:
         requested_wall = self.wall_ns()
         requested_monotonic = self.monotonic_ns()
@@ -430,50 +406,7 @@ class CollectionEvidenceRuntime:
             response_sha256=response_sha256, response_date=response_date,
             response_age_seconds=response_age_seconds,
         )
-        if kind == "price_to_beat" and self.settlement_settings.enabled:
-            await self._publish_settlement_context(make_context(
-                market, {**provenance, **parsed}, status=status,
-                http_status=response.status_code if response is not None else None,
-                requested_wall_ns=requested_wall, requested_monotonic_ns=requested_monotonic,
-                received_wall_ns=received_wall, received_monotonic_ns=received_monotonic,
-                identity_validated=identity_validated, response_sha256=response_sha256,
-            ))
         return status
-
-    async def _publish_settlement_context(self, context: dict) -> None:
-        """Bounded Redis handoff on the existing metadata worker, never the feed reader."""
-        if not self.settlement_settings.enabled or self._settlement_redis is None:
-            return
-        try:
-            if self._settlement_context_lock is None:
-                self._settlement_context_lock = asyncio.Lock()
-            async with self._settlement_context_lock:
-                now_ms = self.wall_ns() // 1_000_000
-                if not context["market_start_ms"] <= now_ms < context["market_end_ms"]:
-                    return
-                context = latch_context(self._settlement_context_memory, context)
-                self._settlement_context_memory = context
-                raw = await asyncio.wait_for(self._settlement_redis.get(CONTEXT_KEY), timeout=0.3)
-                previous = None if raw is None else decode_context(raw)
-                if previous is not None and previous.get("market_id", -1) > context["market_id"]:
-                    return
-                context = latch_context(previous, context)
-                self._settlement_context_memory = context
-                body = json.dumps(context, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-                if len(body) > CONTEXT_MAX_BYTES:
-                    raise ValueError("settlement context exceeds byte limit")
-                # Recheck after the read: a slow response must not replace the
-                # next market's context with an already-closed reference.
-                now_ms = self.wall_ns() // 1_000_000
-                if not context["market_start_ms"] <= now_ms < context["market_end_ms"]:
-                    return
-                await asyncio.wait_for(self._settlement_redis.set(
-                    CONTEXT_KEY, body, px=context["market_end_ms"] - now_ms,
-                ), timeout=0.3)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOGGER.exception("settlement_context_publication_failed")
 
     async def poll_market_once(self, market: Any) -> None:
         gamma_url = self.collector_settings.POLYMARKET_GAMMA_BASE_URL.rstrip("/")
@@ -497,7 +430,7 @@ class CollectionEvidenceRuntime:
         if gamma_status in ("ok", "missing"):
             await self.observe_http(
                 market, "price_to_beat", PRICE_ENDPOINT, parse_price_observation,
-                params=price_request_params(market), identity_validated=True,
+                params=price_request_params(market),
             )
         else:
             self._record(market, "price_to_beat", {
@@ -505,14 +438,6 @@ class CollectionEvidenceRuntime:
                 "reason": "not_requested_without_current_gamma_identity",
                 "gamma_status": gamma_status,
             }, status="invalid")
-            if self.settlement_settings.enabled:
-                wall, mono = self.wall_ns(), self.monotonic_ns()
-                await self._publish_settlement_context(make_context(
-                    market, {"source_url": PRICE_ENDPOINT, "request_params": price_request_params(market)},
-                    status="invalid", http_status=None, requested_wall_ns=wall,
-                    requested_monotonic_ns=mono, received_wall_ns=wall,
-                    received_monotonic_ns=mono, identity_validated=False,
-                ))
 
     async def _metadata_loop(self, market: Any) -> None:
         while not self._closing and self.wall_ns() // 1_000_000 < market.window.market_end_ms + 15_000:
@@ -552,9 +477,6 @@ class CollectionEvidenceRuntime:
         await self.writer.close(timeout_seconds=10)
         if self._owns_client and self.client is not None:
             await self.client.aclose()
-        if self._owns_settlement_redis and self._settlement_redis is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._settlement_redis.aclose(), timeout=0.5)
 
 
 class QuoteCapture:

@@ -1,4 +1,4 @@
-"""Bounded, operator-owned expiry of collector and settlement history.
+"""Bounded, operator-owned expiry of collector history.
 
 Run separately from collectors, using PostgreSQL peer authentication. Ordinary
 collector/API roles gain no permissions. The default CLI only inspects; --apply
@@ -89,20 +89,6 @@ async def expiry_plan(connection, now_ms):
             raise RuntimeError(f"required retention table missing: {table}")
 
     plan = []
-    # Independent of the optional producer flag: stopping settlement must not
-    # make its records permanent. These are separate from ordinary ten-day data.
-    for table, column, days in (("settlement_audit", "created_ms", 7),
-                                ("settlement_history_markets", "market_end_ms", 7),
-                                ("settlement_market_evaluation", "market_end_ms", 7),
-                                ("settlement_evaluation_reports", "created_ms", 90)):
-        if await connection.fetchval("SELECT to_regclass($1)::text", "public." + table):
-            plan.append(Expiry("public." + table, f"t.{column} < $1", f"t.{column}",
-                               max(0, now_ms - days * DAY_MS)))
-    if await connection.fetchval("SELECT to_regclass($1)::text", "public.settlement_history_daily"):
-        # Expire the whole daily aggregate containing the cutoff. This prevents
-        # any member market from surviving the ninety-day maximum.
-        plan.append(Expiry("public.settlement_history_daily", "t.day_ms <= $1", "t.day_ms",
-                           max(0, (now_ms - 90 * DAY_MS) // DAY_MS * DAY_MS)))
     for table, column, _ in MARKET_TABLES:
         if table not in present:
             continue
@@ -245,7 +231,7 @@ async def _run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="apply fixed history retention (10 days; settlement individuals 7 days/summaries 90 days)")
+    parser.add_argument("--apply", action="store_true", help="apply fixed ten-day collector history retention")
     parser.add_argument("--max-seconds", type=int, default=45)
     parser.add_argument("--batch-size", type=int, default=2000,
                         help="rows per transaction (maximum 10000); default 2000")

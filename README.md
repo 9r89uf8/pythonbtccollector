@@ -1110,37 +1110,6 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-The optional historical win-rate panel uses observed conditions throughout each
-five-minute market. It shows how often the TWAP-leading side won in past markets
-with similar TWAP and spot distances from Price to Beat, spot alignment and time
-remaining, with counts, unknowns and history dates. It does not project a closing
-price. These are descriptive frequencies, not a guarantee of the live outcome.
-Retained paired observations from the earlier final-30/60-second recorders also
-provide separate combined historical groups. The panel selects the matching
-group with the largest resolved sample and labels its source; it never chooses
-by win rate or pools incompatible recording methods. Earlier-in-market rates
-use the new full-market observations. Reconstruction runs in the background
-from saved pairs, not from old marginal signal totals or browser-side history.
-The rolling 1-, 2-, 3-, 5-,
-10- and 30-second ghost prices and their accuracy monitor are unchanged.
-See [historical settlement win rates](GHOST_TWAP_REFERENCE.md#historical-settlement-win-rates)
-for selection rules, API routes, retention and the schema-first update.
-`SETTLEMENT_ENABLED` controls the bounded context handoff and producer inside
-the existing probabilities/Chainlink services; `SETTLEMENT_API_ENABLED` controls
-Redis-only delivery. Both remain off by default. No new service or public
-listener is introduced. Remove the obsolete `SETTLEMENT_EVALUATION_START_MS`
-setting when updating; saved study results remain preserved. History records
-with an incomplete freeze remain visibly partial; the panel reports these
-days rather than presenting them as complete evidence.
-
-The condition recorder admits at most one observation per fixed five-second UTC
-interval. The schema-4 full-market cohort is separate from the legacy closing
-projections; old counts cannot fill its combined cells. The panel reads current
-spot/TWAP independently of recording cadence and clears rates when either input
-or its history cache is stale. Existing row/storage caps remain fixed. Apply the
-versioned schedule-check migration in `schema.sql` before restarting the Chainlink
-writer; the referenced update sequence does this. Frontend assets stay local.
-
 The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
 verified research, measured 3.1-second inclusion delay, live-canary findings,
 forecast formula, API behavior, chart metrics, retention and limitations. Dated
@@ -1237,56 +1206,50 @@ If a systemd unit changed, copy that exact unit using its matching command in
 production environment file with an example. Finish each update with the relevant
 [routine checks](#routine-checks) and bounded service logs.
 
-### Full-market historical win-rate migration
+### Remove Historical win rate
 
-After the change is pushed to GitHub, install the new schedule check before
-restarting the Chainlink writer. The schema installs that check as `NOT VALID`:
-new inserts and updates are checked immediately, while the separate validation
-scan checks existing rows after the schema transaction releases its locks.
-Keep validation outside the schema transaction; a populated audit table can
-exceed the ordinary 30-second migration deadline. No environment change is needed.
+The owner retired this feature on September 23, 2026, including its dedicated
+observations and summaries. The ordinary Ghost forecasts and accuracy, original
+market metadata/resolutions, spot samples, official TWAP events and preserved
+research archives remain separate.
 
-```bash
-cd /opt/price-collector
-sudo -u pricecollector git pull --ff-only
-sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-(
-  set -eu
-  trap 'sudo systemctl start price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-collector-retention.timer' EXIT
-  sudo systemctl stop price-collector-retention.timer price-collector-retention.service
-  sudo systemctl stop price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink
-  sudo -u postgres env PGOPTIONS='-c lock_timeout=3s -c statement_timeout=30s' psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
-  sudo systemctl restart price-api
-)
-sudo -u postgres env PGOPTIONS='-c lock_timeout=3s -c statement_timeout=5min' psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/deployment/validate_market_conditions.sql
-sudo systemctl status price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
-curl --fail http://127.0.0.1:9000/healthz
-curl --fail http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
-sudo journalctl -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
-```
-
-If validation alone times out, the committed schema still enforces new writes;
-retry the standalone validation command and require `convalidated = true`.
-The local dashboard is updated separately and must never be copied to the droplet.
-
-For the retrospective-history code update, the full-market schema migration
-above must already be installed. After publishing the change to GitHub, no new
-schema or environment change is needed:
+After pushing the removal to GitHub, stop the old producers before applying the
+explicit removal migration. It drops only five named feature tables and their
+three guard functions; no CASCADE is used. The main schema no longer creates
+these objects.
 
 ```bash
 cd /opt/price-collector
 sudo -u pricecollector git pull --ff-only
 sudo -u pricecollector .venv/bin/pip install -r requirements.txt
-sudo systemctl restart price-collector-polymarket-chainlink
-sudo systemctl status price-collector-polymarket-chainlink price-api --no-pager
+sudo systemctl stop price-collector-retention.timer price-collector-retention.service
+sudo systemctl stop price-collector-polymarket-chainlink price-collector-polymarket-probabilities price-api
+sudo -u postgres psql -X -v ON_ERROR_STOP=1 -d price_collector -f deployment/remove_historical_win_rate.sql
+sudo systemctl start price-collector-polymarket-chainlink price-collector-polymarket-probabilities price-api price-collector-retention.timer
+sudo systemctl status price-collector-polymarket-chainlink price-collector-polymarket-probabilities price-api price-collector-retention.timer --no-pager
 curl --fail http://127.0.0.1:9000/healthz
-curl --fail http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
-sudo journalctl -u price-collector-polymarket-chainlink -n 80 --no-pager
+sudo journalctl -u price-collector-polymarket-chainlink -u price-collector-polymarket-probabilities -u price-api -n 60 --no-pager
 ```
 
-Check history schema 3, separate retrospective cohorts, their retained market
-counts, backfill status and storage headroom. The API continues reading the
-existing Redis key; dashboard assets remain local.
+One-time cleanup also removes the obsolete `SETTLEMENT_*` entries from the
+existing collector/API environment files, the three exact Redis keys
+`btc:live:ghost_settlement`, `btc:live:ghost_settlement_context` and
+`btc:live:ghost_settlement:history`, and only the `settlement` child directory
+of the configured Ghost state directory after the old workers stop. Keep the
+parent Ghost state, ordinary Ghost keys and all source-price keys. No database
+reset or source-market deletion is involved. Verify the retired routes return
+404 and the ordinary Ghost routes remain available. Update and restart the local
+dashboard separately; no frontend assets belong on the droplet.
+
+Removal validation passed 1,656 backend tests with 17 opt-in skips and two
+existing deprecation warnings, plus two local proxy tests. In a disposable
+PostgreSQL 16.15 database, an unexpected dependent view blocked the migration
+and rolled back every drop. Removal twice and the new schema twice preserved
+exact seeded source-market, outcome, price, TWAP, opening-evidence and Ghost
+accuracy rows while leaving all retired objects absent. The scratch database
+and files were removed. The local browser showed no Historical win rate panel
+and still displayed live Ghost forecasts without console errors.
+
 
 ### Maintenance
 
