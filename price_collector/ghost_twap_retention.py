@@ -373,7 +373,9 @@ class GhostRetentionStore(GhostAuditStore):
         Both watermarks fence not-yet-compacted decisions before selecting any
         target. A five-second source-age allowance covers decisions issued
         after their target source stamp. The single SQL statement ensures the
-        watermark and compact rows share a PostgreSQL MVCC snapshot.
+        watermark and compact rows share a PostgreSQL MVCC snapshot. Scalar
+        bounds let PostgreSQL seek into the compact age index instead of
+        filtering a full ordered index scan through a join.
         """
         from .ghost_twap_chart import (MATCHING_AGE_MS, MAX_BODY_BYTES, MAX_ROWS,
                                       SOURCE_AGE_ALLOWANCE_MS, WINDOW_MS)
@@ -395,9 +397,9 @@ class GhostRetentionStore(GhostAuditStore):
                   SELECT *,greatest(0,window_end_ms-$5::bigint) AS window_start_ms FROM bounds
                 ), candidates AS MATERIALIZED (
                   SELECT c.run_id,c.decision_id,c.created_ms,c.body_json,c.body_sha256
-                  FROM {COMPACT} c CROSS JOIN chart_window w
-                  WHERE c.created_ms>=greatest(0,w.window_start_ms-30000)
-                    AND c.created_ms<w.window_end_ms+$4::bigint
+                  FROM {COMPACT} c
+                  WHERE c.created_ms>=(SELECT greatest(0,window_start_ms-30000) FROM chart_window)
+                    AND c.created_ms<(SELECT window_end_ms+$4::bigint FROM chart_window)
                   ORDER BY c.created_ms,c.run_id,c.decision_id LIMIT $6
                 ), sizes AS (
                   SELECT count(*)::bigint AS row_count,

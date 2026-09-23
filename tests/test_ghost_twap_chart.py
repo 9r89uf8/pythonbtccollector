@@ -170,4 +170,10 @@ def test_store_snapshot_uses_one_bounded_statement_and_passes_both_watermarks():
     sql, args = pool.connection.calls[0]
     assert args == (300_000, 110_000, 120_000, 5_000, 900_000, 10_001, MAX_BODY_BYTES)
     assert 'min(created_ms)' in sql and 'LIMIT $6' in sql and 's.body_bytes<=$7' in sql
-    assert 'WHERE c.created_ms>=' in sql and 'window_start_ms-30000' in sql
+    # Scalar bounds become index conditions. A CROSS JOIN can instead scan
+    # every older compact row in order, applying these bounds as a join filter.
+    candidates = sql.split('candidates AS MATERIALIZED (', 1)[1].split('), sizes AS (', 1)[0]
+    assert 'CROSS JOIN' not in candidates
+    assert 'c.created_ms>=(SELECT greatest(0,window_start_ms-30000) FROM chart_window)' in candidates
+    assert 'c.created_ms<(SELECT window_end_ms+$4::bigint FROM chart_window)' in candidates
+    assert 'ORDER BY c.created_ms,c.run_id,c.decision_id LIMIT $6' in candidates
