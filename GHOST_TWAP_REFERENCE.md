@@ -748,6 +748,22 @@ The replacement index was valid and ready. No retained evidence was removed,
 no table rewrite was run, and no storage limit or recurring retention procedure
 was changed.
 
+The retained-history extension was deployed September 23, 2026 at 16:14:48
+UTC from backend `93c8e1b`; the local dashboard is `4cf63be`. No additional
+schema or environment change was required. By 16:19 UTC reconstruction was
+complete: 1,090 retained final-thirty-second markets and 503 retained final-minute
+markets, with no unavailable individual records in these source days. Their
+25-30-second cells contain 1,018 and 482 resolved markets respectively before
+filtering by price margins and alignment; the methods remain separate.
+
+The live local page selected the older thirty-second group at 15 seconds
+remaining and displayed 113 resolved matching markets, 113 wins and zero losses,
+with the historical date range and source method visible. This observed 100%
+frequency is not a guaranteed live win. Browser console checks were clean;
+all four collectors, the API and the retention timer were active. The API
+reported no settlement fault and recording had resumed. Relation allocation
+was 508,116,992 bytes with 11,976,704 bytes below the admission threshold.
+
 Retrospective-history validation: the full backend suite passed 1,857 tests
 with 17 opt-in skips; the final store-focused checks passed 47 tests. A separate
 PostgreSQL 16.15 smoke test exercised the configured production path, distinct
