@@ -138,6 +138,9 @@ async def migrate_old_schedule_check(connection):
               AND conname='settlement_audit_observation_window_check'""")
         assert 'historical-market-conditions-v1' in definition
         assert 'historical-settlement-v2' in definition
+    assert await connection.fetchval("""SELECT convalidated FROM pg_constraint
+        WHERE conrelid='settlement_audit'::regclass
+          AND conname='settlement_audit_observation_window_check'""") is False
 
 
 async def rejected(connection, sql, *parameters, contains):
@@ -281,6 +284,24 @@ async def main(name):
                            contains='settlement_audit_observation_window_check')
         await connection.execute('RESET ROLE')
 
+        # The metadata transaction has committed. Validate retained rows using
+        # its weaker lock, independently of schema installation, while a writer
+        # can still update the table. Invalid inserts above were already blocked.
+        async with connection.transaction():
+            validation_sql = (Path(__file__).resolve().parents[1] / 'deployment' /
+                              'validate_market_conditions.sql').read_text(encoding='utf-8')
+            await connection.execute(validation_sql)
+            locks = await connection.fetch("""SELECT mode FROM pg_locks WHERE pid=pg_backend_pid()
+                AND relation='settlement_audit'::regclass AND granted""")
+            modes = {row['mode'] for row in locks}
+            assert 'ShareUpdateExclusiveLock' in modes and 'AccessExclusiveLock' not in modes
+            async with pool.acquire(timeout=5) as concurrent_writer:
+                await concurrent_writer.execute("""UPDATE settlement_audit
+                    SET history_folded_version=history_folded_version WHERE decision_id='conditions-first'""")
+        assert await connection.fetchval("""SELECT convalidated FROM pg_constraint
+            WHERE conrelid='settlement_audit'::regclass
+              AND conname='settlement_audit_observation_window_check'""") is True
+
         for record in (first, later):
             record.update(version=2, terminal=True)
             assert await conditions.persist(record) == 'updated'
@@ -301,6 +322,8 @@ async def main(name):
                 'bounded fold and outcome join SQL', 'reader/writer privilege split', 'capacity query',
                 'versioned sixty-second admission', 'separate legacy and minute history buckets',
                 'old named schedule constraint migration and repeat application',
+                'committed NOT VALID check still enforces new rows',
+                'separate constraint validation allows concurrent writer',
                 'full-market observed-condition boundary admission', 'immutable recorded observations',
                 'exact schema-4 contract and half-open schedule rejection',
                 'combined condition summary and first observation selection',

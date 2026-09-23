@@ -1231,6 +1231,38 @@ If a systemd unit changed, copy that exact unit using its matching command in
 production environment file with an example. Finish each update with the relevant
 [routine checks](#routine-checks) and bounded service logs.
 
+### Full-market historical win-rate migration
+
+After the change is pushed to GitHub, install the new schedule check before
+restarting the Chainlink writer. The schema installs that check as `NOT VALID`:
+new inserts and updates are checked immediately, while the separate validation
+scan checks existing rows after the schema transaction releases its locks.
+Keep validation outside the schema transaction; a populated audit table can
+exceed the ordinary 30-second migration deadline. No environment change is needed.
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+(
+  set -eu
+  trap 'sudo systemctl start price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-collector-retention.timer' EXIT
+  sudo systemctl stop price-collector-retention.timer price-collector-retention.service
+  sudo systemctl stop price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink
+  sudo -u postgres env PGOPTIONS='-c lock_timeout=3s -c statement_timeout=30s' psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/schema.sql
+  sudo systemctl restart price-api
+)
+sudo -u postgres env PGOPTIONS='-c lock_timeout=3s -c statement_timeout=5min' psql -v ON_ERROR_STOP=1 -d price_collector -f /opt/price-collector/deployment/validate_market_conditions.sql
+sudo systemctl status price-collector price-collector-binance-futures price-collector-polymarket-probabilities price-collector-polymarket-chainlink price-api price-collector-retention.timer --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
+sudo journalctl -u price-collector-polymarket-chainlink -u price-api -n 80 --no-pager
+```
+
+If validation alone times out, the committed schema still enforces new writes;
+retry the standalone validation command and require `convalidated = true`.
+The local dashboard is updated separately and must never be copied to the droplet.
+
 ### Maintenance
 
 Check database allocation as well as filesystem free space; raw/evidence caps

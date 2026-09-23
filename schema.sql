@@ -1951,6 +1951,10 @@ CREATE TABLE IF NOT EXISTS settlement_audit (
 -- Replace the original anonymous final-30s schedule check on existing installs.
 -- The frozen version controls admission; legacy projections cannot acquire the
 -- full-market scope of schema-4 observed market conditions.
+-- Avoid scanning retained JSON evidence while the schema transaction holds an
+-- ACCESS EXCLUSIVE lock. NOT VALID still checks every new insert and update.
+-- After this file COMMITs, validate existing rows in a separate transaction:
+-- ALTER TABLE public.settlement_audit VALIDATE CONSTRAINT settlement_audit_observation_window_check;
 DO $$
 DECLARE old_check RECORD;
 BEGIN
@@ -1987,7 +1991,7 @@ BEGIN
               AND compact_json::jsonb->>'rule_version'<>'historical-settlement-v2' THEN 30000
             ELSE 0 END) * 1000000
           AND decision_wall_ns < market_end_ms * 1000000
-          AND created_ms = decision_wall_ns / 1000000);
+          AND created_ms = decision_wall_ns / 1000000) NOT VALID;
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS settlement_audit_expiry_idx ON settlement_audit(created_ms,run_id,decision_id);

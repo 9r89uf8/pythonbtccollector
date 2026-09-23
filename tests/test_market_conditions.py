@@ -217,3 +217,4 @@ def test_schema_replaces_existing_schedule_check_and_preserves_older_versions():
     assert "'sampling_interval_ms'='5000'::jsonb THEN 300000" in check
     assert "'sampling_interval_ms'='2000'::jsonb THEN 60000" in check
     assert "THEN 30000" in check
+    assert "AND created_ms = decision_wall_ns / 1000000) NOT VALID;" in check
