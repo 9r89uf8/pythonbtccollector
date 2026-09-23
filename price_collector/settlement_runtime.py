@@ -463,7 +463,8 @@ async def attach_settlement(parent, pool):
             rule_version=RULE_VERSION, observation_window_s=300, sampling_interval_ms=5000,
             policy=asdict(parent.engine.policy)))
         runtime = MarketConditionsRuntime(parent, config,
-            SettlementStore(pool, market_conditions=True, history_cohort=cohort),
+            SettlementStore(pool, market_conditions=True, history_cohort=cohort,
+                            history_policy=asdict(parent.engine.policy)),
             GhostSpool(parent.settings.state_directory / 'settlement', MAX_RECORDS, MAX_BYTES))
         await runtime.start()
         parent.settlement = runtime

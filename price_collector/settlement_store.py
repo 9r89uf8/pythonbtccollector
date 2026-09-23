@@ -6,6 +6,7 @@ durable outbox; database acknowledgement must not be mistaken for publication.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from decimal import Decimal
 import json
 from typing import Any, Mapping
@@ -13,6 +14,8 @@ from typing import Any, Mapping
 from price_collector.settlement_history import (
     cohort_key, daily_summary, history_summary, observe, observation_window_s,
     market_condition_summary, freeze_daily_unknowns,
+    combined_condition_summary, retrospective_cohort, retrospective_condition_daily_summary,
+    RETROSPECTIVE_COHORT_PREFIX,
 )
 
 from price_collector.ghost_twap_store import (
@@ -167,12 +170,14 @@ def capture_outcome(body: dict, row: Mapping, cutoff_ms: int) -> dict:
 
 class SettlementStore:
     def __init__(self, pool: Any, start_ms: int = 0, *, market_conditions: bool = False,
-                 history_cohort: str | None = None):
+                 history_cohort: str | None = None, history_policy: dict | None = None):
         # A legacy constructor argument is accepted for queued old evidence;
         # it never arms a study or changes the frozen record's association.
         self.pool = pool
         self.market_conditions = market_conditions
         self.history_cohort = history_cohort
+        self.history_policy = deepcopy(history_policy)
+        self._retrospective_seen: dict[str, None] = {}
 
     @asynccontextmanager
     async def _connection(self):
@@ -229,7 +234,10 @@ class SettlementStore:
 
     async def guard(self) -> dict:
         async with self._connection() as connection:
-            row = await connection.fetchrow("""SELECT
+            return await self._guard(connection)
+
+    async def _guard(self, connection) -> dict:
+        row = await connection.fetchrow("""SELECT
                 pg_total_relation_size('settlement_audit')+pg_total_relation_size('settlement_market_evaluation')+
                 pg_total_relation_size('settlement_evaluation_reports')+
                 pg_total_relation_size('settlement_history_markets')+
@@ -239,6 +247,119 @@ class SettlementStore:
         return {"relation_bytes": used, "row_count": count, "warning": used >= WARN_BYTES,
                 "capacity_ok": used < STOP_BYTES - 16 * 1024 * 1024 and count < ROW_CAP,
                 "stop_bytes": STOP_BYTES, "row_cap": ROW_CAP}
+
+    async def _backfill_legacy_conditions(self, now_ms: int) -> dict:
+        """Reclassify one retained paired day, preserving its original outcomes.
+
+        Only compact, separately identified daily totals are written. Selection
+        is keyed by the source day's semantic fingerprint, so refreshed worker
+        timestamps do not produce updates. The existing memory/disk caps remain.
+        """
+        async with self._connection() as connection:
+            source = await connection.fetchrow("""WITH sources AS (
+                SELECT s.*, h.retained_count,h.retained_updated_ms, encode(sha256(convert_to(
+                    (s.body_json::jsonb-'generated_at_ms')::text||'|'||h.retained_count::text||'|'||
+                    h.retained_updated_ms::text,'UTF8')),'hex') AS source_fingerprint
+                FROM settlement_history_daily s JOIN LATERAL (
+                    SELECT count(*) AS retained_count,max(updated_ms) AS retained_updated_ms
+                    FROM (SELECT updated_ms FROM settlement_history_markets
+                        WHERE cohort=s.cohort AND market_start_ms>=s.day_ms
+                          AND market_start_ms<s.day_ms+86400000 AND market_end_ms>$5
+                          AND market_end_ms+120000<=$7 LIMIT 289) bounded
+                    ) h ON h.retained_count>0 WHERE s.day_ms >= $1
+                  AND s.day_ms <= $2
+                  AND s.body_json::jsonb#>>'{description,selection_version}'
+                    IN ('first-ack-5s-v1','first-ack-5s-v2')
+                  AND ((s.body_json::jsonb#>>'{description,selection_version}'='first-ack-5s-v1'
+                    AND NOT (s.body_json::jsonb->'description' ? 'observation_window_s')
+                    AND NOT (s.body_json::jsonb->'description' ? 'sampling_interval_ms'))
+                    OR (s.body_json::jsonb#>>'{description,selection_version}'='first-ack-5s-v2'
+                    AND s.body_json::jsonb#>'{description,observation_window_s}'='60'::jsonb
+                    AND s.body_json::jsonb#>'{description,sampling_interval_ms}'='2000'::jsonb))
+                  AND s.body_json::jsonb#>>'{description,model_version}'='chainlink-60s-offset3-settlement-v1'
+                  AND s.body_json::jsonb#>>'{description,reference_version}'='causal-observed-website-opening-v1'
+                  AND s.body_json::jsonb#>>'{description,settlement_rule_version}'='btc-5m-twap-60'
+                  AND coalesce(s.body_json::jsonb#>'{description,policy}','{}'::jsonb)=$4::jsonb)
+                SELECT s.cohort,s.day_ms,s.updated_ms,s.final,s.body_json,s.source_fingerprint,
+                    s.retained_count,s.retained_updated_ms
+                FROM sources s LEFT JOIN settlement_history_daily d
+                  ON d.day_ms=s.day_ms AND d.cohort=encode(sha256(convert_to($3||s.cohort,'UTF8')),'hex')
+                WHERE (d.cohort IS NULL OR (NOT d.final AND
+                    d.body_json::jsonb->>'source_summary_fingerprint' IS DISTINCT FROM s.source_fingerprint))
+                  AND NOT (s.cohort||':'||s.day_ms::text||':'||s.source_fingerprint)=ANY($6::text[])
+                ORDER BY (d.cohort IS NULL) DESC,s.day_ms,s.cohort LIMIT 1""",
+                (now_ms - INDIVIDUAL_MS) // DAY_MS * DAY_MS, now_ms // DAY_MS * DAY_MS,
+                RETROSPECTIVE_COHORT_PREFIX, _canonical(self.history_policy or {}),
+                now_ms - INDIVIDUAL_MS, list(self._retrospective_seen), now_ms)
+            if source is None:
+                return dict(status="complete", pending=False, processed_groups=0, reason=None)
+            cohort, day = source["cohort"], int(source["day_ms"])
+            derived_cohort = retrospective_cohort(cohort)
+            # Lock/recheck the selected source and destination. A concurrent
+            # source rebuild or another worker must not freeze a mixed version.
+            locked = await connection.fetchrow("""SELECT updated_ms,final,body_json
+                FROM settlement_history_daily WHERE cohort=$1 AND day_ms=$2 FOR SHARE""", cohort, day)
+            pending = dict(status="pending", pending=True, processed_groups=0, reason=None,
+                           last_source_cohort=cohort, last_day_ms=day)
+            if locked is None or locked["body_json"] != source["body_json"]:
+                return dict(pending, reason="source_changed")
+            existing = await connection.fetchrow("""SELECT final,body_json FROM settlement_history_daily
+                WHERE cohort=$1 AND day_ms=$2 FOR UPDATE""", derived_cohort, day)
+            if existing and existing["final"]:
+                return dict(pending, reason="already_final")
+            rows = await connection.fetch("""SELECT body_json,updated_ms FROM settlement_history_markets
+                WHERE cohort=$1 AND market_start_ms >= $2 AND market_start_ms < $3
+                  AND market_end_ms>$4 AND market_end_ms+120000<=$5
+                ORDER BY market_id LIMIT 289 FOR SHARE""",
+                cohort, day, day + DAY_MS, now_ms - INDIVIDUAL_MS, now_ms)
+            if len(rows) > 288:
+                raise ValueError("retrospective daily market history exceeds fixed calendar")
+            if not rows:
+                return dict(pending, reason="source_expired_or_not_closed")
+            if (len(rows) != source["retained_count"]
+                    or max(row["updated_ms"] for row in rows) != source["retained_updated_ms"]):
+                return dict(pending, reason="source_changed")
+            source_daily = _json_object(source["body_json"])
+            if (source_daily["cohort"] != cohort or source_daily["day_ms"] != day
+                    or source_daily["final"] != source["final"]):
+                raise ValueError("retrospective source identity differs")
+            markets = [_json_object(row["body_json"]) for row in rows]
+            if (len(markets) > source_daily["observed_markets"] or any(
+                    market["market_start_ms"] < source_daily["covered_start_ms"]
+                    or market["market_end_ms"] > source_daily["covered_end_ms"] for market in markets)):
+                return dict(pending, reason="source_summary_pending")
+            body = retrospective_condition_daily_summary(
+                markets,
+                source_daily=source_daily, day_ms=day, now_ms=now_ms)
+            if body["cohort"] != derived_cohort or body["final"] != source["final"]:
+                raise ValueError("retrospective derived identity or finality differs")
+            body.update(source_summary_updated_ms=int(source["updated_ms"]),
+                        source_summary_fingerprint=source["source_fingerprint"])
+            def meaningful(value):
+                return {key: item for key, item in value.items() if key not in (
+                    "generated_at_ms", "source_generated_at_ms", "source_summary_updated_ms",
+                    "source_summary_fingerprint")}
+            if existing and meaningful(_json_object(existing["body_json"])) == meaningful(body):
+                token = f"{cohort}:{day}:{source['source_fingerprint']}"
+                self._retrospective_seen[token] = None
+                while len(self._retrospective_seen) > 64:
+                    self._retrospective_seen.pop(next(iter(self._retrospective_seen)))
+                return dict(pending, processed_groups=1, reason="unchanged_conditions")
+            encoded = _canonical(body)
+            size = len(encoded.encode("utf-8"))
+            if size > 65536:
+                raise ValueError("retrospective daily history exceeds byte cap")
+            guard = await self._guard(connection)
+            reserve = 4 * size + 16 * 1024
+            if (not guard["capacity_ok"]
+                    or guard["relation_bytes"] + reserve >= STOP_BYTES - 16 * 1024 * 1024):
+                return dict(pending, status="capacity_paused", reason="history_capacity_reserve")
+            await connection.execute("""INSERT INTO settlement_history_daily
+                (cohort,day_ms,updated_ms,final,body_json) VALUES($1,$2,$3,$4,$5)
+                ON CONFLICT(cohort,day_ms) DO UPDATE SET updated_ms=EXCLUDED.updated_ms,
+                final=EXCLUDED.final,body_json=EXCLUDED.body_json WHERE NOT settlement_history_daily.final""",
+                derived_cohort, day, now_ms, body["final"], encoded)
+            return dict(pending, processed_groups=1)
 
     async def _fold_audit(self, now_ms: int) -> int:
         """One indexed page; version markers also catch a later publication ACK."""
@@ -357,6 +478,10 @@ class SettlementStore:
                 AND market_end_ms+120000<=$2)""", now_ms - INDIVIDUAL_MS, now_ms)
         complete = persistence_complete and not pending
         await self._rebuild_days(now_ms, complete=complete)
+        retrospective = None
+        if self.market_conditions and self.history_policy is not None:
+            retrospective = (await self._backfill_legacy_conditions(now_ms) if complete else
+                dict(status="persistence_pending", pending=True, processed_groups=0, reason="audit_catchup"))
         async with self._connection() as connection:
             days = await connection.fetch("""SELECT body_json FROM settlement_history_daily
                 WHERE day_ms>$1 ORDER BY day_ms,cohort LIMIT 4097""",
@@ -378,5 +503,10 @@ class SettlementStore:
                     " t USING batch b WHERE t.ctid=b.ctid", cutoff)
         records = [_json_object(row["body_json"]) for row in days]
         if self.market_conditions:
+            if self.history_policy is not None:
+                summary = combined_condition_summary(records, now_ms, complete=complete,
+                    cohort_id=self.history_cohort, policy=self.history_policy)
+                summary["retrospective_backfill"] = retrospective
+                return summary
             return market_condition_summary(records, now_ms, complete=complete, cohort_id=self.history_cohort)
         return history_summary(records, now_ms, complete=complete)

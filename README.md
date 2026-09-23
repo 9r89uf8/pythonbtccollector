@@ -1115,6 +1115,12 @@ five-minute market. It shows how often the TWAP-leading side won in past markets
 with similar TWAP and spot distances from Price to Beat, spot alignment and time
 remaining, with counts, unknowns and history dates. It does not project a closing
 price. These are descriptive frequencies, not a guarantee of the live outcome.
+Retained paired observations from the earlier final-30/60-second recorders also
+provide separate combined historical groups. The panel selects the matching
+group with the largest resolved sample and labels its source; it never chooses
+by win rate or pools incompatible recording methods. Earlier-in-market rates
+use the new full-market observations. Reconstruction runs in the background
+from saved pairs, not from old marginal signal totals or browser-side history.
 The rolling 1-, 2-, 3-, 5-,
 10- and 30-second ghost prices and their accuracy monitor are unchanged.
 See [historical settlement win rates](GHOST_TWAP_REFERENCE.md#historical-settlement-win-rates)
@@ -1262,6 +1268,25 @@ sudo journalctl -u price-collector-polymarket-chainlink -u price-api -n 80 --no-
 If validation alone times out, the committed schema still enforces new writes;
 retry the standalone validation command and require `convalidated = true`.
 The local dashboard is updated separately and must never be copied to the droplet.
+
+For the retrospective-history code update, the full-market schema migration
+above must already be installed. After publishing the change to GitHub, no new
+schema or environment change is needed:
+
+```bash
+cd /opt/price-collector
+sudo -u pricecollector git pull --ff-only
+sudo -u pricecollector .venv/bin/pip install -r requirements.txt
+sudo systemctl restart price-collector-polymarket-chainlink
+sudo systemctl status price-collector-polymarket-chainlink price-api --no-pager
+curl --fail http://127.0.0.1:9000/healthz
+curl --fail http://127.0.0.1:9000/forecasts/chainlink-twap/settlement/history
+sudo journalctl -u price-collector-polymarket-chainlink -n 80 --no-pager
+```
+
+Check history schema 3, separate retrospective cohorts, their retained market
+counts, backfill status and storage headroom. The API continues reading the
+existing Redis key; dashboard assets remain local.
 
 ### Maintenance
 

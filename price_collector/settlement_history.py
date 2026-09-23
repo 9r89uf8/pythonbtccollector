@@ -15,6 +15,11 @@ MARKET_CONDITION_SELECTION_VERSION = "first-observation-time-bucket-v1"
 MARKET_CONDITION_RULE = "historical-market-conditions-v1"
 MARKET_CONDITION_MODEL = "market-conditions-v1"
 MARKET_CONDITION_CELL_ENCODING = "market-condition-indexed-v1"
+RETROSPECTIVE_AGGREGATION_VERSION = "legacy-paired-conditions-v1"
+RETROSPECTIVE_COHORT_PREFIX = RETROSPECTIVE_AGGREGATION_VERSION + "|"
+COMBINED_SELECTION_VERSION = "separate-condition-cohorts-v1"
+COMBINED_CELL_ENCODING = "combined-condition-indexed-v1"
+LEGACY_CONDITION_MODEL = "chainlink-60s-offset3-settlement-v1"
 SPOT_ALIGNMENTS = ("agrees", "opposes", "tie")
 TIME_BUCKETS = tuple(f"{lower}-{lower + 5}" for lower in range(0, 60, 5))
 MARKET_CONDITION_TIME_BUCKETS = TIME_BUCKETS + tuple(f"{lower}-{lower + 15}" for lower in range(60, 300, 15))
@@ -182,7 +187,8 @@ def daily_summary(markets: list[dict], *, day_ms: int, now_ms: int, final: bool)
         raise ValueError("duplicate historical market")
     if any(item["cohort"] != cohort or item["market_start_ms"] // DAY_MS * DAY_MS != day_ms for item in markets):
         raise ValueError("mixed daily cohort")
-    if markets[0]["description"].get("selection_version") == MARKET_CONDITION_SELECTION_VERSION:
+    if (markets[0]["description"].get("selection_version") == MARKET_CONDITION_SELECTION_VERSION
+            or markets[0]["description"].get("kind") == "retrospective_market_conditions"):
         return _market_condition_daily_summary(markets, day_ms=day_ms, now_ms=now_ms, final=final)
     closed = [item for item in markets if item["market_end_ms"] <= now_ms]
     buckets = _buckets(markets[0]["description"])
@@ -224,6 +230,7 @@ def history_summary(days: list[dict], now_ms: int, *, complete: bool) -> dict:
     grouped = {}
     for day in days:
         if (day["description"].get("schema_version") == 4
+                or day["description"].get("kind") == "retrospective_market_conditions"
                 or day["description"].get("selection_version") == MARKET_CONDITION_SELECTION_VERSION):
             continue
         if day["day_ms"] <= (now_ms - 90 * DAY_MS) // DAY_MS * DAY_MS:
@@ -289,15 +296,19 @@ def history_summary(days: list[dict], now_ms: int, *, complete: bool) -> dict:
 def _market_condition_daily_summary(markets: list[dict], *, day_ms: int, now_ms: int, final: bool) -> dict:
     """Count the TWAP-leading side once for each selected joint condition."""
     description = markets[0]["description"]
-    observation_window_s(description)
+    if description.get("kind") == "retrospective_market_conditions":
+        _validate_retrospective_description(description, markets[0]["cohort"])
+    else:
+        observation_window_s(description)
+    buckets = _buckets(description)
     if any(item["description"] != description for item in markets):
         raise ValueError("mixed market condition descriptions")
     closed = [item for item in markets if item["market_end_ms"] <= now_ms]
     selected, counts = Counter(), {}
-    ties = {bucket: Counter() for bucket in MARKET_CONDITION_TIME_BUCKETS}
+    ties = {bucket: Counter() for bucket in buckets}
     for market in closed:
         for bucket, observation in market["buckets"].items():
-            if bucket not in MARKET_CONDITION_TIME_BUCKETS:
+            if bucket not in buckets:
                 raise ValueError("observation outside historical cohort window")
             selected[bucket] += 1
             twap, spot = (observation["signals"][name] for name in ("twap", "spot"))
@@ -332,7 +343,7 @@ def _market_condition_daily_summary(markets: list[dict], *, day_ms: int, now_ms:
             "observed_markets": len(closed), "cell_encoding": MARKET_CONDITION_CELL_ENCODING, "cells": cells,
             "coverage": [{"time_bucket": bucket, "selected_markets": selected[bucket],
                           "ties": {name: ties[bucket][name] for name in ("twap", "spot")}}
-                         for bucket in MARKET_CONDITION_TIME_BUCKETS]}
+                         for bucket in buckets]}
 
 
 def _market_condition_cells(day: Mapping) -> list[dict]:
@@ -380,21 +391,120 @@ def freeze_daily_unknowns(body: dict) -> dict:
     return result
 
 
-def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
-                             cohort_id: str | None = None) -> dict:
-    """Expose only joint current-condition cohorts, without legacy forecasts.
+def retrospective_cohort(source_cohort: str) -> str:
+    """A separate deterministic identity; original source rows are never relabelled."""
+    if (not isinstance(source_cohort, str) or len(source_cohort) != 64
+            or any(letter not in "0123456789abcdef" for letter in source_cohort)):
+        raise ValueError("invalid retrospective source cohort")
+    return hashlib.sha256((RETROSPECTIVE_COHORT_PREFIX + source_cohort).encode("utf-8")).hexdigest()
+
+
+def _legacy_condition_window(description: Mapping) -> int:
+    base = {"model_version", "policy", "settlement_rule_version", "reference_version", "selection_version"}
+    if (description.get("model_version") != LEGACY_CONDITION_MODEL
+            or not isinstance(description.get("policy"), dict)
+            or description.get("settlement_rule_version") != "btc-5m-twap-60"
+            or description.get("reference_version") != "causal-observed-website-opening-v1"):
+        raise ValueError("unsupported retrospective source description")
+    if description.get("selection_version") == LEGACY_SELECTION_VERSION and set(description) == base:
+        return 30
+    if (description.get("selection_version") == SELECTION_VERSION
+            and set(description) == base | {"observation_window_s", "sampling_interval_ms"}
+            and type(description.get("observation_window_s")) is int and description["observation_window_s"] == 60
+            and type(description.get("sampling_interval_ms")) is int and description["sampling_interval_ms"] == 2000):
+        return 60
+    raise ValueError("unsupported retrospective source selection")
+
+
+def _retrospective_description(source_cohort: str, source: Mapping) -> dict:
+    window = _legacy_condition_window(source)
+    encoded = json.dumps(dict(source), sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != source_cohort:
+        raise ValueError("retrospective source cohort differs from description")
+    return {**deepcopy(dict(source)), "schema_version": 1, "kind": "retrospective_market_conditions",
+            "aggregation_version": RETROSPECTIVE_AGGREGATION_VERSION, "source_cohort": source_cohort,
+            "source_description": deepcopy(dict(source)), "observation_window_s": window}
+
+
+def _validate_retrospective_description(description: Mapping, cohort: str) -> None:
+    source_cohort = description.get("source_cohort")
+    if cohort != retrospective_cohort(source_cohort):
+        raise ValueError("invalid retrospective derived cohort")
+    source = description.get("source_description")
+    if not isinstance(source, dict) or dict(description) != _retrospective_description(source_cohort, source):
+        raise ValueError("invalid retrospective derived description")
+
+
+def retrospective_condition_daily_summary(markets: list[dict], *, source_daily: Mapping,
+                                          day_ms: int, now_ms: int) -> dict:
+    """Classify already paired legacy observations, preserving their clocks.
+
+    This reads the original selected bucket entries and saved official outcomes;
+    it does not select another tick, infer a missing price, or refresh outcomes.
+    Source daily totals supply coverage/finality metadata, never joint counts.
+    """
+    source_cohort = source_daily["cohort"]
+    source_description = source_daily["description"]
+    description = _retrospective_description(source_cohort, source_description)
+    derived_cohort = retrospective_cohort(source_cohort)
+    source_observed = source_daily["observed_markets"]
+    if (type(day_ms) is not int or day_ms % DAY_MS or source_daily["day_ms"] != day_ms
+            or type(source_observed) is not int or not 0 < source_observed <= 288
+            or type(source_daily["final"]) is not bool):
+        raise ValueError("invalid retrospective source day")
+    start, end = source_daily["covered_start_ms"], source_daily["covered_end_ms"]
+    if (type(start) is not int or type(end) is not int or not day_ms <= start < end <= day_ms + DAY_MS
+            or start % 300_000 or end % 300_000
+            or (end - start) // 300_000 < source_observed):
+        raise ValueError("invalid retrospective source coverage")
+    if not markets or len(markets) > source_observed:
+        raise ValueError("invalid retrospective retained population")
+    converted = []
+    for market in markets:
+        if (market["cohort"] != source_cohort or market["description"] != source_description
+                or not start <= market["market_start_ms"] < market["market_end_ms"] <= end
+                or market["market_end_ms"] > now_ms):
+            raise ValueError("incompatible retrospective market")
+        copy = deepcopy(market)
+        copy.update(cohort=derived_cohort, description=deepcopy(description))
+        converted.append(copy)
+    result = daily_summary(converted, day_ms=day_ms, now_ms=now_ms, final=source_daily["final"])
+    retained = result["observed_markets"]
+    missing = source_observed - retained
+    result.update(covered_start_ms=start, covered_end_ms=end, observed_markets=source_observed,
+                  retained_markets=retained, unavailable_retained_markets=missing,
+                  reconstruction_complete=missing == 0,
+                  persistence_complete=source_daily.get("persistence_complete", True) is True and missing == 0,
+                  final=source_daily["final"], outcome_freeze_ms=source_daily.get("outcome_freeze_ms"),
+                  source_final=source_daily["final"], source_outcome_freeze_ms=source_daily.get("outcome_freeze_ms"),
+                  source_generated_at_ms=source_daily["generated_at_ms"])
+    return result
+
+
+def _condition_summary(days: list[dict], now_ms: int, *, complete: bool,
+                       cohort_id: str | None = None, policy: Mapping | None = None,
+                       include_retrospective: bool = False) -> dict:
+    """Combine joint counts while preserving every cohort's sampling method.
 
     Daily totals remain replaceable and are never combined with individual
     rows. Cells are sparse: an unobserved combination is not an estimated rate.
     """
     grouped, identities = {}, set()
     for day in days:
-        if cohort_id is not None and day["cohort"] != cohort_id:
-            continue
         description = day["description"]
-        if description.get("selection_version") != MARKET_CONDITION_SELECTION_VERSION:
+        retrospective = description.get("kind") == "retrospective_market_conditions"
+        if policy is not None and description.get("policy") != policy:
             continue
-        observation_window_s(description)
+        if retrospective:
+            if not include_retrospective:
+                continue
+            _validate_retrospective_description(description, day["cohort"])
+        else:
+            if cohort_id is not None and day["cohort"] != cohort_id:
+                continue
+            if description.get("selection_version") != MARKET_CONDITION_SELECTION_VERSION:
+                continue
+            observation_window_s(description)
         if day["day_ms"] <= (now_ms - 90 * DAY_MS) // DAY_MS * DAY_MS or not day["observed_markets"]:
             continue
         identity = day["cohort"], day["day_ms"]
@@ -402,6 +512,8 @@ def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
             raise ValueError("duplicate market condition daily summary")
         identities.add(identity)
         grouped.setdefault(day["cohort"], []).append(day)
+    if include_retrospective and len(grouped) > 3:
+        raise ValueError("combined condition cohort capacity exceeded")
     cells, coverage, cohorts = [], [], []
     for cohort, records in sorted(grouped.items()):
         description = records[0]["description"]
@@ -411,6 +523,9 @@ def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
         ends = [item["covered_end_ms"] for item in records if item["covered_end_ms"] is not None]
         start, end = min(starts, default=None), max(ends, default=None)
         observed = sum(item["observed_markets"] for item in records)
+        retained = sum(item.get("retained_markets", item["observed_markets"]) for item in records)
+        unavailable_retained = observed - retained
+        buckets = _buckets(description)
         expected = (end - start) // 300_000 if start is not None else 0
         cohort_index = len(cohorts)
         cohorts.append({"id": cohort, **deepcopy(description), "covered_start_ms": start,
@@ -418,12 +533,17 @@ def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
                         "expected_markets": expected, "no_observation_markets": max(0, expected - observed),
                         "incomplete_frozen_days": sum(item.get("final", False) and not item.get("persistence_complete", True)
                                                       for item in records)})
+        if include_retrospective:
+            cohorts[-1].update(retained_markets=retained, unavailable_retained_markets=unavailable_retained)
+            if description.get("kind") == "retrospective_market_conditions":
+                cohorts[-1].update(reconstructed_days=len(records),
+                    incomplete_reconstruction_days=sum(not item.get("reconstruction_complete", False) for item in records))
         totals, selected = {}, Counter()
-        ties = {bucket: Counter() for bucket in MARKET_CONDITION_TIME_BUCKETS}
+        ties = {bucket: Counter() for bucket in buckets}
         for record in records:
             for cell in _market_condition_cells(record):
                 key = (cell["time_bucket"], cell["twap_margin_bucket"], cell["spot_margin_bucket"], cell["spot_alignment"])
-                if (cell["signal"] != "combined" or key[0] not in MARKET_CONDITION_TIME_BUCKETS
+                if (cell["signal"] != "combined" or key[0] not in buckets
                         or key[1] not in MARGIN_BUCKETS or key[2] not in MARGIN_BUCKETS
                         or key[3] not in ("agrees", "opposes", "tie")):
                     raise ValueError("invalid market condition cell")
@@ -431,17 +551,19 @@ def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
                     ("wins", "losses", "unknown", "pending", "frozen_unknown")})
             for item in record["coverage"]:
                 bucket = item["time_bucket"]
-                if bucket not in MARKET_CONDITION_TIME_BUCKETS:
+                if bucket not in buckets:
                     raise ValueError("invalid market condition coverage")
                 selected[bucket] += item["selected_markets"]
                 ties[bucket].update(item["ties"])
-        for bucket in MARKET_CONDITION_TIME_BUCKETS:
+        for bucket in buckets:
             coverage.append({"cohort": cohort_index, "time_bucket": bucket, "observed_markets": observed,
                              "selected_markets": selected[bucket],
                              "classified_markets": selected[bucket] - ties[bucket]["twap"],
-                             "no_eligible_observation_markets": observed - selected[bucket],
+                             "no_eligible_observation_markets": retained - selected[bucket],
                              "no_observation_markets": max(0, expected - observed),
                              "ties": {name: ties[bucket][name] for name in ("twap", "spot")}})
+            if include_retrospective:
+                coverage[-1]["unavailable_retained_markets"] = unavailable_retained
         for key, values in sorted(totals.items()):
             resolved = values["wins"] + values["losses"]
             rate, interval = percentage(values["wins"], resolved)
@@ -467,3 +589,47 @@ def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
                             "The first eligible observation in each time bucket is selected before price classification",
                             "Daily outcomes freeze after the following UTC day; unknowns remain unknown",
                             "Coverage starts at the first retained observation; earlier missing history is not inferred"]}
+
+
+def market_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
+                             cohort_id: str | None = None) -> dict:
+    """Preserve the original schema-2 current-condition cache contract."""
+    return _condition_summary(days, now_ms, complete=complete, cohort_id=cohort_id)
+
+
+def combined_condition_summary(days: list[dict], now_ms: int, *, complete: bool,
+                               cohort_id: str | None, policy: Mapping) -> dict:
+    """Publish separate prospective/retrospective counts in a compact table.
+
+    Exact policy and known model/selection identities permit at most the current
+    cohort plus one legacy 30-second and one legacy 60-second cohort. Selection
+    for a live condition happens in the consumer, by resolved sample size only.
+    """
+    if not isinstance(policy, dict):
+        raise ValueError("combined history requires an explicit input policy")
+    result = _condition_summary(days, now_ms, complete=complete, cohort_id=cohort_id,
+                                policy=policy, include_retrospective=True)
+    cells = []
+    for cell in result["cells"]:
+        cells.append([cell["cohort"], MARKET_CONDITION_TIME_BUCKETS.index(cell["time_bucket"]),
+                      MARGIN_BUCKETS.index(cell["twap_margin_bucket"]), MARGIN_BUCKETS.index(cell["spot_margin_bucket"]),
+                      SPOT_ALIGNMENTS.index(cell["spot_alignment"]),
+                      *[cell[name] for name in ("wins", "losses", "unknown", "pending", "frozen_unknown")],
+                      cell["win_rate_pct"], cell["interval95_pct"]])
+    result.update(schema_version=3, selection_version=COMBINED_SELECTION_VERSION,
+                  cell_encoding=COMBINED_CELL_ENCODING, cells=cells, spot_alignments=list(SPOT_ALIGNMENTS))
+    result["limitations"] = [
+        "Descriptive historical frequency, not an individual-market probability",
+        "Wins follow the current TWAP-leading side; Up and Down are pooled",
+        "Each cohort retains its own window, policy and original observation or acknowledgement clock",
+        "Retrospective counts use only retained paired observations and their saved official outcomes",
+        "Original marginal daily counts cannot recover missing joint conditions",
+        "Choose one matching cohort by resolved sample size, never win rate; cohorts are not pooled",
+        "Intervals assume independent comparable markets; markets may be correlated",
+        "TWAP ties have no leading side and are excluded from rate cells",
+        "Original outcome cutoffs remain unchanged; unresolved outcomes remain unknown",
+        "Unavailable retained markets remain separate from observed markets without eligible inputs",
+    ]
+    if len(json.dumps(result, separators=(",", ":")).encode("utf-8")) > 512 * 1024 - 16_384:
+        raise ValueError("combined history cache byte budget")
+    return result

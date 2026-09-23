@@ -631,11 +631,23 @@ a display threshold, not proof of calibration. The interval assumes independent,
 comparable markets; adjacent markets and changing regimes may violate that
 assumption. These are historical frequencies, not a certified live probability.
 
-This full-market joint-condition cohort starts fresh. Legacy thirty- and
-sixty-second projection evidence, daily totals and the retired study remain
-separate and retain their original identities. Old marginal signal counts
-cannot reconstruct a joint spot/TWAP condition or observations earlier in a
-market. No invented backfill or study restoration is performed.
+The full-market recorder has its own cohort. The panel also uses retained
+paired TWAP/spot observations from the earlier final-thirty-second and
+final-minute recorders. Those per-market records retain the opening reference,
+both prices, original first-acknowledged selection and official outcome.
+Separate retrospective joint summaries preserve that method and its original
+window; they do not become full-market decision-time observations. Earlier
+daily marginal signal counts cannot reconstruct a joint condition, and no
+earlier-in-market observations are invented from final-minute evidence.
+
+For the exact live price/side/time combination, choose the compatible cohort
+with the largest resolved sample, independent of its win rate. If all candidates
+are unresolved, choose the one with the largest recorded sample; remaining ties
+prefer the current full-market method, then a stable cohort ID. Show only that
+cohort's counts, date range and recording method. Do not pool incompatible
+methods. Preserve original endpoint conventions: exact 30 seconds belongs to
+25-30 in a thirty-second cohort, and exact 60 belongs to 55-60 in a final-minute
+cohort. The full-market conventions above remain unchanged.
 
 ### Storage and background work
 
@@ -648,10 +660,20 @@ at most 60 admissions per market, approximately 120,960 per uninterrupted week;
 this is a volume bound, not an availability or storage guarantee.
 
 Daily cells use a versioned compact representation to fit the existing 64 KiB
-row limit. Cache output uses sparse combined cells and indexed cohort references
-inside the existing 512 KiB envelope limit. Only the configured current cohort
-is cached; other compatible-version histories remain separately retained in the
-database. Policies, source identity and selection versions never silently pool.
+row limit. Cache schema 3 uses compact indexed combined cells inside the existing
+512 KiB envelope limit. It contains the configured current cohort and supported
+retrospective cohorts with the same input policy. The local page accepts schema
+2 during rollout. Policies, source identity and selection versions never silently
+pool.
+
+The background worker reconstructs at most one legacy day/cohort per pass from
+at most 288 retained market records. It writes only separate compact daily rows,
+preserves the original outcome-freeze cutoff and unknowns, and never modifies
+original frozen summaries. Replays replace mutable totals rather than increment
+them. Missing expired source records remain explicit; unavailable pairs cannot
+be recovered from marginal totals. Backfill obeys the existing relation guard,
+keeps a reserve for the actual output size, and reports pending work if capacity
+prevents another summary. These daily rows follow the existing ninety-day expiry.
 
 The worker folds bounded pages, then replaces daily totals idempotently. Current
 in-flight markets do not block already completed markets from appearing in the
@@ -673,7 +695,7 @@ the historical rate. Browser sleep does not stop collector recording.
 | --- | --- |
 | `/markets/current/live` | Current official TWAP and spot from the existing Redis read |
 | `/markets/current/dashboard` | Current market and observed opening reference |
-| `/forecasts/chainlink-twap/settlement/history` | Redis-only cached combined history, envelope schema 1/history schema 2 |
+| `/forecasts/chainlink-twap/settlement/history` | Redis-only cached combined history, envelope schema 1/history schema 3 |
 | `/forecasts/chainlink-twap/settlement/live` and `/stream` | Legacy projection readers retained for compatibility; new recorder does not populate them |
 
 The new local panel no longer subscribes to settlement projection routes. Its
@@ -716,6 +738,23 @@ was September 22 at 23:09 UTC, and settlement relations used 520,126,464 bytes,
 reduced allocation to 519,872,512 bytes and reclaimed internal reusable space.
 Recording resumed without deleting retained evidence or raising the limit.
 Allocation remains close to the threshold; monitor it as history tables grow.
+
+During the retained-history extension later that day, allocation reached
+520,257,536 bytes and admission paused again. A second ordinary VACUUM recovered
+reusable space but did not lower allocation. A one-time concurrent rebuild of
+the audit TOAST index reduced that index from 18 MiB to 6,480 KiB; allocation
+fell to 508,100,608 bytes, leaving 11,993,088 bytes below the admission threshold.
+The replacement index was valid and ready. No retained evidence was removed,
+no table rewrite was run, and no storage limit or recurring retention procedure
+was changed.
+
+Retrospective-history validation: the full backend suite passed 1,857 tests
+with 17 opt-in skips; the final store-focused checks passed 47 tests. A separate
+PostgreSQL 16.15 smoke test exercised the configured production path, distinct
+derived daily rows, one-group-per-cycle rebuilding, idempotence, immutable final
+rows and unchanged original evidence. The disposable database and files were
+removed. The frontend consumes generated examples from the real backend and
+checks sample-count selection, separate methods and original time boundaries.
 
 Full-market validation: 1,833 backend tests passed with 17 opt-in skips. A separate
 PostgreSQL 16.15 test database passed repeated schema application, old-check

@@ -247,6 +247,13 @@ live probability. Any Wilson range must state its comparable-independent-market
 assumption; below 30 resolved observations display counts without a percentage.
 
 Keep per-market evidence seven days and daily count summaries ninety days.
+Use retained paired legacy per-market observations to reconstruct separate
+combined-condition daily cohorts; never derive joint counts from marginal daily
+totals. Preserve original first-ACK sampling, policy, 30/60-second coverage and
+outcome-freeze cutoff. Do not relabel them as schema-4 observations or pool
+incompatible cohorts. Select a displayed cohort by resolved sample size, never
+win rate, and label its source. Bound reconstruction to one day/cohort and 288
+markets per pass; persist only compact daily counts within existing guards.
 Replace daily totals idempotently, freeze outcomes before individual expiry,
 and keep unresolved outcomes explicit. The background worker builds the bounded
 Redis history cache; API requests read Redis only. A stale cache is unavailable.

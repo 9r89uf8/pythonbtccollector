@@ -19,7 +19,10 @@ import asyncpg
 
 from price_collector.settlement_store import SettlementStore, DAY_MS
 from price_collector.ghost_twap_store import validate_record
-from price_collector.settlement_history import cohort_key, MARKET_CONDITION_SELECTION_VERSION
+from price_collector.settlement_history import cohort_key, retrospective_cohort, MARKET_CONDITION_SELECTION_VERSION
+
+SMOKE_POLICY = dict(enabled=True, source_max_age_ms=5000, receipt_max_age_ms=3000,
+    max_carry_ms=10000, history_ms=120000, max_events=1024, spot_reconnect_max_gap_ms=10000)
 
 
 AUDIT_INSERT_SQL = """INSERT INTO settlement_audit
@@ -40,6 +43,7 @@ def decision(start, identity, offset, prices, *, observation_window_s=30):
             signals[name] = dict(price=value, side='up' if lead > 0 else 'down' if lead < 0 else 'tie',
                                  lead_bps=str(lead), qualifies=abs(lead) >= 2)
     frozen = dict(run_id='postgres-smoke', decision_id=identity, schema_version=1, kind='settlement',
+        model_version='chainlink-60s-offset3-settlement-v1', policy=dict(SMOKE_POLICY),
         rule_version='settlement-first-2bp-v1', threshold_bps='2', evaluation_start_ms=start,
         market_id=start // 300_000, market_start_ms=start, market_end_ms=end,
         target_source_timestamp_ms=end, decision_wall_ns=str(wall), decision_monotonic_ns=str(1_000_000 + offset * 1_000_000),
@@ -87,8 +91,7 @@ def condition_observation(start, identity, offset=0, prices=('100.01', '99.97'))
         valid_until_wall_ns=str(min(wall + 2_000_000_000, end * 1_000_000)),
         status='available', quality='healthy', reasons=[], signals=signals, **events,
         reference=dict(price_to_beat='100', condition_id='c', up_token_id='u', down_token_id='d'),
-        policy=dict(enabled=True, source_max_age_ms=5000, receipt_max_age_ms=3000,
-                    max_carry_ms=10000, history_ms=120000, max_events=1024, spot_reconnect_max_gap_ms=10000))
+        policy=dict(SMOKE_POLICY))
     frozen['history_cohort'] = cohort_key(frozen)
     state = dict(publication=dict(status='not_published', eligible_before_close=False),
         observation=dict(status='recorded', decision_wall_ns=str(wall), decision_monotonic_ns=str(mono)),
@@ -315,6 +318,40 @@ async def main(name):
         assert await connection.fetchval("SELECT count(*) FROM settlement_audit WHERE decision_id LIKE 'invalid-%'") == 0
         guard = await conditions.guard()
         assert guard['capacity_ok'] and guard['row_count'] == 5
+        original_days = dict(saved_days)
+        original_markets = {(row['cohort'], row['market_id']): row['body_json'] for row in await connection.fetch(
+            'SELECT cohort,market_id,body_json FROM settlement_history_markets')}
+        configured = SettlementStore(pool, market_conditions=True, history_cohort=cohort,
+                                     history_policy=SMOKE_POLICY)
+        previous_count = len(original_days)
+        for _ in range(2):
+            combined_retained = await configured.maintain(now)
+            assert combined_retained['schema_version'] == 3
+            assert combined_retained['retrospective_backfill']['processed_groups'] == 1
+            current_count = await connection.fetchval('SELECT count(*) FROM settlement_history_daily')
+            assert current_count == previous_count + 1, 'one separate derived day per pass'
+            previous_count = current_count
+        repeated_retained = await configured.maintain(now)
+        assert repeated_retained['retrospective_backfill']['status'] == 'complete'
+        assert repeated_retained['cells'] == combined_retained['cells']
+        assert len(repeated_retained['cohorts']) == 3
+        assert len(repeated_retained['cells']) == 3 and sum(cell[7] for cell in repeated_retained['cells']) == 3
+        preserved = {row['cohort']: row['body_json'] for row in await connection.fetch(
+            'SELECT cohort,body_json FROM settlement_history_daily')}
+        assert len(preserved) == 5 and all(preserved[key] == value for key, value in original_days.items())
+        assert {(row['cohort'], row['market_id']): row['body_json'] for row in await connection.fetch(
+            'SELECT cohort,market_id,body_json FROM settlement_history_markets')} == original_markets
+        assert await connection.fetchval('SELECT count(*) FROM settlement_audit') == 5
+        await connection.execute('SET ROLE price_writer')
+        for original_cohort in legacy_days:
+            derived_cohort = retrospective_cohort(original_cohort)
+            derived = json.loads(preserved[derived_cohort])
+            assert derived['final'] and derived['source_final']
+            assert derived['description']['source_cohort'] == original_cohort
+            assert derived['outcome_freeze_ms'] == json.loads(legacy_days[original_cohort])['outcome_freeze_ms']
+            await rejected(connection, 'UPDATE settlement_history_daily SET updated_ms=updated_ms+1 WHERE cohort=$1',
+                           derived_cohort, contains='frozen history day is immutable')
+        await connection.execute('RESET ROLE')
         print(json.dumps(dict(database=name, server=await connection.fetchval('SHOW server_version'),
             result='passed', checks=['writer persistence and idempotency', 'first ACK per time bucket',
                 'immutable audit and publication clocks', 'seven-day individual deletion guard',
@@ -327,7 +364,11 @@ async def main(name):
                 'full-market observed-condition boundary admission', 'immutable recorded observations',
                 'exact schema-4 contract and half-open schedule rejection',
                 'combined condition summary and first observation selection',
-                'condition compaction and retry idempotency', 'legacy daily totals preserved'],
+                'condition compaction and retry idempotency', 'legacy daily totals preserved',
+                'policy-enabled retained-market backfill emits schema 3',
+                'one separate compact retrospective day per pass',
+                'retrospective idempotency and immutable final rows',
+                'original daily, market and audit evidence unchanged'],
                 relation_bytes=guard['relation_bytes'])))
     finally:
         if pool is not None:
