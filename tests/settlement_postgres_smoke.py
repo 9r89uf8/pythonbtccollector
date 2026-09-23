@@ -3,18 +3,29 @@
 Apply schema.sql first to a disposable database named settlement_validation_*.
 Run this script as the local postgres OS user, with DATABASE_NAME as its sole
 argument and this checkout on PYTHONPATH. Uses existing asyncpg, not pytest.
-The caller owns scratch database creation and removal. No role changes or feeds.
+The caller owns scratch database creation and removal. This exercises the old
+named schedule constraint's migration in the disposable database, including
+an idempotent second application. No role definitions or feeds are changed.
 """
 from __future__ import annotations
 
 import asyncio
 from decimal import Decimal, localcontext
 import json
+from pathlib import Path
 import sys
 
 import asyncpg
 
 from price_collector.settlement_store import SettlementStore, DAY_MS
+from price_collector.ghost_twap_store import validate_record
+from price_collector.settlement_history import cohort_key, MARKET_CONDITION_SELECTION_VERSION
+
+
+AUDIT_INSERT_SQL = """INSERT INTO settlement_audit
+    (run_id,decision_id,evaluation_start_ms,market_id,market_start_ms,market_end_ms,
+     decision_wall_ns,created_ms,frozen_json,frozen_sha256,compact_json,state_json,version,terminal)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"""
 
 
 def decision(start, identity, offset, prices, *, observation_window_s=30):
@@ -47,6 +58,86 @@ def decision(start, identity, offset, prices, *, observation_window_s=30):
     return dict(run_id=frozen['run_id'], decision_id=identity, decision_wall_ns=wall,
                 created_ms=wall // 1_000_000, frozen_json=json.dumps(frozen), state_json=json.dumps(state),
                 version=1, terminal=False)
+
+
+def condition_observation(start, identity, offset=0, prices=('100.01', '99.97')):
+    """An observed-condition audit, with no projection or publication credit."""
+    end, now = start + 300_000, start + offset
+    wall, mono = now * 1_000_000, (300_000 + offset) * 1_000_000
+    signals = {}
+    events = {}
+    with localcontext() as arithmetic:
+        arithmetic.prec = 80
+        for sequence, (name, value) in enumerate(zip(('twap', 'spot'), prices), 1):
+            price = Decimal(value)
+            lead = price - Decimal(100)
+            signals[name] = dict(price=value, side='up' if lead > 0 else 'down' if lead < 0 else 'tie',
+                signed_lead_usd=str(lead), lead_bps=str(lead * 100))
+            events['current_' + name] = dict(feed=name, value=value,
+                source_timestamp_ms=now // 1000 * 1000 - 1000,
+                received_wall_ns=str(wall - 500_000_000),
+                received_monotonic_ns=str(mono - 500_000_000), received_ms=now - 500,
+                sequence=sequence, event_id=f'{identity}-{name}', window_s=60 if name == 'twap' else None)
+    frozen = dict(run_id='postgres-smoke', decision_id=identity, schema_version=4, kind='market_conditions',
+        model_version='market-conditions-v1', rule_version='historical-market-conditions-v1',
+        observation_window_s=300, sampling_interval_ms=5000,
+        market_id=start // 300_000, market_start_ms=start, market_end_ms=end,
+        target_source_timestamp_ms=end, decision_wall_ns=str(wall), decision_monotonic_ns=str(mono),
+        decision_time_ms=now, remaining_ms=end-now, valid_until_ms=min(now + 2000, end),
+        valid_until_wall_ns=str(min(wall + 2_000_000_000, end * 1_000_000)),
+        status='available', quality='healthy', reasons=[], signals=signals, **events,
+        reference=dict(price_to_beat='100', condition_id='c', up_token_id='u', down_token_id='d'),
+        policy=dict(enabled=True, source_max_age_ms=5000, receipt_max_age_ms=3000,
+                    max_carry_ms=10000, history_ms=120000, max_events=1024, spot_reconnect_max_gap_ms=10000))
+    frozen['history_cohort'] = cohort_key(frozen)
+    state = dict(publication=dict(status='not_published', eligible_before_close=False),
+        observation=dict(status='recorded', decision_wall_ns=str(wall), decision_monotonic_ns=str(mono)),
+        target=dict(status='not_applicable', first_event=None))
+    return dict(run_id=frozen['run_id'], decision_id=identity, decision_wall_ns=wall,
+                created_ms=now, frozen_json=json.dumps(frozen), state_json=json.dumps(state),
+                version=1, terminal=False)
+
+
+def insert_parameters(record):
+    """Bypass store schedule validation to exercise the database constraint."""
+    record = validate_record(record)
+    frozen = json.loads(record['frozen_json'])
+    compact = {key: value for key, value in frozen.items() if key not in ('slots', 'slot_inputs')}
+    return (record['run_id'], record['decision_id'], frozen.get('evaluation_start_ms', 0),
+            frozen['market_id'], frozen['market_start_ms'], frozen['market_end_ms'],
+            record['decision_wall_ns'], record['created_ms'], record['frozen_json'],
+            record['frozen_sha256'], json.dumps(compact), record['state_json'],
+            record['version'], record['terminal'])
+
+
+async def migrate_old_schedule_check(connection):
+    """Reproduce the installed old named check, then migrate existing rows."""
+    sql = (Path(__file__).resolve().parents[1] / 'schema.sql').read_text(encoding='utf-8')
+    start = sql.index('-- Replace the original anonymous final-30s schedule check')
+    end = sql.index('CREATE INDEX IF NOT EXISTS settlement_audit_expiry_idx', start)
+    migration = sql[start:end]
+    async with connection.transaction():
+        await connection.execute('ALTER TABLE settlement_audit DROP CONSTRAINT settlement_audit_observation_window_check')
+        await connection.execute("""ALTER TABLE settlement_audit
+            ADD CONSTRAINT settlement_audit_observation_window_check CHECK (
+              decision_wall_ns >= (market_end_ms - CASE
+                WHEN compact_json::jsonb->'schema_version'='3'::jsonb
+                  AND compact_json::jsonb->>'rule_version'='historical-settlement-v2'
+                  AND compact_json::jsonb->'observation_window_s'='60'::jsonb
+                  AND compact_json::jsonb->'sampling_interval_ms'='2000'::jsonb THEN 60000
+                WHEN NOT (compact_json::jsonb ? 'observation_window_s')
+                  AND compact_json::jsonb->'schema_version' IN ('1'::jsonb,'2'::jsonb)
+                  AND compact_json::jsonb->>'rule_version'<>'historical-settlement-v2' THEN 30000
+                ELSE 0 END) * 1000000
+              AND decision_wall_ns < market_end_ms * 1000000
+              AND created_ms = decision_wall_ns / 1000000)""")
+        for _ in range(2):
+            await connection.execute(migration)
+        definition = await connection.fetchval("""SELECT pg_get_constraintdef(oid) FROM pg_constraint
+            WHERE conrelid='settlement_audit'::regclass
+              AND conname='settlement_audit_observation_window_check'""")
+        assert 'historical-market-conditions-v1' in definition
+        assert 'historical-settlement-v2' in definition
 
 
 async def rejected(connection, sql, *parameters, contains):
@@ -129,12 +220,91 @@ async def main(name):
         assert await connection.fetchval("""SELECT count(*) FROM pg_constraint
             WHERE conrelid='settlement_audit'::regclass
             AND conname='settlement_audit_observation_window_check'""") == 1
+        legacy_days = {row['cohort']: row['body_json'] for row in await connection.fetch(
+            'SELECT cohort,body_json FROM settlement_history_daily')}
+        await migrate_old_schedule_check(connection)
+        conditions = SettlementStore(pool, market_conditions=True)
+        first = condition_observation(start, 'conditions-first')
+        later = condition_observation(start, 'conditions-later', 5000, ('99.8', '99.7'))
+        # Persistence arrival order cannot select a later observation or a more
+        # favorable margin. Both decisions belong to the 285-300s time bucket.
+        assert await conditions.persist(later) == 'inserted'
+        assert await conditions.persist(first) == 'inserted', 'schema 4 admits the full-300s boundary'
+        assert await conditions.persist(first) == 'unchanged'
+        combined = await conditions.maintain(now)
+        assert combined['schema_version'] == 2 and combined['status'] == 'available'
+        assert combined['selection_version'] == MARKET_CONDITION_SELECTION_VERSION
+        assert len(combined['cohorts']) == 1 and combined['cohorts'][0]['observation_window_s'] == 300
+        cohort = combined['cohorts'][0]['id']
+        body = json.loads(await connection.fetchval(
+            'SELECT body_json FROM settlement_history_markets WHERE cohort=$1', cohort))
+        assert body['buckets']['285-300']['order'][2] == 'conditions-first'
+        assert body['buckets']['285-300']['signals']['twap']['price'] == '100.01'
+        assert set(body['buckets']['285-300']['signals']) == {'twap', 'spot'}
+        assert len(combined['cells']) == 1 and combined['cells'][0]['signal'] == 'combined'
+        cell = combined['cells'][0]
+        assert (cell['time_bucket'], cell['twap_margin_bucket'], cell['spot_margin_bucket'], cell['spot_alignment']) == (
+            '285-300', '1-2', '2-4', 'opposes')
+        assert (cell['resolved'], cell['unknown'], cell['frozen_unknown']) == (0, 1, 1)
+        assert cell['win_rate_pct'] is None and cell['interval95_pct'] is None
+        assert next(row for row in combined['coverage'] if row['time_bucket'] == '285-300')['selected_markets'] == 1
+
+        await connection.execute('SET ROLE price_writer')
+        for field in ('decision_wall_ns', 'decision_monotonic_ns', 'status'):
+            changed = json.loads(first['state_json'])
+            value = changed['observation'][field]
+            changed['observation'][field] = 'unavailable' if field == 'status' else str(int(value) + 1)
+            await rejected(connection, "UPDATE settlement_audit SET state_json=$1,version=2 WHERE decision_id='conditions-first'",
+                           json.dumps(changed), contains='recorded market observation is immutable')
+        removed = json.loads(first['state_json'])
+        removed.pop('observation')
+        await rejected(connection, "UPDATE settlement_audit SET state_json=$1,version=2 WHERE decision_id='conditions-first'",
+                       json.dumps(removed), contains='recorded market observation is immutable')
+
+        for field, invalid in (('schema_version', 3), ('kind', 'settlement'),
+                ('model_version', 'unsupported'), ('rule_version', 'historical-settlement-v2'),
+                ('observation_window_s', 60), ('sampling_interval_ms', 2000)):
+            rejected_record = condition_observation(start, 'invalid-' + field)
+            frozen = json.loads(rejected_record['frozen_json'])
+            frozen[field] = invalid
+            rejected_record['frozen_json'] = json.dumps(frozen)
+            await rejected(connection, AUDIT_INSERT_SQL, *insert_parameters(rejected_record),
+                           contains='settlement_audit_observation_window_check')
+        for offset in (-1, 300_000):
+            outside = condition_observation(start, f'outside-{offset}', offset)
+            await rejected(connection, AUDIT_INSERT_SQL, *insert_parameters(outside),
+                           contains='settlement_audit_observation_window_check')
+        for window in (30, 60):
+            old_early = decision(start, f'old-contract-{window}-early', -271_000,
+                ('100.03', '100.01', '99.97'), observation_window_s=window)
+            await rejected(connection, AUDIT_INSERT_SQL, *insert_parameters(old_early),
+                           contains='settlement_audit_observation_window_check')
+        await connection.execute('RESET ROLE')
+
+        for record in (first, later):
+            record.update(version=2, terminal=True)
+            assert await conditions.persist(record) == 'updated'
+        repeated_combined = await conditions.maintain(now)
+        assert repeated_combined['cells'] == combined['cells'], 'condition retries never count a second market'
+        assert await conditions.persist(first) == 'unchanged', 'condition compaction preserves recovery'
+        saved_days = {row['cohort']: row['body_json'] for row in await connection.fetch(
+            'SELECT cohort,body_json FROM settlement_history_daily')}
+        assert len(saved_days) == 3 and all(saved_days[key] == value for key, value in legacy_days.items())
+        assert await connection.fetchval('SELECT bool_and(history_folded_version=version) FROM settlement_audit')
+        assert await connection.fetchval("SELECT count(*) FROM settlement_audit WHERE decision_id LIKE 'invalid-%'") == 0
+        guard = await conditions.guard()
+        assert guard['capacity_ok'] and guard['row_count'] == 5
         print(json.dumps(dict(database=name, server=await connection.fetchval('SHOW server_version'),
             result='passed', checks=['writer persistence and idempotency', 'first ACK per time bucket',
                 'immutable audit and publication clocks', 'seven-day individual deletion guard',
                 'daily freeze and ninety-day aggregate guard', 'terminal compaction',
                 'bounded fold and outcome join SQL', 'reader/writer privilege split', 'capacity query',
-                'versioned sixty-second admission', 'separate legacy and minute history buckets'],
+                'versioned sixty-second admission', 'separate legacy and minute history buckets',
+                'old named schedule constraint migration and repeat application',
+                'full-market observed-condition boundary admission', 'immutable recorded observations',
+                'exact schema-4 contract and half-open schedule rejection',
+                'combined condition summary and first observation selection',
+                'condition compaction and retry idempotency', 'legacy daily totals preserved'],
                 relation_bytes=guard['relation_bytes'])))
     finally:
         if pool is not None:

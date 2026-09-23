@@ -1949,7 +1949,8 @@ CREATE TABLE IF NOT EXISTS settlement_audit (
     CHECK (octet_length(compact_json) <= 65536)
 );
 -- Replace the original anonymous final-30s schedule check on existing installs.
--- The frozen version controls admission; a legacy row cannot acquire 60s scope.
+-- The frozen version controls admission; legacy projections cannot acquire the
+-- full-market scope of schema-4 observed market conditions.
 DO $$
 DECLARE old_check RECORD;
 BEGIN
@@ -1962,10 +1963,21 @@ BEGIN
     LOOP
         EXECUTE format('ALTER TABLE settlement_audit DROP CONSTRAINT %I',old_check.conname);
     END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='settlement_audit'::regclass
+                   AND conname='settlement_audit_observation_window_check'
+                   AND pg_get_constraintdef(oid) NOT LIKE '%historical-market-conditions-v1%') THEN
+        ALTER TABLE settlement_audit DROP CONSTRAINT settlement_audit_observation_window_check;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='settlement_audit'::regclass
                    AND conname='settlement_audit_observation_window_check') THEN
         ALTER TABLE settlement_audit ADD CONSTRAINT settlement_audit_observation_window_check
         CHECK (decision_wall_ns >= (market_end_ms - CASE
+            WHEN compact_json::jsonb->'schema_version'='4'::jsonb
+              AND compact_json::jsonb->>'kind'='market_conditions'
+              AND compact_json::jsonb->>'model_version'='market-conditions-v1'
+              AND compact_json::jsonb->>'rule_version'='historical-market-conditions-v1'
+              AND compact_json::jsonb->'observation_window_s'='300'::jsonb
+              AND compact_json::jsonb->'sampling_interval_ms'='5000'::jsonb THEN 300000
             WHEN compact_json::jsonb->'schema_version'='3'::jsonb
               AND compact_json::jsonb->>'rule_version'='historical-settlement-v2'
               AND compact_json::jsonb->'observation_window_s'='60'::jsonb
@@ -1982,8 +1994,8 @@ CREATE INDEX IF NOT EXISTS settlement_audit_expiry_idx ON settlement_audit(creat
 CREATE INDEX IF NOT EXISTS settlement_audit_compact_idx ON settlement_audit(market_end_ms,run_id,decision_id)
     WHERE terminal AND frozen_json IS NOT NULL;
 
--- First acknowledged observations feed a bounded descriptive history. The
--- durable fold marker handles a later ACK/version update without double counts.
+-- Frozen observations feed bounded descriptive history. Legacy cohorts retain
+-- their publication ACK rules; schema 4 uses recorded decision-time conditions.
 ALTER TABLE settlement_audit ADD COLUMN IF NOT EXISTS history_folded_version BIGINT NOT NULL DEFAULT -1
     CHECK (history_folded_version >= -1 AND history_folded_version <= version);
 CREATE INDEX IF NOT EXISTS settlement_audit_history_pending_idx
@@ -2102,6 +2114,9 @@ BEGIN
         OR (NEW.version=OLD.version AND ROW(NEW.state_json,NEW.terminal) IS DISTINCT FROM ROW(OLD.state_json,OLD.terminal))
     THEN RAISE EXCEPTION 'settlement state version cannot regress or collide'; END IF;
     old_state := OLD.state_json::jsonb; new_state := NEW.state_json::jsonb;
+    IF old_state#>>'{observation,status}'='recorded' AND
+        old_state->'observation' IS DISTINCT FROM new_state->'observation'
+    THEN RAISE EXCEPTION 'recorded market observation is immutable'; END IF;
     FOREACH field IN ARRAY ARRAY['intent_wall_ns','intent_monotonic_ns','attempt_wall_ns','attempt_monotonic_ns',
         'ack_wall_ns','ack_monotonic_ns','failure_wall_ns','failure_monotonic_ns'] LOOP
         IF old_state->'publication' ? field AND old_state->'publication'->field IS DISTINCT FROM new_state->'publication'->field

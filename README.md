@@ -1110,11 +1110,12 @@ fills or a frozen fee schedule for future markets.
 
 ## Ghost TWAP — optional worker
 
-The optional historical settlement estimator replaces the retired two-day
-candidate study. In the final 60 seconds it shows how often the leading side
-won in past markets with a similar projected margin and remaining time, with
-counts, unknowns and the history dates. These are descriptive frequencies,
-not a guarantee that the live winner is locked. The rolling 1-, 2-, 3-, 5-,
+The optional historical win-rate panel uses observed conditions throughout each
+five-minute market. It shows how often the TWAP-leading side won in past markets
+with similar TWAP and spot distances from Price to Beat, spot alignment and time
+remaining, with counts, unknowns and history dates. It does not project a closing
+price. These are descriptive frequencies, not a guarantee of the live outcome.
+The rolling 1-, 2-, 3-, 5-,
 10- and 30-second ghost prices and their accuracy monitor are unchanged.
 See [historical settlement win rates](GHOST_TWAP_REFERENCE.md#historical-settlement-win-rates)
 for selection rules, API routes, retention and the schema-first update.
@@ -1126,13 +1127,13 @@ setting when updating; saved study results remain preserved. History records
 with an incomplete freeze remain visibly partial; the panel reports these
 days rather than presenting them as complete evidence.
 
-The exact-close estimator admits at most one decision per fixed two-second UTC
-interval and uses twelve five-second time buckets. Its schema-3 sixty-second observation window
-has a new history cohort; retained thirty-second observations keep their
-original identity and are not relabelled or pooled into it. The existing row
-and storage caps remain fixed. Expired projections wait for a fresh update;
-their TTL is not extended to bridge the interval. Apply the schedule-check
-migration in `schema.sql` before restarting the Chainlink writer; the referenced update sequence does this.
+The condition recorder admits at most one observation per fixed five-second UTC
+interval. The schema-4 full-market cohort is separate from the legacy closing
+projections; old counts cannot fill its combined cells. The panel reads current
+spot/TWAP independently of recording cadence and clears rates when either input
+or its history cache is stale. Existing row/storage caps remain fixed. Apply the
+versioned schedule-check migration in `schema.sql` before restarting the Chainlink
+writer; the referenced update sequence does this. Frontend assets stay local.
 
 The [Ghost TWAP reference](GHOST_TWAP_REFERENCE.md) is the single guide to the
 verified research, measured 3.1-second inclusion delay, live-canary findings,

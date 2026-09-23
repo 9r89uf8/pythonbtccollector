@@ -588,152 +588,123 @@ behavior. For current operations and exact service commands, use
 
 ## Historical settlement win rates
 
-The historical estimator replaces the two-day first-2-bp candidate feature.
-It leaves the existing rolling 1-, 2-, 3-, 5-, 10- and 30-second ghost prices,
-source feeds, publication rules and accuracy monitor unchanged. It does not
-issue a locked-winner label or fit a statistical prediction model.
+The local panel shows one historical win rate for current official TWAP, current
+Chainlink spot and time remaining throughout the five-minute market. It does not
+calculate a closing price or require a Ghost projection. The rolling 1-, 2-, 3-,
+5-, 10- and 30-second Ghost forecasts, their inputs and accuracy remain unchanged.
 
-In the final 60 seconds of each five-minute market, the separate settlement
-projection calculates the exact closing TWAP using the sixty source slots from
-E−62 through E−3. It reuses the frozen ghost inputs, existing freshness/carry
-rules and causally observed website Price to Beat. A missing or conflicting
-reference makes the projection unavailable. Current TWAP and spot margins use
-the same reference. All financial calculation remains Decimal. Earlier decisions
-contain more future slots held at the latest received spot; extending this
-observation window does not establish the same accuracy at sixty seconds as at
-five or ten seconds.
-
-The optional settlement output admits the first successfully admitted decision
-in each fixed two-second UTC wall-clock interval. Further offers in that
-interval increment `sampling_skipped` without another publication or audit row. Clock regressions
-cannot reopen an admitted interval. An unavailable first observation can therefore
-delay a usable refinement until the next interval; retained counts reflect actual
-eligible acknowledgements. This sampling limit changes only the exact-close
-estimator, not the rolling ghost's event-driven updates. Input freshness and TTL
-remain unchanged: when a projection expires, the panel waits for the next valid
-publication rather than extending its lifetime.
+The optional recorder uses already accepted current spot/TWAP and the causally
+observed website Price to Beat for the current market. Source ages must be at
+most five seconds and wall/monotonic receipt ages at most three seconds. Missing,
+conflicting, future or stale inputs remain unavailable. Historical Ghost slot
+warmup does not gate a valid pair of current observations; actual feed/clock
+faults remain binding. Prices and margins use exact Decimal arithmetic.
 
 ### Historical cell definition
 
-The background worker selects the first eligible, acknowledged publication in
-each market's five-second remaining-time bucket. Selection uses the actual
-acknowledgement clock, not the earlier decision clock, and happens before margin
-classification. Later ticks cannot replace the selected observation merely
-because they were more accurate. Late, uncertain or ineligible publications
-cannot enter the sample.
+New observations use schema 4, kind `market_conditions`, rule
+`historical-market-conditions-v1`, model `market-conditions-v1`,
+`observation_window_s=300` and `sampling_interval_ms=5000`. Admit at most the first
+decision in each fixed five-second UTC interval. Fsync the frozen evidence before
+marking it recorded. A recorded observation has no forecast-publication or
+acknowledgement claim. Its original decision clock remains the sampling clock.
 
-Twelve five-second time buckets cover the final 60 seconds. Absolute margin bins
-are [0,1), [1,2), [2,4), [4,8) and at least 8 basis points; one basis point is
-0.01% of the opening reference. Ghost, current TWAP and spot have distinct cell counts. Up and Down
-leading sides are explicitly pooled. Each market contributes at most once to a
-given signal/time cell. A tie has no leading side and must not count as a win.
-The versioned sixty-second window and two-second sampling cadence form a new
-cohort. Original thirty-second history retains its hashes and separate counts;
-it cannot fill the new cohort's cells merely because some time buckets overlap.
+For each market/time bucket, select the first eligible recorded observation
+before classifying prices. Five-second buckets cover 0-60 seconds remaining;
+fifteen-second buckets cover 60-300 seconds. Exact 60 belongs to 60-75, exact 30
+to 30-35, and exact 300 to 285-300. Later observations cannot replace the selected
+one because their margin or outcome looks better. Each market contributes at
+most once to a time bucket.
 
-An observed leading side is compared with the identity-validated official
-market winner. A loss means the market settled on the opposite side, not that
-the live price briefly crossed its reference. Outcomes not yet known and
-markets with no usable observation remain visible separately. Different model,
-settlement identity, input policy or selection versions do not silently pool.
-The baseline signals share the eligible settlement-publication sample; their
-coverage is not the independent coverage of their source feeds.
+The combined lookup uses both absolute distances from Price to Beat in
+[0,1), [1,2), [2,4), [4,8) or at least 8 basis points, plus whether spot agrees
+with the TWAP-leading side, opposes it or equals the reference. A win means that
+the TWAP-leading side ultimately matched the identity-validated official market
+winner. Up and Down leaders are pooled after orienting spot to that leader.
+TWAP ties have no leader and stay out of rate cells; their counts remain visible.
+Unresolved outcomes and missing eligible observations remain explicit.
 
-The panel displays counts and covered dates first. For example, “57 wins and
-3 losses among 60 resolved markets” describes the selected historical cell.
-At least 30 resolved markets are required to display a historical percentage
-and Wilson 95% interval; below that it shows limited history and counts. Thirty
-is a display threshold, not a proof of calibration. The interval assumes
-independent, comparable markets; adjacent markets and changing regimes can
-violate those assumptions. Neither a high percentage nor zero recorded losses
-certifies the current market's winning probability or a profitable trade.
+The page shows the current prices, reference, remaining time, matching conditions,
+wins, losses, unknowns and resolved-market count. Percentages and Wilson 95%
+ranges require at least 30 resolved markets in that exact combined cell. This is
+a display threshold, not proof of calibration. The interval assumes independent,
+comparable markets; adjacent markets and changing regimes may violate that
+assumption. These are historical frequencies, not a certified live probability.
+
+This full-market joint-condition cohort starts fresh. Legacy thirty- and
+sixty-second projection evidence, daily totals and the retired study remain
+separate and retain their original identities. Old marginal signal counts
+cannot reconstruct a joint spot/TWAP condition or observations earlier in a
+market. No invented backfill or study restoration is performed.
 
 ### Storage and background work
 
-Individual settlement audit and compact per-market history retain seven days.
-Each compact market row keeps its selected observations and copied official
-outcome, so it never depends on an already-expired resolution row. The
-`settlement_history_markets` table has one row per compatible cohort and market.
-The `settlement_history_daily` table keeps only bounded daily count summaries
-for ninety days. No new record is retained forever. One admission per two-second
-interval through the final minute gives at most thirty admissions per market
-during an uninterrupted run, about 60,480 per week. This is not an availability
-or storage guarantee: restarts, row sizes and other retained records still
-matter. The 200,000 audit-row guard and existing 512 MiB relation budget remain
-authoritative; do not raise them to accommodate the longer observation window.
+The existing optional Chainlink worker, pool and bounded fsynced outbox record
+observations. Feed callbacks and API requests do not query historical data.
+Individual audit/per-market evidence expires after seven days; replaceable daily
+count summaries expire after ninety days. Existing 200,000-row and 512 MiB
+relation guards remain authoritative. One observation per five seconds permits
+at most 60 admissions per market, approximately 120,960 per uninterrupted week;
+this is a volume bound, not an availability or storage guarantee.
 
-The worker folds retained audit records in bounded batches, then replaces the
-corresponding daily totals idempotently. It does not increment counters again
-on a replay or restart. Normally, a day's outcomes freeze after the day has
-ended by at least 24 hours and its available audit records have been folded;
-unresolved outcomes remain unknown. An incomplete freeze is labelled partial,
-not a complete day or a successful study. The cohort's `incomplete_frozen_days`
-count preserves this limitation beside its rates.
+Daily cells use a versioned compact representation to fit the existing 64 KiB
+row limit. Cache output uses sparse combined cells and indexed cohort references
+inside the existing 512 KiB envelope limit. Only the configured current cohort
+is cached; other compatible-version histories remain separately retained in the
+database. Policies, source identity and selection versions never silently pool.
 
-Remaining retained audit rows for that day must be folded before any freeze,
-including the fallback at six days after the day's start. That fallback can
-freeze an incomplete day when other historical persistence is still catching
-up, before individual expiry begins. If the worker returns only after some of
-the previously covered day's individual evidence may have expired, it preserves
-the last daily totals as explicitly incomplete instead of replacing them with
-only the surviving rows. Merely crossing midnight seven days later is not
-proof that a covered market's records have expired.
+The worker folds bounded pages, then replaces daily totals idempotently. Current
+in-flight markets do not block already completed markets from appearing in the
+same day's history. A due audit backlog still prevents an incomplete day from
+being frozen as complete. Normally outcomes freeze after the following UTC day;
+the bounded fallback preserves unresolved counts and an incomplete marker before
+individual expiry. Copied official outcomes keep a loss represented after its
+source row expires. Restart/replay cannot increment a market twice.
 
-Daily summaries preserve a recorded loss after its individual evidence expires,
-until the summary itself reaches ninety days. Whole summary days expire at the
-ninety-day cutoff, potentially less than one day early.
-
-Missing raw history cannot be reconstructed from the former study's first-call
-summary. Initial history is limited to compatible retained publications and
-explicitly reports its covered dates and missing observations. Backfill must
-finish before the retained raw records expire. With the optional producer off,
-the independent retention timer still expires individual records and summaries;
-it does not run a replacement study or manufacture missing historical cells.
-
-Aggregation uses the existing optional worker and database pool. Neither feed
-event handling nor an API request performs a historical query. The worker
-publishes a bounded cached table with generation and expiry times to Redis.
-A stale or absent cache is reported unavailable rather than relabelled current.
-The ordinary six-horizon ghost remains independent of optional-history faults.
+The page reads independently fresh live spot/TWAP, the current observed opening
+reference and the cached history. It does not use the recorder's five-second
+cadence as a live-price freshness promise. Cache expiry, feed staleness, a missing
+reference, market rollover or uncertainty across a time-bucket boundary clears
+the historical rate. Browser sleep does not stop collector recording.
 
 ### Routes and settings
 
 | Route | Purpose |
 | --- | --- |
-| `/forecasts/chainlink-twap/settlement/live` | One Redis GET of the exact-close projection; typed 503 when unavailable |
-| `/forecasts/chainlink-twap/settlement/stream` | Existing bounded SSE transport, named `settlement` events and reconnect resync |
-| `/forecasts/chainlink-twap/settlement/history` | Bounded cached historical cell counts; Redis only |
+| `/markets/current/live` | Current official TWAP and spot from the existing Redis read |
+| `/markets/current/dashboard` | Current market and observed opening reference |
+| `/forecasts/chainlink-twap/settlement/history` | Redis-only cached combined history, envelope schema 1/history schema 2 |
+| `/forecasts/chainlink-twap/settlement/live` and `/stream` | Legacy projection readers retained for compatibility; new recorder does not populate them |
 
-The projection uses schema 3, rule `historical-settlement-v2` and
-`observation_window_s=60`, with `sampling_interval_ms=2000`. The former
-`/settlement/report` endpoint and the first-2-bp candidate/evaluation workflow
-are retired. The dashboard combines a current valid projection with the cached
-historical table; it clears live eligibility at expiry or the market close.
-The local dashboard remains on the user's computer and reaches the loopback
-API through its SSH tunnel. No new listener, production frontend or service
-is introduced.
+The new local panel no longer subscribes to settlement projection routes. Its
+history is refreshed every thirty seconds and on resume. The ordinary Ghost
+live/SSE routes and charts are unchanged. The dashboard stays local and reaches
+the loopback API through its SSH tunnel; no frontend asset goes to the droplet.
 
-Review only these existing environment entries; never replace the production
-files with examples:
+Keep existing environment entries and defaults:
 
-- `/etc/price-collector/collector.env`: `SETTLEMENT_ENABLED` remains false by
-  default. Enabling requires the existing `GHOST_TWAP_ENABLED=true`,
-  `GHOST_TWAP_CONTINUOUS=true` and `POLYMARKET_EVIDENCE_ENABLED=true`. Remove
-  obsolete `SETTLEMENT_EVALUATION_START_MS`; no evaluation needs arming.
-- `/etc/price-collector/api.env`: `SETTLEMENT_API_ENABLED` remains false by
-  default. The API keeps reader credentials only.
+- `SETTLEMENT_ENABLED=false` by default. Recording requires the existing
+  `GHOST_TWAP_ENABLED=true`, `GHOST_TWAP_CONTINUOUS=true` and
+  `POLYMARKET_EVIDENCE_ENABLED=true` settings.
+- `SETTLEMENT_API_ENABLED=false` by default; enabled API access remains read-only.
+- Do not restore `SETTLEMENT_EVALUATION_START_MS` or automatic study finalization.
 
-A projection outside the final 60 seconds is normally unavailable. Use the
-history response's generation/expiry, compatibility, missing observations and
-runtime health for the operational check. Check `incomplete_frozen_days` before
-interpreting the counts as complete daily coverage. Normal in-flight work in
-the still-open market is separate from a backlog of completed-market history.
-An unavailable or stale history cache
-is an unknown monitoring state, not evidence that the historical loss rate is
-zero. Keep the existing independent outbox, guards, durable-before-publication
-ordering and actual acknowledgement evidence.
+Schema must be updated before the Chainlink writer restarts. Inspect history
+schema/version, covered dates, missing/unknown counts, cache expiry, runtime
+faults and `incomplete_frozen_days` when checking the rollout. No percentage
+should appear until its combined cell reaches the sample threshold.
 
 ### Update procedure
+
+The full-market condition change is prepared locally; the older deployment
+records below describe their original releases, not a deployment of schema 4.
+
+Full-market validation: 1,833 backend tests passed with 17 opt-in skips. A separate
+PostgreSQL 16.15 test database passed repeated schema application, old-check
+migration, exact schema-4 admission, observation immutability, combined counts
+and legacy preservation; the test database and temporary files were removed.
+The local panel was checked with live spot/TWAP before the final minute.
+
 
 The final-minute extension was deployed September 20, 2026 at 21:03 UTC from
 runtime commit `47e4ce4`; the local dashboard is `78c8b67`. The new window and
@@ -780,9 +751,9 @@ Run after the reviewed backend release has been pushed to GitHub. Apply schema
 before restarting services. Pause the affected writers and retention job during
 the full schema apply; existing ghost-audit DDL can contend with live writes.
 The cleanup trap restores the paused services if schema application fails.
-The sixty-second extension requires the version-aware settlement audit schedule
-check migration in `schema.sql` before its writer restarts. It accepts the new
-window while preserving the original thirty-second records and their identities.
+The full-market recorder requires the schema-4 settlement audit schedule check
+before its writer restarts. The migration accepts full-market observations while
+preserving the original thirty- and sixty-second records and their identities.
 
 ```bash
 cd /opt/price-collector
@@ -803,8 +774,8 @@ sudo journalctl -u price-collector-polymarket-probabilities -u price-collector-p
 ```
 
 The existing retention timer loads the updated module on its next invocation;
-no unit change, daemon reload or immediate extra deletion is required. Restart
-the local dashboard proxy to load its new history allowlist entry. Keep all
+no unit change, daemon reload or immediate extra deletion is required. Reload
+the local page to load its updated historical-condition panel. Keep all
 frontend assets off the droplet. A successful local test is not a deployment
 or a measured live estimator result.
 

@@ -349,7 +349,8 @@ class HistoryConnection(Connection):
             rows = (row for row in self.audit.values()
                     if row.get("history_folded_version", -1) < row["version"] and row["created_ms"] > args[0])
             if "market_start_ms >=" in sql:
-                return any(args[1] <= row["market_start_ms"] < args[2] for row in rows)
+                return any(args[1] <= row["market_start_ms"] < args[2]
+                           and row["market_end_ms"] + 120_000 <= args[3] for row in rows)
             return any(row["market_end_ms"] + 120_000 <= args[1] for row in rows)
         return await super().fetchval(sql, *args)
 

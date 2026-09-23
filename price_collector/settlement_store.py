@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from price_collector.settlement_history import (
     cohort_key, daily_summary, history_summary, observe, observation_window_s,
+    market_condition_summary, freeze_daily_unknowns,
 )
 
 from price_collector.ghost_twap_store import (
@@ -84,10 +85,30 @@ def publication_eligible(frozen: Mapping, state: Mapping) -> bool:
         return False
 
 
+def history_eligible(frozen: Mapping, state: Mapping) -> bool:
+    """Observed conditions earn no forecast or publication credit."""
+    if frozen.get("schema_version") != 4:
+        return publication_eligible(frozen, state)
+    try:
+        observation = state["observation"]
+        return (observation_window_s(frozen) == 300
+                and frozen.get("status") == "available" and frozen.get("quality") == "healthy"
+                and frozen.get("reasons") == []
+                and observation.get("status") == "recorded"
+                and state.get("publication", {}).get("status") == "not_published"
+                and _int(observation["decision_wall_ns"]) == _int(frozen["decision_wall_ns"])
+                and _int(observation["decision_monotonic_ns"]) == _int(frozen["decision_monotonic_ns"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _settlement_transition(old: Mapping, new: Mapping) -> str:
     if new["version"] <= old["version"]:
         return _transition(old, new)
     old_state, new_state = _json_object(old["state_json"]), _json_object(new["state_json"])
+    observation = old_state.get("observation", {})
+    if observation.get("status") == "recorded" and observation != new_state.get("observation"):
+        raise GhostAuditConflict("recorded market observation is immutable")
     prior, current = old_state.get("publication", {}), new_state.get("publication", {})
     if not isinstance(prior, dict) or not isinstance(current, dict):
         raise GhostAuditConflict("settlement publication must be an object")
@@ -145,10 +166,13 @@ def capture_outcome(body: dict, row: Mapping, cutoff_ms: int) -> dict:
 
 
 class SettlementStore:
-    def __init__(self, pool: Any, start_ms: int = 0):
+    def __init__(self, pool: Any, start_ms: int = 0, *, market_conditions: bool = False,
+                 history_cohort: str | None = None):
         # A legacy constructor argument is accepted for queued old evidence;
         # it never arms a study or changes the frozen record's association.
         self.pool = pool
+        self.market_conditions = market_conditions
+        self.history_cohort = history_cohort
 
     @asynccontextmanager
     async def _connection(self):
@@ -235,7 +259,7 @@ class SettlementStore:
                     previous = await connection.fetchval("""SELECT body_json FROM settlement_history_markets
                         WHERE cohort=$1 AND market_id=$2 FOR UPDATE""", cohort, frozen["market_id"])
                     body = observe(_json_object(previous) if previous else {}, frozen, state,
-                                   eligible=publication_eligible(frozen, state))
+                                   eligible=history_eligible(frozen, state))
                     await connection.execute("""INSERT INTO settlement_history_markets
                         (cohort,market_id,market_start_ms,market_end_ms,updated_ms,body_json)
                         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(cohort,market_id) DO UPDATE
@@ -264,8 +288,9 @@ class SettlementStore:
                     continue
                 pending = await connection.fetchval("""SELECT EXISTS(SELECT 1 FROM settlement_audit
                     WHERE history_folded_version < version AND created_ms>$1
-                    AND market_start_ms >= $2 AND market_start_ms < $3)""",
-                    now_ms - INDIVIDUAL_MS, day, day + DAY_MS)
+                    AND market_start_ms >= $2 AND market_start_ms < $3
+                    AND market_end_ms+120000<=$4)""",
+                    now_ms - INDIVIDUAL_MS, day, day + DAY_MS, now_ms)
                 if pending:
                     # An old day's first page is not its complete history.
                     # Finish its retained input before either replacing or
@@ -278,11 +303,8 @@ class SettlementStore:
                     # If the worker was disabled through expiry, retain its
                     # last totals instead of replacing them with a partial day.
                     # Day+7 midnight alone does not mean an input has expired.
-                    body = prior
+                    body = freeze_daily_unknowns(prior)
                     body.update(final=True, outcome_freeze_ms=now_ms, persistence_complete=False)
-                    for cell in body["cells"]:
-                        cell["frozen_unknown"] = cell.get("frozen_unknown", 0) + cell.get("pending", 0)
-                        cell["pending"] = 0
                     await connection.execute("""UPDATE settlement_history_daily
                         SET final=true,updated_ms=$3,body_json=$4 WHERE cohort=$1 AND day_ms=$2""",
                         cohort, day, now_ms, _canonical(body))
@@ -354,4 +376,7 @@ class SettlementStore:
                 await connection.execute("""WITH batch AS (SELECT ctid FROM """ + table + " WHERE " + key + """<=$1
                     ORDER BY """ + key + " LIMIT 100 FOR UPDATE SKIP LOCKED) DELETE FROM " + table +
                     " t USING batch b WHERE t.ctid=b.ctid", cutoff)
-        return history_summary([_json_object(row["body_json"]) for row in days], now_ms, complete=complete)
+        records = [_json_object(row["body_json"]) for row in days]
+        if self.market_conditions:
+            return market_condition_summary(records, now_ms, complete=complete, cohort_id=self.history_cohort)
+        return history_summary(records, now_ms, complete=complete)

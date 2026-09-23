@@ -10,6 +10,7 @@ import asyncio
 from collections import OrderedDict, Counter, deque
 from contextlib import suppress
 from copy import deepcopy
+from dataclasses import asdict
 from decimal import Decimal, localcontext
 from functools import partial
 import json
@@ -382,9 +383,75 @@ class SettlementRuntime:
         await self._disk(self.spool.close)
 
 
+class MarketConditionsRuntime(SettlementRuntime):
+    """Record current prices throughout a market; publish only historical counts.
+
+    The inherited outbox/retention path also recovers older projection evidence.
+    A recorded observation is not a sent forecast, so it has no publication ACK.
+    """
+
+    def offer(self, decision, epoch):
+        from price_collector.market_conditions import build_observation
+
+        now = decision.decision_wall_ns // NS_MS
+        sampling_slot = now // 5000
+        if self._closed:
+            return
+        if sampling_slot <= self._last_admitted_slot:
+            self.counters['sampling_skipped'] += 1
+            return
+        if not self._safe(epoch) or len(self.records) >= MAX_RECORDS:
+            self.counters['admission_paused'] += 1
+            return
+        try:
+            observation = build_observation(decision, self.context, self.context_wall, self.context_mono)
+            row = dict(projection=observation, frozen_json=_json_bytes(observation).decode(),
+                version=1, terminal=False, busy=False,
+                state=dict(publication_epoch=epoch,
+                    publication=dict(status='reserved', eligible_before_close=False),
+                    observation=dict(status='pending'),
+                    target=dict(status='pending', first_event=None, conflicted=False)))
+            if len(_json_bytes(self.record(row))) + 16_384 > MAX_BYTES:
+                raise ValueError('market observation record byte budget')
+        except Exception:
+            self._fault = 'observation_or_record_failure'
+            LOGGER.exception('market-condition recording paused')
+            return
+        self.records[observation['decision_id']] = row
+        self._last_admitted_slot = sampling_slot
+        self.pending.append(observation['decision_id'])
+        self.dirty.add(observation['decision_id'])
+        self.counters['observations'] += 1
+        self._wake.set()
+
+    async def publish_one(self, row):
+        # This method drains the inherited durable-work queue. New observations
+        # never write the legacy live projection key or send a forecast.
+        if row['projection'].get('schema_version') != 4:
+            return await super().publish_one(row)
+        row['busy'] = True
+        try:
+            await self._save(row)
+            observation = row['projection']
+            row['state']['publication'].update(status='not_published', eligible_before_close=False)
+            row['state']['observation'] = dict(status='recorded',
+                decision_wall_ns=observation['decision_wall_ns'],
+                decision_monotonic_ns=observation['decision_monotonic_ns'])
+            self._changed(row)
+            await self._save(row)
+            self.counters['recorded'] += 1
+        except Exception:
+            self._fault = 'observation_outbox_failure'
+            LOGGER.exception('market-condition outbox paused')
+        finally:
+            row['busy'] = False
+
+
 async def attach_settlement(parent, pool):
     """Failure of this optional feature never disables the existing producer."""
     from price_collector.settlement_store import SettlementStore
+    from price_collector.settlement_history import cohort_key
+    from price_collector.market_conditions import MODEL_VERSION, RULE_VERSION
     runtime = None
     try:
         config = SettlementSettings()
@@ -392,7 +459,11 @@ async def attach_settlement(parent, pool):
             return
         if not parent.settings.continuous:
             raise ValueError('settlement requires the continuous ghost worker')
-        runtime = SettlementRuntime(parent, config, SettlementStore(pool),
+        cohort = cohort_key(dict(schema_version=4, kind='market_conditions', model_version=MODEL_VERSION,
+            rule_version=RULE_VERSION, observation_window_s=300, sampling_interval_ms=5000,
+            policy=asdict(parent.engine.policy)))
+        runtime = MarketConditionsRuntime(parent, config,
+            SettlementStore(pool, market_conditions=True, history_cohort=cohort),
             GhostSpool(parent.settings.state_directory / 'settlement', MAX_RECORDS, MAX_BYTES))
         await runtime.start()
         parent.settlement = runtime
