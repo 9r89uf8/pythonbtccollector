@@ -1250,6 +1250,15 @@ accuracy rows while leaving all retired objects absent. The scratch database
 and files were removed. The local browser showed no Historical win rate panel
 and still displayed live Ghost forecasts without console errors.
 
+Deployed backend `ff2418c` on September 23, 2026 at 16:58:42 UTC; the local
+dashboard removal is `8b0aa48`. Production checks found zero feature tables,
+guard functions and cache keys, and all three retired routes returned 404.
+All 65 original public/raw-capture table identities were preserved. The dedicated
+spool and two environment flags were removed; the parent Ghost state remains.
+All collectors, the API and the retention timer were active. Live Ghost forecasts
+and accuracy returned 200. The separate comparison cache reported its existing
+snapshot timeout; its code and stored forecast/target pairs were not removed.
+
 
 ### Maintenance
 
